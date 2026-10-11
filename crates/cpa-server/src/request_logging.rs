@@ -454,6 +454,22 @@ impl cpa_core::exec::CaptureObserver for RequestLog {
     }
 
     fn record(&self, event: cpa_core::exec::CaptureEvent<'_>) {
+        self.capture(event, None);
+    }
+
+    fn record_request(&self, info: cpa_core::exec::UpstreamRequest<'_>, body: &Bytes) {
+        let info = cpa_core::exec::UpstreamRequest {
+            body: &body[..],
+            ..info
+        };
+        self.capture(cpa_core::exec::CaptureEvent::Request(info), Some(body));
+    }
+}
+
+impl RequestLog {
+    /// `shared` is the request event's body as the caller holds it: the deferred copy
+    /// for an error log keeps a handle to it instead of a copy.
+    fn capture(&self, event: cpa_core::exec::CaptureEvent<'_>, shared: Option<&Bytes>) {
         use cpa_core::exec::CaptureEvent::*;
         let mut locked = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(record) = locked.as_mut() else { return };
@@ -466,6 +482,7 @@ impl cpa_core::exec::CaptureObserver for RequestLog {
         // records each body whole, as one event (bounded by its read limits), so an SDP
         // line never spans two events.
         let redacted;
+        let shared = shared.filter(|_| !record.redact_sdp);
         let event = match event {
             Request(info) if record.redact_sdp => {
                 redacted = cpa_exec::codex_live::redact_sdp(info.body);
@@ -532,14 +549,24 @@ impl cpa_core::exec::CaptureObserver for RequestLog {
                     write!(tail, "\n[API REQUEST BODY TRUNCATED: captured first {limit} bytes]").unwrap();
                 }
                 tail.extend_from_slice(b"\n\n");
-                // The body goes straight to the section, so a large one is not
-                // copied into a second buffer first.
-                for part in [&head[..], body, &tail[..]] {
-                    if enabled {
+                if enabled {
+                    // The body goes straight to the section, so a large one is not
+                    // copied into a second buffer first.
+                    for part in [&head[..], body, &tail[..]] {
                         record.api_request.append(&record.state.dir, part);
-                    } else {
-                        record.deferred_api_request.extend_from_slice(part);
                     }
+                } else {
+                    // Kept until the exchange ends, possibly for a whole stream: a
+                    // handle to the body being sent where the caller gave one and the
+                    // log keeps all of it. A slice would keep the whole body alive past
+                    // the cap, so a truncated body is copied.
+                    let body = match shared {
+                        Some(shared) if !shared.is_empty() && limit == shared.len() => shared.clone(),
+                        _ => Bytes::copy_from_slice(body),
+                    };
+                    record
+                        .deferred_api_request
+                        .extend([Bytes::from(head), body, Bytes::from(tail)]);
                 }
             }
             _ if !enabled => {}
@@ -1094,7 +1121,7 @@ struct Record {
     timeline: Option<Spool>,
     api_timeline: Section,
     api_request: Section,
-    deferred_api_request: Vec<u8>,
+    deferred_api_request: Vec<Bytes>,
     api_response: Section,
     api_timestamp: Option<DateTime<Local>>,
     api_errors: Vec<(u16, String)>,
@@ -1120,7 +1147,8 @@ impl Record {
             return;
         }
         if forced && self.api_request.is_empty() {
-            self.api_request = Section::from_vec("api-request", std::mem::take(&mut self.deferred_api_request));
+            self.api_request =
+                Section::from_vec("api-request", std::mem::take(&mut self.deferred_api_request).concat());
         }
         if let Some(deferred) = &self.deferred {
             let body = deferred.lock().unwrap_or_else(PoisonError::into_inner).bytes();
@@ -1780,7 +1808,7 @@ mod tests {
                         (
                             "request",
                             if kind == "disabled" {
-                                record.deferred_api_request.clone()
+                                record.deferred_api_request.concat()
                             } else {
                                 contents(&record.api_request)
                             },

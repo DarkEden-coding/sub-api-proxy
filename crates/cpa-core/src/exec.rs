@@ -295,6 +295,14 @@ pub enum CaptureEvent<'a> {
 
 pub trait CaptureObserver: Send + Sync {
     fn record(&self, event: CaptureEvent<'_>);
+    /// [`CaptureEvent::Request`] for a body the caller already holds as [`Bytes`]: an
+    /// observer that keeps the body may keep this handle instead of a copy of it.
+    fn record_request(&self, info: UpstreamRequest<'_>, body: &Bytes) {
+        self.record(CaptureEvent::Request(UpstreamRequest {
+            body: &body[..],
+            ..info
+        }));
+    }
     /// Whether response events are kept right now (Go's `requestLogCaptureEnabled`).
     /// An observer that drops them while logging is off says so, so executors need not
     /// buffer data that exists only to be logged.
@@ -321,6 +329,12 @@ impl CaptureSink {
     pub fn record(&self, event: CaptureEvent<'_>) {
         if let Some(observer) = &self.0 {
             observer.record(event);
+        }
+    }
+    /// [`CaptureObserver::record_request`].
+    pub fn record_request(&self, info: UpstreamRequest<'_>, body: &Bytes) {
+        if let Some(observer) = &self.0 {
+            observer.record_request(info, body);
         }
     }
 }
