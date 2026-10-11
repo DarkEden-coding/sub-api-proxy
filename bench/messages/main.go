@@ -588,22 +588,42 @@ func load(args []string) {
 		flight.maxBytes = max(flight.maxBytes, flight.bytes)
 		flight.Unlock()
 	}
+	// stopTrace writes the last trace line, for the time since the last tick, and closes
+	// the file.
+	stopTrace := func() {}
 	if *traceFile != "" {
 		f, err := os.OpenFile(*traceFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer f.Close()
+		line := func(now time.Time) {
+			flight.Lock()
+			fmt.Fprintf(f, "%d\t%d\t%d\t%d\t%d\n", now.Unix(), flight.n, flight.maxN, flight.bytes/1024, flight.maxBytes/1024)
+			flight.maxN, flight.maxBytes = flight.n, flight.bytes
+			flight.Unlock()
+		}
 		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
+		done, stopped := make(chan struct{}), make(chan struct{})
 		go func() {
-			for now := range ticker.C {
-				flight.Lock()
-				fmt.Fprintf(f, "%d\t%d\t%d\t%d\t%d\n", now.Unix(), flight.n, flight.maxN, flight.bytes/1024, flight.maxBytes/1024)
-				flight.maxN, flight.maxBytes = flight.n, flight.bytes
-				flight.Unlock()
+			defer close(stopped)
+			for {
+				select {
+				case now := <-ticker.C:
+					line(now)
+				case <-done:
+					return
+				}
 			}
 		}()
+		stopTrace = func() {
+			ticker.Stop()
+			close(done)
+			<-stopped
+			line(time.Now())
+			if err := f.Close(); err != nil {
+				log.Printf("trace: %v", err)
+			}
+		}
 	}
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -711,6 +731,7 @@ func load(args []string) {
 	}
 	wg.Wait()
 	elapsed := time.Since(start)
+	stopTrace()
 
 	var ttfb, tot []time.Duration
 	out := map[string]any{"seconds": elapsed.Seconds()}
