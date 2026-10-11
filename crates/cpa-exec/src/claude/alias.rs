@@ -150,7 +150,7 @@ pub(crate) fn remap(body: &str, secret: &str) -> (String, Reverse) {
         return (out, reverse);
     }
     let mut out = body.as_bytes().to_vec();
-    for edit in &edits {
+    for (edit, _) in &edits {
         let updated = match edit {
             Edit::Raw(path, raw) => gj::try_set_raw(&out, path.as_str(), raw),
             Edit::Alias(path, alias) => gj::try_set_str(&out, path.as_str(), alias),
@@ -163,9 +163,20 @@ pub(crate) fn remap(body: &str, secret: &str) -> (String, Reverse) {
     (out, reverse)
 }
 
+/// Byte range of a value in the body.
+type Span = Option<(usize, usize)>;
+
+/// Byte range of `value` in `body`, when it borrows `body` at the index gjson gave it.
+fn span(body: &[u8], value: &gj::Res<'_>) -> Span {
+    let raw = value.raw();
+    let start = (raw.as_ptr() as usize).checked_sub(body.as_ptr() as usize)?;
+    (start == value.index && !raw.is_empty() && start + raw.len() <= body.len()).then_some((start, start + raw.len()))
+}
+
 /// The renames of [`remap`] and the inverse map, read with Go's gjson semantics (which
-/// also read malformed JSON the way Go does).
-fn plan(body: &[u8], secret: &str) -> (Vec<Edit>, Reverse) {
+/// also read malformed JSON the way Go does). Each rename carries where this walk found
+/// its value, so applying the renames does not look every path up again from the start.
+fn plan(body: &[u8], secret: &str) -> (Vec<(Edit, Span)>, Reverse) {
     let mut reverse = Reverse::new();
     let record = |reverse: &mut Reverse, original: &str, renamed: &str| {
         reverse.entry(renamed.to_owned()).or_insert_with(|| original.to_owned());
@@ -249,14 +260,18 @@ fn plan(body: &[u8], secret: &str) -> (Vec<Edit>, Reverse) {
             }
             rebuilt.push(raw);
         }
-        edits.push(Edit::Raw("tools".into(), format!("[{}]", rebuilt.join(","))));
+        edits.push((
+            Edit::Raw("tools".into(), format!("[{}]", rebuilt.join(","))),
+            span(body, &tools),
+        ));
     }
     // 2. tool_choice naming a declared client tool.
     if gj::get(body, "tool_choice.type").str() == "tool" {
-        let name = gj::get(body, "tool_choice.name").str().into_owned();
+        let value = gj::get(body, "tool_choice.name");
+        let name = value.str().into_owned();
         if let Some(alias) = rewrite(&name) {
             record(&mut reverse, &name, &alias);
-            edits.push(Edit::Alias("tool_choice.name".into(), alias));
+            edits.push((Edit::Alias("tool_choice.name".into(), alias), span(body, &value)));
         }
     }
     // 3. History references.
@@ -269,10 +284,14 @@ fn plan(body: &[u8], secret: &str) -> (Vec<Edit>, Reverse) {
             }
             for (i, part) in content.array().iter().enumerate() {
                 for path in reference_paths(part) {
-                    let name = part.get(path.as_str()).str().into_owned();
+                    let value = part.get(path.as_str());
+                    let name = value.str().into_owned();
                     if let Some(alias) = rewrite(&name) {
                         record(&mut reverse, &name, &alias);
-                        edits.push(Edit::Alias(format!("messages.{m}.content.{i}.{path}"), alias));
+                        edits.push((
+                            Edit::Alias(format!("messages.{m}.content.{i}.{path}"), alias),
+                            span(body, &value),
+                        ));
                     }
                 }
             }
@@ -325,25 +344,39 @@ fn reference_paths(part: &gj::Res<'_>) -> Vec<String> {
 
 /// `applyClaudeRawJSONEdits` at the values' gjson offsets; `None` when an offset does
 /// not point at the value or edits overlap (Go then takes the legacy path).
-fn apply_at_offsets(body: &str, edits: &[Edit]) -> Option<String> {
+fn apply_at_offsets(body: &str, edits: &[(Edit, Span)]) -> Option<String> {
     let bytes = body.as_bytes();
     let mut spans = Vec::with_capacity(edits.len());
-    for edit in edits {
+    for (edit, at) in edits {
         let (path, replacement) = match edit {
             Edit::Raw(path, raw) => (path, raw.clone()),
             // Generated aliases only use [A-Za-z0-9_-]: quoting is sjson's encoding.
             Edit::Alias(path, alias) => (path, format!("\"{alias}\"")),
         };
-        let value = gj::get(bytes, path.as_str());
-        let (start, raw) = (value.index, value.raw());
-        let end = start + raw.len();
-        if raw.is_empty() || end > bytes.len() || &bytes[start..end] != raw || !body.is_char_boundary(start) {
+        let (start, end) = match at {
+            Some(at) => *at,
+            None => {
+                let value = gj::get(bytes, path.as_str());
+                let (start, raw) = (value.index, value.raw());
+                let end = start + raw.len();
+                if raw.is_empty() || end > bytes.len() || &bytes[start..end] != raw {
+                    return None;
+                }
+                (start, end)
+            }
+        };
+        if !body.is_char_boundary(start) {
             return None;
         }
         spans.push((start, end, replacement));
     }
     spans.sort_by_key(|span| span.0);
-    let mut out = String::with_capacity(body.len());
+    // Aliases are longer than the names they replace: size the copy for them.
+    let grown: usize = spans
+        .iter()
+        .map(|(start, end, replacement)| replacement.len().saturating_sub(end - start))
+        .sum();
+    let mut out = String::with_capacity(body.len() + grown);
     let mut cursor = 0;
     for (start, end, replacement) in spans {
         if start < cursor || !body.is_char_boundary(end) {

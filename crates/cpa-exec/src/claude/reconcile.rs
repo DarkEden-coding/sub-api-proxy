@@ -14,29 +14,72 @@ pub(crate) struct SystemPlacement {
     texts: Vec<String>,
 }
 
+/// What the captures below read from the request before cloaking rewrote it, taken
+/// then so the cloaked body is the only copy kept.
+#[derive(Default)]
+pub(crate) struct Before {
+    empty: bool,
+    legacy: bool,
+    /// The caller's system texts that cloaking moves into the messages.
+    texts: Vec<String>,
+    messages: usize,
+    /// Where they go: after the first user turn and any user turns that follow it.
+    insert_at: Option<usize>,
+    fallbacks: bool,
+    display: bool,
+    reporting: bool,
+}
+
+impl Before {
+    pub(crate) fn read(body: &str) -> Self {
+        let legacy = cloak::legacy_system_reminder(body);
+        let texts = if legacy {
+            Vec::new()
+        } else {
+            cloak::forwarded_system_blocks(body)
+        };
+        let (mut messages, mut insert_at) = (0, None);
+        if !texts.is_empty() {
+            let msgs = rawjson::get(body, "messages");
+            let msgs = msgs.array();
+            messages = msgs.len();
+            insert_at = cloak::first_user_index(body).map(|first| {
+                let mut at = first + 1;
+                while at < msgs.len() && msgs[at].get("role").str() == "user" {
+                    at += 1;
+                }
+                at
+            });
+        }
+        Self {
+            empty: body.is_empty(),
+            legacy,
+            texts,
+            messages,
+            insert_at,
+            fallbacks: rawjson::get(body, "fallbacks").exists(),
+            display: rawjson::get(body, "thinking.display").exists(),
+            reporting: has_reporting_block(body),
+        }
+    }
+}
+
 impl SystemPlacement {
     /// `captureClaudeCodeSystemPlacement`. The message-count increase is part of the
     /// proof: turns that already existed belong to the caller.
-    pub(crate) fn capture(before: &str, after: &str, cloaked: bool) -> Self {
-        if !cloaked || cloak::legacy_system_reminder(before) {
+    pub(crate) fn capture(before: &Before, after: &str, cloaked: bool) -> Self {
+        if !cloaked || before.legacy || before.texts.is_empty() {
             return Self::default();
         }
-        let texts = cloak::forwarded_system_blocks(before);
-        if texts.is_empty() {
+        let texts = &before.texts;
+        let after_msgs = rawjson::get(after, "messages");
+        let after_msgs = after_msgs.array();
+        if after_msgs.len() != before.messages + texts.len() {
             return Self::default();
         }
-        let (before_msgs, after_msgs) = (rawjson::get(before, "messages"), rawjson::get(after, "messages"));
-        let (before_msgs, after_msgs) = (before_msgs.array(), after_msgs.array());
-        if after_msgs.len() != before_msgs.len() + texts.len() {
-            return Self::default();
-        }
-        let Some(first) = cloak::first_user_index(before) else {
+        let Some(at) = before.insert_at else {
             return Self::default();
         };
-        let mut at = first + 1;
-        while at < before_msgs.len() && before_msgs[at].get("role").str() == "user" {
-            at += 1;
-        }
         if at + texts.len() > after_msgs.len() {
             return Self::default();
         }
@@ -51,7 +94,7 @@ impl SystemPlacement {
         Self {
             insert_at: at,
             inserted,
-            texts,
+            texts: texts.clone(),
         }
     }
 
@@ -59,17 +102,18 @@ impl SystemPlacement {
     /// final model a legacy one, the exact turns captured above move to
     /// `<system-reminder>` blocks. Any rule edit to those turns fails closed and leaves
     /// the final mid-system validation to reject the request.
-    pub(crate) fn reconcile(&self, body: &str) -> String {
-        if self.inserted.is_empty() || !cloak::legacy_system_reminder(body) {
-            return body.to_owned();
+    pub(crate) fn reconcile(&self, body: String) -> String {
+        if self.inserted.is_empty() || !cloak::legacy_system_reminder(&body) {
+            return body;
         }
-        let messages = rawjson::get(body, "messages");
+        let messages = rawjson::get(&body, "messages");
         let messages = messages.array();
         let end = self.insert_at + self.inserted.len();
         if end > messages.len()
             || (self.insert_at..end).any(|i| messages[i].json() != self.inserted[i - self.insert_at])
         {
-            return body.to_owned();
+            drop(messages);
+            return body;
         }
         let kept: Vec<&str> = messages
             .iter()
@@ -77,7 +121,7 @@ impl SystemPlacement {
             .filter(|(i, _)| !(self.insert_at..end).contains(i))
             .map(|(_, m)| m.json())
             .collect();
-        let updated = rawjson::set_raw(body, "messages", &format!("[{}]", kept.join(",")));
+        let updated = rawjson::set_raw(&body, "messages", &format!("[{}]", kept.join(",")));
         cloak::prepend_reminders(&updated, &self.texts)
     }
 }
@@ -92,15 +136,15 @@ pub(crate) struct FableState {
 
 impl FableState {
     /// `captureClaudeCodeFableState`.
-    pub(crate) fn capture(before: &str, after: &str, cloaked: bool) -> Self {
-        if !cloaked || before.is_empty() || after.is_empty() {
+    pub(crate) fn capture(before: &Before, after: &str, cloaked: bool) -> Self {
+        if !cloaked || before.empty || after.is_empty() {
             return Self::default();
         }
-        let added = |path: &str| !rawjson::get(before, path).exists() && rawjson::get(after, path).exists();
+        let added = |existed: bool, path: &str| !existed && rawjson::get(after, path).exists();
         Self {
-            fallbacks: added("fallbacks"),
-            display: added("thinking.display"),
-            reporting: !has_reporting_block(before) && has_reporting_block(after),
+            fallbacks: added(before.fallbacks, "fallbacks"),
+            display: added(before.display, "thinking.display"),
+            reporting: !before.reporting && has_reporting_block(after),
         }
     }
 }
@@ -145,14 +189,13 @@ fn remove_reporting_block(body: String) -> String {
 /// and the `# Reporting outcomes` block follow the final model. Additions a payload
 /// rule touched, or the caller sent, are never changed.
 pub(crate) fn fable(
-    body: &str,
+    mut body: String,
     state: &FableState,
     touched_fallbacks: bool,
     touched_display: bool,
     cloaked: bool,
     probe: bool,
 ) -> String {
-    let mut body = body.to_owned();
     if !cloaked || body.is_empty() {
         return body;
     }
@@ -216,7 +259,7 @@ pub(crate) fn fable(
         return if touched_display {
             body
         } else {
-            super::cloak_thinking_display(&body)
+            super::cloak_thinking_display(body)
         };
     }
     if cloak::is_opus55(&model) && !exists(&body, "fallbacks") && !touched_fallbacks {
@@ -230,7 +273,7 @@ pub(crate) fn fable(
         body = rawjson::delete(&body, "thinking.display");
     }
     if !touched_display {
-        body = super::cloak_thinking_display(&body);
+        body = super::cloak_thinking_display(body);
     }
     if state.reporting {
         body = remove_reporting_block(body);
@@ -247,19 +290,23 @@ mod tests {
     #[test]
     fn system_placement_moves_only_cpa_turns_to_reminders() {
         let after = cloak::insert_mid_system(MID, &["rules".to_owned()]);
-        let placement = SystemPlacement::capture(MID, &after, true);
+        let placement = SystemPlacement::capture(&Before::read(MID), &after, true);
         assert_eq!(placement.inserted.len(), 1);
         // A rule that keeps a current model leaves the turn where it is.
-        assert_eq!(placement.reconcile(&after), after);
+        assert_eq!(placement.reconcile(after.clone()), after);
         // A rule that selects a legacy model turns it into a reminder.
         let legacy = rawjson::set_str(&after, "model", "claude-3-5-haiku-20241022");
-        let fixed = placement.reconcile(&legacy);
+        let fixed = placement.reconcile(legacy.clone());
         assert_eq!(rawjson::get(&fixed, "messages.#").i64(), 1);
         assert!(rawjson::string(&fixed, "messages.0.content.0.text").starts_with("<system-reminder>"));
         // A rule that edited the inserted turn fails closed.
         let edited = rawjson::set_str(&legacy, "messages.1.content.0.text", "changed");
-        assert_eq!(placement.reconcile(&edited), edited);
+        assert_eq!(placement.reconcile(edited.clone()), edited);
         // Turns the caller already had are not CPA's.
-        assert!(SystemPlacement::capture(&after, &after, true).inserted.is_empty());
+        assert!(
+            SystemPlacement::capture(&Before::read(&after), &after, true)
+                .inserted
+                .is_empty()
+        );
     }
 }
