@@ -168,9 +168,17 @@ jobs:
             sh "$(id -u)" "$(id -g)"
 
   perf:
-    name: size and idle gates (Linux)
+    name: ${{ matrix.gates }} (Linux)
     # The release builds use Ubuntu 22.04 too, so the sizes compare with theirs, and its
-    # unprivileged user namespaces give bench/idle.sh a loopback-only network.
+    # unprivileged user namespaces give bench/idle.sh a loopback-only network. The two
+    # idle gates run on separate runners, so neither waits out the other's 60 s window;
+    # each still has its machine to itself. Both build the same release binary.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { gates: "size and idle gates, 1 auth file", auth-files: 1 }
+          - { gates: "idle gate, 2,000 auth files", auth-files: 2000 }
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -179,24 +187,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev perl
       - name: Rust
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
+      # Both entries share one cache; one of them saves it.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-if: ${{ github.ref == 'refs/heads/master' && matrix.auth-files == 1 }}
       - name: Build
         run: cargo build --release --locked -p cliproxy
       # Bytes and counts against bench/budgets.txt, never elapsed time.
       - name: Size
+        if: matrix.auth-files == 1
         run: |
           name=cliproxy-ci-x86_64-unknown-linux-gnu
           mkdir -p "$name" && cp target/release/cliproxy README.md LICENSE "$name/"
           tar -czf "$name.tar.gz" "$name"
           bench/gate.sh size x86_64-unknown-linux-gnu target/release/cliproxy "$name.tar.gz"
-      - name: Idle, 1 and 2,000 auth files
-        run: |
-          status=0
-          bench/gate.sh idle linux target/release/cliproxy 1 || status=1
-          bench/gate.sh idle linux target/release/cliproxy 2000 || status=1
-          exit $status
+      - name: Idle
+        env:
+          AUTH_FILES: ${{ matrix.auth-files }}
+        run: bench/gate.sh idle linux target/release/cliproxy "$AUTH_FILES"
 
   # Clippy over every target (tests, examples, benches) with warnings as errors, so code
   # that only builds on Windows, test-only code included, is held to the Linux rules.
