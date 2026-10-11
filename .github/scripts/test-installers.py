@@ -122,9 +122,12 @@ def main():
         threading.Thread(target=server.serve_forever, daemon=True).start()
         home = root / "private home"
         bindir = root / "private bin"
+        # PSModuleAnalysisCachePath points Windows PowerShell at the runner image's module
+        # cache. Without it, each powershell.exe spends about 22 s indexing every installed
+        # module before its first command.
         env = {k: v for k, v in os.environ.items() if k.upper() in {
             "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
-            "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432",
+            "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "PSMODULEANALYSISCACHEPATH",
         }}
         env.update({"HOME": str(root), "USERPROFILE": str(root), "LOCALAPPDATA": str(root),
                "CLIPROXY_RELEASES": f"http://127.0.0.1:{server.server_port}/releases",
