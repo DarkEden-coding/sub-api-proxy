@@ -1,14 +1,15 @@
 # Published Unix releases retain the login-service smoke tests. Candidate binaries
 # on all three systems exercise local checksummed releases, no-op checks, upgrades,
-# rollback and direct Windows startup without waiting for the next release.
+# rollback, direct Windows startup and the embedded dashboard files without waiting
+# for the next release.
 name: Installers
 
 on:
   push:
     branches: [master]
-    paths: [install.sh, install.ps1, .github/workflows/install.yml, .github/scripts/test-installers.py, .github/scripts/installer-fixture.rs, crates/cliproxy/**, crates/cpa-server/src/logging.rs]
+    paths: [install.sh, install.ps1, .github/workflows/install.yml, .github/scripts/test-installers.py, .github/scripts/installer-fixture.rs, crates/cliproxy/**, crates/cpa-server/src/logging.rs, crates/cpa-server/build.rs, crates/cpa-server/src/management.rs, ui/dist/**]
   pull_request:
-    paths: [install.sh, install.ps1, .github/workflows/install.yml, .github/scripts/test-installers.py, .github/scripts/installer-fixture.rs, crates/cliproxy/**, crates/cpa-server/src/logging.rs]
+    paths: [install.sh, install.ps1, .github/workflows/install.yml, .github/scripts/test-installers.py, .github/scripts/installer-fixture.rs, crates/cliproxy/**, crates/cpa-server/src/logging.rs, crates/cpa-server/build.rs, crates/cpa-server/src/management.rs, ui/dist/**]
   workflow_dispatch:
     inputs:
       version:
