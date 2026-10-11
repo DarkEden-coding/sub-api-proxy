@@ -13,15 +13,14 @@ pub(crate) fn enabled(api_key: &str, cli_fingerprint: bool, first_party: bool) -
     api_key.contains("sk-ant-oat") || (cli_fingerprint && first_party)
 }
 
-/// `finalizeAnthropicMessagesBodyCCH`.
-pub(crate) fn finalize(body: &str, fallback_billing: &str) -> Result<String, String> {
-    let body = ensure_placeholder(body, fallback_billing);
-    sign(&body)
+/// `finalizeAnthropicMessagesBodyCCH`. The body is signed in place: only the hash
+/// input is a second copy.
+pub(crate) fn finalize(body: String, fallback_billing: &str) -> Result<String, String> {
+    sign(ensure_placeholder(body, fallback_billing))
 }
 
-fn ensure_placeholder(body: &str, fallback: &str) -> String {
-    let billing = rawjson::get(body, "system.0.text");
-    let mut body = body.to_owned();
+fn ensure_placeholder(mut body: String, fallback: &str) -> String {
+    let billing = rawjson::get(&body, "system.0.text");
     if billing.kind() != gjson::Kind::String || !billing.str().starts_with(BILLING_PREFIX) {
         if fallback.is_empty() {
             return body;
@@ -90,11 +89,11 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn sign(body: &str) -> Result<String, String> {
-    let Some(offset) = digits_offset(body) else {
-        return Ok(body.to_owned());
+fn sign(body: String) -> Result<String, String> {
+    let Some(offset) = digits_offset(&body) else {
+        return Ok(body);
     };
-    let mut unsigned = body.as_bytes().to_vec();
+    let mut unsigned = body.into_bytes();
     unsigned[offset..offset + 5].copy_from_slice(b"00000");
     let normalized = normalize(&unsigned).map_err(|e| format!("normalize Claude CCH input: {e}"))?;
     let cch = format!("{:05x}", xxh64(&normalized, SEED) & 0xFFFFF);
@@ -380,15 +379,15 @@ mod tests {
         // Upstream body from the Go differential capture (case `buffered`).
         let signed = r#"{"model":"claude-sonnet-4-6","max_tokens":17,"messages":[{"role":"user","content":[{"type":"text","text":"<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-10-02.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"},{"type":"text","text":"Local question","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280.b43; cc_entrypoint=cli; cch=2a498; cc_prompt_id=83ec619f-ab81-4d70-9c67-44c3865291b9; cc_turn_origin=human;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral","ttl":"1h"}}],"diagnostics":{"previous_message_id":null},"stream":false,"metadata":{"user_id":"{\"device_id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"account_uuid\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"session_id\":\"dd01238e-cdb5-5572-8f27-a28d98fe9075\"}"}}"#;
         let unsigned = signed.replace("cch=2a498", "cch=00000");
-        assert_eq!(finalize(&unsigned, "").unwrap(), signed);
+        assert_eq!(finalize(unsigned, "").unwrap(), signed);
         // An already-signed body re-signs to the same digits.
-        assert_eq!(finalize(signed, "").unwrap(), signed);
+        assert_eq!(finalize(signed.to_owned(), "").unwrap(), signed);
     }
 
     #[test]
     fn fallback_billing_is_prepended_to_string_system() {
         let out = finalize(
-            r#"{"system":"Native caller system","messages":[]}"#,
+            r#"{"system":"Native caller system","messages":[]}"#.to_owned(),
             "x-anthropic-billing-header: cc_version=2.1.280.b43; cc_entrypoint=cli;",
         )
         .unwrap();

@@ -302,9 +302,25 @@ pub(crate) fn insert_mid_system(body: &str, texts: &[String]) -> String {
         .iter()
         .map(|t| format!(r#"{{"role":"system","content":[{}]}}"#, text_block(t, EPHEMERAL)))
         .collect();
-    let mut raw: Vec<String> = msgs.iter().map(|m| m.json().to_owned()).collect();
-    raw.splice(at..at, inserted);
-    rawjson::set_raw(body, "messages", &format!("[{}]", raw.join(",")))
+    // The messages joined with the new turns at `at`, written once: per-message copies,
+    // their join and its bracketing were three more body-sized buffers.
+    let size = messages.json().len() + inserted.iter().map(|m| m.len() + 1).sum::<usize>();
+    let mut array = String::with_capacity(size);
+    array.push('[');
+    for (i, message) in msgs[..at]
+        .iter()
+        .map(|m| m.json())
+        .chain(inserted.iter().map(String::as_str))
+        .chain(msgs[at..].iter().map(|m| m.json()))
+        .enumerate()
+    {
+        if i > 0 {
+            array.push(',');
+        }
+        array.push_str(message);
+    }
+    array.push(']');
+    rawjson::set_raw(body, "messages", &array)
 }
 
 /// Advisor results are bound to message positions; splicing would break them.
@@ -394,10 +410,11 @@ pub(crate) struct SystemPlan<'a> {
     pub date: &'a str,
 }
 
-/// `checkSystemInstructionsWithSigningModeAt`.
-pub(crate) fn install_system(body: &str, plan: &SystemPlan<'_>) -> String {
-    let forwarded = forwarded_system_blocks(body);
-    let message = fingerprint_message(body);
+/// `checkSystemInstructionsWithSigningModeAt`. Takes the body so it is freed as soon as
+/// the first rewrite has copied it.
+pub(crate) fn install_system(body: String, plan: &SystemPlan<'_>) -> String {
+    let forwarded = forwarded_system_blocks(&body);
+    let message = fingerprint_message(&body);
     let billing = Billing {
         message: &message,
         ..plan.billing
@@ -406,10 +423,13 @@ pub(crate) fn install_system(body: &str, plan: &SystemPlan<'_>) -> String {
         text_block(&billing_header(&billing), None),
         text_block(CLI_IDENTITY, EPHEMERAL),
     ];
-    if is_fable51(rawjson::get(body, "model").str()) && !signals::probe_or_helper(body) {
+    if is_fable51(rawjson::get(&body, "model").str()) && !signals::probe_or_helper(&body) {
         blocks.push(text_block(FABLE_REPORTING, None));
     }
-    let mut body = rawjson::set_raw(body, "system", &format!("[{}]", blocks.join(",")));
+    let mut body = {
+        let input = body;
+        rawjson::set_raw(&input, "system", &format!("[{}]", blocks.join(",")))
+    };
     if !plan.strict && !forwarded.is_empty() {
         if has_advisor_history(&body) {
             blocks.extend(forwarded.iter().map(|t| text_block(t, None)));
@@ -461,23 +481,23 @@ pub(crate) fn inject_context_management(body: &str) -> Option<String> {
 
 /// `reconcileClaudeCodeContextManagement` without payload-rule ownership.
 pub(crate) fn reconcile_context_management(
-    body: &str,
+    body: String,
     eligible: bool,
     caller_owned: bool,
     injected: bool,
     payload_touched: bool,
 ) -> String {
-    let current = rawjson::get(body, "context_management");
-    if !thinking_accepts_clear(body) {
+    let current = rawjson::get(&body, "context_management");
+    if !thinking_accepts_clear(&body) {
         if caller_owned || !injected || payload_touched || current.json() != CONTEXT_MANAGEMENT {
-            return body.to_owned();
+            return body;
         }
-        return rawjson::delete(body, "context_management");
+        return rawjson::delete(&body, "context_management");
     }
     if !eligible || caller_owned || payload_touched || current.exists() {
-        return body.to_owned();
+        return body;
     }
-    rawjson::set_raw(body, "context_management", CONTEXT_MANAGEMENT)
+    rawjson::set_raw(&body, "context_management", CONTEXT_MANAGEMENT)
 }
 
 fn has_cache_control(body: &str, path: &str) -> bool {
@@ -493,14 +513,14 @@ pub(crate) fn count_cache_controls(body: &str) -> usize {
 }
 
 /// `upgradeClaudeCacheControlTTL`: every marker without an explicit ttl joins `ttl`.
-pub(crate) fn upgrade_ttl(body: &str, ttl: &str) -> String {
-    if !gjson::valid(body) {
-        return body.to_owned();
+pub(crate) fn upgrade_ttl(body: String, ttl: &str) -> String {
+    if !gjson::valid(&body) {
+        return body;
     }
     // Go visits the blocks of the payload it was given; each edit touches only its own
-    // block, so the remaining blocks read the same from either copy.
-    let mut out = body.to_owned();
-    for (path, block) in signals::blocks(body) {
+    // block, so the remaining blocks read the same before and after the others.
+    let mut edits = Vec::new();
+    for (path, block) in signals::blocks(&body) {
         let parsed = gjson::get(&block, "cache_control");
         if parsed.kind() != gjson::Kind::Object
             || parsed.get("ttl").exists()
@@ -518,34 +538,37 @@ pub(crate) fn upgrade_ttl(body: &str, ttl: &str) -> String {
             upgraded.push_str(&format!(r#","scope":{}"#, scope.json()));
         }
         upgraded.push('}');
-        out = rawjson::set_raw(&out, &format!("{path}.cache_control"), &upgraded);
+        edits.push((format!("{path}.cache_control"), upgraded));
     }
-    out
+    edits
+        .into_iter()
+        .fold(body, |body, (path, upgraded)| rawjson::set_raw(&body, &path, &upgraded))
 }
 
 /// `stripClaudeCacheControlTTL`.
-pub(crate) fn strip_ttl(body: &str) -> String {
-    if !gjson::valid(body) {
-        return body.to_owned();
+pub(crate) fn strip_ttl(body: String) -> String {
+    if !gjson::valid(&body) {
+        return body;
     }
-    let mut out = body.to_owned();
-    for (path, block) in signals::blocks(body) {
-        let cc = gjson::get(&block, "cache_control");
-        if cc.kind() == gjson::Kind::Object && cc.get("ttl").exists() {
-            out = rawjson::delete(&out, &format!("{path}.cache_control.ttl"));
-        }
-    }
-    out
+    let paths: Vec<String> = signals::blocks(&body)
+        .into_iter()
+        .filter(|(_, block)| {
+            let cc = gjson::get(block, "cache_control");
+            cc.kind() == gjson::Kind::Object && cc.get("ttl").exists()
+        })
+        .map(|(path, _)| format!("{path}.cache_control.ttl"))
+        .collect();
+    paths.iter().fold(body, |body, path| rawjson::delete(&body, path))
 }
 
 /// `normalizeCacheControlTTL`: a 1h marker may not follow a 5m one in evaluation order.
-pub(crate) fn normalize_ttl(body: &str) -> String {
-    if !gjson::valid(body) {
-        return body.to_owned();
+pub(crate) fn normalize_ttl(body: String) -> String {
+    if !gjson::valid(&body) {
+        return body;
     }
-    let mut out = body.to_owned();
+    let mut paths = Vec::new();
     let mut seen_5m = false;
-    for (path, block) in signals::blocks(body) {
+    for (path, block) in signals::blocks(&body) {
         let parsed = gjson::get(&block, "cache_control");
         if !parsed.exists() {
             continue;
@@ -556,24 +579,23 @@ pub(crate) fn normalize_ttl(body: &str) -> String {
             continue;
         }
         if seen_5m {
-            out = rawjson::delete(&out, &format!("{path}.cache_control.ttl"));
+            paths.push(format!("{path}.cache_control.ttl"));
         }
     }
-    out
+    paths.iter().fold(body, |body, path| rawjson::delete(&body, path))
 }
 
 /// `enforceCacheControlLimit`: drop the earliest non-final system/tool markers, then
 /// message markers, then any remaining system/tool markers.
-pub(crate) fn enforce_cache_limit(body: &str, max: usize) -> String {
-    if !gjson::valid(body) {
-        return body.to_owned();
+pub(crate) fn enforce_cache_limit(mut body: String, max: usize) -> String {
+    if !gjson::valid(&body) {
+        return body;
     }
-    let total = count_cache_controls(body);
+    let total = count_cache_controls(&body);
     if total <= max {
-        return body.to_owned();
+        return body;
     }
     let mut excess = total - max;
-    let mut body = body.to_owned();
     let remove = |body: &mut String, section: &str, keep_last: bool, excess: &mut usize| {
         let items = gjson::get(body, section).array().len();
         let marked: Vec<usize> = (0..items)
@@ -633,8 +655,7 @@ fn cacheable_system(body: &str) -> bool {
 }
 
 /// `ensureCacheControl`: CPA-owned breakpoints for non-native callers.
-pub(crate) fn ensure_cache_control(body: &str) -> String {
-    let mut body = body.to_owned();
+pub(crate) fn ensure_cache_control(mut body: String) -> String {
     if !cacheable_system(&body) {
         body = inject_tools_cache(&body);
     }
@@ -885,14 +906,14 @@ mod tests {
         assert_eq!(count_cache_controls(body), 3);
         assert!(signals::has_1h_ttl(body));
         assert_eq!(
-            normalize_ttl(body),
+            normalize_ttl(body.to_owned()),
             body.replace(
                 r#""text":"b","cache_control":{"type":"ephemeral","ttl":"1h"}"#,
                 r#""text":"b","cache_control":{"type":"ephemeral"}"#
             )
         );
-        assert_eq!(strip_ttl(body).matches(r#""ttl""#).count(), 0);
-        let upgraded = upgrade_ttl(body, "1h");
+        assert_eq!(strip_ttl(body.to_owned()).matches(r#""ttl""#).count(), 0);
+        let upgraded = upgrade_ttl(body.to_owned(), "1h");
         assert!(
             upgraded
                 .contains(r#""system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral","ttl":"1h"}}]"#)

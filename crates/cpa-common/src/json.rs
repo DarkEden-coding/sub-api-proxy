@@ -2581,6 +2581,12 @@ fn set_impl(jstr: &[u8], path: &[u8], raw: &[u8], stringify: bool, del: bool) ->
     };
     let mut buf = Vec::with_capacity(jstr.len() + raw.len() + path.len() + 8);
     append_raw_paths(&mut buf, jstr, &paths, raw, stringify, del)?;
+    // Sized for an insertion: replacing a large value (a request's messages or system)
+    // leaves the old value's length unused, often in what becomes the next document.
+    // One shrinking `realloc`, only for those.
+    if buf.capacity() - buf.len() > (4 << 10).max(buf.len() / 8) {
+        buf.shrink_to_fit();
+    }
     Ok(buf)
 }
 
@@ -2652,6 +2658,12 @@ pub fn try_set_str(json: &[u8], path: &(impl JsonPath + ?Sized), value: impl AsR
 pub fn try_set_raw(json: &[u8], path: &(impl JsonPath + ?Sized), raw: impl AsRef<[u8]>) -> Result<Vec<u8>, String> {
     let path = path.as_path();
     checked(json, path, raw.as_ref(), false, false)
+}
+
+/// `sjson.DeleteBytes` when it changes the document: `None` when `path` is missing or
+/// sjson would fail, so the caller keeps its document instead of a copy.
+pub fn delete_changed(json: &[u8], path: &(impl JsonPath + ?Sized)) -> Option<Vec<u8>> {
+    set_impl(json, path.as_path(), b"", false, true).ok()
 }
 
 /// `sjson.DeleteBytes`, returning sjson's error message.

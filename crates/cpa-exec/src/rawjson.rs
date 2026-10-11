@@ -56,6 +56,12 @@ pub(crate) fn delete(json: &str, path: &str) -> String {
     json::try_delete(json.as_bytes(), path).map_or_else(|_| json.to_owned(), text)
 }
 
+/// [`delete`] of an owned document, which comes back as it was, not copied, when
+/// nothing changes.
+pub(crate) fn delete_owned(json: String, path: &str) -> String {
+    json::delete_changed(json.as_bytes(), path).map_or(json, text)
+}
+
 /// `gjson.Result.String()` on a lookup, owned.
 pub(crate) fn string(json: &str, path: &str) -> String {
     get(json, path).str().to_owned()

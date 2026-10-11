@@ -1,5 +1,7 @@
 //! Claude Messages history sanitizing for a target provider (claude_messages_sanitize.go).
 
+use std::borrow::Cow;
+
 use super::claude::is_empty_thinking_placeholder;
 use super::{Action, BlockKind, Decision, Provider, decide_compatibility_for_model, normalize_target};
 use crate::json::{self, Res};
@@ -40,13 +42,13 @@ pub fn sanitize_claude_messages_signatures_for_model(payload: &[u8], target_mode
     )
 }
 
-/// `SanitizeClaudeMessagesForClaudeUpstream`.
+/// `SanitizeClaudeMessagesForClaudeUpstream`; `None` when the payload is unchanged.
 pub fn sanitize_claude_messages_for_claude_upstream(
     payload: &[u8],
     target_model: &str,
     preserve_empty_thinking_blocks: bool,
-) -> (Vec<u8>, SanitizeReport) {
-    sanitize_claude_messages_signatures_for_target(
+) -> (Option<Vec<u8>>, SanitizeReport) {
+    sanitize(
         payload,
         &ClaudeMessagesSanitizeOptions {
             target_provider: Provider::Claude,
@@ -64,6 +66,14 @@ pub fn sanitize_claude_messages_signatures_for_target(
     payload: &[u8],
     opts: &ClaudeMessagesSanitizeOptions,
 ) -> (Vec<u8>, SanitizeReport) {
+    let (out, report) = sanitize(payload, opts);
+    (out.unwrap_or_else(|| payload.to_vec()), report)
+}
+
+/// [`sanitize_claude_messages_signatures_for_target`], `None` when nothing changed.
+/// Untouched messages and blocks are borrowed from the payload, so only the edited
+/// ones and the rebuilt document are copied.
+fn sanitize(payload: &[u8], opts: &ClaudeMessagesSanitizeOptions) -> (Option<Vec<u8>>, SanitizeReport) {
     let mut target = normalize_target(opts.target_provider);
     if target == Provider::Unknown && !opts.target_model.is_empty() {
         target = super::provider_from_model_name(&opts.target_model);
@@ -78,17 +88,17 @@ pub fn sanitize_claude_messages_signatures_for_target(
     };
     let messages = json::get(payload, "messages");
     if !messages.is_array() {
-        return (payload.to_vec(), report);
+        return (None, report);
     }
-    let mut kept_messages = Vec::new();
+    let mut kept_messages: Vec<Cow<'_, [u8]>> = Vec::new();
     let mut modified = false;
     for (i, message) in messages.array().iter().enumerate() {
         let content = message.get("content");
         if !content.is_array() {
-            kept_messages.push(message.raw().to_vec());
+            kept_messages.push(message.raw.clone());
             continue;
         }
-        let mut kept_parts: Vec<Vec<u8>> = Vec::new();
+        let mut kept_parts: Vec<Cow<'_, [u8]>> = Vec::new();
         let mut message_modified = false;
         for (j, part) in content.array().iter().enumerate() {
             let part_type = part.get("type").bytes();
@@ -98,13 +108,18 @@ pub fn sanitize_claude_messages_signatures_for_target(
                     if changed {
                         message_modified = true;
                         report.dropped_signatures += 1;
+                        kept_parts.push(Cow::Owned(updated));
+                    } else {
+                        kept_parts.push(part.raw.clone());
                     }
-                    kept_parts.push(updated);
                     continue;
                 }
                 let (updated, changed, decisions) = sanitize_tool_use_signature(part, target, &opts.target_model, i, j);
                 if changed {
                     message_modified = true;
+                    kept_parts.push(Cow::Owned(updated));
+                } else {
+                    kept_parts.push(part.raw.clone());
                 }
                 for decision in &decisions {
                     match decision.action {
@@ -114,24 +129,23 @@ pub fn sanitize_claude_messages_signatures_for_target(
                     }
                 }
                 report.decisions.extend(decisions);
-                kept_parts.push(updated);
                 continue;
             }
             if &*part_type != b"thinking" {
-                kept_parts.push(part.raw().to_vec());
+                kept_parts.push(part.raw.clone());
                 continue;
             }
             let raw_signature = part.get("signature").bytes();
             if opts.preserve_empty_thinking_blocks {
                 report.preserved += 1;
-                kept_parts.push(part.raw().to_vec());
+                kept_parts.push(part.raw.clone());
                 continue;
             }
             if target == Provider::Claude
                 && is_empty_thinking_placeholder(part)
                 && !opts.drop_empty_thinking_placeholders
             {
-                kept_parts.push(part.raw().to_vec());
+                kept_parts.push(part.raw.clone());
                 continue;
             }
             let mut decision =
@@ -141,26 +155,31 @@ pub fn sanitize_claude_messages_signatures_for_target(
             let normalized = decision.normalized_signature.clone();
             let replacement = decision.replacement_signature.clone();
             report.decisions.push(decision);
-            let mut updated = part.raw().to_vec();
+            let updated = || part.raw().to_vec();
             match action {
                 Action::Preserve => {
                     report.preserved += 1;
                     if !normalized.is_empty() && normalized.as_bytes() != &*raw_signature {
+                        let mut updated = updated();
                         json::set_str(&mut updated, "signature", &normalized);
+                        kept_parts.push(Cow::Owned(updated));
                         message_modified = true;
+                    } else {
+                        kept_parts.push(part.raw.clone());
                     }
-                    kept_parts.push(updated);
                 }
                 Action::ReplaceWithGeminiBypass => {
                     report.replaced_signatures += 1;
+                    let mut updated = updated();
                     json::set_str(&mut updated, "signature", &replacement);
-                    kept_parts.push(updated);
+                    kept_parts.push(Cow::Owned(updated));
                     message_modified = true;
                 }
                 Action::DropSignature => {
                     report.dropped_signatures += 1;
+                    let mut updated = updated();
                     json::delete(&mut updated, "signature");
-                    kept_parts.push(updated);
+                    kept_parts.push(Cow::Owned(updated));
                     message_modified = true;
                 }
                 _ => {
@@ -174,19 +193,21 @@ pub fn sanitize_claude_messages_signatures_for_target(
             if kept_parts.is_empty() && opts.drop_empty_messages {
                 continue;
             }
-            let mut updated = message.raw().to_vec();
-            json::set_raw(&mut updated, "content", json::join(&kept_parts));
-            kept_messages.push(updated);
+            // sjson leaves the document unchanged when it cannot set the path.
+            let updated = json::try_set_raw(message.raw(), "content", json::join(&kept_parts))
+                .unwrap_or_else(|_| message.raw().to_vec());
+            kept_messages.push(Cow::Owned(updated));
             continue;
         }
-        kept_messages.push(message.raw().to_vec());
+        kept_messages.push(message.raw.clone());
     }
     if !modified {
-        return (payload.to_vec(), report);
+        return (None, report);
     }
-    let mut out = payload.to_vec();
-    json::set_raw(&mut out, "messages", json::join(&kept_messages));
-    (out, report)
+    let joined = json::join(&kept_messages);
+    drop(kept_messages);
+    let out = json::try_set_raw(payload, "messages", joined).unwrap_or_else(|_| payload.to_vec());
+    (Some(out), report)
 }
 
 const TOOL_USE_SIGNATURE_PATHS: [&str; 4] = [

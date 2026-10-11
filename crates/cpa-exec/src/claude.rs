@@ -305,6 +305,16 @@ impl ClaudeExecutor {
         let mut prepared = ctx
             .prepare_messages(&req, &translated, &original_translated, upstream_stream)
             .await?;
+        drop(original_translated);
+        // Only a translated client needs the translation again, for its response; a
+        // Claude client's copy would otherwise wait out the upload and the upstream's
+        // time to first byte.
+        let translated = if req.response_format == Format::Claude {
+            drop(translated);
+            Bytes::new()
+        } else {
+            translated
+        };
         // reporter.SetTranslatedReasoningEffort on the body sent upstream.
         if req.usage.enabled() {
             req.usage.request(Format::Claude, prepared.body.as_bytes());
@@ -457,7 +467,7 @@ impl ClaudeExecutor {
             if ctx.rebuild_mid_system() {
                 body = rebuild_mid_system(&body);
             }
-            let body = sanitize_for_upstream(&body, &ctx.base_model, ctx.is_compat);
+            let body = sanitize_for_upstream(body, &ctx.base_model, ctx.is_compat);
             return Ok(ExecResponse {
                 status: 200,
                 headers: Default::default(),
@@ -522,20 +532,25 @@ impl ClaudeExecutor {
             })
         };
         // helps.RecordAPIRequest: the header map the executor built (Go spelling, the
-        // transport's own headers excluded), unmasked; every physical send.
+        // transport's own headers excluded), unmasked; every physical send. The log may
+        // keep the body for the whole exchange, so it gets the body being sent rather
+        // than a copy.
         if capture.enabled() {
             let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(ctx.credential);
-            capture.record(CaptureEvent::Request(UpstreamRequest {
-                url: &url,
-                method: "POST",
-                headers: &prepared.headers,
-                body: &body,
-                provider: ctx.log_provider,
-                auth_id: &ctx.credential.id,
-                auth_label: &ctx.credential.label,
-                auth_type,
-                auth_value: &auth_value,
-            }));
+            capture.record_request(
+                UpstreamRequest {
+                    url: &url,
+                    method: "POST",
+                    headers: &prepared.headers,
+                    body: &body,
+                    provider: ctx.log_provider,
+                    auth_id: &ctx.credential.id,
+                    auth_label: &ctx.credential.label,
+                    auth_type,
+                    auth_value: &auth_value,
+                },
+                &body,
+            );
         }
         if let Some(usage) = usage {
             usage.round_trip_started();
@@ -806,12 +821,12 @@ fn text(bytes: Vec<u8>) -> String {
 }
 
 /// `helps.SetStringIfDifferent`.
-fn set_string_if_different(body: &str, path: &str, value: &str) -> String {
-    let current = rawjson::get(body, path);
+fn set_string_if_different(body: String, path: &str, value: &str) -> String {
+    let current = rawjson::get(&body, path);
     if current.kind() == gjson::Kind::String && current.str() == value {
-        return body.to_owned();
+        return body;
     }
-    rawjson::set_str(body, path, value)
+    rawjson::set_str(&body, path, value)
 }
 
 /// `isKimiMessagesUpstream`: a Kimi credential, or Kimi's API host.
@@ -846,12 +861,12 @@ fn base_model(model: &str) -> String {
 /// `sanitizeClaudeMessagesForClaudeUpstreamWithDebug`: Claude-family targets (and
 /// compat models, which keep empty thinking blocks) go through the shared Messages
 /// signature sanitizer; then empty web_search domain lists are removed.
-fn sanitize_for_upstream(body: &str, base_model: &str, preserve_empty_thinking: bool) -> String {
+fn sanitize_for_upstream(mut body: String, base_model: &str, preserve_empty_thinking: bool) -> String {
     use cpa_common::signature::{Provider, provider_from_model_name, sanitize_claude_messages_for_claude_upstream};
-    let mut body = body.to_owned();
-    if provider_from_model_name(base_model) == Provider::Claude || preserve_empty_thinking {
-        let sanitized =
-            sanitize_claude_messages_for_claude_upstream(body.as_bytes(), base_model, preserve_empty_thinking).0;
+    if (provider_from_model_name(base_model) == Provider::Claude || preserve_empty_thinking)
+        && let Some(sanitized) =
+            sanitize_claude_messages_for_claude_upstream(body.as_bytes(), base_model, preserve_empty_thinking).0
+    {
         body = text(sanitized);
     }
     // sanitizeClaudeWebSearchDomains: one pass over the tools, then the deletes.
@@ -874,10 +889,10 @@ fn sanitize_for_upstream(body: &str, base_model: &str, preserve_empty_thinking: 
 }
 
 /// `extractAndRemoveBetas`.
-fn extract_betas(body: &str) -> (Vec<String>, String) {
-    let v = rawjson::get(body, "betas");
+fn extract_betas(body: String) -> (Vec<String>, String) {
+    let v = rawjson::get(&body, "betas");
     if !v.exists() {
-        return (Vec::new(), body.to_owned());
+        return (Vec::new(), body);
     }
     let betas = if v.kind() == gjson::Kind::Array {
         v.array()
@@ -891,7 +906,7 @@ fn extract_betas(body: &str) -> (Vec<String>, String) {
             .into_iter()
             .collect()
     };
-    (betas, rawjson::delete(body, "betas"))
+    (betas, rawjson::delete(&body, "betas"))
 }
 
 impl<'a> Ctx<'a> {
@@ -1077,6 +1092,11 @@ impl<'a> Ctx<'a> {
         req.derived_session.clone().unwrap_or_default()
     }
 
+    // ponytail: every rewrite that changes the body still returns a new copy of it, so a
+    // cloaked 1.9 MB request allocates 32 buffers of 256 KiB or more and peaks at 5.1x its
+    // body (alloc.cloak.* in bench/budgets.txt). Recording the edits from one walk and
+    // splicing them into one output, as signals.rs does for cache_control, is the way to
+    // the 3x target.
     async fn prepare_messages(
         &self,
         req: &ExecRequest,
@@ -1104,7 +1124,7 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = translated;
-        body = set_string_if_different(&body, "model", &self.upstream_model);
+        body = set_string_if_different(body, "model", &self.upstream_model);
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1114,7 +1134,12 @@ impl<'a> Ctx<'a> {
         let probe_before = signals::probe_or_helper(&body);
         let mut continuity = session::Continuity::default();
         let mut cloaked = false;
-        let before_cloak = body.clone();
+        // What the post-payload reconciliations need from the uncloaked body.
+        let before = if cloak {
+            reconcile::Before::read(&body)
+        } else {
+            reconcile::Before::default()
+        };
         if cloak {
             if !strict && let Some(message) = cloak::invalid_system_block(&body) {
                 return Err(ExecError::local(400, FailureScope::Request, message));
@@ -1130,7 +1155,7 @@ impl<'a> Ctx<'a> {
             let version = profile::default_version(&self.settings);
             let workload = detect::header(&req.headers, "x-cpa-claude-workload").to_owned();
             body = cloak::install_system(
-                &body,
+                body,
                 &cloak::SystemPlan {
                     strict,
                     billing: cloak::Billing {
@@ -1155,10 +1180,10 @@ impl<'a> Ctx<'a> {
                 body = rawjson::set_raw(&body, "fallbacks", r#"[{"model":"claude-opus-5"}]"#);
             }
             if !probe_before {
-                body = cloak_thinking_display(&body);
+                body = cloak_thinking_display(body);
             }
             if probe_before || (subagent && !signals::subagent_requests_1h(&req.headers, &body)) {
-                body = cloak::strip_ttl(&body);
+                body = cloak::strip_ttl(body);
             }
             if !self.cli_profile && needs_fake_user_id(&body) {
                 // Go `injectFakeUserID`: Home KV in Home mode, and its errors fail the
@@ -1201,8 +1226,8 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        let placement = reconcile::SystemPlacement::capture(&before_cloak, &body, cloaked);
-        let fable = reconcile::FableState::capture(&before_cloak, &body, cloaked);
+        let placement = reconcile::SystemPlacement::capture(&before, &body, cloaked);
+        let fable = reconcile::FableState::capture(&before, &body, cloaked);
         let (edited, touched) = cpa_common::payload::apply_tracked(
             &self.payload_rules,
             &cpa_common::payload::Request {
@@ -1221,7 +1246,7 @@ impl<'a> Ctx<'a> {
         );
         body = text(edited);
         let touched = |path: &str| touched.contains(path);
-        body = placement.reconcile(&body);
+        body = placement.reconcile(body);
         let was_probe = probe;
         let probe = signals::probe_or_helper(&body);
         if probe {
@@ -1249,36 +1274,36 @@ impl<'a> Ctx<'a> {
             }
         }
         body = reconcile::fable(
-            &body,
+            body,
             &fable,
             touched("fallbacks"),
             touched("thinking.display"),
             cloaked,
             probe,
         );
-        body = self.ensure_max_tokens(&body);
-        body = disable_thinking_if_tool_choice_forced(&body);
+        body = self.ensure_max_tokens(body);
+        body = disable_thinking_if_tool_choice_forced(body);
         body = cloak::reconcile_context_management(
-            &body,
+            body,
             eligible,
             caller_owned_cm,
             injected_cm,
             touched("context_management"),
         );
-        body = normalize_sampling(&body, confirmed);
+        body = normalize_sampling(body, confirmed);
         let cpa_owns_cache = !confirmed && (cloaked || cloak::count_cache_controls(&body) == 0);
         if cpa_owns_cache {
-            body = cloak::ensure_cache_control(&body);
+            body = cloak::ensure_cache_control(body);
         }
-        body = cloak::enforce_cache_limit(&body, 4);
+        body = cloak::enforce_cache_limit(body, 4);
         let subagent = signals::subagent(&req.headers, &body);
         let subagent_1h = subagent && signals::subagent_requests_1h(&req.headers, &body);
         if cpa_owns_cache && self.cli_profile && (!subagent || subagent_1h) && !probe {
-            body = cloak::upgrade_ttl(&body, "1h");
+            body = cloak::upgrade_ttl(body, "1h");
         } else if probe || (subagent && !subagent_1h) {
-            body = cloak::strip_ttl(&body);
+            body = cloak::strip_ttl(body);
         }
-        body = cloak::normalize_ttl(&body);
+        body = cloak::normalize_ttl(body);
         // Execute only: ExecuteStream forwards the body's own `stream` field.
         let stream_field = rawjson::get(&body, "stream");
         if !req.stream && (!detection.helper_profile || stream_field.exists() || upstream_stream) {
@@ -1287,7 +1312,7 @@ impl<'a> Ctx<'a> {
                 body = rawjson::set_raw(&body, "stream", want);
             }
         }
-        let (extra_betas, stripped) = extract_betas(&body);
+        let (extra_betas, stripped) = extract_betas(body);
         body = stripped;
         let mut reverse = alias::Reverse::new();
         if self.cli_profile && cloaked {
@@ -1296,7 +1321,7 @@ impl<'a> Ctx<'a> {
                 .unwrap_or(alias::DEFAULT_SECRET);
             (body, reverse) = alias::remap(&body, secret);
         }
-        body = sanitize_for_upstream(&body, &self.base_model, self.is_compat);
+        body = sanitize_for_upstream(body, &self.base_model, self.is_compat);
         if self.cli_profile {
             body = self.apply_identity(&body, &session_id)?;
         }
@@ -1312,7 +1337,7 @@ impl<'a> Ctx<'a> {
             } else {
                 String::new()
             };
-            body = signing::finalize(&body, &fallback)
+            body = signing::finalize(body, &fallback)
                 .map_err(|e| ExecError::local(500, FailureScope::Request, format!("finalize Claude CCH: {e}")))?;
         }
         if self.kimi && !self.cli_profile {
@@ -1368,7 +1393,7 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = utf8(translated).into_owned();
-        body = set_string_if_different(&body, "model", &self.upstream_model);
+        body = set_string_if_different(body, "model", &self.upstream_model);
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1385,9 +1410,9 @@ impl<'a> Ctx<'a> {
                 body = m.obfuscate(&body);
             }
         }
-        body = cloak::enforce_cache_limit(&body, 4);
-        body = cloak::normalize_ttl(&body);
-        let (mut extra_betas, stripped) = extract_betas(&body);
+        body = cloak::enforce_cache_limit(body, 4);
+        body = cloak::normalize_ttl(body);
+        let (mut extra_betas, stripped) = extract_betas(body);
         body = stripped;
         extra_betas.push(betas::TOKEN_COUNTING.into());
         if self.cli_profile && cloak {
@@ -1396,7 +1421,7 @@ impl<'a> Ctx<'a> {
                 .unwrap_or(alias::DEFAULT_SECRET);
             body = alias::remap(&body, secret).0;
         }
-        body = sanitize_for_upstream(&body, &self.base_model, self.is_compat);
+        body = sanitize_for_upstream(body, &self.base_model, self.is_compat);
         if self.first_party || self.cli_profile {
             for field in ["metadata", "context_management", "diagnostics"] {
                 body = rawjson::delete(&body, field);
@@ -1645,15 +1670,15 @@ impl<'a> Ctx<'a> {
 
     /// `ensureModelMaxTokens`: only a model some Claude credential registered gets a
     /// default `max_tokens`, its registered completion limit or 1024.
-    fn ensure_max_tokens(&self, body: &str) -> String {
+    fn ensure_max_tokens(&self, body: String) -> String {
         let model = self.base_model.trim();
-        if !gjson::valid(body)
-            || rawjson::get(body, "max_tokens").exists()
+        if !gjson::valid(&body)
+            || rawjson::get(&body, "max_tokens").exists()
             || !cpa_core::registry::model_providers(model)
                 .iter()
                 .any(|p| p.eq_ignore_ascii_case("claude"))
         {
-            return body.to_owned();
+            return body;
         }
         let max = cpa_core::registry::registered_model(model, Some("claude"))
             .and_then(|info| {
@@ -1663,7 +1688,7 @@ impl<'a> Ctx<'a> {
             })
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_TOKENS);
-        rawjson::set_raw(body, "max_tokens", &max.to_string())
+        rawjson::set_raw(&body, "max_tokens", &max.to_string())
     }
 }
 
@@ -1671,13 +1696,13 @@ impl<'a> Ctx<'a> {
 const DEFAULT_MAX_TOKENS: i64 = 1024;
 
 /// Fill `thinking.display: updates` for progress-display models with active thinking.
-fn cloak_thinking_display(body: &str) -> String {
-    if rawjson::get(body, "thinking.display").exists() || !betas::progress_display(&rawjson::string(body, "model")) {
-        return body.to_owned();
+fn cloak_thinking_display(body: String) -> String {
+    if rawjson::get(&body, "thinking.display").exists() || !betas::progress_display(&rawjson::string(&body, "model")) {
+        return body;
     }
-    match rawjson::string(body, "thinking.type").trim().to_lowercase().as_str() {
-        "adaptive" | "enabled" => rawjson::set_str(body, "thinking.display", "updates"),
-        _ => body.to_owned(),
+    match rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str() {
+        "adaptive" | "enabled" => rawjson::set_str(&body, "thinking.display", "updates"),
+        _ => body,
     }
 }
 
@@ -1710,11 +1735,11 @@ fn inject_diagnostics(body: &str, previous_message_id: &str) -> String {
 }
 
 /// `disableThinkingIfToolChoiceForced`.
-fn disable_thinking_if_tool_choice_forced(body: &str) -> String {
-    if !matches!(rawjson::get(body, "tool_choice.type").str(), "any" | "tool") {
-        return body.to_owned();
+fn disable_thinking_if_tool_choice_forced(body: String) -> String {
+    if !matches!(rawjson::get(&body, "tool_choice.type").str(), "any" | "tool") {
+        return body;
     }
-    let mut body = rawjson::delete(body, "thinking");
+    let mut body = rawjson::delete(&body, "thinking");
     body = rawjson::delete(&body, "output_config.effort");
     let oc = rawjson::get(&body, "output_config");
     let mut members = 0;
@@ -1729,17 +1754,16 @@ fn disable_thinking_if_tool_choice_forced(body: &str) -> String {
 }
 
 /// `normalizeClaudeSamplingForUpstream`.
-fn normalize_sampling(body: &str, native: bool) -> String {
+fn normalize_sampling(mut body: String, native: bool) -> String {
     let thinking = matches!(
-        rawjson::string(body, "thinking.type").trim().to_lowercase().as_str(),
+        rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str(),
         "enabled" | "adaptive" | "auto"
     );
-    let mut body = body.to_owned();
     if !native {
-        body = rawjson::delete(&body, "temperature");
-        body = rawjson::delete(&body, "top_p");
+        body = rawjson::delete_owned(body, "temperature");
+        body = rawjson::delete_owned(body, "top_p");
         if thinking {
-            body = rawjson::delete(&body, "top_k");
+            body = rawjson::delete_owned(body, "top_k");
         }
         return body;
     }
@@ -1752,7 +1776,7 @@ fn normalize_sampling(body: &str, native: bool) -> String {
         if p.exists() && p.f64() < 0.95 {
             body = rawjson::delete(&body, "top_p");
         }
-        return rawjson::delete(&body, "top_k");
+        return rawjson::delete_owned(body, "top_k");
     }
     if rawjson::get(&body, "temperature").exists() && rawjson::get(&body, "top_p").exists() {
         body = rawjson::delete(&body, "top_p");
