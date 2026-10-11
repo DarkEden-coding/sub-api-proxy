@@ -11,10 +11,13 @@ go-plugins = { max-threads = 1 }
 
 # The heap gate counts this process's allocations against bench/budgets.txt. It runs
 # alone and first, as it did under cargo test, where it was the only test in its binary.
+# Its output, the measured values, is shown even when it passes, so a change can update
+# the budgets from the log.
 [[profile.default.overrides]]
 filter = 'binary_id(cpa-server::alloc_budget)'
 threads-required = 'num-test-threads'
 priority = 100
+success-output = 'final'
 
 # Tests that assert an upper bound on elapsed wall-clock time run alone too, right after
 # the heap gate, so no other test can slow them down.

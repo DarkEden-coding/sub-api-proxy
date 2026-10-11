@@ -405,15 +405,22 @@ impl RequestLog {
             self.1.notify.notify_waiters();
         }
         if websocket {
-            loop {
-                let notified = self.1.notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.1.done.load(Ordering::Acquire) {
-                    break;
-                }
-                notified.await;
+            self.finished().await;
+        }
+    }
+
+    /// Resolves once this request's capture is finalized: its log written, or its
+    /// captured bytes dropped when no log is due. For HTTP that happens in a task of its
+    /// own after the response's last byte (or its drop).
+    pub async fn finished(&self) {
+        loop {
+            let notified = self.1.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.1.done.load(Ordering::Acquire) {
+                break;
             }
+            notified.await;
         }
     }
 }

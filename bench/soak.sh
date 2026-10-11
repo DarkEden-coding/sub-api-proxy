@@ -16,11 +16,21 @@
 # alternating between the Claude model and the Codex model, so both local token counts
 # run. Batches of BATCH turns (default 160).
 #
+# MIX=cloak models the large-prompt bursts of a coding agent on a Claude subscription:
+# 10 sessions of streamed /v1/messages requests for claude-opus-5-5 from a client that
+# is not Claude Code, each a conversation that grows from 1.5 MB in 50 KB steps (to
+# about 2 MB by the end of a batch; requests average about 1.7 MB). The Claude API key
+# has `fingerprint-profile: claude-code-cli`, so the requests are cloaked, their tools
+# renamed and the CLI identity applied as for a login; the request signing and the
+# native TLS client that a login on api.anthropic.com adds are not covered. The fake
+# upstream waits 2 s before it answers and then streams for about 7.5 s, near the
+# field's medians. Batches of BATCH turns (default 100).
+#
 # After each batch the server rests REST seconds (default 20) and its VmRSS and RssAnon
 # are recorded in <output dir>/soak.tsv. Every 10 s, <output dir>/samples.tsv records
 # VmRSS, VmHWM, threads, CPU ticks (1/100 s), context switches and RssAnon (VmRSS without
 # the binary's file pages, which come and go with the page cache). After the last batch
-# the server stays idle for IDLE seconds (default 0 for claude, 300 for field), then its
+# the server stays idle for IDLE seconds (default 0 for claude, 300 otherwise), then its
 # wakeups are counted over 30 more seconds.
 #
 # The run fails on any failed request; when the resting RSS climbs: the highest resting
@@ -55,6 +65,8 @@ MIX=${MIX:-claude}
 PORT=8345
 UP_PORT=9203
 KEY=sk-bench-client-key
+MODEL=claude-sonnet-4-5-20250929
+UPSTREAM=()
 case $MIX in
   claude)
     LOAD=(-n "${BATCH:-600}" -c "${C:-8}" -min 100000 -max 500000 -step 25000)
@@ -63,12 +75,17 @@ case $MIX in
     LOAD=(-n "${BATCH:-160}" -c 4 -codex 2 -codex-model gpt-5.5 -count 4 -min 200000 -max 2000000 -step 100000)
     IDLE=${IDLE:-300}
     PEAK_KB=${PEAK_KB-$(awk '$1 == "soak.field.peak_hwm_kb" {gsub("_", "", $2); print int($2 * (1 + $3 / 100))}' "$HERE/budgets.txt")} ;;
-  *) echo "MIX must be claude or field" >&2; exit 2 ;;
+  cloak)
+    MODEL=claude-opus-5-5
+    LOAD=(-n "${BATCH:-100}" -c 10 -model "$MODEL" -min 1500000 -max 2500000 -step 50000)
+    UPSTREAM=(-ttft 2s -delay 50ms)
+    IDLE=${IDLE:-300} ;;
+  *) echo "MIX must be claude, field or cloak" >&2; exit 2 ;;
 esac
 mkdir -p "$OUT/bin" "$OUT/auth"
 [[ -x $OUT/bin/messages ]] || go build -o "$OUT/bin/messages" "$HERE/messages/main.go"
 
-"$OUT/bin/messages" upstream -addr "127.0.0.1:$UP_PORT" > "$OUT/upstream.log" 2>&1 &
+"$OUT/bin/messages" upstream -addr "127.0.0.1:$UP_PORT" "${UPSTREAM[@]}" > "$OUT/upstream.log" 2>&1 &
 UP_PID=$!
 trap 'kill $UP_PID ${SRV_PID:-} ${SAMPLER:-} 2>/dev/null || true' EXIT
 cat > "$OUT/config.yaml" <<EOF
@@ -86,11 +103,14 @@ api-keys:
     - name: bench
       base-url: "http://127.0.0.1:$UP_PORT"
       models:
-        - name: "claude-sonnet-4-5-20250929"
-          alias: "claude-sonnet-4-5-20250929"
+        - name: "$MODEL"
+          alias: "$MODEL"
       keys:
         - api-key: "sk-ant-api03-FAKE-bench-key"
 EOF
+if [[ $MIX == cloak ]]; then
+  echo "          fingerprint-profile: claude-code-cli" >> "$OUT/config.yaml"
+fi
 if [[ $MIX == field ]]; then
   cat >> "$OUT/config.yaml" <<EOF
   codex:

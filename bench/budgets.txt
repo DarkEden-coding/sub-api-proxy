@@ -85,15 +85,21 @@ soak.field.peak_hwm_kb    173_072  20
 # Heap per request through the Claude route (debug test build, counting allocator):
 # peak live bytes above the idle baseline and allocation calls, for one streamed
 # /v1/messages request of about 306 KB and one of about 1.9 MB, the fake upstream not
-# counted, smallest of three sends. Target: peak at most 3x the body; today it is 6x.
+# counted, smallest of three sends. Target: peak at most 3x the body; today it is 4x.
 # 2026-10-06: re-measured with the upstream excluded; identical over 9 runs, 4 of them
 # under full CPU contention.
 # 2026-10-06: the test's runtime also holds the Codex API key the Codex budgets below
 # use: +32 bytes and +14 allocations per request.
-alloc.306k.peak_bytes       1_876_777  2
-alloc.306k.allocations          2_393  3
-alloc.1900k.peak_bytes     11_083_177  2
-alloc.1900k.allocations         7_054  3
+# 2026-10-11: the translated body is no longer kept past preparation, the signature
+# sanitizer copies only the messages it edits, rewrites that change nothing pass the body
+# on instead of copying it, and a JSON set that replaces a large value no longer leaves
+# room for a second one: 11,083,177 to 7,420,905 bytes (6.0x to 4.0x) and 26 to 10
+# allocations of 256 KiB or more for 1.9 MB. The runtime also holds the cloaked login
+# below and its request capture.
+alloc.306k.peak_bytes       1_286_793  2
+alloc.306k.allocations          2_337  3
+alloc.1900k.peak_bytes      7_420_905  2
+alloc.1900k.allocations         6_710  3
 
 # The same through the Codex route: one streamed /v1/responses request of about 322 KB and
 # one of about 1.9 MB (reasoning items, function calls and their outputs) through the
@@ -101,6 +107,8 @@ alloc.1900k.allocations         7_054  3
 # 3x the body; today it is 8.8x (the request is rewritten pass by pass, each pass a new
 # copy of the body).
 # 2026-10-06: first budgets; identical over 4 runs.
+# 2026-10-11: the runtime also holds the cloaked login below and its request capture:
+# +48 bytes and +6 allocations per request.
 alloc.codex.306k.peak_bytes       2_769_147  2
 alloc.codex.306k.allocations          1_683  3
 alloc.codex.1900k.peak_bytes     16_783_275  2
@@ -108,9 +116,38 @@ alloc.codex.1900k.allocations         4_004  3
 
 # count_tokens with the same Claude bodies, counted locally as for an OAuth login: the
 # body as a JSON tree, its text joined, then the shared o200k_base encoder (built by the
-# warm-up, so not counted here). Target: peak at most 3x the body; today it is 7.3x.
+# warm-up, so not counted here). Target: peak at most 3x the body; today it is 6.3x.
 # 2026-10-06: first budgets; identical over 3 runs.
-alloc.count.306k.peak_bytes       2_259_573  2
-alloc.count.306k.allocations        275_337  3
-alloc.count.1900k.peak_bytes     13_530_973  2
-alloc.count.1900k.allocations     1_630_109  3
+# 2026-10-11: the same body walks as the Claude route above: 13,530,973 to 11,687,196
+# bytes for 1.9 MB.
+alloc.count.306k.peak_bytes       1_949_324  2
+alloc.count.306k.allocations        275_295  3
+alloc.count.1900k.peak_bytes     11_687_196  2
+alloc.count.1900k.allocations     1_629_779  3
+
+# The Claude bodies through a Claude OAuth login (`cloak/` model prefix in the test) from
+# a client that is not Claude Code, as for a coding agent on a subscription: cloaked,
+# tools renamed, the CLI identity applied and the body signed; only what is particular to
+# api.anthropic.com (context management, diagnostics, the native TLS client) is not run.
+# The requests go through the server's request capture, which with request logs off
+# keeps each upstream body for a possible error log until the response has streamed; a
+# send is measured only once the capture of the one before it is finalized.
+# Target: peak at most 3x the body; today it is 5.1x. Before the changes of 2026-10-11:
+# 2,815,071 and 16,643,303 bytes (9.0x), and 56 allocations of 256 KiB or more for
+# 1.9 MB, now 32.
+# 2026-10-11: first budgets; identical over 7 runs but for 128 bytes at 306k.
+alloc.cloak.306k.peak_bytes       1_635_396  2
+alloc.cloak.306k.allocations          4_443  3
+alloc.cloak.1900k.peak_bytes      9_322_748  2
+alloc.cloak.1900k.allocations        10_388  3
+# Eight of those 1.9 MB requests at once, the fake upstream holding back every answer
+# until all eight have been sent, as a coding agent's prompts wait seconds for their first
+# token. `held`: what the eight keep between them while they wait, each its upstream body
+# (sent and kept for the error log); before 2026-10-11 also the translated body and a
+# copy of the upstream body grown to up to twice its size, 59,983,460 bytes. `peak`
+# (alloc.cloak.1900k.c8.peak_bytes) also counts what their preparations held while they
+# overlapped. It depends on scheduling, so it is reported without a line until runners
+# show how far it varies: 26,495,783 to 30,310,290 bytes over 7 runs on one machine;
+# before, 67,151,533 to 78,173,141 over 5.
+# 2026-10-11: first budget; identical over 7 runs.
+alloc.cloak.1900k.c8.held_bytes  15_662_380  2

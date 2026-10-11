@@ -8,8 +8,9 @@
 // upstream is a fake Anthropic Messages endpoint. POST /v1/messages reads the whole
 // request and streams a Claude SSE reply: message_start, a thinking block with a
 // signature, a text block, a tool_use block naming the request's first tool, then
-// message_delta and message_stop. -events sets the number of delta events and -delay
-// the pause between them. It is also a fake Codex upstream: POST /responses reads the
+// message_delta and message_stop. -ttft sets the wait before that reply starts (the time
+// a real upstream takes to read a long prompt), -events the number of delta events and
+// -delay the pause between them. It is also a fake Codex upstream: POST /responses reads the
 // whole request and streams an OpenAI Responses reply with the same number of events (a
 // reasoning item with a summary and encrypted content, a message, a function call naming
 // the request's first tool) ending in response.completed with the full output and usage.
@@ -88,6 +89,7 @@ func upstream(args []string) {
 	addr := fs.String("addr", "127.0.0.1:9202", "listen address")
 	events := fs.Int("events", 150, "delta events per streamed response")
 	delay := fs.Duration("delay", 2*time.Millisecond, "pause between delta events")
+	ttft := fs.Duration("ttft", 0, "wait before a Claude reply starts")
 	fs.Parse(args)
 
 	r := rand.New(rand.NewSource(1))
@@ -126,6 +128,7 @@ func upstream(args []string) {
 				time.Sleep(*delay)
 			}
 		}
+		time.Sleep(*ttft)
 		id := fmt.Sprintf("msg_bench%d", time.Now().UnixNano())
 		send("message_start", `{"type":"message_start","message":{"id":"`+id+`","type":"message","role":"assistant","model":"`+body.Model+`","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":`+fmt.Sprint(len(data)/4)+`,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`)
 		send("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`)
@@ -256,7 +259,7 @@ func upstream(args []string) {
 			"total_tokens": input + *events*30}
 		send("response.completed", map[string]any{"response": response("completed", []any{reasoning, message, call}, usage)})
 	})
-	log.Printf("fake Claude and Codex upstream on %s (%d events, %s apart)", *addr, *events, *delay)
+	log.Printf("fake Claude and Codex upstream on %s (%d events, %s apart, first after %s)", *addr, *events, *delay, *ttft)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
@@ -553,6 +556,7 @@ func load(args []string) {
 	codexWorkers := fs.Int("codex", 0, "how many of the -c sessions are Codex Responses sessions")
 	codexModel := fs.String("codex-model", "gpt-5.5", "model of the Codex sessions and of every other count_tokens request")
 	countEvery := fs.Int("count", 0, "send count_tokens before every Nth Claude turn (0: never)")
+	traceFile := fs.String("trace", "", "append one line a second: unix time, requests in flight now and at most since the last line, and their request bytes")
 	fs.Parse(args)
 	base := strings.TrimSuffix(*url, "/v1/messages")
 
@@ -571,6 +575,36 @@ func load(args []string) {
 	}
 	results := make([]result, *workers)
 	var issued atomic.Int64
+	// Requests in flight and their request bytes, now and at most since the last trace line.
+	var flight struct {
+		sync.Mutex
+		n, bytes, maxN, maxBytes int64
+	}
+	inflight := func(n, bytes int64) {
+		flight.Lock()
+		flight.n += n
+		flight.bytes += bytes
+		flight.maxN = max(flight.maxN, flight.n)
+		flight.maxBytes = max(flight.maxBytes, flight.bytes)
+		flight.Unlock()
+	}
+	if *traceFile != "" {
+		f, err := os.OpenFile(*traceFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		go func() {
+			for now := range ticker.C {
+				flight.Lock()
+				fmt.Fprintf(f, "%d\t%d\t%d\t%d\t%d\n", now.Unix(), flight.n, flight.maxN, flight.bytes/1024, flight.maxBytes/1024)
+				flight.maxN, flight.maxBytes = flight.n, flight.bytes
+				flight.Unlock()
+			}
+		}()
+	}
 	start := time.Now()
 	var wg sync.WaitGroup
 	for w := 0; w < *workers; w++ {
@@ -598,6 +632,8 @@ func load(args []string) {
 						req.Header.Set("x-api-key", *key)
 					}
 				}
+				inflight(1, int64(len(body)))
+				defer inflight(-1, -int64(len(body)))
 				t0 := time.Now()
 				resp, err := client.Do(req)
 				if err != nil {
