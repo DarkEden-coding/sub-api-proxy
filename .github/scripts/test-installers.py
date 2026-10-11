@@ -5,6 +5,7 @@ import http.server
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import ssl
@@ -250,10 +251,31 @@ if($script:removed.Count -ne 1 -or $script:removed[0] -ne '/long/path/cliproxy.p
             install(pipe=windows)
             health()
             keys = dict(line.split("=", 1) for line in (home / "keys.env").read_text().splitlines() if line.startswith("CLIPROXY_"))
+            # The dashboard page alone is not enough: on Windows its nested scripts,
+            # styles and fonts once returned 404, leaving the page blank.
+            with urllib.request.urlopen("http://127.0.0.1:8317/management.html", timeout=5) as response:
+                assert (response.status, response.headers.get_content_type()) == (200, "text/html")
+                page = response.read().decode()
+            # ponytail: the page's own double-quoted src and href values only; follow url()
+            # and import() in the fetched CSS and JS too if the build starts splitting chunks.
+            referenced = re.findall(r'(?:src|href)="\./([^"]+)"', page)
+            assert {".js", ".css", ".woff2"} <= {Path(r).suffix for r in referenced if "/" in r}, referenced
+            types = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2", ".svg": "image/svg+xml"}
+            failures = []
+            for reference in referenced:
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:8317/" + reference, timeout=5) as response:
+                        served = response.status, response.headers.get_content_type(), bool(response.read())
+                except urllib.error.HTTPError as error:
+                    served = error.code, None, False
+                if served != (200, types.get(Path(reference).suffix), True):
+                    failures.append((reference, served))
+            assert not failures, failures
             for path, key, expected in [
                 ("/v1/models", None, 401),
                 ("/v1/models", keys["CLIPROXY_CLIENT_KEY"], 200),
                 ("/v8/management/config", keys["CLIPROXY_MANAGEMENT_KEY"], 200),
+                ("/assets/missing.js", None, 404),
             ]:
                 request = urllib.request.Request("http://127.0.0.1:8317" + path)
                 if key:
