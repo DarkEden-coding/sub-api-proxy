@@ -10,6 +10,8 @@ The 17.3 MB idle result below is from a fresh 0.1.0 process with no connected ac
 
 A later field report from 0.2.0, serving Claude and Codex with 1 to 2 MB prompts, showed a resting floor that rose from 26 to 89 MB over 7 hours and peaks of 300 to 400 MB. It prompted the [field mix](#field-mix-claude-codex-and-count_tokens) soak, in which two copies of the same tokenizer, about 93 MB, made up most of 0.2.0's resting RSS of 128 to 145 MB.
 
+A report from 0.2.2, serving a coding agent on a Claude subscription with prompts of about 2 MB, showed peaks of 530 MB RSS and a `VmHWM` of 613 MB. It prompted the [cloaked large-prompt](#large-prompts-through-cloaking-bursts-and-peaks) soak: requests waiting for their first token each held up to four copies of their body, and glibc kept the copies of one burst resident into the next.
+
 ## Setup
 
 Measured on 2026-10-03.
@@ -260,6 +262,89 @@ CPU per request depends on the machine, and each build had a runner of its own, 
 
 - `soak.yml` runs the field mix for an hour on every release tag, next to an hour of the Claude soak's load, and for 300 minutes every week. Either fails if any request fails or if the resting RSS climbs: the highest resting reading of the last third of the run more than 10% plus 2 MB above the highest of the first third, or the lowest of the last third that far above the lowest of the first third (a rising floor under peaks that do not rise). The field mix also fails if `VmHWM` ends above `soak.field.peak_hwm_kb` in [`bench/budgets.txt`](../bench/budgets.txt) (this change's 169.0 MB plus 20%, which 0.2.0 exceeds).
 - Raw results: [`bench/results/2026-10-06-field.jsonl`](../bench/results/2026-10-06-field.jsonl) holds one `bench/soak.sh` summary per run, with the resting readings' lowest and highest over the run and in its first and last thirds, and the requests by kind. Every resting reading behind them is in [`bench/results/2026-10-06-field-batches.tsv`](../bench/results/2026-10-06-field-batches.tsv). The `session` field groups the runs: `ci-runners-60min` (the three runners), `vm2-releases-10min`, `vm2-allocator-10min` and `vm2-mock-check-10min` (the 2-vCPU machine; the allocator runs name their setting in `env`, and the two without one are this change's same-machine runs), `tokenizer-steps` (`RssAnon` in kB after each request on a fresh server), `heaptrack` (bytes still allocated at exit, by site), `malloc-info`, and `lcp-matcher` (live heap by hour, in MB of 10^6 bytes as measured).
+
+## Large prompts through cloaking: bursts and peaks
+
+Measured on 2026-10-11, after a field report from a Linux server (glibc, systemd service, 3 to 6 threads) that ran 0.2.2 for a coding agent on a Claude subscription: streamed `/v1/messages` requests for `claude-opus-5-5` from a client that is not Claude Code, so every request was cloaked. A sampler read `/proc` once a minute for 24 hours: RSS median 61 MB, 95th percentile 247 MB, highest 530 MB; `VmHWM` 573 MB at the end of the day and 613 MB later, where 0.1.2 had peaked at 174 MB. For one hour the usage records of all 567 requests were kept: prompts (input plus cache tokens) were 495k tokens at the median and 675k at most, up to 10 requests were in flight at once, the first token came after 2.2 s at the median and a request took 9 s. `VmHWM` went from 396 to 502 MB in a minute in which 17 requests overlapped, and RSS was back near 220 MB a few minutes later. Before the first large burst of the day the resting RSS was 26 to 52 MB, after the bursts 59 to 67 MB. These are field observations: the traffic, the account and the sampling cannot be reproduced on demand.
+
+### Setup
+
+- Units: RSS and `VmHWM` are in MB of 1,024 kB, as `/proc` reports kB (the field figures above too); heap figures, from heaptrack and the counting allocator, are in MB of 10^6 bytes.
+- [`bench/soak.sh`](../bench/soak.sh) with `MIX=cloak`, in a loopback-only network namespace. 10 sessions send streamed `/v1/messages` requests for `claude-opus-5-5`, shaped as in the Claude soak; each conversation grows from 1.5 MB in 50 KB steps, to about 2 MB by the end of a batch (requests averaged 1,738 KB). The server has one Claude API key with `fingerprint-profile: claude-code-cli` whose `base-url` is the fake upstream, so the requests are cloaked, their tools renamed and the CLI identity applied, as for a login. The fake upstream reads the whole request, waits 2 seconds, as a real upstream does before the first token of a long prompt, and then streams 150 events 50 ms apart: a request takes 9.6 seconds, close to the field's medians, and the sessions run in step, so ten requests arrive within a second of each other. Batches of 100 turns, 20 seconds of rest after each (the resting RSS), 60 seconds idle after the last.
+- The soak does not cover what only a login on `api.anthropic.com` runs: the request signing and the native TLS client (an OAuth login would fetch its account profile from there). The heap gate below covers the signing.
+- A virtual machine with 2 vCPUs (Intel Xeon at 2.60 GHz) and 3.8 GB of memory, running Debian 12 (glibc 2.36) with Linux 6.1, shared by the server, the fake upstream and the load generator. Release builds with rustc 1.99.0: master at `b52c478` (0.2.3, whose request path is 0.2.2's) and this change, run alternately, 8 minutes each.
+- Attribution: heaptrack on builds with line tables (`[profile.release]` with `debug = "line-tables-only"` and `strip = false`), with the same load in 100-request runs (heaptrack slows the server, so its peaks are lower than without it), and the counting allocator of `crates/cpa-server/tests/alloc_budget.rs`.
+
+```sh
+MIX=cloak IDLE=60 bench/soak.sh target/release/cliproxy 8 /tmp/soak-cloak
+```
+
+### What drove the peak
+
+Two things, in about a 2:1 ratio on master: the heap that requests held while they waited for the upstream, and memory glibc kept resident after those requests had freed it.
+
+- The heap. heaptrack measured a live peak of 123.5 MB on master, when the ten requests of a burst had all been sent and were waiting for their first token. 84.5 MB of it (68%) was those requests' copies of their bodies: the copy that request capture keeps for a possible error log (Go keeps one too), grown part by part to 1.74 times the body on average (30.2 MB); the client's body, which dispatch keeps for retries (19.6 MB); the translated body, which the Claude executor kept until the upstream answered although a Claude client never needs it again (19.6 MB); and the body being sent, which the HTTP client keeps until the upstream answers in case of a redirect (15.1 MB). The copies of the requests being prepared at that moment were about 21 MB (17%), hyper's read buffers of the ten client connections 8.4 MB (7%), everything else about 9 MB.
+- glibc. The same load without heaptrack peaked at a `VmHWM` of 199.9 MB. In the one-second sample nearest that peak, 174.7 MB of RSS was anonymous memory and 20.2 MB the binary's pages. The live heap's peak above is 117.8 MB in these units, so about 57 MB (28% of the peak) was memory glibc had taken back from earlier requests but not returned to the kernel. Body-sized buffers come from the per-thread arenas once glibc has raised its mmap threshold past their size, and while the server stays busy the heap trim is forced only once a minute. Sampled every second, RSS climbed by 59 to 83 MB within seconds of a trim and fell back to 71 to 94 MB at the next.
+- Per request, a cloaked 1.9 MB request peaked at 9.0 times its body on master (16.6 MB) and allocated 56 buffers of 256 KiB or more. Besides request capture's copy and the translated body, every rewrite returned a new copy of the body, including the many that changed nothing, the cloak kept a whole copy of the uncloaked body for its later checks, the signature sanitizer copied every message whether it changed it or not, the tool renaming grew its output past its first allocation, and replacing a large JSON value left room for a second one.
+- Not the cause: the number of arenas (`MALLOC_ARENA_MAX=1` gave the same peak, 140.9 against 139.1 MB, in runs without the 2-second wait). A fixed `MALLOC_MMAP_THRESHOLD_=131072` took that peak from 139.1 to 92.0 MB (34%) for 40 to 65% more CPU per request (114 ms against 69 and 80 ms in the runs next to it), in line with the field mix's measurement above, so the server still sets none.
+
+### What changed
+
+- The Claude executor drops the translated body once the request is prepared, for a Claude client; a translated client still keeps it to translate the response.
+- Request capture keeps the body being sent, by reference, instead of a copy of it: the error log that needs it is unchanged.
+- The cloak reads what its later checks need from the uncloaked body before rewriting it, instead of keeping a copy; the messages with inserted system turns are written once instead of copied three times; the signature sanitizer borrows the messages it does not change and returns nothing when it changes none; the CCH signature is computed on the body in place; the tool renaming sizes its output for the aliases and applies its edits at the offsets it found them, rather than looking every path up again from the start; rewrites that change nothing pass the body on instead of copying it; and a JSON set that replaces a large value (messages, system) gives the unused room back. Request bytes are unchanged: the Go golden tests in `cpa-exec` and the executor's other tests pass. The Go-against-Rust differential harness was built but not run.
+
+### Results
+
+Each run sends whole batches until 8 minutes have passed: 500 requests in 583 to 584 seconds, none failed. The columns are grouped by build. Master's first two runs came earlier the same day; the rest ran back to back: this change, the run with a forced trim every 10 seconds (below), master, this change. The 10-second samples cover the whole run, the rests between batches and the minute of idle at the end included.
+
+| | master | master | master | this change | this change |
+| --- | --- | --- | --- | --- | --- |
+| Peak RSS (`VmHWM`, MB) | 174.4 | 171.8 | 171.3 | 111.4 | 117.1 |
+| RSS sampled every 10 s, median / highest (MB) | 147.0 / 167.3 | 136.1 / 162.8 | 133.4 / 163.5 | 78.4 / 100.3 | 79.2 / 96.9 |
+| RSS before the first batch (MB) | 19.4 | 19.7 | 19.5 | 19.2 | 20.5 |
+| Resting RSS after each batch, lowest / highest (MB) | 29.7 / 33.3 | 25.8 / 29.7 | 25.5 / 33.3 | 26.4 / 27.8 | 27.3 / 28.5 |
+| After 60 s idle: RSS / `RssAnon` (MB) | 33.3 / 13.1 | 25.8 / 5.5 | 25.6 / 5.4 | 27.8 / 6.7 | 27.4 / 5.8 |
+| Server CPU for 500 requests (s) | 30.92 | 31.09 | 30.32 | 28.96 | 28.65 |
+| Server CPU per request (ms) | 61 | 62 | 60 | 57 | 57 |
+| Time to first byte, p99 of each batch (ms) | 2,214 to 2,279 | 2,233 to 2,310 | 2,223 to 2,267 | 2,218 to 2,266 | 2,215 to 2,257 |
+| Wakeups in 30 s idle, threads | 3, 3 | 3, 3 | 3, 3 | 3, 3 | 3, 3 |
+
+- Peak RSS fell by a third, from 171 to 174 MB to 111 to 117 MB, and the median of the sampled RSS by 42 to 47%. CPU per request did not get worse: 57 ms against 60 to 62 ms here, but an earlier build of this change, with a forced trim every 10 seconds, measured 62 and 61 ms next to master's first two runs, so the difference is within this machine's noise. The time to first byte includes the fake upstream's 2-second wait.
+- The live heap's peak, measured by heaptrack in the 100-request runs, fell from 123.5 to 68.7 MB (44%).
+- These runs did not establish a repeatable change in the resting or idle RSS (next section).
+- The counting allocator, debug build: a cloaked 1.9 MB request peaks at 9,322,748 bytes of live heap (5.1x, master 16,643,303, 9.0x) and allocates 32 buffers of 256 KiB or more (master 56); eight waiting at once hold 15,662,380 bytes (master 59,983,460) and peak at 26.5 to 30.3 MB (master 67.2 to 78.2 MB). The Claude route without cloaking goes from 6.0x to 4.0x its body and count_tokens from 7.3x to 6.3x.
+
+### What the memory after a burst is
+
+Snapshots after a burst of 100 requests and 60 seconds idle, with the load generator's ten keep-alive connections still open (`malloc_info` through gdb; heaptrack for the live heap, the process stopped at that point):
+
+| | master | this change |
+| --- | --- | --- |
+| RSS before the burst / after it and 60 s idle (MB) | 18.5 / 35.3 | 18.6 / 30.5 |
+| of the rise: `RssFile` / `RssAnon` (MB) | 5.6 / 11.3 | 5.9 / 6.0 |
+| Free inside glibc's arenas, already returned (MB) | 129.2 | 36.9 |
+| RSS change from another `malloc_trim(0)` (kB) | +12 | +8 |
+
+- `RssFile`: the binary's pages that the requests touched for the first time, shared with the page cache, which can reclaim them.
+- Live heap (heaptrack, master): 6.6 MB at that point. 3.8 MB of it was hyper's read buffers for the ten idle client connections, about 380 KB each, kept at the size the 2 MB uploads grew them to until the client closes the connection. No cache or map held more than 0.4 MB.
+- Most of the rest of the rise in `RssAnon` is pages glibc cannot hand back because a small live allocation sits in each: the trim returns only whole free pages, and the arenas that the burst's large buffers spread over held them. After the same burst the arenas spanned 136 MB on master and 44 MB with this change, which is likely why the rise was smaller here; across the soak runs above the idle RSS varied more than that from run to run on master (25.6 to 33.3 MB; 27.4 and 27.8 MB with this change), so that difference is not established.
+- The field's rise of about 30 MB is most likely the same three kinds of memory at a larger scale, not a cache or a leak: more code paths (TLS to `api.anthropic.com`, the dashboard), a read buffer of up to about 400 KB for every connection the client keeps open, and pages pinned in arenas that its larger bursts spread wider. This was not checked on the field server.
+
+### What is left
+
+- Each waiting request still holds two copies of its body, as in Go: the client's, which dispatch keeps for retries until the upstream answers, and the one sent, which the HTTP client keeps for redirects until then and request capture for the error log until the response ends.
+- A cloaked 1.9 MB request still allocates 32 buffers of 256 KiB or more and peaks at 5.1x its body: each remaining rewrite returns a new copy. Recording the edits from one walk and splicing them into one output, as `signals.rs` does for cache_control, is the way to the 3x target (`ponytail:` note in `crates/cpa-exec/src/claude.rs`).
+- glibc still keeps what a burst freed until the next trim: when the server goes quiet, or at the forced trim that comes once a minute while it stays busy. Fresh pages for every large buffer (`MALLOC_MMAP_THRESHOLD_`) would remove that too, at the CPU cost above. Forcing that trim every 10 seconds while busy instead is not part of this change: `malloc_trim` locks each arena in turn, so request threads can wait on it although it runs on the blocking pool. In one soak run of this change with it, between the two above, the median of the sampled RSS was 67.6 MB against 78.4 and 79.2 MB, `VmHWM` 112.5 MB against 111.4 and 117.1 MB, CPU 58 ms per request against 57, and the time to first byte at p99 of each batch 2,153 to 2,289 ms against 2,215 to 2,266 ms. The soak records no maximum time to first byte. On an intermediate build with the 200-request load of the attribution runs, it lowered `VmHWM` from 159.8 and 163.9 MB to 147.2 and 151.1 MB.
+- hyper keeps an idle client connection's read buffer at the size its last upload grew it to, up to about 400 KB. That limit is also hyper's limit on request headers, so lowering it would refuse headers Go accepts (Go reads up to 1 MB).
+- Codex request shaping still makes 44 large buffers for a 1.9 MB request (`ponytail:` note in `crates/cpa-exec/src/codex_request.rs`).
+- CPU: the field's hour used 283 s of CPU for 567 requests, 0.5 s each, about 8 times this soak's. The soak cannot say why: the field server's CPU, TLS on both sides, the signing and the response lengths all differ.
+
+### Gates
+
+- `crates/cpa-server/tests/alloc_budget.rs` now also sends the Claude bodies to a Claude OAuth login through request capture, cloaked and signed: `alloc.cloak.306k.*` and `alloc.cloak.1900k.*` in [`bench/budgets.txt`](../bench/budgets.txt) (5.1x the body; master measures 9.0x), and eight 1.9 MB requests at once with the fake upstream holding back its answers: `alloc.cloak.1900k.c8.held_bytes`, the heap the eight keep while they wait (15.7 MB; master 60.0 MB). Each request is measured only once the capture of the one before it is finalized, so the previous request's kept body is not freed inside the measurement. Master fails all of them but the 306k allocation count (4,549 against a ceiling of 4,576). `alloc.cloak.1900k.c8.peak_bytes`, the eight's peak with their preparation, is reported without a line: it depends on scheduling (26.5 to 30.3 MB over 7 runs on this machine; master 67.2 to 78.2 MB over 5), and how far it varies on GitHub-hosted runners is not known yet. The existing Claude and count_tokens budgets are re-measured lower.
+- `MIX=cloak` has no `soak.*` budget yet: as for the other mixes, the bound should come from a GitHub-hosted runner.
+- Raw results: [`bench/results/2026-10-11-cloak.jsonl`](../bench/results/2026-10-11-cloak.jsonl), one `bench/soak.sh` summary per run (`vm2-cloak-ab-8min`, in the order they ran, with the run with a forced trim every 10 seconds), plus the heaptrack, allocator-setting, trim-cadence, after-burst snapshot and heap gate runs.
 
 ## Claude latency: time added before the first byte
 
