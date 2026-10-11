@@ -24,7 +24,14 @@ fn main() {
     let mut output =
         String::from("fn dashboard_asset(path: &str) -> Option<(&'static [u8], &'static str)> { match path {\n");
     for path in files {
-        let name = format!("/{}", path.strip_prefix(&root).unwrap().display());
+        // The match key is a URL path, so it is joined with `/` on every host;
+        // `display()` would give `\` on Windows. include_bytes! keeps the native path.
+        let name: String = path
+            .strip_prefix(&root)
+            .unwrap()
+            .components()
+            .map(|part| format!("/{}", part.as_os_str().to_str().unwrap()))
+            .collect();
         let mime = match path.extension().and_then(|s| s.to_str()).unwrap_or_default() {
             "html" => "text/html; charset=utf-8",
             "js" => "text/javascript; charset=utf-8",
