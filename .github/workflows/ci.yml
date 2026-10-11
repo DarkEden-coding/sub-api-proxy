@@ -31,19 +31,28 @@ env:
 
 jobs:
   linux:
-    name: fmt, clippy, tests and harness (Linux)
+    name: tests (Linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      # No debug info in test builds: linking about 55 test binaries with full debug info
+      # was most of a warm build (18 GB in target/debug/deps). Panic messages keep their
+      # file and line. Only for this job and the next: rust-cache keys its caches on
+      # CARGO_* variables, and the perf and Windows jobs keep theirs.
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7
       - name: Build tools
         # BoringSSL (through btls-sys) needs cmake, clang and perl; bindgen needs libclang.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev perl
       - name: Rust
-        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy && rustup default "$RUST_TOOLCHAIN"
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-nextest@0.9.148
       # The plugin tests build Go plugins (cgo, c-shared) from this module. Without Go 1.26
       # they would skip; CPA_TEST_NO_SKIP below turns that skip into a failure.
       - uses: actions/setup-go@v7
@@ -63,14 +72,81 @@ jobs:
           fi
           "$bin/initdb" --version
           echo "CPA_TEST_PG_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Fetch dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path vendor/gjson/Cargo.toml
+          cd crates/cpa-plugin/tests/goplugins && go mod download
+      - name: Test, with external network denied
+        # A loopback-only network namespace, as the project's merge gates use, so a test
+        # that tries to reach a real provider fails instead of sending anything. The tests
+        # run as the runner user inside it, so file-permission tests behave as usual.
+        # Nextest runs the test binaries in parallel; .config/nextest.toml runs the memory
+        # gate (crates/cpa-server/tests/alloc_budget.rs) and the tests with wall-clock
+        # bounds alone. Nextest skips doc tests, so cargo test runs those, then the tests
+        # of the patched gjson in vendor/, which is outside the workspace.
+        # CPA_TEST_NO_SKIP makes a test that would skip for a missing Go toolchain or
+        # PostgreSQL fail instead: a passing test's output is captured, so a printed skip
+        # line never reaches the log.
+        run: |
+          tests='
+            cargo nextest run --workspace --locked --profile ci 2>&1 | tee test.log
+            cargo test --workspace --doc --locked 2>&1 | tee -a test.log
+            cargo test --locked --manifest-path vendor/gjson/Cargo.toml --target-dir target 2>&1 | tee -a test.log
+          '
+          # shellcheck disable=SC2016 # $1 to $3 belong to the inner shell
+          sudo env "PATH=$PATH" "HOME=$HOME" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+            "CPA_TEST_PG_BIN=$CPA_TEST_PG_BIN" CPA_TEST_NO_SKIP=1 \
+            CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 \
+            "CARGO_PROFILE_TEST_DEBUG=$CARGO_PROFILE_TEST_DEBUG" \
+            GOTOOLCHAIN=local GOPROXY=off \
+            unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- bash -eo pipefail -c "$3"' \
+            sh "$(id -u)" "$(id -g)" "$tests"
+      - name: Test counts
+        # Nextest's summary line and cargo test's result lines; nextest counts an ignored
+        # test as skipped.
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' test.log | awk '
+            /^test result:/ { passed += $4; failed += $6; ignored += $8 }
+            /^ *Summary \[/ {
+              for (i = 2; i <= NF; i++) {
+                word = $i; sub(/,$/, "", word)
+                if (word == "passed") passed += $(i - 1)
+                else if (word == "failed") failed += $(i - 1)
+                else if (word == "skipped") ignored += $(i - 1)
+              }
+            }
+            END { printf "%d passed, %d failed, %d ignored\n", passed, failed, ignored }'
+
+  # Everything that does not need the test build: formatting, clippy over every target,
+  # the harness, and the Codex Live media relay tests, which build cpa-server with its
+  # optional media-relay feature. In parallel with the tests above.
+  lint:
+    name: fmt, clippy, harness and media relay tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev perl
+      - name: Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy && rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-nextest@0.9.148
       - name: Format
         run: cargo fmt --all --check
       - name: Fetch dependencies
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path harness/rust/Cargo.toml
-          cargo fetch --locked --manifest-path vendor/gjson/Cargo.toml
-          cd crates/cpa-plugin/tests/goplugins && go mod download
       - name: Clippy
         env:
           CARGO_NET_OFFLINE: "true"
@@ -79,27 +155,17 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo check --locked --manifest-path harness/rust/Cargo.toml --target-dir target
-      - name: Test, with external network denied
-        # A loopback-only network namespace, as the project's merge gates use, so a test
-        # that tries to reach a real provider fails instead of sending anything. The tests
-        # run as the runner user inside it, so file-permission tests behave as usual. The
-        # patched gjson in vendor/ is outside the workspace, so its own tests run after.
-        # CPA_TEST_NO_SKIP makes a test that would skip for a missing Go toolchain or
-        # PostgreSQL fail instead: the harness captures a passing test's output, so a
-        # printed skip line never reaches the log. The memory gate
-        # (crates/cpa-server/tests/alloc_budget.rs) runs here too.
+      - name: Media relay tests, with external network denied
+        # The same loopback-only namespace as the tests above. All of cpa-server's unit
+        # tests run with the feature on, the 25 behind it included.
         run: |
+          # shellcheck disable=SC2016 # $1 and $2 belong to the inner shell
           sudo env "PATH=$PATH" "HOME=$HOME" \
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-            "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
-            "CPA_TEST_PG_BIN=$CPA_TEST_PG_BIN" CPA_TEST_NO_SKIP=1 \
-            CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 \
-            GOTOOLCHAIN=local GOPROXY=off \
-            unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- bash -o pipefail -c "cargo test --workspace --locked 2>&1 | tee test.log && cargo test --locked --manifest-path vendor/gjson/Cargo.toml --target-dir target 2>&1 | tee -a test.log"' \
+            CPA_TEST_NO_SKIP=1 CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 \
+            "CARGO_PROFILE_TEST_DEBUG=$CARGO_PROFILE_TEST_DEBUG" \
+            unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- cargo nextest run -p cpa-server --features media-relay --lib --locked --profile ci' \
             sh "$(id -u)" "$(id -g)"
-      - name: Test counts
-        run: |
-          grep -E '^test result:' test.log | awk '{ passed += $4; failed += $6; ignored += $8 } END { printf "%d passed, %d failed, %d ignored\n", passed, failed, ignored }'
 
   perf:
     name: size and idle gates (Linux)
