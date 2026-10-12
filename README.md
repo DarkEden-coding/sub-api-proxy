@@ -70,7 +70,11 @@ The local OpenAI base URL is `http://127.0.0.1:8317/v1`. Claude Code and Gemini 
 
 ## API keys: Codex CLI and mixed providers
 
-Codex CLI only speaks the Responses API now. A provider entry with `wire_api = "chat"` stops Codex with "`wire_api = "chat"` is no longer supported", and many providers only offer Chat Completions. Point Codex at the proxy instead: it accepts Responses requests and sends Chat Completions upstream, tool calls included.
+Codex CLI only speaks the Responses API now. A provider entry with `wire_api = "chat"` stops Codex with "`wire_api = "chat"` is no longer supported".
+
+If you only use one provider and it serves the Responses API, Codex can talk to it directly. DeepSeek's API, Z.ai's GLM Coding Plan and Kimi Code do, and each publishes its own Codex setup: [DeepSeek](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/), [GLM Coding Plan](https://docs.z.ai/devpack/tool/codex), [Kimi Code](https://www.kimi.com/code/docs/en/third-party-tools/codex.html).
+
+The proxy is for the rest: an endpoint that only offers Chat Completions, such as OpenCode Go's models, or several providers and keys behind one endpoint, with failover when one returns 429. It accepts Responses requests from Codex and sends Chat Completions upstream, tool calls included.
 
 You do not need a subscription login. Merge this provider block into `~/.cliproxy-rs/config.yaml`, or `%USERPROFILE%\.cliproxy-rs\config.yaml` on Windows. Keep `access.api-keys`, `management.secret-key` and the rest of your config. The proxy reloads the configuration on save. The upstream keys below are separate from your proxy's client key. Replace the key and upstream model placeholders with values from each provider.
 
