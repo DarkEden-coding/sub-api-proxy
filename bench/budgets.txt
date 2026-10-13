@@ -25,10 +25,12 @@
 # or less, archive 13 MB or less.
 # 2026-10-05: first budgets, measured by this job (Ubuntu 22.04 runner) on master with
 # file change notifications.
-size.x86_64-unknown-linux-gnu.binary_bytes   40_307_056  2
-size.x86_64-unknown-linux-gnu.text_bytes     26_370_487  2
-size.x86_64-unknown-linux-gnu.rodata_bytes    8_492_512  2
-size.x86_64-unknown-linux-gnu.archive_bytes  17_102_342  2
+# 2026-10-13: Google Antigravity provider and Google upstream capture, +710 KB .text
+# (+0.84 MB binary, +0.35 MB archive).
+size.x86_64-unknown-linux-gnu.binary_bytes   41_287_408  2
+size.x86_64-unknown-linux-gnu.text_bytes     27_195_447  2
+size.x86_64-unknown-linux-gnu.rodata_bytes    8_508_896  2
+size.x86_64-unknown-linux-gnu.archive_bytes  17_516_134  2
 # Crates linked into the binary in two or more versions; a new one fails until it is
 # justified here. 2026-10-05: base64, block-buffer, cpufeatures, crypto-common, digest,
 # getrandom, hashbrown (3), rand, rand_core, sha2, thiserror.
