@@ -54,12 +54,35 @@ func userAgents() map[string]any {
 	}
 }
 
+// scenarioSets are executor scenarios recorded from a newer Go tree than the pinned one,
+// selected by ANTIGRAVITY_GO_SET (see v8_0_27.go).
+var scenarioSets = map[string]func() []execScenario{}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: generator OUTPUT.json")
 		os.Exit(2)
 	}
 	coreusage.RegisterPlugin(capturedUsage)
+	if set := os.Getenv("ANTIGRAVITY_GO_SET"); set != "" {
+		scenarios, ok := scenarioSets[set]
+		if !ok {
+			panic("unknown scenario set " + set + "; build with its tag")
+		}
+		execs := scenarios()
+		defaultCredentials(execs)
+		for i := range execs {
+			runExec(&execs[i])
+		}
+		data, err := json.MarshalIndent(map[string]any{"go": set, "executor": execs}, "", "  ")
+		if err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(os.Args[1], append(data, '\n'), 0o644); err != nil {
+			panic(err)
+		}
+		return
+	}
 	execs := execScenarios()
 	defaultCredentials(execs)
 	for i := range execs {

@@ -1,5 +1,7 @@
 //! Differential tests against `tests/fixtures/antigravity_go.json` `executor`, produced by
-//! the real Go `AntigravityExecutor` (tests/reference/antigravity/executor.go). Each
+//! the real Go `AntigravityExecutor` (tests/reference/antigravity/executor.go), and
+//! `antigravity_v8_0_27_go.json`, the behaviour ported from Go v8.0.27 recorded the same
+//! way from that tree (tests/reference/antigravity/v8_0_27.go). Each
 //! scenario replays the scripted upstream answer to the Rust executor and compares the
 //! raw upstream request, the output, the client stream bytes, errors and the capture
 //! of the attempt. Expected values come only from Go. Scenarios run in fixture order on
@@ -176,9 +178,24 @@ fn check_capsules(name: &str, text: &str, summary: &str) {
 
 #[tokio::test]
 async fn go_reference_scenarios() {
+    let ran = replay_go_scenarios(scenarios()).await;
+    assert!(ran >= 49, "fixture lost scenarios: {ran}");
+}
+
+/// The scenarios recorded from Go v8.0.27 for the behaviour ported from it.
+#[tokio::test]
+async fn go_v8_0_27_scenarios() {
+    let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/antigravity_v8_0_27_go.json")).unwrap();
+    assert_eq!(fixture["go"], "v8.0.27");
+    let scenarios = fixture["executor"].as_array().unwrap();
+    assert_eq!(replay_go_scenarios(scenarios).await, scenarios.len());
+}
+
+/// Replays `scenarios` in order on one executor; returns how many ran.
+async fn replay_go_scenarios(scenarios: &[Value]) -> usize {
     let executor = AntigravityExecutor::default();
     let mut ran = 0;
-    for s in scenarios() {
+    for s in scenarios {
         let name = s["name"].as_str().unwrap();
         if s.get("scripted").is_some_and(|v| !v.is_null()) {
             continue;
@@ -338,7 +355,7 @@ async fn go_reference_scenarios() {
         assert!(events.is_empty(), "{name}: extra captures {events:?}");
         ran += 1;
     }
-    assert!(ran >= 49, "fixture lost scenarios: {ran}");
+    ran
 }
 
 /// A TLS server for the Vertex Search redirect host answering HEAD requests in order,
