@@ -5,7 +5,7 @@
 //! until a fetch succeeds, and whenever the cached value is older than six hours, the
 //! built-in fallback is used.
 
-use std::sync::{LazyLock, Once, RwLock};
+use std::sync::{Once, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::proxy::{self, GoClients, GoHeaders, Hooks, Proxy};
@@ -31,19 +31,35 @@ struct Cached {
     expiry: Option<Instant>,
 }
 
-static CACHED: LazyLock<RwLock<Cached>> = LazyLock::new(|| {
+fn never_fetched() -> RwLock<Cached> {
     RwLock::new(Cached {
         version: FALLBACK_VERSION.into(),
         expiry: None,
     })
-});
+}
+
+#[cfg(not(test))]
+fn cached() -> &'static RwLock<Cached> {
+    static CACHED: std::sync::LazyLock<RwLock<Cached>> = std::sync::LazyLock::new(never_fetched);
+    &CACHED
+}
+
+/// In unit tests each thread has its own cache, so a test that sets a version never
+/// changes the user agent of requests other tests compare with Go's.
+#[cfg(test)]
+fn cached() -> &'static RwLock<Cached> {
+    thread_local! {
+        static CACHED: &'static RwLock<Cached> = Box::leak(Box::new(never_fetched()));
+    }
+    CACHED.with(|cached| *cached)
+}
 
 fn read() -> std::sync::RwLockReadGuard<'static, Cached> {
-    CACHED.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    cached().read().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn write() -> std::sync::RwLockWriteGuard<'static, Cached> {
-    CACHED.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    cached().write().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `StartAntigravityVersionUpdater`: once per process, a task that fetches the manifest

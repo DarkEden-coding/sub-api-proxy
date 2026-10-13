@@ -1,15 +1,12 @@
 //! internal/misc/antigravity_version_test.go, plus the refresh rules and manifest
 //! decoding. Manifests come from a loopback mock; nothing reaches the Hub updater.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use super::*;
 
-/// The cached version is process-wide; tests that set it run one at a time.
-static CACHE: Mutex<()> = Mutex::new(());
-
+/// Runs `f` with this thread's cached version set (each test thread has its own).
 fn with_cached<T>(version: &str, expiry: Option<Instant>, f: impl FnOnce() -> T) -> T {
-    let _guard = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let saved = {
         let mut cached = write();
         let saved = (cached.version.clone(), cached.expiry);
