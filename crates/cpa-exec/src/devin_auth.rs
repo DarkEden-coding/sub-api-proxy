@@ -620,9 +620,19 @@ pub struct AuthRecord {
 /// normalized, the weight validated, `disabled` stamped, then Go's compact JSON. An
 /// unchanged file is left alone. Returns the path.
 pub fn save_record(auth_dir: &Path, record: &AuthRecord) -> Result<PathBuf, String> {
-    let path = auth_dir.join(&record.file_name);
-    let mut metadata: GoMap = record
-        .metadata
+    save_metadata_file(auth_dir, &record.file_name, &record.metadata, "devin")
+}
+
+/// `Manager.Login` + `FileTokenStore.Save` (metadata branch) for any provider's login
+/// record: see [`save_record`]. Shared with the Antigravity login.
+pub(crate) fn save_metadata_file(
+    auth_dir: &Path,
+    file_name: &str,
+    metadata: &Map<String, Value>,
+    provider: &str,
+) -> Result<PathBuf, String> {
+    let path = auth_dir.join(file_name);
+    let mut metadata: GoMap = metadata
         .iter()
         .map(|(k, v)| (k.clone(), GoValue::from_json(v)))
         .collect();
@@ -631,7 +641,7 @@ pub fn save_record(auth_dir: &Path, record: &AuthRecord) -> Result<PathBuf, Stri
     if let Some(raw) = existing.as_deref().filter(|r| !r.is_empty())
         && let Some((map, true)) = go_map_from_json(raw)
         && !map.is_empty()
-        && let Some(flag) = merge_existing(&mut metadata, &map, "devin")
+        && let Some(flag) = merge_existing(&mut metadata, &map, provider)
     {
         disabled = flag;
     }

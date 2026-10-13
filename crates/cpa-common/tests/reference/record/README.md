@@ -1,10 +1,17 @@
 # Recorded Go calls for `thinking` and `signature`
 
-The fixtures in `../../fixtures/go_*.jsonl.gz` hold real CLIProxyAPI outputs at
-`6fecc6e`. Each line is one call into `internal/thinking`, a thinking provider applier,
-`internal/signature` or `helps.translatedRequestSummaryConfig`, with its inputs, Go's
-output (or error text) and every model-registry lookup Go made during that call. The
-Rust tests replay each line and compare outputs exactly.
+The fixtures in `../../fixtures/go_*.jsonl.gz` hold real CLIProxyAPI outputs. Each line
+is one call into `internal/thinking`, a thinking provider applier, `internal/signature`
+or `helps.translatedRequestSummaryConfig`, with its inputs, Go's output (or error text)
+and every model-registry lookup Go made during that call. The Rust tests replay each
+line and compare outputs exactly.
+
+`go_calls.jsonl.gz` and `go_signature_matrix.jsonl.gz` are recorded at v8.0.27
+(`bf9341629ef2300ac9d846a2e80fe2756f63a671`) for its Antigravity Claude 5.5 CAQS
+signatures (Go 9b9c2bdf and 174248ca). Between `6fecc6e` and v8.0.27, `internal/signature`
+changed only by those two commits, and `internal/thinking` and
+`helps.translatedRequestSummaryConfig` did not change, so every other recorded function
+behaves as at `6fecc6e`. `go_thinking_matrix.jsonl.gz` is still recorded at `6fecc6e`.
 
 - `go_calls.jsonl.gz`: every call made while Go's own suites ran:
   `./internal/thinking/...`, `./internal/signature/...`,
@@ -14,14 +21,15 @@ Rust tests replay each line and compare outputs exactly.
   capabilities and body shapes plus the resolved pipeline over source, target,
   capability and suffix.
 - `go_signature_matrix.jsonl.gz`: `signature_matrix_test.go.txt`, every signature in
-  `signature_corpus.json` (all raw signatures from Go's signature tests) through every
+  `signature_corpus.json` (all raw signatures from Go's signature tests at `6fecc6e`,
+  plus the `Q`-form ones the v8.0.27 suites pass to a signature function) through every
   target, block kind and validator option.
 
 Recording runs on a throwaway copy, never on the reference checkout. No network access
 is needed beyond the Go module cache.
 
 ```sh
-reference=/absolute/path/to/CLIProxyAPI      # at 6fecc6e
+reference=/absolute/path/to/CLIProxyAPI      # at v8.0.27 (6fecc6e for the thinking matrix)
 here=$(pwd)                                   # this directory
 copy=$(mktemp -d)
 tar -C "$reference" --exclude=.git -cf - . | tar -C "$copy" -xf -
@@ -52,12 +60,13 @@ budgets, and the recorder serializes their 20 MiB payloads. Their behaviour is u
 Strings that are not valid UTF-8 are recorded as `{"b64": ...}` and replayed as raw bytes,
 because Go strings are bytes and the Rust API takes `&[u8]`.
 
-`merge.py` lists every record it drops. At 6fecc6e that is four lines over 64 KiB:
+`merge.py` lists every record it drops. At v8.0.27 that is 19 lines over 64 KiB:
 
-- `normalize_claude` and `validate_claude` (32 MiB signatures): the length caps, covered by
-  `length_caps_reject_before_decoding`.
-- Two `sanitize_gemini` calls (4 MiB and 20 MiB inline media) that Go returns unchanged,
-  rebuilt byte for byte in `large_inline_data_passes_through_like_go`.
+- 17 calls with a 32 MiB signature (`normalize_claude`, `valid_claude`, `inspect_cais`,
+  `inspect_antigravity_caqs` and others), or a 64 MiB `split_prefix` input: the length
+  caps, covered by `length_caps_reject_before_decoding`.
+- Two `sanitize_gemini` calls with large inline media that Go returns unchanged, rebuilt
+  byte for byte in `large_inline_data_passes_through_like_go`.
 
 Replay normalizes protobuf-go's `proto:` separator inside error strings only: the library
 picks U+0020 or U+00A0 per binary so nothing depends on it.

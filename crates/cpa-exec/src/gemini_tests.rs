@@ -74,6 +74,171 @@ impl cpa_core::exec::UsageObserver for UsageReports {
     }
 }
 
+/// Upstream capture events (cpa_core::exec::CaptureEvent) as an executor recorded them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Captured {
+    Request {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        provider: String,
+        auth_id: String,
+        auth_type: String,
+        auth_value: String,
+    },
+    Metadata(u16),
+    Chunk(Vec<u8>),
+    Error(String),
+}
+
+#[derive(Default)]
+pub(crate) struct Captures(Mutex<Vec<Captured>>);
+
+impl Captures {
+    pub(crate) fn sink(self: &Arc<Self>) -> cpa_core::exec::CaptureSink {
+        cpa_core::exec::CaptureSink::new(self.clone())
+    }
+
+    pub(crate) fn events(&self) -> Vec<Captured> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl cpa_core::exec::CaptureObserver for Captures {
+    fn record(&self, event: cpa_core::exec::CaptureEvent<'_>) {
+        use cpa_core::exec::CaptureEvent as E;
+        let captured = match event {
+            E::Request(r) => {
+                assert_eq!(r.method, "POST");
+                Captured::Request {
+                    url: r.url.into(),
+                    headers: r.headers.to_vec(),
+                    body: r.body.to_vec(),
+                    provider: r.provider.into(),
+                    auth_id: r.auth_id.into(),
+                    auth_type: r.auth_type.into(),
+                    auth_value: r.auth_value.into(),
+                }
+            }
+            E::ResponseMetadata(status, _) => Captured::Metadata(status),
+            E::ResponseChunk(chunk) => Captured::Chunk(chunk.to_vec()),
+            E::ResponseError(error) => Captured::Error(error.into()),
+            other => panic!(
+                "unexpected websocket capture {}",
+                matches!(other, E::WebsocketRequest(_))
+            ),
+        };
+        self.0.lock().unwrap().push(captured);
+    }
+}
+
+/// bufio.ScanLines.
+fn scan_lines(body: &[u8]) -> Vec<Vec<u8>> {
+    let body = body.strip_suffix(b"\n").unwrap_or(body);
+    if body.is_empty() {
+        return Vec::new();
+    }
+    body.split(|b| *b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l).to_vec())
+        .collect()
+}
+
+/// Checks the capture of one physical upstream attempt against the raw request Go's
+/// executor sent (`wire`, from the fixture) and the reply it got. Go logs
+/// `httpReq.Header` before the transport adds `User-Agent`, `Accept-Encoding`,
+/// `Content-Length` and `Host`; so the captured headers must be the wire headers less
+/// exactly those additions. Then the reply's status, and its body: whole for buffered
+/// reads, one chunk per scanner line for streams (the fixtures read every stream to
+/// its end).
+pub(crate) fn check_attempt(
+    name: &str,
+    events: &mut std::collections::VecDeque<Captured>,
+    wire: &str,
+    reply: Option<&Value>,
+    lines: bool,
+    provider: &str,
+    account: Option<(&str, &str)>,
+) {
+    let Some(Captured::Request {
+        url,
+        headers,
+        body,
+        provider: got_provider,
+        auth_type,
+        auth_value,
+        ..
+    }) = events.pop_front()
+    else {
+        panic!("{name}: no request capture");
+    };
+    let (head, wire_body) = wire.split_once("\r\n\r\n").or_else(|| wire.split_once("\n\n")).unwrap();
+    let mut head_lines = head.lines();
+    let request_line = head_lines.next().unwrap();
+    let target = request_line.split(' ').nth(1).unwrap();
+    assert!(
+        url.ends_with(target.trim_start_matches("UPSTREAM")),
+        "{name}: url {url} for {target}"
+    );
+    assert_eq!(String::from_utf8_lossy(&body), wire_body, "{name}: request body");
+    assert_eq!(got_provider, provider, "{name}: provider");
+    let wire_headers: Vec<(String, String)> = head_lines
+        .filter_map(|l| l.split_once(": "))
+        .map(|(n, v)| (n.to_ascii_lowercase(), v.to_owned()))
+        .collect();
+    for (n, v) in &headers {
+        if n.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        assert!(
+            wire_headers.contains(&(n.to_ascii_lowercase(), v.clone())),
+            "{name}: captured {n}: {v} was not sent"
+        );
+    }
+    for (n, v) in &wire_headers {
+        let captured = headers.iter().any(|(cn, cv)| cn.eq_ignore_ascii_case(n) && cv == v);
+        assert!(
+            captured || matches!(n.as_str(), "host" | "user-agent" | "accept-encoding" | "content-length"),
+            "{name}: sent {n}: {v} without capture"
+        );
+    }
+    if let Some(account) = account {
+        assert_eq!((auth_type.as_str(), auth_value.as_str()), account, "{name}: account");
+    }
+    let Some(reply) = reply else {
+        return;
+    };
+    let status = reply["status"].as_u64().unwrap() as u16;
+    match events.pop_front() {
+        Some(Captured::Metadata(got)) => assert_eq!(got, status, "{name}: response status"),
+        other => panic!("{name}: expected response metadata, got {other:?}"),
+    }
+    let reply_body = reply["body"].as_str().unwrap_or_default().as_bytes();
+    let mut chunks = Vec::new();
+    while let Some(Captured::Chunk(_)) = events.front() {
+        let Some(Captured::Chunk(chunk)) = events.pop_front() else {
+            unreachable!()
+        };
+        chunks.push(chunk);
+    }
+    if lines && (200..300).contains(&status) {
+        let text = |v: &[Vec<u8>]| {
+            v.iter()
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&chunks), text(&scan_lines(reply_body)), "{name}: stream chunks");
+    } else {
+        assert_eq!(chunks, vec![reply_body.to_vec()], "{name}: response body");
+    }
+    // A reply cut short (`missing` bytes): Go's RecordAPIResponseError of the scanner.
+    if reply["missing"].as_u64().unwrap_or(0) > 0 {
+        match events.pop_front() {
+            Some(Captured::Error(text)) => assert_eq!(text, "unexpected EOF", "{name}: response error"),
+            other => panic!("{name}: expected the read error, got {other:?}"),
+        }
+    }
+}
+
 const FIXTURE: &str = include_str!("../tests/fixtures/gemini_go.json");
 
 fn fixture() -> &'static Value {
@@ -82,13 +247,13 @@ fn fixture() -> &'static Value {
 }
 
 /// One-shot raw HTTP/1.1 capture server answering with the scripted response.
-struct Mock {
+pub(crate) struct Mock {
     addr: String,
     raw: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Mock {
-    async fn start(up: &Value) -> Self {
+    pub(crate) async fn start(up: &Value) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let raw: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
@@ -102,6 +267,7 @@ impl Mock {
                     .collect()
             })
             .unwrap_or_default();
+        let up_missing = up["missing"].as_u64().unwrap_or(0) as usize;
         let mut body = up["body"].as_str().unwrap().as_bytes().to_vec();
         if up["gzip"].as_bool() == Some(true) {
             use async_compression::tokio::bufread::GzipEncoder;
@@ -144,7 +310,9 @@ impl Mock {
             for (n, v) in &headers {
                 out.extend_from_slice(format!("{n}: {v}\r\n").as_bytes());
             }
-            out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+            // `missing`: bytes promised beyond the body, a connection closed mid-stream.
+            let missing = up_missing;
+            out.extend_from_slice(format!("Content-Length: {}\r\n", body.len() + missing).as_bytes());
             out.extend_from_slice(b"Connection: close\r\n\r\n");
             out.extend_from_slice(&body);
             let _ = write.write_all(&out).await;
@@ -153,7 +321,11 @@ impl Mock {
         Self { addr, raw }
     }
 
-    fn request(&self) -> Option<String> {
+    pub(crate) fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    pub(crate) fn request(&self) -> Option<String> {
         let raw = self.raw.lock().unwrap().clone()?;
         Some(String::from_utf8(raw).unwrap().replace(&self.addr, "UPSTREAM"))
     }
@@ -328,7 +500,8 @@ async fn go_reference_scenarios() {
         let cred = credential(s, &cfg, &addr);
         let mut req = request(s);
         let reports = Arc::new(UsageReports::default());
-        req.usage = reports.sink();
+        let captures = Arc::new(Captures::default());
+        req.usage = reports.sink().with_capture(captures.sink());
         let (client, alt) = (req.response_format, req.alt.as_deref().is_some_and(|a| !a.is_empty()));
         let mut output = None;
         let mut streamed = Vec::new();
@@ -376,6 +549,32 @@ async fn go_reference_scenarios() {
         let request = mock.as_ref().and_then(Mock::request);
         assert_eq!(request.as_deref(), s["request"].as_str(), "{name}: upstream request");
         reports.check(s);
+        let mut events: std::collections::VecDeque<Captured> = captures.events().into();
+        if let Some(wire) = s["request"].as_str() {
+            let provider = if s["provider"] == "gemini-interactions" {
+                "gemini-interactions"
+            } else {
+                "gemini"
+            };
+            // Config keys are API-key accounts (Go AccountInfo); the attribute-only
+            // credential has neither an API key nor OAuth metadata.
+            let key = s["config_auth"].as_i64().unwrap() >= 0;
+            let key_value = wire
+                .lines()
+                .find_map(|l| l.strip_prefix("X-Goog-Api-Key: "))
+                .unwrap_or_default();
+            let account = if key { ("api_key", key_value) } else { ("", "") };
+            check_attempt(
+                name,
+                &mut events,
+                wire,
+                s.get("upstream"),
+                s["op"] == "stream",
+                provider,
+                Some(account),
+            );
+        }
+        assert!(events.is_empty(), "{name}: extra captures {events:?}");
         ran += 1;
     }
     eprintln!("gemini scenarios: {ran} ran, {} wait for translators:", skipped.len());
@@ -550,6 +749,7 @@ async fn pending_responses_frame_is_flushed_before_terminal_error() {
             Bytes::new(),
         ),
         usage: Default::default(),
+        capture: Default::default(),
     };
     let lines = futures_util::stream::iter([
         Ok(Bytes::from_static(br#"data: {"a":1}"#)),
@@ -557,7 +757,7 @@ async fn pending_responses_frame_is_flushed_before_terminal_error() {
         Ok(Bytes::from_static(br#"data: {"never":1}"#)),
     ])
     .boxed();
-    let items: Vec<Result<Bytes, ExecError>> = gemini_lines(lines, output).collect().await;
+    let items: Vec<Result<Bytes, ExecError>> = gemini_lines(lines, output, Format::Gemini).collect().await;
     assert_eq!(items.len(), 2, "{items:?}");
     assert_eq!(
         items[0].as_ref().unwrap(),
@@ -617,13 +817,14 @@ async fn apply_patch_hooks_follow_go_order() {
             raw: false,
             claude: ClaudeInputTokens::new(Format::OpenAI, Format::Gemini, Format::OpenAI, Bytes::new()),
             usage: Default::default(),
+            capture: Default::default(),
         };
         let lines = futures_util::stream::iter([
             Ok(Bytes::from_static(br#"data: {"a":1}"#)),
             Ok(Bytes::from_static(br#"data: {"b":2}"#)),
         ])
         .boxed();
-        let items: Vec<Result<Bytes, ExecError>> = gemini_lines(lines, output).collect().await;
+        let items: Vec<Result<Bytes, ExecError>> = gemini_lines(lines, output, Format::Gemini).collect().await;
         items
             .into_iter()
             .map(|i| match i {

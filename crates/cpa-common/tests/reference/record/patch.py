@@ -185,6 +185,7 @@ sig_renames = [
     ('provider_compatibility.go', 'SplitSignatureProviderPrefix'),
     ('provider_compatibility.go', 'SignatureProviderFromModelName'),
     ('claude_validation.go', 'InspectClaudeCAISSignature'),
+    ('claude_antigravity_validation.go', 'InspectAntigravityClaudeCAQSSignature'),
     ('claude_validation.go', 'NormalizeClaudeThinkingSignature'),
     ('claude_validation.go', 'NormalizeClaudeProviderNativeThinkingSignature'),
     ('claude_validation.go', 'InspectClaudeSignaturePayload'),
@@ -284,6 +285,21 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 		o = map[string]any{"first_byte": info.FirstByte, "envelope_version": info.EnvelopeVersion, "channel_id": info.ChannelID, "model_text": info.ModelText, "block_kind": info.BlockKind, "context_id": info.ContextID, "signature_len": info.SignatureLen}
 	}
 	recorder.End("inspect_cais", rawSignature, map[string]any{"info": o, "err": recorder.Err(err)})
+	return info, err
+}
+
+func InspectAntigravityClaudeCAQSSignature(rawSignature string) (*ClaudeCAISSignatureInfo, error) {
+	recorder.Begin()
+	info, err := inspectAntigravityClaudeCAQSSignatureImpl(rawSignature)
+	var o any
+	if info != nil {
+		var infra any
+		if info.Infrastructure != nil {
+			infra = *info.Infrastructure
+		}
+		o = map[string]any{"first_byte": info.FirstByte, "envelope_version": info.EnvelopeVersion, "channel_id": info.ChannelID, "model_text": info.ModelText, "block_kind": info.BlockKind, "context_id": info.ContextID, "signature_len": info.SignatureLen, "infrastructure": infra, "signature_in_container": info.SignatureInContainer}
+	}
+	recorder.End("inspect_antigravity_caqs", rawSignature, map[string]any{"info": o, "err": recorder.Err(err)})
 	return info, err
 }
 

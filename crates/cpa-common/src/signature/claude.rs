@@ -1,8 +1,9 @@
 //! Claude thinking signatures: single-layer `E…` (protobuf, first byte 0x12), double-layer
-//! `R…` (base64 of the `E` form) and CAIS/CAQS `C…` (first byte 0x08)
-//! (claude_validation.go, claude.go).
+//! `R…` (base64 of the `E` form), CAIS/CAQS `C…` (first byte 0x08) and Antigravity's
+//! double-layer CAQS `Q…` (base64 of a `C` form) (claude_validation.go,
+//! claude_antigravity_validation.go, claude.go).
 
-use super::wire::{self, BYTES, STD, VARINT, WireError};
+use super::wire::{self, BYTES, STD, STD_STRICT, VARINT, WireError};
 use super::{Error, ascii, err};
 use crate::gostr::{quote, trim_space};
 use crate::json::{self, Res};
@@ -64,6 +65,7 @@ pub fn has_decodable_claude_thinking_signature(raw: impl AsRef<[u8]>) -> bool {
         return false;
     }
     match sig[0] {
+        b'Q' => inspect_antigravity_claude_caqs_signature(sig).is_ok(),
         b'E' => STD.decode(sig).is_ok_and(|d| !d.is_empty()),
         b'R' => match STD.decode(sig) {
             Ok(decoded) if decoded.first() == Some(&b'E') => STD.decode(&decoded).is_ok_and(|d| !d.is_empty()),
@@ -73,9 +75,14 @@ pub fn has_decodable_claude_thinking_signature(raw: impl AsRef<[u8]>) -> bool {
     }
 }
 
-/// `HasClaudeThinkingSignaturePrefix`.
+/// `HasClaudeThinkingSignaturePrefix`: an `E`/`R` prefix, or a structurally valid `Q`
+/// envelope.
 pub fn has_claude_thinking_signature_prefix(raw: impl AsRef<[u8]>) -> bool {
-    matches!(strip_cache_prefix(raw.as_ref()).first(), Some(b'E' | b'R'))
+    let sig = strip_cache_prefix(raw.as_ref());
+    match sig.first() {
+        Some(b'Q') => inspect_antigravity_claude_caqs_signature(sig).is_ok(),
+        first => matches!(first, Some(b'E' | b'R')),
+    }
 }
 
 /// Everything after the first `#`, trimmed (any prefix, not only known providers).
@@ -132,11 +139,16 @@ fn check_len(sig: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-/// `NormalizeClaudeThinkingSignature`: the double-layer `R` form.
+/// `NormalizeClaudeThinkingSignature`: the double-layer `R` form, or a valid `Q` envelope
+/// unchanged (always fully inspected, whatever `opt` says).
 pub fn normalize_claude_thinking_signature(raw: impl AsRef<[u8]>, opt: ClaudeValidation) -> Result<String, Error> {
     let sig = strip_cache_prefix(raw.as_ref());
     check_len(sig)?;
     match sig[0] {
+        b'Q' => {
+            inspect_antigravity_claude_caqs_signature(sig)?;
+            Ok(ascii(sig))
+        }
         b'R' => {
             validate_double_layer(sig, opt)?;
             Ok(ascii(sig))
@@ -146,7 +158,7 @@ pub fn normalize_claude_thinking_signature(raw: impl AsRef<[u8]>, opt: ClaudeVal
             Ok(wire::std_encode(sig))
         }
         _ => err(format!(
-            "invalid signature: expected 'E' or 'R' prefix, got {}",
+            "invalid signature: expected 'E', 'R' or 'Q' prefix, got {}",
             first_char(sig)
         )),
     }
@@ -405,6 +417,10 @@ pub struct ClaudeCaisInfo {
     pub block_kind: String,
     pub context_id: String,
     pub signature_len: usize,
+    /// Channel field 2, when present.
+    pub infrastructure: Option<u64>,
+    /// The signature bytes came from container field 5 (version 4 and later).
+    pub signature_in_container: bool,
 }
 
 /// `IsValidClaudeCAISSignature`.
@@ -425,6 +441,46 @@ pub fn inspect_claude_cais_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCais
     let decoded = STD
         .decode(sig)
         .map_err(|e| Error(format!("invalid Claude CAIS signature: base64 decode failed: {e}")))?;
+    inspect_cais_payload(&decoded, false)
+}
+
+/// `InspectAntigravityClaudeCAQSSignature`: Antigravity Claude 5.5's double-base64 CAQS
+/// envelope, version 4 on the Google thinking channel (18, infrastructure 2) with its
+/// signature in the container. Structure only: it says nothing about cryptographic
+/// validity or replay across accounts.
+pub fn inspect_antigravity_claude_caqs_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCaisInfo, Error> {
+    let sig = strip_cache_prefix(raw.as_ref());
+    if sig.is_empty() || sig.len() > MAX_CLAUDE_THINKING_SIGNATURE_LEN {
+        return err("invalid Antigravity CAQS signature length");
+    }
+    if sig[0] != b'Q' || sig.iter().any(|b| matches!(b, b'\r' | b'\n')) {
+        return err("invalid Antigravity CAQS wrapper");
+    }
+    let inner = STD_STRICT
+        .decode(sig)
+        .map_err(|e| Error(format!("invalid Antigravity CAQS encoding: {e}")))?;
+    if inner.first() != Some(&b'C') || inner.iter().any(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'#')) {
+        return err("invalid Antigravity CAQS inner encoding");
+    }
+    let decoded = STD_STRICT
+        .decode(&inner)
+        .map_err(|e| Error(format!("invalid Antigravity CAQS inner encoding: {e}")))?;
+    let info =
+        inspect_cais_payload(&decoded, true).map_err(|e| Error(format!("invalid Antigravity CAQS payload: {e}")))?;
+    if info.envelope_version != 4
+        || info.channel_id != 18
+        || info.infrastructure != Some(2)
+        || info.block_kind != "thinking"
+        || !info.signature_in_container
+    {
+        return err("unsupported Antigravity CAQS envelope or channel schema");
+    }
+    Ok(info)
+}
+
+/// `inspectClaudeCAISPayload`: a decoded CAIS/CAQS envelope. `reject_duplicates` (the
+/// Antigravity `Q` gate only) refuses a second container or channel block.
+fn inspect_cais_payload(decoded: &[u8], reject_duplicates: bool) -> Result<ClaudeCaisInfo, Error> {
     match decoded.first() {
         None => return err("invalid Claude CAIS signature: empty after decode"),
         Some(&0x08) => {}
@@ -439,10 +495,15 @@ pub fn inspect_claude_cais_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCais
         ..Default::default()
     };
     let mut container = None;
-    walk_fields(&decoded, |num, typ, raw| {
+    walk_fields(decoded, |num, typ, raw| {
         match num {
             1 => info.envelope_version = cais_varint(raw, typ, "CAIS top-level field 1 envelope version")?,
-            2 => container = Some(cais_bytes(raw, typ, "CAIS top-level field 2 container")?),
+            2 => {
+                if reject_duplicates && container.is_some() {
+                    return err("invalid Antigravity CAQS signature: duplicate container");
+                }
+                container = Some(cais_bytes(raw, typ, "CAIS top-level field 2 container")?);
+            }
             3 => {
                 cais_varint(raw, typ, "CAIS top-level field 3 trailer")?;
             }
@@ -456,7 +517,12 @@ pub fn inspect_claude_cais_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCais
     let mut container_signature: &[u8] = &[];
     walk_fields(container, |num, typ, raw| {
         match num {
-            1 => channel = Some(cais_bytes(raw, typ, "CAIS container field 1 channel block")?),
+            1 => {
+                if reject_duplicates && channel.is_some() {
+                    return err("invalid Antigravity CAQS signature: duplicate channel block");
+                }
+                channel = Some(cais_bytes(raw, typ, "CAIS container field 1 channel block")?);
+            }
             5 => container_signature = cais_bytes(raw, typ, "CAIS container field 5 signature bytes")?,
             _ => {}
         }
@@ -471,6 +537,7 @@ pub fn inspect_claude_cais_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCais
                 info.channel_id = cais_varint(raw, typ, "CAIS channel field 1 channel_id")?;
                 have_channel = true;
             }
+            2 => info.infrastructure = Some(cais_varint(raw, typ, "CAIS channel field 2 infrastructure")?),
             3 => {
                 cais_varint(raw, typ, "CAIS channel field 3 version")?;
             }
@@ -513,6 +580,7 @@ pub fn inspect_claude_cais_signature(raw: impl AsRef<[u8]>) -> Result<ClaudeCais
     })?;
     if !have_signature && info.envelope_version >= 4 && !container_signature.is_empty() {
         info.signature_len = container_signature.len();
+        info.signature_in_container = true;
         have_signature = true;
     }
     if !have_channel {

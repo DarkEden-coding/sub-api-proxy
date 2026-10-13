@@ -245,6 +245,12 @@ pub struct GoClients {
     /// Injected default (tests point it at local mocks); used for Inherit/Invalid.
     default: Option<wreq::Client>,
     cache: Mutex<Vec<(Proxy, wreq::Client)>>,
+    /// Never offer HTTP/2 (Go transports with `ForceAttemptHTTP2` off and an empty
+    /// `TLSNextProto`, as Antigravity's).
+    http1: bool,
+    /// Idle connections kept per host and how long (Go `MaxIdleConnsPerHost` and
+    /// `IdleConnTimeout`); `None` keeps wreq's defaults.
+    pool: Option<(usize, Option<std::time::Duration>)>,
     /// The clients tell timed requests whether they dialled ([`watch_connections`]).
     timed: bool,
 }
@@ -255,8 +261,24 @@ impl GoClients {
             hooks,
             default: None,
             cache: Mutex::default(),
+            http1: false,
+            pool: None,
             timed: false,
         }
+    }
+
+    /// Clients keeping at most `max_idle_per_host` idle connections per host (0 closes
+    /// each connection after its response), each for at most `idle_timeout`. Additive
+    /// (Antigravity's connection pool settings).
+    pub fn pool(mut self, max_idle_per_host: usize, idle_timeout: Option<std::time::Duration>) -> Self {
+        self.pool = Some((max_idle_per_host, idle_timeout));
+        self
+    }
+
+    /// Clients that speak only HTTP/1.1. Additive (Antigravity).
+    pub fn http1_only(mut self) -> Self {
+        self.http1 = true;
+        self
     }
 
     /// Every unproxied request uses `client` (local mock servers in tests).
@@ -265,6 +287,8 @@ impl GoClients {
             hooks: Hooks::default(),
             default: Some(client),
             cache: Mutex::default(),
+            http1: false,
+            pool: None,
             timed: false,
         }
     }
@@ -303,9 +327,14 @@ impl GoClients {
         if self.timed {
             builder = watch_connections(builder);
         }
-        let built = proxy
-            .apply(self.hooks.apply(builder), true)
-            .and_then(wreq::ClientBuilder::build);
+        let mut builder = self.hooks.apply(builder);
+        if self.http1 {
+            builder = builder.http1_only();
+        }
+        if let Some((max_idle, idle_timeout)) = self.pool {
+            builder = builder.pool_max_idle_per_host(max_idle).pool_idle_timeout(idle_timeout);
+        }
+        let built = proxy.apply(builder, true).and_then(wreq::ClientBuilder::build);
         let client = built.ok()?;
         cache.insert(0, (proxy.clone(), client.clone()));
         cache.truncate(CACHE_CAPACITY);
@@ -575,7 +604,17 @@ pub async fn send_routed(
     timeout: Option<std::time::Duration>,
     timing: Option<&UsageSink>,
 ) -> Result<Upstream, ExecError> {
-    let raw = exchange(route, wreq::Method::POST, url, headers, Some(body), timeout, timing).await;
+    let raw = exchange(
+        route,
+        wreq::Method::POST,
+        url,
+        headers,
+        Some(body),
+        timeout,
+        true,
+        timing,
+    )
+    .await;
     upstream(raw)
 }
 
@@ -589,21 +628,22 @@ pub async fn send_request(
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Upstream, ExecError> {
-    upstream(exchange(route, method, url, headers, body, timeout, None).await)
+    upstream(exchange(route, method, url, headers, body, timeout, true, None).await)
 }
 
+/// What [`send_request`] makes of an exchange: errors and body errors sanitised.
 fn upstream(raw: Result<RawUpstream, SendError>) -> Result<Upstream, ExecError> {
-    let raw = raw.map_err(|e| match e {
+    raw.map(RawUpstream::sanitized).map_err(sanitize)
+}
+
+/// The error [`send_request`] reports for a [`SendError`].
+fn sanitize(error: SendError) -> ExecError {
+    match error {
         SendError::Transport { error, .. } => crate::upstream::transport_error(error),
         SendError::Local { error, .. } => error,
         // What `transport_error` makes of the transport's own timeout.
         SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
-    })?;
-    Ok(Upstream {
-        status: raw.status,
-        headers: raw.headers,
-        body: raw.body.map(|r| r.map_err(body_error)).boxed(),
-    })
+    }
 }
 
 /// Why [`send_request_raw`] failed: the transport's own error (which may name the URL,
@@ -631,6 +671,54 @@ pub struct RawUpstream {
     pub body: BoxStream<'static, Result<Bytes, std::io::Error>>,
 }
 
+impl RawUpstream {
+    /// The [`Upstream`] [`send_request`] returns: body errors sanitised.
+    fn sanitized(self) -> Upstream {
+        Upstream {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(|r| r.map_err(body_error)).boxed(),
+        }
+    }
+
+    /// [`Self::sanitized`] for a body read line by line, as Go's `bufio.Scanner` reads
+    /// it: a body the upstream ended early fails with the scanner's `unexpected EOF`;
+    /// every other read failure keeps `upstream request failed`.
+    // ponytail: Go names resets and timeouts by their own error text, which can carry
+    // the upstream URL; those keep this crate's generic text.
+    fn scanned(self) -> Upstream {
+        let map = |error: std::io::Error| {
+            if ended_early(&error) {
+                ExecError::local(502, FailureScope::Transport, "unexpected EOF")
+            } else {
+                body_error(error)
+            }
+        };
+        Upstream {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(move |r| r.map_err(map)).boxed(),
+        }
+    }
+}
+
+/// Whether a body read failed because the upstream ended the body before its length or
+/// final chunk (the transport's `UnexpectedEof`, Go's `io.ErrUnexpectedEOF`), rather
+/// than a reset or a timeout.
+fn ended_early(error: &std::io::Error) -> bool {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)
+        {
+            return true;
+        }
+        cause = current.source();
+    }
+    false
+}
+
 /// [`send_request`] without error sanitising, for callers that report Go's own error
 /// text (the plugin host's `host.http.*`).
 pub async fn send_request_raw(
@@ -641,9 +729,63 @@ pub async fn send_request_raw(
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
 ) -> Result<RawUpstream, SendError> {
-    exchange(route, method, url, headers, body, timeout, None).await
+    exchange(route, method, url, headers, body, timeout, true, None).await
 }
 
+/// [`send`] for a response body the caller reads line by line: a body cut short fails
+/// with Go's `unexpected EOF` ([`RawUpstream::scanned`]).
+pub async fn send_scanned(
+    client: &wreq::Client,
+    url: &str,
+    headers: GoHeaders,
+    body: Bytes,
+    timeout: Option<std::time::Duration>,
+) -> Result<Upstream, ExecError> {
+    let route = |_: &url::Url| {
+        Ok(Route {
+            client: client.clone(),
+            order: None,
+        })
+    };
+    exchange(
+        &route,
+        wreq::Method::POST,
+        url,
+        headers,
+        Some(body),
+        timeout,
+        true,
+        None,
+    )
+    .await
+    .map(RawUpstream::scanned)
+    .map_err(sanitize)
+}
+
+/// [`request`] without following redirects: a client whose `CheckRedirect` returns
+/// `http.ErrUseLastResponse` hands back the first answer, 3xx included. Untimed: it
+/// reports no stages (Antigravity's grounding redirects).
+pub async fn request_once(
+    client: &wreq::Client,
+    method: wreq::Method,
+    url: &str,
+    headers: GoHeaders,
+    body: Option<Bytes>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Upstream, ExecError> {
+    let route = |_: &url::Url| {
+        Ok(Route {
+            client: client.clone(),
+            order: None,
+        })
+    };
+    upstream(exchange(&route, method, url, headers, body, timeout, false, None).await)
+}
+
+/// One request and, with `follow_redirects`, the redirects it is answered with, as
+/// Go's `Client.Do`; without, the first answer, 3xx included. With `timing`, the
+/// exchange reports its stages to the attempt's usage record ([`UpstreamStage`]).
+#[allow(clippy::too_many_arguments)]
 async fn exchange(
     route: &(dyn Fn(&url::Url) -> Result<Route, ExecError> + Sync),
     method: wreq::Method,
@@ -651,6 +793,7 @@ async fn exchange(
     headers: GoHeaders,
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
     timing: Option<&UsageSink>,
 ) -> Result<RawUpstream, SendError> {
     let local = |error: ExecError, url: &str| SendError::Local {
@@ -771,7 +914,7 @@ async fn exchange(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        if !matches!(status, 301 | 302 | 303 | 307 | 308) || location.is_empty() {
+        if !follow_redirects || !matches!(status, 301 | 302 | 303 | 307 | 308) || location.is_empty() {
             break (response, auto_gzip, dialled);
         }
         let from_exact = exact.as_deref().filter(|_| sent == 1);
@@ -1308,6 +1451,64 @@ pub type SharedGoClients = Arc<GoClients>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body read line by line fails with Go's scanner text `unexpected EOF` only when
+    /// the upstream ended it early; a reset keeps the generic transport text. Every
+    /// reply sends five of the hundred bytes or a partial chunked body, then, once the
+    /// client holds the response, closes or resets the connection.
+    #[tokio::test]
+    async fn scanned_bodies_name_only_an_early_end_unexpected_eof() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        const LENGTH: &str = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello";
+        const CHUNKED: &str = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        for (head, reset, want) in [
+            (LENGTH, false, "unexpected EOF"),
+            (CHUNKED, false, "unexpected EOF"),
+            (LENGTH, true, "upstream request failed"),
+            (CHUNKED, true, "upstream request failed"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let (holds_response, response_held) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio::io::BufReader::new(socket);
+                // The request has no body: its head ends with an empty line.
+                let mut line = String::new();
+                while socket.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                let _ = response_held.await;
+                if reset {
+                    #[allow(deprecated)]
+                    socket.get_ref().set_linger(Some(std::time::Duration::ZERO)).unwrap();
+                }
+            });
+            let client = wreq::Client::builder().build().unwrap();
+            let upstream = send_scanned(&client, &url, GoHeaders::new(), Bytes::new(), None)
+                .await
+                .unwrap();
+            holds_response.send(()).unwrap();
+            let mut read = lines(upstream.body, 1 << 20);
+            let error = loop {
+                match read.next().await.expect("a read error") {
+                    Ok(_) => {}
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(
+                (
+                    String::from_utf8_lossy(&error.body).into_owned(),
+                    error.status,
+                    error.scope
+                ),
+                (want.to_owned(), 502, FailureScope::Transport),
+                "{head:?} reset={reset}"
+            );
+        }
+    }
 
     #[test]
     fn proxy_parsing_scheme_mapping_and_redaction() {

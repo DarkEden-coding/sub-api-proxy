@@ -27,7 +27,7 @@ use crate::registry::Registry;
 use crate::scheduler::{Policy, Scheduler};
 
 /// The config snapshot and credential epoch a registry was built from.
-type RegistryCache = (Arc<Config>, (u64, u64), Arc<Registry>);
+type RegistryCache = (Arc<Config>, (u64, u64, u64), Arc<Registry>);
 
 pub struct Runtime {
     config: RwLock<Arc<Config>>,
@@ -254,7 +254,12 @@ impl Runtime {
         let config = self.config();
         // A refreshed static catalog re-registers every credential (Go's model refresh
         // callback), so the catalog generation is part of the key.
-        let generation = (self.store.epoch(), cpa_core::registry::catalog_generation());
+        // Capability probes (Antigravity web search) refine registered models later.
+        let generation = (
+            self.store.epoch(),
+            cpa_core::registry::catalog_generation(),
+            cpa_core::registry::dynamic::capabilities_generation(),
+        );
         let mut cache = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((cfg, g, registry)) = cache.as_ref()
             && Arc::ptr_eq(cfg, &config)
@@ -262,7 +267,10 @@ impl Runtime {
         {
             return registry.clone();
         }
-        let registry = Arc::new(Registry::build(&config, &self.store.snapshot()));
+        let snapshot = self.store.snapshot();
+        let registry = Arc::new(Registry::build(&config, &snapshot));
+        let credentials: Vec<_> = snapshot.iter().map(|c| self.for_executor(c)).collect();
+        self.executors.models_registered(&credentials, &config);
         *cache = Some((config, generation, registry.clone()));
         registry
     }
@@ -324,6 +332,42 @@ impl Runtime {
             }
         }
         Ok(lease)
+    }
+
+    /// A lease on credential `id` outside selection, prepared like [`Self::acquire`]
+    /// (Go's credits fallback, `findAllAntigravityCreditsCandidateAuths` then
+    /// `prepareRequestAuth`). `None` when the credential is gone or preparation fails;
+    /// Go records no result for either.
+    pub(crate) async fn lease_credential(
+        &self,
+        id: &str,
+        selection: Selection,
+        cfg: &Config,
+        prepare: impl FnOnce(&Credential) -> Credential,
+    ) -> Option<Lease> {
+        let mut credential = self.store.get(id)?;
+        if self.executors.readiness(&credential, cfg) == Readiness::PrepareNow {
+            credential = self.prepare_credential(id, cfg, None).await.ok()?;
+        }
+        // Outside selection: the lease answers no bounded window or probe reservation.
+        let picked = self
+            .store
+            .scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .outside_selection_generation();
+        Some(Lease {
+            store: self.store.clone(),
+            credential: Arc::new(prepare(&credential)),
+            execution_model: selection.model.clone(),
+            selection,
+            attempt: self.store.attempts.fetch_add(1, Ordering::Relaxed),
+            policy: self.policy(),
+            reported: false,
+            picked,
+            remote: None,
+            lcp: None,
+        })
     }
 
     /// The installed remote dispatcher (Go Home mode), if any.

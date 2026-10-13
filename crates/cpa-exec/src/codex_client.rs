@@ -96,6 +96,27 @@ pub(crate) fn translate_request(
     ))
 }
 
+/// `TranslateRequestEnvelopeWithCodexMultiAgentV2`: the Responses orphan-delegation and
+/// multi-agent v2 rewrites (no integer tool-type normalization), then
+/// `cpa_translate::translate_request_envelope` with the attempt's model info.
+pub(crate) fn translate_request_envelope(
+    from: Format,
+    to: Format,
+    ctx: &RequestCtx<'_>,
+    body: &[u8],
+    client: &Client<'_>,
+    model_info: Option<&cpa_core::registry::ModelInfo>,
+) -> Result<Vec<u8>, cpa_translate::Error> {
+    let mut payload = body.to_vec();
+    if from == Format::OpenAIResponse {
+        payload = cc::rewrite_orphan_delegation_input(client.headers, &payload, client.settings.orphan_delegation);
+        if !matches!(to, Format::Codex | Format::OpenAIResponse) {
+            payload = cc::rewrite_multi_agent_v2_input(client.headers, &payload, &client.settings, client.is_compat);
+        }
+    }
+    cpa_translate::translate_request_envelope(from, to, ctx, &payload, model_info)
+}
+
 /// Routes whose handler runs Go's `prepareCodexMultiAgentV2Tools` before dispatch (the
 /// Responses HTTP and WebSocket endpoints, not compact). For an eligible client that
 /// sets Go's `CodexMultiAgentV2ToolsPreparedContextKey`.

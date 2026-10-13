@@ -216,7 +216,9 @@ async fn go_reference_scenarios() {
     // Responses output stamps `created_at` and mints call IDs from the wall clock
     // (`call_<UnixNano, hex or decimal>_<n>`); only their shape can match a fixture.
     let created = regex::Regex::new(r#""created_at":1[0-9]{9}([,}])"#).unwrap();
-    let call_ids = regex::Regex::new(r"call_[0-9a-f]{16,20}_").unwrap();
+    // Responses call IDs: `call_<UnixNano>_<n>`, where n is a process-wide counter that
+    // other executors' tests in this binary advance too.
+    let call_ids = regex::Regex::new(r"call_[0-9a-f]{16,20}_[0-9]+").unwrap();
     for s in scenarios {
         let name = s["name"].as_str().unwrap();
         let replies: Vec<Value> = s["replies"].as_array().cloned().unwrap_or_default();
@@ -236,7 +238,8 @@ async fn go_reference_scenarios() {
         }
         let mut req = request(s);
         let reports = std::sync::Arc::new(crate::gemini::tests::UsageReports::default());
-        req.usage = reports.sink();
+        let captures = std::sync::Arc::new(crate::gemini::tests::Captures::default());
+        req.usage = reports.sink().with_capture(captures.sink());
         let (client, alt) = (req.response_format, req.alt.as_deref().is_some_and(|a| !a.is_empty()));
         let mut output = None;
         let mut streamed = Vec::new();
@@ -267,7 +270,7 @@ async fn go_reference_scenarios() {
         let norm = |t: &str| {
             let t = imagen_id.replace_all(t, r#""responseId":"imagen-<nanos>""#);
             let t = created.replace_all(&t, r#""created_at":<unix>$1"#);
-            call_ids.replace_all(&t, "call_<nanos>_").into_owned()
+            call_ids.replace_all(&t, "call_<nanos>_<n>").into_owned()
         };
         assert_eq!(
             output.as_deref().map(norm),
@@ -300,6 +303,38 @@ async fn go_reference_scenarios() {
             .collect();
         assert_eq!(got, want, "{name}: upstream requests");
         reports.check(s);
+        // Every model request is captured with its reply; the token exchange is not
+        // (Go logs only the executor's own request).
+        let mut events: std::collections::VecDeque<_> = captures.events().into();
+        let replies = s["replies"].as_array().cloned().unwrap_or_default();
+        for (i, wire) in want.iter().enumerate() {
+            let target = wire.split(' ').nth(1).unwrap_or_default();
+            if target.split('?').next().unwrap_or_default().ends_with("/token") {
+                continue;
+            }
+            // Go AccountInfo: config keys are API-key accounts, file credentials OAuth ones
+            // named by their email.
+            let key_value = wire
+                .lines()
+                .find_map(|l| l.strip_prefix("X-Goog-Api-Key: "))
+                .unwrap_or_default();
+            let email = s["metadata"]["email"].as_str().unwrap_or_default();
+            let account = if s["config_auth"].as_i64().unwrap() >= 0 {
+                ("api_key", key_value)
+            } else {
+                ("oauth", email)
+            };
+            crate::gemini::tests::check_attempt(
+                name,
+                &mut events,
+                wire,
+                replies.get(i),
+                s["op"] == "stream",
+                "vertex",
+                Some(account),
+            );
+        }
+        assert!(events.is_empty(), "{name}: extra captures {events:?}");
         plain.task.abort();
         proxy.task.abort();
     }
@@ -411,4 +446,72 @@ fn key_file_folded_duplicates_follow_sorted_order() {
     let sa = account(&[("typE", "service_account"), ("type", "bogus")]);
     let token = vertex_auth::token_request(&sa, 1_700_000_000);
     assert_eq!(token.err().as_deref(), Some(r#"unknown credential type: "bogus""#));
+}
+
+/// A proxy that refuses every request and counts the connections it saw.
+async fn refusing_proxy() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let _ = socket
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    (url, hits)
+}
+
+/// TestVertexAccessTokenUsesCredentialProxyNotRequestProxy: the service-account token
+/// exchange goes through the credential's proxy, not the global `proxy-url`. (Rust has
+/// no request-scoped proxy override, the third proxy of Go's case.)
+#[tokio::test]
+async fn token_exchange_uses_the_credential_proxy() {
+    let (credential_proxy, credential_hits) = refusing_proxy().await;
+    let (global_proxy, global_hits) = refusing_proxy().await;
+    let cfg = Config::parse(&format!("proxy-url: {global_proxy}\n")).unwrap();
+    let s = fixture()["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "sa_generate_default_location")
+        .unwrap();
+    let cred = credential(s, &cfg, "127.0.0.1:1", credential_proxy.trim_start_matches("http://"));
+    let executor = VertexExecutor::with_hooks(Hooks::default(), now);
+    let sa = cred.metadata["service_account"].as_object().unwrap().clone();
+    let result = vertex_auth::access_token(&executor.client(&cred, &cfg), &sa, now()).await;
+    assert!(result.is_err(), "{result:?}");
+    assert!(
+        credential_hits.load(Ordering::SeqCst) > 0,
+        "the credential proxy was not used"
+    );
+    assert_eq!(global_hits.load(Ordering::SeqCst), 0, "the global proxy was used");
+}
+
+/// TestStripVertexToolCallIDsReusesPayloadWithoutIDs and
+/// TestStripVertexToolCallIDsRebuildsContentsOnce (helps/vertex_payload_helpers_test.go):
+/// Responses call IDs leave function calls and responses, nested `id` fields and large
+/// integers stay exact, and a payload without IDs is unchanged.
+#[test]
+fn responses_tool_call_ids_are_stripped_like_go() {
+    let without = br#"{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"id":9007199254740993}}}]}]}"#;
+    assert_eq!(
+        strip_tool_call_ids(without.to_vec(), Format::OpenAIResponse),
+        without.to_vec()
+    );
+    let with = br#"{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"id":9007199254740993}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"lookup","response":{"id":"keep"}}}]}]}"#;
+    let out = strip_tool_call_ids(with.to_vec(), Format::OpenAIResponse);
+    let get = |path: &str| cpa_common::json::get(&out, path);
+    assert!(!get("contents.0.parts.0.functionCall.id").exists());
+    assert!(!get("contents.1.parts.0.functionResponse.id").exists());
+    assert_eq!(get("contents.1.parts.0.functionResponse.response.id").str(), "keep");
+    assert_eq!(
+        get("contents.0.parts.0.functionCall.args.id").raw(),
+        b"9007199254740993"
+    );
+    // Other sources keep their IDs.
+    assert_eq!(strip_tool_call_ids(with.to_vec(), Format::Gemini), with.to_vec());
 }

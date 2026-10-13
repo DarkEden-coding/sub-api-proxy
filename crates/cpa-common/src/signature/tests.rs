@@ -1,5 +1,6 @@
-//! Replays every signature call Go's own test suites made at 6fecc6e (see
-//! tests/reference/record), comparing outputs and error text exactly.
+//! Replays every signature call Go's own test suites made at v8.0.27, whose signature
+//! package is 6fecc6e's plus the Antigravity CAQS commits (see tests/reference/record),
+//! comparing outputs and error text exactly.
 
 use serde_json::{Value, json};
 
@@ -116,6 +117,16 @@ fn replay(fn_name: &str, input: &Value) -> Option<Value> {
                 json!({"first_byte": i.first_byte, "envelope_version": i.envelope_version, "channel_id": i.channel_id,
                     "model_text": i.model_text, "block_kind": i.block_kind, "context_id": i.context_id,
                     "signature_len": i.signature_len})
+            });
+            json!({"info": info, "err": err(&r)})
+        }
+        "inspect_antigravity_caqs" => {
+            let r = inspect_antigravity_claude_caqs_signature(b(input));
+            let info = r.as_ref().ok().map(|i| {
+                json!({"first_byte": i.first_byte, "envelope_version": i.envelope_version, "channel_id": i.channel_id,
+                    "model_text": i.model_text, "block_kind": i.block_kind, "context_id": i.context_id,
+                    "signature_len": i.signature_len, "infrastructure": i.infrastructure,
+                    "signature_in_container": i.signature_in_container})
             });
             json!({"info": info, "err": err(&r)})
         }

@@ -214,6 +214,12 @@ impl ClaudeInputTokens {
         }
     }
 
+    /// The same state estimating `original` instead.
+    pub(crate) fn with_original(mut self, original: Bytes) -> Self {
+        self.original = original;
+        self
+    }
+
     /// `state.apply`: patches the first chunk holding a `message_start` event.
     pub(crate) fn apply(&mut self, chunks: &mut [Bytes]) {
         if self.handled {

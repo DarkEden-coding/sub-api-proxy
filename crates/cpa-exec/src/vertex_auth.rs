@@ -535,19 +535,6 @@ pub struct KeyFileView<'a> {
     pub audience: &'a str,
 }
 
-/// Go `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 /// The token request for a key file: Go's `jwtSource` URL and form body, signed at
 /// `now` (Unix seconds), after `CredentialsFromJSON` decoded the key.
 pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, String), String> {
@@ -586,8 +573,8 @@ pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, Strin
     )?;
     let body = format!(
         "assertion={}&grant_type={}",
-        query_escape(&assertion),
-        query_escape(GRANT_TYPE)
+        cpa_common::gostr::query_escape(&assertion),
+        cpa_common::gostr::query_escape(GRANT_TYPE)
     );
     Ok((token_url.to_owned(), body))
 }

@@ -166,6 +166,210 @@ fn carrier_matches_adjacent(blocks: &[Res<'_>], index: usize, direction: &[u8], 
     false
 }
 
+/// geminiClaudeIsValidNonEmptyThinking: a thinking signature valid in place, given the
+/// kind of the next semantic block.
+fn valid_non_empty_thinking(raw: &[u8], next_kind: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    let carrier = decode_carrier(raw);
+    if !carrier.ok {
+        return sig::compatible_signature_for_provider_block(Provider::Gemini, raw, BlockKind::GeminiModelPart)
+            .is_some();
+    }
+    let kind = block_kind(carrier.marked, &carrier.target);
+    if sig::compatible_signature_for_provider_block(Provider::Gemini, &carrier.signature, kind).is_none() {
+        return false;
+    }
+    if carrier.marked {
+        let (direction, target) = (carrier.direction.as_slice(), carrier.target.as_slice());
+        if direction == PREVIOUS.as_bytes() || (direction == STANDALONE.as_bytes() && target == FUNCTION.as_bytes()) {
+            return false;
+        }
+        if direction == NEXT.as_bytes()
+            && (next_kind.is_empty() || (target != ANY.as_bytes() && target != next_kind.as_bytes()))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// geminiClaudePrecomputeCarrierContext: for each block, the kind of the next semantic
+/// block and whether a valid `previous` carrier trails it.
+fn carrier_context(blocks: &[Res<'_>]) -> (Vec<&'static str>, Vec<bool>) {
+    let n = blocks.len();
+    let (mut next_kind, mut trailing) = (vec![""; n], vec![false; n]);
+    let mut previous_target: Option<Vec<u8>> = None;
+    let mut latest: Option<usize> = None;
+    let mut current = "";
+    for i in (0..n).rev() {
+        let block = &blocks[i];
+        next_kind[i] = current;
+        match block.get("type").bytes().as_ref() {
+            b"thinking" => {
+                let text = trim_space(&block.get("thinking").bytes()).to_vec();
+                let raw = trim_space(&block.get("signature").bytes()).to_vec();
+                if text.is_empty() {
+                    let carrier = decode_carrier(&raw);
+                    previous_target = (carrier.ok
+                        && carrier.marked
+                        && carrier.direction == PREVIOUS.as_bytes()
+                        && sig::compatible_signature_for_provider_block(
+                            Provider::Gemini,
+                            &carrier.signature,
+                            block_kind(true, &carrier.target),
+                        )
+                        .is_some())
+                    .then_some(carrier.target);
+                    continue;
+                }
+                if !raw.is_empty() && !valid_non_empty_thinking(&raw, current) {
+                    previous_target = None;
+                    latest = None;
+                    current = "";
+                    continue;
+                }
+                current = TEXT;
+                if previous_target
+                    .as_deref()
+                    .is_some_and(|t| t == ANY.as_bytes() || t == TEXT.as_bytes())
+                    || latest.is_some_and(|l| trailing[l])
+                {
+                    trailing[i] = true;
+                }
+                previous_target = None;
+                latest = Some(i);
+            }
+            kind @ (b"text" | b"tool_use") => {
+                let semantic = if kind == b"tool_use" { FUNCTION } else { TEXT };
+                current = semantic;
+                if previous_target
+                    .as_deref()
+                    .is_some_and(|t| t == ANY.as_bytes() || t == semantic.as_bytes())
+                {
+                    trailing[i] = true;
+                }
+                previous_target = None;
+                latest = Some(i);
+            }
+            _ => {
+                previous_target = None;
+                latest = None;
+                current = "";
+            }
+        }
+    }
+    (next_kind, trailing)
+}
+
+/// StripInvalidGeminiSignatureThinkingBlocks: assistant thinking blocks keep only
+/// signatures (or carriers in a valid position) that can be replayed to Gemini; an
+/// unsigned non-empty thought survives when a carrier covers it.
+pub(crate) fn strip_invalid_gemini_signature_thinking_blocks(payload: &[u8]) -> Vec<u8> {
+    let messages = gj::get(payload, "messages");
+    if !messages.is_array() {
+        return payload.to_vec();
+    }
+    let mut changed = false;
+    let mut message_items: Vec<Vec<u8>> = Vec::new();
+    for message in messages.array() {
+        let mut message_json = message.raw().to_vec();
+        let content = message.get("content");
+        if !content.is_array() {
+            message_items.push(message_json);
+            continue;
+        }
+        let assistant = message.get("role").bytes().eq_ignore_ascii_case(b"assistant");
+        let blocks = content.array();
+        let (next_kind, trailing) = carrier_context(&blocks);
+        let mut content_changed = false;
+        let mut items: Vec<&[u8]> = Vec::with_capacity(blocks.len());
+        let mut pending_target: Vec<u8> = Vec::new();
+        let mut previous_kind = "";
+        for (index, block) in blocks.iter().enumerate() {
+            let kind = block.get("type").bytes();
+            if kind.as_ref() != b"thinking" {
+                pending_target.clear();
+                previous_kind = match kind.as_ref() {
+                    b"tool_use" => FUNCTION,
+                    b"text" => TEXT,
+                    _ => "",
+                };
+                items.push(block.raw());
+                continue;
+            }
+            let raw = trim_space(&block.get("signature").bytes()).to_vec();
+            let text = trim_space(&block.get("thinking").bytes()).to_vec();
+            let pending = pending_target.as_slice();
+            if assistant
+                && raw.is_empty()
+                && !text.is_empty()
+                && (pending == ANY.as_bytes() || pending == TEXT.as_bytes() || trailing[index])
+            {
+                pending_target.clear();
+                previous_kind = TEXT;
+                items.push(block.raw());
+                continue;
+            }
+            let carrier = decode_carrier(&raw);
+            let block_kind = block_kind(carrier.marked, &carrier.target);
+            let target = carrier.target.as_slice();
+            let mut misplaced = false;
+            if carrier.marked {
+                let direction = carrier.direction.as_slice();
+                if direction == NEXT.as_bytes() {
+                    let next = next_kind[index];
+                    misplaced = next.is_empty() || (target != ANY.as_bytes() && target != next.as_bytes());
+                } else if direction == PREVIOUS.as_bytes() {
+                    misplaced =
+                        previous_kind.is_empty() || (target != ANY.as_bytes() && target != previous_kind.as_bytes());
+                } else if direction == STANDALONE.as_bytes() {
+                    misplaced = !text.is_empty() && target == FUNCTION.as_bytes();
+                }
+                if !text.is_empty() && direction == PREVIOUS.as_bytes() {
+                    misplaced = true;
+                }
+            }
+            let inner = if carrier.marked {
+                carrier.signature.as_slice()
+            } else {
+                raw.as_slice()
+            };
+            let drop = !carrier.ok
+                || !assistant
+                || misplaced
+                || sig::compatible_signature_for_provider_block(Provider::Gemini, inner, block_kind).is_none();
+            if drop {
+                pending_target.clear();
+                if !text.is_empty() {
+                    previous_kind = "";
+                }
+                content_changed = true;
+                continue;
+            }
+            pending_target = if carrier.marked && carrier.direction == NEXT.as_bytes() {
+                carrier.target.clone()
+            } else {
+                Vec::new()
+            };
+            if !text.is_empty() {
+                previous_kind = TEXT;
+            }
+            items.push(block.raw());
+        }
+        if content_changed {
+            gj::set_raw(&mut message_json, "content", gj::join(&items));
+            changed = true;
+        }
+        message_items.push(message_json);
+    }
+    if !changed {
+        return payload.to_vec();
+    }
+    gj::try_set_raw(payload, "messages", gj::join(&message_items)).unwrap_or_else(|_| payload.to_vec())
+}
+
 // ---------------------------------------------------------------------------------------
 // Signature resolution
 

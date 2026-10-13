@@ -231,10 +231,11 @@ def judge_route(item, routes, tests):
 
 
 # Provider families with no executor in Rust: their keys are accepted and never used.
-NO_EXECUTOR = {"antigravity": "google", "aistudio": "google"}
+NO_EXECUTOR = {"aistudio": "google"}
 FAMILY_OWNER = {"claude": "claude", "codex": "codex", "gemini": "google", "interactions": "google",
                 "meta": "device-providers", "kimi": "device-providers", "openai-compatibility": "openai-xai",
-                **NO_EXECUTOR, "vertex": "google", "xai": "openai-xai", "devin": "device-providers"}
+                **NO_EXECUTOR, "antigravity": "google", "vertex": "google", "xai": "openai-xai",
+                "devin": "device-providers"}
 SECTION_OWNER = [("management.", "manage"), ("config-version", "manage"), ("plugins.", "plugins"),
                  ("server.discovery", "tui"), ("credentials.", "home"),
                  ("client.codex", "codex"), ("multimedia.", "openai-xai")]
@@ -384,7 +385,7 @@ def main():
 # Milestones whose rows have been reviewed by hand; the others are not rendered yet.
 AUDITED = ["M1", "M2", "M3", "M4", "M5", "M6"]
 # What the audited tree is called in the rendered pages: a release or a date.
-BASE = "2026-10-05"
+BASE = "2026-10-13"
 
 
 def title(r):

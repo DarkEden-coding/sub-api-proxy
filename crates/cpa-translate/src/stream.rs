@@ -280,7 +280,7 @@ pub type ChunkHook = fn(&[u8]) -> Vec<u8>;
 #[derive(Clone, Copy, Default)]
 pub struct StreamOptions {
     /// Each event is one Go translator call, newlines included, as Go's AI Studio
-    /// executor passes every relay chunk (Gemini upstreams only).
+    /// executor passes every relay chunk and its Antigravity executor every payload.
     pub whole_events: bool,
     /// Applied to every chunk the translator returns for an event, before the client's
     /// framing (AI Studio's `ensureColonSpacedJSON`). The tool-input finalization is
