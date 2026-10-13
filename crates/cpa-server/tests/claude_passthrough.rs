@@ -435,3 +435,296 @@ async fn request_log_masks_upstream_credentials() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// What the slow upstream waits before reading a large request body, before answering
+/// it, and before the first event; and what the client waits before the end of its body.
+const READ_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+const HEAD_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+const FIRST_BYTE_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+const CLIENT_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+const USAGE_SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n\
+                         event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                         event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n\
+                         event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+                         event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
+                         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+/// A mock Anthropic upstream on raw sockets with a small receive window, so a body it
+/// has not read stays with the sender. A request body over 1 MiB waits [`READ_PAUSE`]
+/// before it is read, [`HEAD_DELAY`] before the response head and [`FIRST_BYTE_DELAY`]
+/// before the events; smaller ones are answered at once. Connections are kept alive.
+/// Records each request's body length and whether its head had a Content-Length.
+async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(16).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (conn, _) = listener.accept().await.unwrap();
+            // The head and the events go out as written, without waiting for an ACK.
+            conn.set_nodelay(true).unwrap();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut conn = tokio::io::BufReader::new(conn);
+                loop {
+                    let mut length = None;
+                    loop {
+                        let mut line = String::new();
+                        if conn.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end().to_ascii_lowercase();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(value) = line.strip_prefix("content-length:") {
+                            length = Some(value.trim().parse::<usize>().unwrap());
+                        }
+                    }
+                    let slow = length.unwrap_or(0) > 1 << 20;
+                    if slow {
+                        tokio::time::sleep(READ_PAUSE).await;
+                    }
+                    let mut body = vec![0; length.unwrap_or(0)];
+                    conn.read_exact(&mut body).await.unwrap();
+                    seen.lock().unwrap().push((body.len(), length.is_some()));
+                    if slow {
+                        tokio::time::sleep(HEAD_DELAY).await;
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+                        USAGE_SSE.len()
+                    );
+                    conn.get_mut().write_all(head.as_bytes()).await.unwrap();
+                    if slow {
+                        tokio::time::sleep(FIRST_BYTE_DELAY).await;
+                    }
+                    conn.get_mut().write_all(USAGE_SSE.as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    url
+}
+
+/// A proxy whose usage queue keeps records, in front of a Claude API key on
+/// `upstream_url`: the runtime, and the proxy's `/v1/messages` URL.
+async fn usage_proxy(dir: &Path, upstream_url: &str) -> (Arc<cpa_server::Runtime>, String) {
+    let mut config = Config::parse(&format!(
+        "observability:\n  usage:\n    usage-statistics-enabled: true\n\
+         claude-api-key:\n  - api-key: sk-upstream-usage\n    base-url: {upstream_url}\n"
+    ))
+    .unwrap();
+    config.api_keys = vec!["client-key-1".into()];
+    config.auth_dir = dir.into();
+    let creds = cpa_core::config::credentials::from_config(&config)
+        .into_iter()
+        .map(cpa_server::testing::local)
+        .collect();
+    let executors = Executors {
+        claude: ClaudeExecutor::new(upstream_url).unwrap(),
+        codex: Default::default(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(cpa_server::testing::runtime(config, creds, executors));
+    rt.usage_queue().configure(true, &rt.config());
+    cpa_server::install_registry(&rt);
+    let proxy = serve(cpa_server::observability::router(&rt, router(rt.clone()))).await;
+    (rt, format!("{proxy}/v1/messages"))
+}
+
+/// The next `count` usage records, as JSON. A stream's record is published as the
+/// stream ends, so this waits up to 2 s for them.
+async fn usage_records(rt: &cpa_server::Runtime, count: usize) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    for _ in 0..200 {
+        records.extend(rt.usage_queue().pop_oldest(count - records.len()));
+        if records.len() == count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(records.len(), count);
+    records.iter().map(|r| serde_json::from_slice(r).unwrap()).collect()
+}
+
+/// The usage record's timings: every stage of a slow request in order, each gap at
+/// least the delay injected there, the sizes as sent and received, and a second
+/// request on the pooled connection reported as reused.
+#[tokio::test]
+async fn usage_record_times_each_stage() {
+    let _registry = REGISTRY.lock().await;
+    let seen = Arc::default();
+    let upstream_url = slow_upstream(Arc::clone(&seen)).await;
+    let dir = auth_dir("timings", &[]);
+    let (rt, url) = usage_proxy(&dir, &upstream_url).await;
+    let client = wreq::Client::new();
+
+    // More than the client, its socket and the upstream's window can hold while the
+    // upstream waits, so the last of it is handed over only after the wait.
+    let large = format!(
+        r#"{{"model":"claude-opus-5-5","stream":true,"max_tokens":16,"messages":[{{"role":"user","content":"{}"}}]}}"#,
+        "x".repeat(6 << 20)
+    );
+    let (head, tail) = large.as_bytes().split_at(large.len() - 1024);
+    let (head, tail) = (Bytes::copy_from_slice(head), Bytes::copy_from_slice(tail));
+    let body = futures_util::StreamExt::chain(
+        futures_util::stream::iter([Ok::<_, std::io::Error>(head)]),
+        futures_util::stream::once(async move {
+            tokio::time::sleep(CLIENT_DELAY).await;
+            Ok(tail)
+        }),
+    );
+    let res = client
+        .post(&url)
+        .header("x-api-key", "client-key-1")
+        .body(wreq::Body::wrap_stream(body))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    assert_eq!(res.text().await.unwrap(), USAGE_SSE);
+    let small =
+        r#"{"model":"claude-opus-5-5","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+    let res = client
+        .post(&url)
+        .header("x-api-key", "client-key-1")
+        .body(small)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.text().await.unwrap(), USAGE_SSE);
+
+    let records = usage_records(&rt, 2).await;
+    let upstream = seen.lock().unwrap().clone();
+    assert_eq!(upstream.len(), 2);
+    let ms = |record: &serde_json::Value, key: &str| {
+        record["timings"][key]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{key} missing: {record}"))
+    };
+    let at_least = |gap: u64, delay: std::time::Duration, what: &str, record: &serde_json::Value| {
+        // Whole milliseconds on both sides.
+        assert!(gap + 2 >= delay.as_millis() as u64, "{what}: {gap} ms: {record}");
+    };
+
+    let slow = &records[0];
+    let stages = [
+        "client_body_received_ms",
+        "upstream_started_ms",
+        "upstream_connected_ms",
+        "upstream_body_sent_ms",
+        "upstream_headers_ms",
+        "upstream_first_byte_ms",
+        "client_first_byte_ms",
+    ]
+    .map(|key| ms(slow, key));
+    assert!(stages.is_sorted(), "stages out of order: {slow}");
+    let [received, _, connected, sent, headers, first, _] = stages;
+    at_least(received, CLIENT_DELAY, "client body", slow);
+    at_least(sent - connected, READ_PAUSE, "upstream body handed over", slow);
+    at_least(headers - sent, HEAD_DELAY, "upstream response head", slow);
+    at_least(first - headers, FIRST_BYTE_DELAY, "upstream first byte", slow);
+    assert_eq!(slow["timings"]["upstream_connection_reused"], false, "{slow}");
+    assert_eq!(slow["client_request_bytes"], large.len(), "{slow}");
+    // The timed body keeps the exact length on the wire, not a chunked one.
+    assert_eq!(
+        upstream[0],
+        (slow["upstream_request_bytes"].as_u64().unwrap() as usize, true)
+    );
+    assert_eq!(slow["upstream_response_bytes"], USAGE_SSE.len(), "{slow}");
+
+    let quick = &records[1];
+    assert_eq!(quick["timings"]["upstream_connection_reused"], true, "{quick}");
+    assert_eq!(quick["client_request_bytes"], small.len(), "{quick}");
+    assert_eq!(
+        upstream[1],
+        (quick["upstream_request_bytes"].as_u64().unwrap() as usize, true)
+    );
+    assert!(
+        ms(quick, "client_first_byte_ms") >= ms(quick, "upstream_first_byte_ms"),
+        "{quick}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The usage record names the conversation and the prompt prefix: two turns of one
+/// conversation share `session_id`, another conversation gets another one, a session
+/// header is reported as such, and only a changed system prompt changes
+/// `prompt_prefix_hash`. No prompt text is kept.
+#[tokio::test]
+async fn usage_record_names_the_conversation_and_prompt_prefix() {
+    let _registry = REGISTRY.lock().await;
+    let upstream_url = slow_upstream(Arc::default()).await;
+    let dir = auth_dir("conversation", &[]);
+    let (rt, url) = usage_proxy(&dir, &upstream_url).await;
+    let client = wreq::Client::new();
+    let tools = r#"[{"name":"read_file","description":"Reads a file","input_schema":{"type":"object"}}]"#;
+    let body = |system: &str, messages: &str| {
+        format!(
+            r#"{{"model":"claude-opus-5-5","stream":true,"max_tokens":16,"system":[{{"type":"text","text":"{system}"}}],"tools":{tools},"messages":{messages}}}"#
+        )
+    };
+    let first_turn = r#"[{"role":"user","content":"Plan the parser refactor"}]"#;
+    let second_turn = r#"[{"role":"user","content":"Plan the parser refactor"},{"role":"assistant","content":"Done."},{"role":"user","content":"Now the tests"}]"#;
+    let other = r#"[{"role":"user","content":"Fix the login bug"}]"#;
+    let requests = [
+        (body("You are the smart agent.", first_turn), None),
+        (body("You are the smart agent.", second_turn), None),
+        (body("You are the smart agent.", other), None),
+        (body("You are the rush agent.", second_turn), None),
+        (
+            body("You are the smart agent.", first_turn),
+            Some("6f0e8a51-3c2d-4b7a-9e10-2a4b6c8d0e1f"),
+        ),
+    ];
+    for (body, session) in &requests {
+        let mut request = client.post(&url).header("x-api-key", "client-key-1");
+        if let Some(session) = session {
+            request = request.header("x-claude-code-session-id", *session);
+        }
+        let res = request.body(body.clone()).send().await.unwrap();
+        assert_eq!(res.text().await.unwrap(), USAGE_SSE);
+    }
+    let records = usage_records(&rt, requests.len()).await;
+    let field = |i: usize, key: &str| records[i][key].as_str().unwrap_or_default().to_owned();
+    let (session, prefix) = (|i| field(i, "session_id"), |i| field(i, "prompt_prefix_hash"));
+    assert!(!session(0).is_empty(), "{}", records[0]);
+    assert_eq!(session(0), session(1), "one conversation, two turns");
+    assert_ne!(session(0), session(2), "another conversation");
+    for record in &records[..4] {
+        assert_eq!(record["session_source"], "derived", "{record}");
+    }
+    assert_eq!(session(4), "6f0e8a51-3c2d-4b7a-9e10-2a4b6c8d0e1f");
+    assert_eq!(field(4, "session_source"), "header");
+
+    assert_eq!(prefix(0).len(), 16, "{}", records[0]);
+    assert!(prefix(0).bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(prefix(0), prefix(1));
+    assert_eq!(
+        prefix(0),
+        prefix(2),
+        "the same system prompt and tools in another conversation"
+    );
+    assert_eq!(prefix(0), prefix(4));
+    assert_ne!(prefix(0), prefix(3), "another system prompt");
+    for record in &records {
+        let text = record.to_string();
+        for prompt in [
+            "smart agent",
+            "rush agent",
+            "parser refactor",
+            "login bug",
+            "Reads a file",
+        ] {
+            assert!(!text.contains(prompt), "{prompt:?} in {text}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

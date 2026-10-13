@@ -151,6 +151,37 @@ pub trait UsageObserver: Send + Sync {
     /// Go returned before creating its usage reporter (Claude's `responses/compact`
     /// 501): this attempt publishes no record at all, whatever its outcome.
     fn discard(&self) {}
+    /// The attempt's upstream exchange reached `stage` now. Not in Go: cliproxy-rs adds
+    /// these timings and sizes to the usage record.
+    fn upstream_stage(&self, stage: UpstreamStage) {
+        let _ = stage;
+    }
+}
+
+/// A stage of one upstream exchange, as the shared HTTP client sees it
+/// (`cpa_exec::proxy::send_routed`). A redirect sends the request again: `Started`
+/// comes once, `Connected` and `BodySent` for each hop, the rest for the final response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamStage {
+    /// The request is about to be sent.
+    Started,
+    /// The client has a connection, new or pooled, and has started writing the
+    /// request: it asked for the body for the first time. `Connected` and `BodySent`
+    /// come only from a hop that speaks HTTP/1.1 and sends a body.
+    Connected,
+    /// The client took the last of the request body, `bytes` in all, into its write
+    /// buffer. Handed to the transport is not acknowledged by the peer: the client's
+    /// own buffer (about 470 KiB at most) and the kernel's socket buffer may still hold
+    /// the end of the body, and nothing here learns when the peer received it.
+    BodySent { bytes: u64 },
+    /// The response head arrived. `reused`: the request went out on a pooled
+    /// connection; the client dialled none for it.
+    Headers { reused: bool },
+    /// The first response body bytes arrived.
+    FirstByte,
+    /// The response body ended or was dropped after `bytes`, as received (before any
+    /// content decoding).
+    BodyRead { bytes: u64 },
 }
 
 /// A handle executors report usage through; cloning shares the observer.
@@ -249,6 +280,13 @@ impl UsageSink {
     pub fn discard(&self) {
         if let Some(o) = &self.0 {
             o.discard();
+        }
+    }
+
+    /// See [`UsageObserver::upstream_stage`].
+    pub fn upstream_stage(&self, stage: UpstreamStage) {
+        if let Some(o) = &self.0 {
+            o.upstream_stage(stage);
         }
     }
 }

@@ -56,7 +56,8 @@ impl Transport {
     fn build(&self, profile: Profile, proxy: &Proxy) -> wreq::Result<wreq::Client> {
         let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
         builder = match profile {
-            Profile::Native => builder
+            // Inference requests are timed for the usage record.
+            Profile::Native => crate::proxy::watch_connections(builder)
                 .http1_only()
                 .tls_options(options(false))
                 .tls_session_cache(LruTlsSessionCache::new(SESSION_CACHE)),

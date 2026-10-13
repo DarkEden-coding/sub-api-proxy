@@ -20,12 +20,103 @@ pub struct RequestId(pub String);
 
 tokio::task_local! {
     static REQUEST_ID: String;
+    static CLOCK: RequestClock;
 }
 
 /// Request-local identity for dispatch code without an HTTP extractor. Captured
 /// before dispatch spawns work; never stored in a process-global mutable slot.
 pub(crate) fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok().filter(|id| !id.is_empty())
+}
+
+/// When an inference request arrived and when its body was in, the origin of the
+/// usage record's timings.
+#[derive(Debug, Clone, Copy)]
+pub struct Clock {
+    /// The server accepted the request: its head was read and routing began.
+    pub accepted: Instant,
+    /// The request body was read to its end, and its size as received.
+    pub body: Option<(Instant, u64)>,
+}
+
+impl Clock {
+    /// A request that did not arrive over HTTP (a WebSocket turn, an internal call)
+    /// counts from now.
+    pub fn now() -> Self {
+        Self {
+            accepted: Instant::now(),
+            body: None,
+        }
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self::now()
+    }
+}
+
+struct RequestClock {
+    accepted: Instant,
+    body: std::cell::Cell<Option<(Instant, u64)>>,
+}
+
+/// The clock of the HTTP request being handled, as far as it has run.
+pub(crate) fn current_clock() -> Clock {
+    CLOCK
+        .try_with(|clock| Clock {
+            accepted: clock.accepted,
+            body: clock.body.get(),
+        })
+        .unwrap_or_else(|_| Clock::now())
+}
+
+/// An inference request's body, counted as it is read: the end goes to [`CLOCK`].
+/// Cost: one box per request and an addition per chunk.
+struct Received {
+    body: Body,
+    bytes: u64,
+    done: bool,
+}
+
+impl Received {
+    fn finish(&mut self) {
+        if !std::mem::replace(&mut self.done, true) {
+            let bytes = self.bytes;
+            let _ = CLOCK.try_with(|clock| clock.body.set(Some((Instant::now(), bytes))));
+        }
+    }
+}
+
+impl HttpBody for Received {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let result = Pin::new(&mut self.body).poll_frame(cx);
+        match &result {
+            Poll::Ready(Some(Ok(frame))) => {
+                self.bytes += frame.data_ref().map_or(0, |data| data.len() as u64);
+                if self.body.is_end_stream() {
+                    self.finish();
+                }
+            }
+            Poll::Ready(None) => self.finish(),
+            _ => {}
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 #[derive(Clone)]
@@ -59,7 +150,8 @@ async fn access_log(State(state): State<Access>, mut request: Request, next: Nex
     let client = state
         .proxies
         .client_ip(peer, |name| request.headers().get(name).map(|v| v.as_bytes()));
-    let id = if is_ai_path(&path) {
+    let inference = is_ai_path(&path);
+    let id = if inference {
         let id = crate::dispatch::request_id();
         request.extensions_mut().insert(RequestId(id.clone()));
         id
@@ -82,7 +174,24 @@ async fn access_log(State(state): State<Access>, mut request: Request, next: Nex
         id,
         health,
     }));
-    let response = REQUEST_ID.scope(context_id, next.run(request)).await;
+    let response = if inference {
+        let request = request.map(|body| {
+            Body::new(Received {
+                body,
+                bytes: 0,
+                done: false,
+            })
+        });
+        let clock = RequestClock {
+            accepted: start,
+            body: Default::default(),
+        };
+        REQUEST_ID
+            .scope(context_id, CLOCK.scope(clock, next.run(request)))
+            .await
+    } else {
+        REQUEST_ID.scope(context_id, next.run(request)).await
+    };
     let status = response.status().as_u16();
     if health && (200..300).contains(&status) {
         log.0 = None;

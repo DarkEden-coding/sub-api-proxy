@@ -1086,7 +1086,7 @@ impl CodexExecutor {
                 order: None,
             })
         };
-        let sent = proxy::send_routed(&route, url, go, body, None).await;
+        let sent = proxy::send_routed(&route, url, go, body, None, None).await;
         if let Err(e) = &sent {
             // `RecordAPIResponseError` on a transport failure.
             target

@@ -33,6 +33,12 @@ pub struct SessionInfo {
     pub client_type: &'static str,
     pub is_fork: bool,
     pub is_subagent: bool,
+    /// Where the session came from, for the usage record (not in Go): `header` (a
+    /// client session header), `metadata` (a session in Claude `metadata.user_id`),
+    /// `user_id` (a plain `metadata.user_id`, which names a user rather than one
+    /// conversation), `body` (another body field) or `execution` (the execution
+    /// session).
+    pub source: &'static str,
 }
 
 /// Go `NormalizeExplicitID`: printable, trimmed, at most 256 bytes.
@@ -579,6 +585,7 @@ pub fn extract_session_info(
     let sid = header(headers, "X-Claude-Code-Session-Id");
     if !sid.is_empty() {
         info.client_type = "claude";
+        info.source = "header";
         let mut agent = header(headers, "X-Claude-Code-Agent-Id");
         if agent.is_empty() && body.exists {
             agent = body.root_then_req(&["metadata.agent_id", "metadata.subagent_id"]);
@@ -615,6 +622,7 @@ pub fn extract_session_info(
         let (sid, parent_sid, mut agent) = claude_metadata_identities(payload);
         if !sid.is_empty() {
             info.client_type = "claude";
+            info.source = "metadata";
             if agent.is_empty() {
                 agent = header(headers, "X-Claude-Code-Agent-Id");
             }
@@ -654,13 +662,17 @@ pub fn extract_session_info(
 
     // 3. OpenAI / Codex CLI headers.
     if let Some(info) = codex(headers, &body, parent) {
-        return finalize(info);
+        return finalize(SessionInfo {
+            source: "header",
+            ..info
+        });
     }
 
     // 4. Antigravity CLI.
     let sid = header(headers, "X-Http-Session-Id");
     if !sid.is_empty() {
         info.client_type = "agy";
+        info.source = "header";
         info.session_id = format!("agy:{sid}");
         let parent_sid = first_header(
             headers,
@@ -682,6 +694,7 @@ pub fn extract_session_info(
             continue;
         }
         info.client_type = family.client;
+        info.source = "header";
         info.session_id = format!("{}{sid}", family.prefix);
         let parent_sid = first_header(headers, family.parents);
         child_of(&mut info, family.prefix, &sid, &parent_sid, parent, family.main);
@@ -693,12 +706,14 @@ pub fn extract_session_info(
         && body.exists
         && let Some(info) = payload_session(headers, &body, parent)
     {
-        return finalize(info);
+        let source = if info.source.is_empty() { "body" } else { info.source };
+        return finalize(SessionInfo { source, ..info });
     }
 
     // 7. Execution session metadata.
     if let Some(id) = execution_session.map(normalize_explicit_id).filter(|id| !id.is_empty()) {
         info.client_type = "generic";
+        info.source = "execution";
         info.session_id = format!("execution:{id}");
         info.agent_name = "main".into();
         return finalize(info);
@@ -1021,6 +1036,7 @@ fn payload_session(headers: &HeaderMap, body: &Body<'_>, parent: &str) -> Option
     }
     if !user.is_empty() {
         info.client_type = "generic";
+        info.source = "user_id";
         info.session_id = format!("user:{user}");
         info.agent_name = "main".into();
         return Some(info);
@@ -1114,6 +1130,12 @@ pub struct Meta<'a> {
 /// Go `extractExplicitSessionIDs`: the explicit identity and its fallback (the parent,
 /// or the conversation alias of a prompt-cache-key session), plus the fork flag.
 pub fn explicit_session_ids(headers: &HeaderMap, payload: &[u8], meta: &Meta<'_>) -> (String, String, bool) {
+    let (primary, fallback, fork, _) = explicit_session(headers, payload, meta);
+    (primary, fallback, fork)
+}
+
+/// [`explicit_session_ids`] and where the identity came from ([`SessionInfo::source`]).
+pub fn explicit_session(headers: &HeaderMap, payload: &[u8], meta: &Meta<'_>) -> (String, String, bool, &'static str) {
     let Some(info) = extract_session_info(headers, payload, meta.execution_session) else {
         return Default::default();
     };
@@ -1121,7 +1143,7 @@ pub fn explicit_session_ids(headers: &HeaderMap, payload: &[u8], meta: &Meta<'_>
     if fallback.is_empty() && info.session_id.starts_with("pck:") && !payload.is_empty() {
         fallback = conversation_alias(&Body::new(payload));
     }
-    (info.session_id, fallback, info.is_fork)
+    (info.session_id, fallback, info.is_fork, info.source)
 }
 
 /// Go `extractSessionIDs`: explicit identity, then `derived:<id>`, then the

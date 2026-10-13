@@ -6,6 +6,10 @@
 //! that forward those payloads through `ExecRequest::usage` get the same parse here;
 //! otherwise the dispatch loop parses the client-format response, which matches Go
 //! whenever the upstream speaks the client's format.
+//!
+//! The queued record adds what Go's lacks, after Go's fields: where its `session_id`
+//! came from, a [`prompt_prefix`] hash, per-stage [`Timings`] and byte counts
+//! (docs/DIFFERENCES-FROM-GO.md).
 
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
@@ -1233,6 +1237,9 @@ pub struct Client {
     /// Go `NodeKind` and `IsCompaction`: set only by an LCP pick (`fork`, `compaction`).
     pub node_kind: String,
     pub is_compaction: bool,
+    /// Where `session_id` came from (`crate::session::Session::source`), `lcp` for an
+    /// LCP pick's session or `home` for Home's. Not in Go.
+    pub session_source: &'static str,
     pub request_id: String,
     /// `METHOD /route/template`.
     pub endpoint: String,
@@ -1268,6 +1275,79 @@ pub struct Record {
     pub response_model: String,
     /// Upstream response headers, names as received.
     pub response_headers: Vec<(String, Vec<String>)>,
+    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
+    pub prompt_prefix_hash: String,
+    pub timings: Timings,
+}
+
+/// Where an attempt's time went, in milliseconds from when the server accepted the
+/// client request, and the bytes it moved. Not in Go's record: cliproxy-rs adds these
+/// fields (docs/DIFFERENCES-FROM-GO.md), and leaves out each one it did not see. The
+/// upstream stages come from the shared HTTP client ([`cpa_core::exec::UpstreamStage`]),
+/// which the Claude executor times; other executors leave them out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Timings {
+    /// The client request body was read to its end.
+    pub client_body_received_ms: Option<i64>,
+    /// The upstream request was about to be sent.
+    pub upstream_started_ms: Option<i64>,
+    /// The upstream client had a connection and started writing the request.
+    pub upstream_connected_ms: Option<i64>,
+    /// The upstream request went out on a pooled connection.
+    pub upstream_connection_reused: Option<bool>,
+    /// The upstream client took the last of the request body into its write buffer.
+    /// Handed over, not acknowledged: up to about 470 KiB of the body, plus what the
+    /// kernel's socket buffer holds, may not have reached the upstream yet.
+    pub upstream_body_sent_ms: Option<i64>,
+    /// The upstream response head arrived.
+    pub upstream_headers_ms: Option<i64>,
+    /// The first upstream response body bytes arrived.
+    pub upstream_first_byte_ms: Option<i64>,
+    /// The server took the first response bytes for the client. Streams only: a
+    /// buffered response's record is published before its body is written.
+    pub client_first_byte_ms: Option<i64>,
+    /// The client request body, as received.
+    pub client_request_bytes: Option<i64>,
+    /// The upstream request body, as sent.
+    pub upstream_request_bytes: Option<i64>,
+    /// The upstream response body, as received (before any content decoding).
+    pub upstream_response_bytes: Option<i64>,
+}
+
+impl Timings {
+    /// The fields after Go's: a `timings` object and the byte counts.
+    fn write(&self, w: &mut Writer) {
+        let stages = [
+            ("client_body_received_ms", self.client_body_received_ms),
+            ("upstream_started_ms", self.upstream_started_ms),
+            ("upstream_connected_ms", self.upstream_connected_ms),
+            ("upstream_body_sent_ms", self.upstream_body_sent_ms),
+            ("upstream_headers_ms", self.upstream_headers_ms),
+            ("upstream_first_byte_ms", self.upstream_first_byte_ms),
+            ("client_first_byte_ms", self.client_first_byte_ms),
+        ];
+        if stages.iter().any(|(_, v)| v.is_some()) || self.upstream_connection_reused.is_some() {
+            w.object("timings", |t| {
+                for (key, value) in stages {
+                    if let Some(value) = value {
+                        t.int(key, value);
+                    }
+                }
+                if let Some(reused) = self.upstream_connection_reused {
+                    t.bool("upstream_connection_reused", reused);
+                }
+            });
+        }
+        for (key, value) in [
+            ("client_request_bytes", self.client_request_bytes),
+            ("upstream_request_bytes", self.upstream_request_bytes),
+            ("upstream_response_bytes", self.upstream_response_bytes),
+        ] {
+            if let Some(value) = value {
+                w.int(key, value);
+            }
+        }
+    }
 }
 
 struct Writer(Vec<u8>, bool);
@@ -1291,8 +1371,10 @@ impl Writer {
         }
     }
     fn int(&mut self, k: &str, v: i64) {
+        use std::io::Write;
         self.key(k);
-        self.0.extend_from_slice(v.to_string().as_bytes());
+        // Straight into the record: no string per number.
+        let _ = write!(self.0, "{v}");
     }
     fn bool(&mut self, k: &str, v: bool) {
         self.key(k);
@@ -1445,6 +1527,10 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.str("service_tier", &service_tier);
     w.opt_str("response_service_tier", detail.response_service_tier.trim());
     w.opt_str("response_model", record.response_model.trim());
+    // Not in Go's record (docs/DIFFERENCES-FROM-GO.md).
+    w.opt_str("session_source", client.session_source);
+    w.opt_str("prompt_prefix_hash", &record.prompt_prefix_hash);
+    record.timings.write(&mut w);
     w.0.push(b'}');
     w.0
 }
@@ -1463,6 +1549,10 @@ pub struct Facts {
     pub service_tier: String,
     pub generate: bool,
     pub stream: bool,
+    /// When the request arrived: the origin of every attempt's [`Timings`].
+    pub clock: crate::observability::Clock,
+    /// [`prompt_prefix`] of the client body.
+    pub prompt_prefix_hash: String,
 }
 
 impl Facts {
@@ -1480,8 +1570,54 @@ impl Facts {
             service_tier: if tier.is_empty() { "auto".into() } else { tier },
             generate: !(generate.is_bool() && !generate.bool()),
             stream,
+            clock: crate::observability::Clock::now(),
+            prompt_prefix_hash: prompt_prefix(entry, body),
         }
     }
+}
+
+/// A fingerprint of the client's system prompt and tool definitions as it sent them
+/// (before translation or cloaking, `cache_control` markers included): the first 64
+/// bits of a SHA-256 over the raw `tools` and system values, in hex. Requests with the
+/// same value share their cacheable prefix up to the messages; a different mode or a
+/// subagent shows as another value. Nothing of the text itself is kept. Empty when the
+/// body has neither value, or for a format whose system prompt sits among its messages.
+/// Cost: one walk over the body's top-level members (large values are skipped by
+/// bracket matching; nothing is decoded or copied), SHA-256 over the two values, and
+/// one 16-byte string.
+// ponytail: Chat Completions, Antigravity and Interactions bodies get none (their system
+// prompt is a message or sits in an envelope); add a lookup when a client of theirs
+// needs one.
+fn prompt_prefix(format: Format, body: &[u8]) -> String {
+    use sha2::Digest;
+    let system: &[&[u8]] = match format {
+        Format::Claude => &[b"system"],
+        Format::OpenAIResponse | Format::Codex => &[b"instructions"],
+        Format::Gemini => &[b"systemInstruction", b"system_instruction"],
+        _ => return String::new(),
+    };
+    let (mut tools, mut instructions) = (None, None);
+    gj::object_members(body, |key, escaped, value| {
+        if !escaped && key == b"tools" {
+            tools.get_or_insert(value);
+        } else if !escaped && system.contains(&key) {
+            instructions.get_or_insert(value);
+        }
+        tools.is_none() || instructions.is_none()
+    });
+    if tools.is_none() && instructions.is_none() {
+        return String::new();
+    }
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"cpa:prompt-prefix:v1\0");
+    for value in [tools, instructions] {
+        // Length first, so the boundary between the two values is unambiguous.
+        let value = value.unwrap_or_default();
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value);
+    }
+    let digest = hash.finalize();
+    format!("{:016x}", u64::from_be_bytes(digest[..8].try_into().expect("8 bytes")))
 }
 
 /// Go executor identity for a credential's provider: `Identifier()` and the
@@ -1570,6 +1706,42 @@ struct Outcome {
     ttft: std::time::Duration,
 }
 
+/// The upstream exchange's stages as the shared HTTP client reported them; a later
+/// hop's mark replaces an earlier one, except the start.
+#[derive(Default)]
+struct Exchange {
+    started: Option<std::time::Instant>,
+    connected: Option<std::time::Instant>,
+    body_sent: Option<std::time::Instant>,
+    headers: Option<std::time::Instant>,
+    first_byte: Option<std::time::Instant>,
+    reused: Option<bool>,
+    request_bytes: Option<u64>,
+    response_bytes: Option<u64>,
+}
+
+impl Exchange {
+    fn mark(&mut self, stage: cpa_core::exec::UpstreamStage, now: std::time::Instant) {
+        use cpa_core::exec::UpstreamStage;
+        match stage {
+            UpstreamStage::Started => {
+                self.started.get_or_insert(now);
+            }
+            UpstreamStage::Connected => self.connected = Some(now),
+            UpstreamStage::BodySent { bytes } => {
+                self.body_sent = Some(now);
+                self.request_bytes = Some(bytes);
+            }
+            UpstreamStage::Headers { reused } => {
+                self.headers = Some(now);
+                self.reused = Some(reused);
+            }
+            UpstreamStage::FirstByte => self.first_byte = Some(now),
+            UpstreamStage::BodyRead { bytes } => self.response_bytes = Some(bytes),
+        }
+    }
+}
+
 /// What an executor reported through `ExecRequest::usage`.
 #[derive(Default)]
 struct Reported {
@@ -1584,6 +1756,7 @@ struct Reported {
     outcome: Option<Outcome>,
     /// Go created no reporter for this attempt: publish nothing.
     discarded: bool,
+    exchange: Exchange,
 }
 
 impl Reported {
@@ -1687,6 +1860,11 @@ impl cpa_core::exec::UsageObserver for Observer {
     fn discard(&self) {
         self.lock().discarded = true;
     }
+
+    fn upstream_stage(&self, stage: cpa_core::exec::UpstreamStage) {
+        let now = std::time::Instant::now();
+        self.lock().exchange.mark(stage, now);
+    }
 }
 
 /// How the attempt ended for the server.
@@ -1710,6 +1888,8 @@ pub struct Tracker {
     body: Option<Detail>,
     model: ResponseModel,
     first: Option<std::time::Duration>,
+    /// The server took the first response bytes for the client.
+    client_first: Option<std::time::Instant>,
     published: bool,
     /// The request's client facts under this attempt's session, when it has its own:
     /// Home's canonical session for a dispatched credential, else its LCP pick's.
@@ -1736,6 +1916,7 @@ impl Tracker {
         client.node_kind = node_kind.into();
         client.is_fork = fork;
         client.is_compaction = compaction;
+        client.session_source = "lcp";
         self.client = Some(client);
     }
 
@@ -1795,6 +1976,7 @@ impl Tracker {
             body: None,
             model: ResponseModel::default(),
             first: None,
+            client_first: None,
             published: false,
             client: home_client,
             requested_at: now.fixed_offset(),
@@ -1835,6 +2017,12 @@ impl Tracker {
         for line in event.split(|b| *b == b'\n') {
             self.line(line);
         }
+    }
+
+    /// The server took the response's first bytes for the client; later calls change
+    /// nothing.
+    pub fn client_first_byte(&mut self) {
+        self.client_first.get_or_insert_with(std::time::Instant::now);
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -1917,6 +2105,8 @@ impl Tracker {
         }
         record.latency_ms = latency.as_millis() as i64;
         record.ttft_ms = ttft.as_millis() as i64;
+        record.timings = self.timings(&reported.exchange);
+        record.prompt_prefix_hash = self.facts.prompt_prefix_hash.clone();
         if let Some(effort) = reported.effort {
             record.reasoning_effort = effort;
         }
@@ -1933,6 +2123,28 @@ impl Tracker {
 }
 
 impl Tracker {
+    /// The record's [`Timings`]: each mark as an offset from the request's arrival.
+    fn timings(&self, exchange: &Exchange) -> Timings {
+        let clock = self.facts.clock;
+        let ms = |at: Option<std::time::Instant>| {
+            at.map(|at| i64::try_from(at.saturating_duration_since(clock.accepted).as_millis()).unwrap_or(i64::MAX))
+        };
+        let bytes = |n: Option<u64>| n.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+        Timings {
+            client_body_received_ms: ms(clock.body.map(|(at, _)| at)),
+            upstream_started_ms: ms(exchange.started),
+            upstream_connected_ms: ms(exchange.connected),
+            upstream_connection_reused: exchange.reused,
+            upstream_body_sent_ms: ms(exchange.body_sent),
+            upstream_headers_ms: ms(exchange.headers),
+            upstream_first_byte_ms: ms(exchange.first_byte),
+            client_first_byte_ms: ms(self.client_first),
+            client_request_bytes: bytes(clock.body.map(|(_, n)| n)),
+            upstream_request_bytes: bytes(exchange.request_bytes),
+            upstream_response_bytes: bytes(exchange.response_bytes),
+        }
+    }
+
     /// Go `usageAdapter.HandleUsage`'s record.
     fn plugin_record(
         &self,
@@ -2103,6 +2315,7 @@ fn home_session<'a>(client: &'a Client, credential: &cpa_core::credential::Crede
     let parent = attr(crate::remote::PARENT_SESSION);
     let mut client = client.clone();
     client.session_id = session.to_owned();
+    client.session_source = "home";
     client.parent_session_id = if parent == session {
         String::new()
     } else {
@@ -2378,6 +2591,9 @@ mod tests {
                             .collect()
                     })
                     .unwrap_or_default(),
+                // Go's record has neither: none are written.
+                prompt_prefix_hash: String::new(),
+                timings: Timings::default(),
             };
             let client = Client {
                 client_ip: s("client_ip"),
@@ -2389,6 +2605,7 @@ mod tests {
                 is_fork: false,
                 node_kind: String::new(),
                 is_compaction: false,
+                session_source: "",
                 request_id: s("request_id"),
                 endpoint: s("endpoint"),
                 api_key: s("client_key"),
@@ -2678,6 +2895,8 @@ mod tests {
                 },
                 generate: true,
                 stream: true,
+                clock: crate::observability::Clock::now(),
+                prompt_prefix_hash: String::new(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();
@@ -2709,6 +2928,15 @@ mod tests {
                     Some(36)
                 );
             }
+            // Not in Go's record (docs/DIFFERENCES-FROM-GO.md): Home's canonical session
+            // says where it came from.
+            let source = got[0].as_object_mut().unwrap().remove("session_source");
+            let home = name == "count_tokens_oauth_runtime";
+            assert_eq!(
+                source.as_ref().and_then(Value::as_str),
+                home.then_some("home"),
+                "{name}"
+            );
             assert_eq!(got[0], want, "{name}");
         }
     }
