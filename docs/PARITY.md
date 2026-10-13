@@ -2,6 +2,8 @@
 
 cliproxy-rs aims to behave like CLIProxyAPI at commit [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/tree/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10): the same `config.yaml`, the same credential files, the same routes and the same answers. To track how close it is, every route, translation, config setting, plugin method and Go test file in that commit is listed as one item, 1,687 in all, and each item is audited against this repository.
 
+One part follows a later release: the Claude executor's prompt-cache and prompt-shaping fixes, thread continuation, and Claude rate-limit and missing-thread answers follow [v8.0.27](https://github.com/router-for-me/CLIProxyAPI/tree/bf9341629ef2300ac9d846a2e80fe2756f63a671) (session-pinned `currentDate` reminder, explicit `prompt_cache_options`, caller system prompt placement, thread breakpoints and tool aliases, invalid `cache_control` markers, overage billing resets). Goldens recorded from v8.0.27 check them; [`parity-audit/upstream-v8.0.27.md`](parity-audit/upstream-v8.0.27.md) lists every Go commit between the two and which of them are ported.
+
 ## What works today
 
 - Client APIs: `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic), `POST /v1/chat/completions`, `/v1/completions`, `/v1/responses` and `/v1/responses/compact` (OpenAI), `/v1beta/models/...` and `/v1beta/interactions` (Gemini), `GET /v1/models`, and the Codex paths under `/backend-api/codex/`. Streaming (SSE) and non-streaming, with format translation between the three protocols.
