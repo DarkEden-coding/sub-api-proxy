@@ -660,6 +660,10 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
     };
     // Go resolves providers before the lifecycle starts: an unknown model never starts one.
     let resolved = route(rt, &rt.registry(), &call, routed.as_ref()).map_err(|e| e.failure)?;
+    // The usage record's prompt prefix is the client's, before interceptors rewrite it.
+    if call.operation == Operation::Generate && rt.usage_queue().accepts() {
+        trace.prompt_prefix(call.entry, &call.body);
+    }
     let mut call = call;
     let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1, true).await?;
     let result = retry_bootstrap(rt, call, trace, &resolved, hooks.as_ref()).await;
@@ -748,6 +752,11 @@ pub struct Trace(
     cpa_core::exec::CaptureSink,
     /// Response headers plugin interceptors changed (Go `downstreamHeadersAfterInterceptors`).
     std::sync::Mutex<HeaderMap>,
+    /// When the request arrived, for the usage record's timings.
+    Arc<crate::observability::Clock>,
+    /// The client's prompt prefix before plugin interceptors rewrite the body
+    /// (`crate::usage_record::prompt_prefix`).
+    std::sync::OnceLock<String>,
 );
 
 impl Trace {
@@ -760,6 +769,8 @@ impl Trace {
             crate::request_logging::current()
                 .map(|log| log.capture_sink())
                 .unwrap_or_default(),
+            Default::default(),
+            crate::observability::current_clock(),
             Default::default(),
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
@@ -818,6 +829,18 @@ impl Trace {
     /// The trace ID once a credential was selected.
     pub(crate) fn id(&self) -> Option<String> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn clock(&self) -> Arc<crate::observability::Clock> {
+        self.4.clone()
+    }
+
+    /// The prompt prefix hash of the request's body, from the first body it is asked
+    /// for: before plugin interceptors when [`run_with_bootstrap_retries`] asks.
+    pub(crate) fn prompt_prefix(&self, format: Format, body: &[u8]) -> String {
+        self.5
+            .get_or_init(|| crate::usage_record::prompt_prefix(format, body))
+            .clone()
     }
 }
 
@@ -922,6 +945,7 @@ async fn run_routed(
             &call.model,
             &call.body,
             call.stream,
+            trace,
         ))
     });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
@@ -2244,6 +2268,7 @@ fn usage_client(
         is_fork: session.fork,
         node_kind: String::new(),
         is_compaction: false,
+        session_source: session.source,
         request_id: trace.request_id(),
         // Session turns arrive on the WebSocket upgrade (a GET).
         endpoint: format!(
@@ -2311,7 +2336,9 @@ fn track_usage(done: Done, tracker: Option<crate::usage_record::Tracker>) -> Don
     }
 }
 
-/// A client stream that reports its events to the attempt's usage record.
+/// A client stream that reports its events to the attempt's usage record. The upstream
+/// stream goes before the record publishes, so the record has the upstream body's size:
+/// dropped on its end or error, and first when the client goes away (field order).
 struct Tracked {
     inner: ExecStream,
     tracker: Option<crate::usage_record::Tracker>,
@@ -2331,12 +2358,15 @@ impl futures_util::Stream for Tracked {
                     t.event(event);
                 }
             }
+            // A boxed empty stream does not allocate.
             Some(Err(error)) => {
+                self.inner = futures_util::stream::empty().boxed();
                 if let Some(t) = self.tracker.take() {
                     t.fail(error);
                 }
             }
             None => {
+                self.inner = futures_util::stream::empty().boxed();
                 if let Some(t) = self.tracker.take() {
                     t.succeed();
                 }
@@ -2524,6 +2554,89 @@ mod tests {
         assert_eq!(response.status().as_u16(), 429);
         assert_eq!(response.headers()["content-type"], "text/plain");
         assert!(response.headers().get("retry-after").is_none());
+    }
+
+    /// A stream's usage record publishes once its upstream stream is gone, so it has the
+    /// upstream body size the stream reports when dropped: on an error the stream
+    /// yields while it still holds its upstream body, at its end, and when the client
+    /// goes away.
+    #[tokio::test]
+    async fn stream_records_publish_after_the_upstream_stream_is_dropped() {
+        use cpa_core::exec::{UpstreamStage, UsageSink};
+        use std::task::Poll;
+        /// What the upstream body reports when it is dropped.
+        struct UpstreamBody(UsageSink);
+        impl Drop for UpstreamBody {
+            fn drop(&mut self) {
+                self.0.upstream_stage(UpstreamStage::BodyRead { bytes: 42 });
+            }
+        }
+        let cfg = Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg.clone(), Vec::new(), executors));
+        rt.usage_queue().configure(true, &cfg);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("type".into(), "claude".into());
+        let credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/auth"),
+            std::path::Path::new("/auth/a.json"),
+            metadata,
+        )
+        .unwrap();
+        let facts = Arc::new(crate::usage_record::Facts::new(
+            Default::default(),
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            true,
+            &Trace::default(),
+        ));
+        for ending in ["error", "end", "client gone"] {
+            let tracker = crate::usage_record::Tracker::start(&rt, &facts, &credential, "m");
+            let body = UpstreamBody(tracker.sink());
+            // Polled, it answers without letting go of the upstream body.
+            let rest = futures_util::stream::poll_fn(move |_| {
+                let _held = &body;
+                match ending {
+                    "error" => Poll::Ready(Some(Err(ExecError::local(
+                        502,
+                        cpa_core::exec::FailureScope::Request,
+                        "restore failed",
+                    )))),
+                    "end" => Poll::Ready(None),
+                    _ => Poll::Pending,
+                }
+            })
+            .boxed();
+            let done = track_usage(
+                Done::Stream {
+                    headers: HeaderMap::new(),
+                    first: None,
+                    rest,
+                },
+                Some(tracker),
+            );
+            let Done::Stream { mut rest, .. } = done else {
+                unreachable!()
+            };
+            if ending == "client gone" {
+                assert!(futures_util::poll!(rest.next()).is_pending());
+                drop(rest);
+            } else {
+                assert!(!matches!(rest.next().await, Some(Ok(_))));
+            }
+            let records = rt.usage_queue().pop_oldest(10);
+            assert_eq!(records.len(), 1, "{ending}");
+            let record: serde_json::Value = serde_json::from_slice(&records[0]).unwrap();
+            assert_eq!(record["upstream_response_bytes"], 42, "{ending}: {record}");
+        }
     }
 
     /// Go `isConnectionLifecycleError` on the texts executors produce.

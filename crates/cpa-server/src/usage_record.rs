@@ -6,6 +6,10 @@
 //! that forward those payloads through `ExecRequest::usage` get the same parse here;
 //! otherwise the dispatch loop parses the client-format response, which matches Go
 //! whenever the upstream speaks the client's format.
+//!
+//! The queued record adds what Go's lacks, after Go's fields: where its `session_id`
+//! came from, a [`prompt_prefix`] hash, per-stage [`Timings`] and byte counts
+//! (docs/DIFFERENCES-FROM-GO.md).
 
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
@@ -1233,6 +1237,9 @@ pub struct Client {
     /// Go `NodeKind` and `IsCompaction`: set only by an LCP pick (`fork`, `compaction`).
     pub node_kind: String,
     pub is_compaction: bool,
+    /// Where `session_id` came from (`crate::session::Session::source`), `lcp` for an
+    /// LCP pick's session or `home` for Home's. Not in Go.
+    pub session_source: &'static str,
     pub request_id: String,
     /// `METHOD /route/template`.
     pub endpoint: String,
@@ -1268,6 +1275,84 @@ pub struct Record {
     pub response_model: String,
     /// Upstream response headers, names as received.
     pub response_headers: Vec<(String, Vec<String>)>,
+    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
+    pub prompt_prefix_hash: String,
+    pub timings: Timings,
+}
+
+/// Where an attempt's time went, in milliseconds from when the server accepted the
+/// client request, and the bytes it moved. Not in Go's record: cliproxy-rs adds these
+/// fields (docs/DIFFERENCES-FROM-GO.md), and leaves out each one it did not see. The
+/// upstream stages come from the shared HTTP client ([`cpa_core::exec::UpstreamStage`]),
+/// which the Claude executor times; other executors leave them out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Timings {
+    /// The client request body was read to its end.
+    pub client_body_received_ms: Option<i64>,
+    /// The upstream request was about to be sent.
+    pub upstream_started_ms: Option<i64>,
+    /// The upstream client had a connection and started writing the request.
+    pub upstream_connected_ms: Option<i64>,
+    /// `true`: the upstream request went out on a pooled connection. Left out when a
+    /// connection was dialled while it waited: the client may still have used a pooled
+    /// one that came free first, and does not say which.
+    pub upstream_connection_reused: Option<bool>,
+    /// The upstream client took the last of the request body into its write buffer.
+    /// Handed over, not acknowledged: the client's buffer (it takes another piece below
+    /// 408 KiB, so under 472 KiB) and the kernel's socket buffer may still hold the end
+    /// of the body.
+    pub upstream_body_sent_ms: Option<i64>,
+    /// The upstream response head arrived.
+    pub upstream_headers_ms: Option<i64>,
+    /// The first upstream response body bytes arrived.
+    pub upstream_first_byte_ms: Option<i64>,
+    /// The request's first response bytes, a keep-alive included, were handed to the
+    /// client's connection before the record was published: a stream's first event, or
+    /// a keep-alive sent while a buffered response waited.
+    pub client_first_byte_ms: Option<i64>,
+    /// The client request body, as received.
+    pub client_request_bytes: Option<i64>,
+    /// The upstream request body of the last hop: its size once handed over, 0 for a
+    /// hop without one (a redirect followed as a GET).
+    pub upstream_request_bytes: Option<i64>,
+    /// The upstream response body, as received (before any content decoding).
+    pub upstream_response_bytes: Option<i64>,
+}
+
+impl Timings {
+    /// The fields after Go's: a `timings` object and the byte counts.
+    fn write(&self, w: &mut Writer) {
+        let stages = [
+            ("client_body_received_ms", self.client_body_received_ms),
+            ("upstream_started_ms", self.upstream_started_ms),
+            ("upstream_connected_ms", self.upstream_connected_ms),
+            ("upstream_body_sent_ms", self.upstream_body_sent_ms),
+            ("upstream_headers_ms", self.upstream_headers_ms),
+            ("upstream_first_byte_ms", self.upstream_first_byte_ms),
+            ("client_first_byte_ms", self.client_first_byte_ms),
+        ];
+        if stages.iter().any(|(_, v)| v.is_some()) || self.upstream_connection_reused.is_some() {
+            w.object("timings", |t| {
+                for (key, value) in stages {
+                    if let Some(value) = value {
+                        t.int(key, value);
+                    }
+                }
+                if let Some(reused) = self.upstream_connection_reused {
+                    t.bool("upstream_connection_reused", reused);
+                }
+            });
+        }
+        for (key, value) in [
+            ("client_request_bytes", self.client_request_bytes),
+            ("upstream_request_bytes", self.upstream_request_bytes),
+            ("upstream_response_bytes", self.upstream_response_bytes),
+        ] {
+            if let Some(value) = value {
+                w.int(key, value);
+            }
+        }
+    }
 }
 
 struct Writer(Vec<u8>, bool);
@@ -1291,8 +1376,10 @@ impl Writer {
         }
     }
     fn int(&mut self, k: &str, v: i64) {
+        use std::io::Write;
         self.key(k);
-        self.0.extend_from_slice(v.to_string().as_bytes());
+        // Straight into the record: no string per number.
+        let _ = write!(self.0, "{v}");
     }
     fn bool(&mut self, k: &str, v: bool) {
         self.key(k);
@@ -1445,6 +1532,10 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.str("service_tier", &service_tier);
     w.opt_str("response_service_tier", detail.response_service_tier.trim());
     w.opt_str("response_model", record.response_model.trim());
+    // Not in Go's record (docs/DIFFERENCES-FROM-GO.md).
+    w.opt_str("session_source", client.session_source);
+    w.opt_str("prompt_prefix_hash", &record.prompt_prefix_hash);
+    record.timings.write(&mut w);
     w.0.push(b'}');
     w.0
 }
@@ -1463,12 +1554,25 @@ pub struct Facts {
     pub service_tier: String,
     pub generate: bool,
     pub stream: bool,
+    /// When the request arrived: the origin of every attempt's [`Timings`].
+    pub clock: std::sync::Arc<crate::observability::Clock>,
+    /// [`prompt_prefix`] of the client body.
+    pub prompt_prefix_hash: String,
 }
 
 impl Facts {
     /// Go `setReasoningEffortMetadata`, `setServiceTierMetadata` and
-    /// `setGenerateMetadata` over the client body; the alias is the client's model.
-    pub fn new(client: Client, entry: Format, response: Format, model: &str, body: &[u8], stream: bool) -> Self {
+    /// `setGenerateMetadata` over the client body; the alias is the client's model. The
+    /// request's clock and prompt prefix come from its `trace`.
+    pub fn new(
+        client: Client,
+        entry: Format,
+        response: Format,
+        model: &str,
+        body: &[u8],
+        stream: bool,
+        trace: &crate::dispatch::Trace,
+    ) -> Self {
         let tier = gj::get(body, "service_tier");
         let tier = tier.str().trim().to_owned();
         let generate = gj::get(body, "generate");
@@ -1480,8 +1584,54 @@ impl Facts {
             service_tier: if tier.is_empty() { "auto".into() } else { tier },
             generate: !(generate.is_bool() && !generate.bool()),
             stream,
+            clock: trace.clock(),
+            prompt_prefix_hash: trace.prompt_prefix(entry, body),
         }
     }
+}
+
+/// A fingerprint of the client's system prompt and tool definitions as it sent them
+/// (before translation or cloaking, `cache_control` markers included): the first 64
+/// bits of a SHA-256 over the raw `tools` and system values, in hex. Requests with the
+/// same value share their cacheable prefix up to the messages; a different mode or a
+/// subagent shows as another value. Nothing of the text itself is kept. Empty when the
+/// body has neither value, or for a format whose system prompt sits among its messages.
+/// Cost: one walk over the body's top-level members (large values are skipped by
+/// bracket matching; nothing is decoded or copied), SHA-256 over the two values, and
+/// one 16-byte string.
+// ponytail: Chat Completions, Antigravity and Interactions bodies get none (their system
+// prompt is a message or sits in an envelope); add a lookup when a client of theirs
+// needs one.
+pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
+    use sha2::Digest;
+    let system: &[&[u8]] = match format {
+        Format::Claude => &[b"system"],
+        Format::OpenAIResponse | Format::Codex => &[b"instructions"],
+        Format::Gemini => &[b"systemInstruction", b"system_instruction"],
+        _ => return String::new(),
+    };
+    let (mut tools, mut instructions) = (None, None);
+    gj::object_members(body, |key, escaped, value| {
+        if !escaped && key == b"tools" {
+            tools.get_or_insert(value);
+        } else if !escaped && system.contains(&key) {
+            instructions.get_or_insert(value);
+        }
+        tools.is_none() || instructions.is_none()
+    });
+    if tools.is_none() && instructions.is_none() {
+        return String::new();
+    }
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"cpa:prompt-prefix:v1\0");
+    for value in [tools, instructions] {
+        // Length first, so the boundary between the two values is unambiguous.
+        let value = value.unwrap_or_default();
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value);
+    }
+    let digest = hash.finalize();
+    format!("{:016x}", u64::from_be_bytes(digest[..8].try_into().expect("8 bytes")))
 }
 
 /// Go executor identity for a credential's provider: `Identifier()` and the
@@ -1570,6 +1720,57 @@ struct Outcome {
     ttft: std::time::Duration,
 }
 
+/// The upstream exchange's stages as the shared HTTP client reported them. Apart from
+/// its start, they describe the last hop sent: a new hop starts over, and what an
+/// earlier hop reports late is dropped.
+#[derive(Default)]
+struct Exchange {
+    started: Option<std::time::Instant>,
+    hop: u32,
+    connected: Option<std::time::Instant>,
+    body_sent: Option<std::time::Instant>,
+    headers: Option<std::time::Instant>,
+    first_byte: Option<std::time::Instant>,
+    /// The request went out on a pooled connection; unknown after a dial.
+    reused: Option<bool>,
+    request_bytes: Option<u64>,
+    response_bytes: Option<u64>,
+}
+
+impl Exchange {
+    fn mark(&mut self, stage: cpa_core::exec::UpstreamStage, now: std::time::Instant) {
+        use cpa_core::exec::UpstreamStage;
+        match stage {
+            UpstreamStage::Started => {
+                self.started.get_or_insert(now);
+            }
+            UpstreamStage::Hop { hop, body } => {
+                *self = Self {
+                    started: self.started,
+                    hop,
+                    // A hop without a body sends none; one with a body says how much
+                    // once it is handed over.
+                    request_bytes: (!body).then_some(0),
+                    ..Self::default()
+                };
+            }
+            UpstreamStage::Connected { hop } if hop == self.hop => self.connected = Some(now),
+            UpstreamStage::BodySent { hop, bytes } if hop == self.hop => {
+                self.body_sent = Some(now);
+                self.request_bytes = Some(bytes);
+            }
+            // An earlier hop's body, taken after its redirect arrived.
+            UpstreamStage::Connected { .. } | UpstreamStage::BodySent { .. } => {}
+            UpstreamStage::Headers { dialled } => {
+                self.headers = Some(now);
+                self.reused = (!dialled).then_some(true);
+            }
+            UpstreamStage::FirstByte => self.first_byte = Some(now),
+            UpstreamStage::BodyRead { bytes } => self.response_bytes = Some(bytes),
+        }
+    }
+}
+
 /// What an executor reported through `ExecRequest::usage`.
 #[derive(Default)]
 struct Reported {
@@ -1584,6 +1785,7 @@ struct Reported {
     outcome: Option<Outcome>,
     /// Go created no reporter for this attempt: publish nothing.
     discarded: bool,
+    exchange: Exchange,
 }
 
 impl Reported {
@@ -1691,6 +1893,11 @@ impl cpa_core::exec::UsageObserver for Observer {
     fn discard(&self) {
         self.lock().discarded = true;
     }
+
+    fn upstream_stage(&self, stage: cpa_core::exec::UpstreamStage) {
+        let now = std::time::Instant::now();
+        self.lock().exchange.mark(stage, now);
+    }
 }
 
 /// How the attempt ended for the server.
@@ -1740,6 +1947,7 @@ impl Tracker {
         client.node_kind = node_kind.into();
         client.is_fork = fork;
         client.is_compaction = compaction;
+        client.session_source = "lcp";
         self.client = Some(client);
     }
 
@@ -1921,6 +2129,8 @@ impl Tracker {
         }
         record.latency_ms = latency.as_millis() as i64;
         record.ttft_ms = ttft.as_millis() as i64;
+        record.timings = self.timings(&reported.exchange);
+        record.prompt_prefix_hash = self.facts.prompt_prefix_hash.clone();
         if let Some(effort) = reported.effort {
             record.reasoning_effort = effort;
         }
@@ -1937,6 +2147,30 @@ impl Tracker {
 }
 
 impl Tracker {
+    /// The record's [`Timings`]: each mark as an offset from the request's arrival.
+    fn timings(&self, exchange: &Exchange) -> Timings {
+        let clock = &self.facts.clock;
+        let accepted = clock.accepted();
+        let ms = |at: Option<std::time::Instant>| {
+            at.map(|at| i64::try_from(at.saturating_duration_since(accepted).as_millis()).unwrap_or(i64::MAX))
+        };
+        let bytes = |n: Option<u64>| n.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+        let body = clock.body_received();
+        Timings {
+            client_body_received_ms: ms(body.map(|(at, _)| at)),
+            upstream_started_ms: ms(exchange.started),
+            upstream_connected_ms: ms(exchange.connected),
+            upstream_connection_reused: exchange.reused,
+            upstream_body_sent_ms: ms(exchange.body_sent),
+            upstream_headers_ms: ms(exchange.headers),
+            upstream_first_byte_ms: ms(exchange.first_byte),
+            client_first_byte_ms: ms(clock.response_started()),
+            client_request_bytes: bytes(body.map(|(_, n)| n)),
+            upstream_request_bytes: bytes(exchange.request_bytes),
+            upstream_response_bytes: bytes(exchange.response_bytes),
+        }
+    }
+
     /// Go `usageAdapter.HandleUsage`'s record.
     fn plugin_record(
         &self,
@@ -2107,6 +2341,7 @@ fn home_session<'a>(client: &'a Client, credential: &cpa_core::credential::Crede
     let parent = attr(crate::remote::PARENT_SESSION);
     let mut client = client.clone();
     client.session_id = session.to_owned();
+    client.session_source = "home";
     client.parent_session_id = if parent == session {
         String::new()
     } else {
@@ -2239,6 +2474,7 @@ mod tests {
             "claude-sonnet-4-6",
             b"{}",
             true,
+            &crate::dispatch::Trace::default(),
         ));
         let error = ExecError::local(502, FailureScope::Credential, "Invalid apply_patch tool arguments");
         let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
@@ -2382,6 +2618,9 @@ mod tests {
                             .collect()
                     })
                     .unwrap_or_default(),
+                // Go's record has neither: none are written.
+                prompt_prefix_hash: String::new(),
+                timings: Timings::default(),
             };
             let client = Client {
                 client_ip: s("client_ip"),
@@ -2393,6 +2632,7 @@ mod tests {
                 is_fork: false,
                 node_kind: String::new(),
                 is_compaction: false,
+                session_source: "",
                 request_id: s("request_id"),
                 endpoint: s("endpoint"),
                 api_key: s("client_key"),
@@ -2489,6 +2729,7 @@ mod tests {
                 model,
                 b"{}",
                 true,
+                &crate::dispatch::Trace::default(),
             ));
             let tracker = Tracker::start(&rt, &facts, &credential_for(provider), model);
             let sink = tracker.sink();
@@ -2682,6 +2923,8 @@ mod tests {
                 },
                 generate: true,
                 stream: true,
+                clock: Default::default(),
+                prompt_prefix_hash: String::new(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();
@@ -2713,6 +2956,15 @@ mod tests {
                     Some(36)
                 );
             }
+            // Not in Go's record (docs/DIFFERENCES-FROM-GO.md): Home's canonical session
+            // says where it came from.
+            let source = got[0].as_object_mut().unwrap().remove("session_source");
+            let home = name == "count_tokens_oauth_runtime";
+            assert_eq!(
+                source.as_ref().and_then(Value::as_str),
+                home.then_some("home"),
+                "{name}"
+            );
             assert_eq!(got[0], want, "{name}");
         }
     }
@@ -2728,7 +2980,16 @@ mod tests {
             parent_session_id: "request-parent".into(),
             ..Client::default()
         };
-        let facts = std::sync::Arc::new(Facts::new(client, Format::Claude, Format::Claude, "m", b"{}", false));
+        let trace = crate::dispatch::Trace::default();
+        let facts = std::sync::Arc::new(Facts::new(
+            client,
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            false,
+            &trace,
+        ));
         let record = |attrs: &[(&str, &str)]| {
             let mut credential = credential_for("claude");
             for (k, v) in attrs {
@@ -2764,6 +3025,172 @@ mod tests {
             ]),
             (uuid("home-session"), Value::Null)
         );
+    }
+
+    /// A loopback upstream for redirected exchanges, on raw sockets with a small receive
+    /// window so an unread body stays with the sender. `/see-other` reads the body and
+    /// answers 303 to `/landing`, which answers `hello`; `/temporary` reads the body and
+    /// answers 307 to `/cut`, which reads the head and 64 KiB of the body, then closes.
+    async fn redirecting_upstream() -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(16).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut conn = tokio::io::BufReader::new(conn);
+                    loop {
+                        let (mut path, mut length) = (String::new(), 0);
+                        loop {
+                            let mut line = String::new();
+                            if conn.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let line = line.trim_end().to_ascii_lowercase();
+                            if line.is_empty() {
+                                break;
+                            }
+                            if path.is_empty() {
+                                path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+                            } else if let Some(value) = line.strip_prefix("content-length:") {
+                                length = value.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; if path == "/cut" { 64 << 10 } else { length }];
+                        if conn.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        let reply: &[u8] = match path.as_str() {
+                            "/see-other" => {
+                                b"HTTP/1.1 303 See Other\r\nLocation: /landing\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            "/temporary" => {
+                                b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /cut\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            "/landing" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+                            // Closed with the rest of the upload unread.
+                            _ => return,
+                        };
+                        conn.get_mut().write_all(reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// The published record of one timed POST of `body` to `url` through the shared
+    /// HTTP client, as the Claude executor sends it, within `timeout` if any.
+    async fn timed_exchange(
+        rt: &std::sync::Arc<crate::Runtime>,
+        url: &str,
+        body: bytes::Bytes,
+        timeout: Option<std::time::Duration>,
+    ) -> Value {
+        use futures_util::StreamExt;
+        let facts = std::sync::Arc::new(Facts::new(
+            Client::default(),
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            true,
+            &crate::dispatch::Trace::default(),
+        ));
+        let tracker = Tracker::start(rt, &facts, &credential_for("claude"), "m");
+        let sink = tracker.sink();
+        let clients = cpa_exec::proxy::GoClients::new(Default::default()).timed();
+        let sent = cpa_exec::proxy::send_routed(
+            &|_| {
+                Ok(cpa_exec::proxy::Route {
+                    client: clients.get(&cpa_exec::proxy::Proxy::Direct),
+                    order: None,
+                })
+            },
+            url,
+            cpa_exec::proxy::GoHeaders::new(),
+            body,
+            timeout,
+            Some(&sink),
+        )
+        .await;
+        match sent {
+            Ok(upstream) => {
+                let chunks: Vec<_> = upstream.body.collect().await;
+                assert!(chunks.iter().all(Result::is_ok));
+                tracker.succeed();
+            }
+            Err(error) => tracker.fail(&error),
+        }
+        let queued = rt.usage_queue().pop_oldest(10);
+        assert_eq!(queued.len(), 1);
+        serde_json::from_slice(&queued[0]).unwrap()
+    }
+
+    /// A redirect starts the upload measurements over. A POST answered with 303 and
+    /// followed as a GET reports no upload and no request body, not the POST's. A 307
+    /// whose second upload is cut short reports that hop's connection and no upload,
+    /// not the first hop's finished one. A request the deadline stops before it is sent
+    /// reports no request body.
+    #[tokio::test]
+    async fn redirects_start_the_upload_measurements_over() {
+        let rt = usage_runtime();
+        let upstream = redirecting_upstream().await;
+        let record = timed_exchange(
+            &rt,
+            &format!("{upstream}/see-other"),
+            bytes::Bytes::from_static(b"{}"),
+            None,
+        )
+        .await;
+        let timings = &record["timings"];
+        assert_eq!(record["failed"], false, "{record}");
+        assert_eq!(record["upstream_request_bytes"], 0, "{record}");
+        assert_eq!(record["upstream_response_bytes"], 5, "{record}");
+        assert!(timings["upstream_headers_ms"].is_i64(), "{record}");
+        for stale in ["upstream_connected_ms", "upstream_body_sent_ms"] {
+            assert!(timings.get(stale).is_none(), "{stale}: {record}");
+        }
+
+        // More than the client and the sockets hold, so the second upload cannot finish.
+        let body = bytes::Bytes::from(vec![b'x'; 6 << 20]);
+        let record = timed_exchange(&rt, &format!("{upstream}/temporary"), body, None).await;
+        let timings = &record["timings"];
+        assert_eq!(record["failed"], true, "{record}");
+        assert!(timings["upstream_connected_ms"].is_i64(), "{record}");
+        assert!(timings.get("upstream_body_sent_ms").is_none(), "{record}");
+        assert!(record.get("upstream_request_bytes").is_none(), "{record}");
+
+        let expired = Some(std::time::Duration::ZERO);
+        let record = timed_exchange(&rt, &format!("{upstream}/landing"), bytes::Bytes::new(), expired).await;
+        assert_eq!(record["failed"], true, "{record}");
+        assert!(record.get("upstream_request_bytes").is_none(), "{record}");
+    }
+
+    /// A late report from an earlier hop (its body, taken after its redirect arrived)
+    /// does not fill in the hop being sent.
+    #[test]
+    fn a_late_hop_report_is_dropped() {
+        use cpa_core::exec::UpstreamStage;
+        let start = std::time::Instant::now();
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        let mut exchange = Exchange::default();
+        for (ms, stage) in [
+            (0, UpstreamStage::Started),
+            (0, UpstreamStage::Hop { hop: 0, body: true }),
+            (1, UpstreamStage::Connected { hop: 0 }),
+            (2, UpstreamStage::Hop { hop: 1, body: true }),
+            (3, UpstreamStage::Connected { hop: 1 }),
+            (4, UpstreamStage::Connected { hop: 0 }),
+            (5, UpstreamStage::BodySent { hop: 0, bytes: 9 }),
+        ] {
+            exchange.mark(stage, at(ms));
+        }
+        assert_eq!((exchange.started, exchange.connected), (Some(at(0)), Some(at(3))));
+        assert_eq!((exchange.body_sent, exchange.request_bytes), (None, None));
     }
 
     /// Go's TTFT: from the upstream request to the first body byte; the first packet

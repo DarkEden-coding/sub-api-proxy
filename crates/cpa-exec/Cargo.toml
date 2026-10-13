@@ -43,6 +43,10 @@ brotli-decompressor = "6"
 # Codex: the upstream WebSocket over an inflating layer for permessage-deflate, as wreq
 # uses it (already in the graph).
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+# Exchange timings: a request body with an exact length and a connector hook for wreq
+# (both already in the graph via wreq).
+http-body = "1"
+tower = { version = "0.5", default-features = false }
 
 [dev-dependencies]
 cpa-home = { workspace = true, features = ["fake"] }

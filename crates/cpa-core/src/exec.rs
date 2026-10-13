@@ -156,6 +156,46 @@ pub trait UsageObserver: Send + Sync {
     /// Go returned before creating its usage reporter (Claude's `responses/compact`
     /// 501): this attempt publishes no record at all, whatever its outcome.
     fn discard(&self) {}
+    /// The attempt's upstream exchange reached `stage` now. Not in Go: cliproxy-rs adds
+    /// these timings and sizes to the usage record.
+    fn upstream_stage(&self, stage: UpstreamStage) {
+        let _ = stage;
+    }
+}
+
+/// A stage of one upstream exchange, as the shared HTTP client sees it
+/// (`cpa_exec::proxy::send_routed`). A redirect sends the request again: `Started`
+/// comes once, `Hop`, `Connected` and `BodySent` for each hop, the rest for the final
+/// response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamStage {
+    /// The exchange is about to send its first request.
+    Started,
+    /// Hop `hop` (0 for the request, then one per redirect followed) is about to be
+    /// sent, with a request body when `body`: what an earlier hop measured no longer
+    /// applies. `Connected` and `BodySent` name their hop, because the client may still
+    /// take an earlier hop's body after its redirect arrived.
+    Hop { hop: u32, body: bool },
+    /// The client has a connection, new or pooled, and has started writing the
+    /// request: it asked for the body for the first time. `Connected` and `BodySent`
+    /// come only from a hop that speaks HTTP/1.1 and sends a body.
+    Connected { hop: u32 },
+    /// The client took the last of the request body, `bytes` in all, into its write
+    /// buffer. Handed to the transport is not acknowledged by the peer: the client's
+    /// own buffer (it takes another 64 KiB piece while it holds less than 408 KiB, so
+    /// under 472 KiB) and the kernel's socket buffer may still hold the end of the body,
+    /// and nothing here learns when the peer received it.
+    BodySent { hop: u32, bytes: u64 },
+    /// The final response head arrived. `dialled`: a connection was dialled while the
+    /// request waited for one. The client may still have sent it on a pooled connection
+    /// that came free first, so only `false` says which connection served it: a pooled
+    /// one.
+    Headers { dialled: bool },
+    /// The first response body bytes arrived.
+    FirstByte,
+    /// The response body ended or was dropped after `bytes`, as received (before any
+    /// content decoding).
+    BodyRead { bytes: u64 },
 }
 
 /// A handle executors report usage through; cloning shares the observer.
@@ -261,6 +301,13 @@ impl UsageSink {
     pub fn discard(&self) {
         if let Some(o) = &self.0 {
             o.discard();
+        }
+    }
+
+    /// See [`UsageObserver::upstream_stage`].
+    pub fn upstream_stage(&self, stage: UpstreamStage) {
+        if let Some(o) = &self.0 {
+            o.upstream_stage(stage);
         }
     }
 }

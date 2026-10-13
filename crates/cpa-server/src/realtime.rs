@@ -403,6 +403,8 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         service_tier: "default".into(),
         generate: false,
         stream: false,
+        clock: Default::default(),
+        prompt_prefix_hash: String::new(),
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

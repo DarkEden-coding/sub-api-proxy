@@ -146,7 +146,7 @@ impl ClaudeExecutor {
             replay: replay::shared(),
             quota: Arc::default(),
             native: Native::Transport(transport),
-            go: Arc::new(GoClients::new(hooks)),
+            go: Arc::new(GoClients::new(hooks).timed()),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
         }
     }
@@ -556,7 +556,7 @@ impl ClaudeExecutor {
             usage.round_trip_started();
         }
         tracing::trace!(target: "cpa_latency", stage = "prepared");
-        let mut upstream = crate::proxy::send_routed(&route, &url, headers, body, None)
+        let mut upstream = crate::proxy::send_routed(&route, &url, headers, body, None, usage)
             .await
             .map_err(|e| {
                 capture_error(capture, &e);
