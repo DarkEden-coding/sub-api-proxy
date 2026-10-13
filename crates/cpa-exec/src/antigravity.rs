@@ -199,7 +199,7 @@ fn cooldown_key(credential: &Credential, model: &str) -> Option<String> {
 
 /// Go `statusErr{code, msg}` with the retry hint of a 429 answer
 /// (`newAntigravityStatusErr`).
-fn upstream_error(status: u16, body: Bytes) -> ExecError {
+pub(crate) fn upstream_error(status: u16, body: Bytes) -> ExecError {
     let retry = (status == 429).then(|| auth::parse_retry_delay(&body)).flatten();
     let mut error = gemini::status_err(status, body);
     error.retry_after = retry;
@@ -731,6 +731,9 @@ impl AntigravityExecutor {
             lines = observed;
             commit = Some(on_end);
         }
+        // Usage filtering and split-payload joining come before grounding resolution, as
+        // in Go, which resolves each joined payload.
+        lines = gemini::antigravity_payloads(lines);
         if ag::resolves_grounding_urls(req.source_format, &req.body, &prepared.translated) {
             let resolver = Grounding {
                 client: self.plain.get(&Proxy::effective(credential, cfg)),
@@ -742,9 +745,15 @@ impl AntigravityExecutor {
                 })
                 .boxed();
         }
-        // The Claude input-token estimate reads the cleaned original request.
-        let output =
-            Output::new(&req, Format::Antigravity, &prepared.translated).with_claude_original(req.body.clone());
+        // The Claude input-token estimate reads the cleaned original request. Each
+        // payload is one translator call, newlines included: Go v8.0.27 joins a payload
+        // split over lines before translating it.
+        let options = cpa_translate::stream::StreamOptions {
+            whole_events: true,
+            ..Default::default()
+        };
+        let output = Output::with_options(&req, Format::Antigravity, &prepared.translated, options)
+            .with_claude_original(req.body.clone());
         let mut body = gemini::gemini_lines(lines, output, Format::Antigravity);
         if let Some(commit) = commit {
             body = commit.on_clean_end(body);

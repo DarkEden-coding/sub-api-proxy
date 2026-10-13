@@ -756,6 +756,8 @@ pub(crate) struct Output {
     claude: ClaudeInputTokens,
     /// The attempt's usage reporter; stream loops feed it what Go's reporter sees.
     pub(crate) usage: UsageSink,
+    /// The attempt's request capture, for errors a stream loop finds in a payload.
+    capture: CaptureSink,
 }
 
 impl Output {
@@ -789,6 +791,7 @@ impl Output {
             raw: alt(req).is_some(),
             claude: ClaudeInputTokens::new(req.source_format, upstream, client, original_request(req).clone()),
             usage: req.usage.clone(),
+            capture: req.capture().clone(),
         }
     }
 
@@ -971,44 +974,122 @@ pub(crate) fn drive<S: LineState>(lines: ExecStream, state: S) -> ExecStream {
 
 /// The streamGenerateContent loop of Gemini and Antigravity upstreams: usage filtering
 /// and the JSON payload of each line through the translator; at EOF the tool-input
-/// finalization, then `[DONE]`.
-struct GeminiLines(Output, Format);
+/// finalization, then `[DONE]`. Antigravity lines come through [`antigravity_payloads`],
+/// already filtered.
+struct GeminiLines {
+    output: Output,
+    upstream: Format,
+}
 
 impl LineState for GeminiLines {
     fn line(&mut self, line: &[u8]) -> Emit {
-        let filtered = sse::filter_sse_usage_metadata(line);
-        // Go observes the response model on the raw line and usage on the filtered
-        // payload; the filter only drops non-terminal usageMetadata, which the model
-        // reader ignores.
-        self.0.usage.response_line(self.1, &filtered);
-        match sse::json_payload(&filtered) {
-            Some(payload) => self.0.translate(payload),
-            None => Emit::default(),
+        if self.upstream != Format::Antigravity {
+            let filtered = sse::filter_sse_usage_metadata(line);
+            // Go observes the response model on the raw line and usage on the filtered
+            // payload; the filter only drops non-terminal usageMetadata, which the model
+            // reader ignores.
+            self.output.usage.response_line(self.upstream, &filtered);
+            return match sse::json_payload(&filtered) {
+                Some(payload) => self.output.translate(payload),
+                None => Emit::default(),
+            };
         }
+        // A payload joined from several lines; its usage is not observed (Go reads usage
+        // from each scanned line, and no part of a split payload parses alone).
+        let assembled = line.contains(&b'\n');
+        if !assembled {
+            self.output.usage.response_line(self.upstream, line);
+        }
+        let Some(payload) = sse::json_payload(line) else {
+            return Emit::default();
+        };
+        // Go v8.0.27 (4e4dede4): an `error` object ends the stream with its code (502
+        // outside 400 to 599) and the payload as the message.
+        let error = gj::get(payload, "error");
+        if error.exists() {
+            let code = error.get("code").int();
+            let status = u16::try_from(code)
+                .ok()
+                .filter(|c| (400..=599).contains(c))
+                .unwrap_or(502);
+            let error = crate::antigravity::upstream_error(status, Bytes::copy_from_slice(payload));
+            self.output
+                .capture
+                .record(CaptureEvent::ResponseError(&String::from_utf8_lossy(&error.body)));
+            return Emit {
+                out: Vec::new(),
+                stop: Some(error),
+            };
+        }
+        if assembled {
+            self.output.usage.response_model_line(payload);
+        }
+        self.output.translate(payload)
     }
 
     fn end(&mut self) -> Emit {
-        self.0.end_with_done()
+        self.output.end_with_done()
     }
 
     /// Gemini translates `[DONE]` before checking the scanner; Antigravity finalizes
     /// tool input only, so a truncated stream never reads as a completed one.
     fn end_after_error(&mut self) -> Emit {
-        if self.1 == Format::Antigravity {
-            self.0.finalize()
+        if self.upstream == Format::Antigravity {
+            self.output.finalize()
         } else {
-            self.0.end_with_done()
+            self.output.end_with_done()
         }
     }
 
     fn flush(&mut self) -> Vec<Bytes> {
-        self.0.flush_frames()
+        self.output.flush_frames()
     }
 }
 
 /// [`GeminiLines`] over `lines` for an `upstream` (Gemini or Antigravity) stream.
 pub(crate) fn gemini_lines(lines: ExecStream, output: Output, upstream: Format) -> ExecStream {
-    drive(lines, GeminiLines(output, upstream))
+    drive(lines, GeminiLines { output, upstream })
+}
+
+/// The Antigravity stream loop's line handling before a payload is used (Go v8.0.27,
+/// 4e4dede4): each scanned line with its non-terminal usage filtered, and a JSON payload
+/// split over several lines joined (each later line trimmed and without `data:`,
+/// newline-separated) until the joined text parses. A joined payload is one item with
+/// newlines in it, which a scanned line never has. Lines that end no pending payload
+/// are not validated again, so joining stays linear in the payload's size.
+pub(crate) fn antigravity_payloads(lines: ExecStream) -> ExecStream {
+    lines
+        .scan(Vec::<u8>::new(), |pending, item| {
+            let line = match item {
+                Ok(line) => line,
+                Err(error) => return std::future::ready(Some(Some(Err(error)))),
+            };
+            let filtered = sse::filter_sse_usage_metadata(&line);
+            let out = if pending.is_empty() {
+                match sse::json_payload(&filtered) {
+                    Some(payload) if !gj::valid(payload) => {
+                        *pending = payload.to_vec();
+                        None
+                    }
+                    _ => Some(Bytes::from(filtered)),
+                }
+            } else {
+                let mut piece = cpa_common::gostr::trim_space(&filtered);
+                if let Some(rest) = piece.strip_prefix(b"data:") {
+                    piece = cpa_common::gostr::trim_space(rest);
+                }
+                if !piece.is_empty() {
+                    pending.push(b'\n');
+                    pending.extend_from_slice(piece);
+                }
+                // The pending text starts with `{` and its pieces are trimmed, so it can
+                // only become valid with a piece that ends in `}`.
+                (piece.ends_with(b"}") && gj::valid(pending)).then(|| Bytes::from(std::mem::take(pending)))
+            };
+            std::future::ready(Some(out.map(Ok)))
+        })
+        .filter_map(std::future::ready)
+        .boxed()
 }
 
 /// The terminator executors append to a scanned line to pass it as one translator

@@ -127,6 +127,11 @@ pub trait UsageObserver: Send + Sync {
     fn response_model(&self, model: &str) {
         let _ = model;
     }
+    /// Go `ObserveResponseModel` on a payload whose usage is not observed (an
+    /// Antigravity payload joined from several stream lines).
+    fn response_model_line(&self, line: &[u8]) {
+        let _ = line;
+    }
     /// Go `StartResponseTTFT`: the upstream request is being sent.
     fn round_trip_started(&self) {}
     /// Go `MarkFirstResponseByte`: the first upstream body byte arrived.
@@ -206,6 +211,13 @@ impl UsageSink {
     pub fn response_model(&self, model: &str) {
         if let Some(o) = &self.0 {
             o.response_model(model);
+        }
+    }
+
+    /// [`UsageObserver::response_model_line`].
+    pub fn response_model_line(&self, line: &[u8]) {
+        if let Some(o) = &self.0 {
+            o.response_model_line(line);
         }
     }
 

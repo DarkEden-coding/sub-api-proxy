@@ -1660,6 +1660,10 @@ impl cpa_core::exec::UsageObserver for Observer {
         self.lock().model.set(model);
     }
 
+    fn response_model_line(&self, line: &[u8]) {
+        self.lock().model.observe(line, &self.provider);
+    }
+
     fn round_trip_started(&self) {
         self.lock().ttft.start();
     }

@@ -749,6 +749,7 @@ async fn pending_responses_frame_is_flushed_before_terminal_error() {
             Bytes::new(),
         ),
         usage: Default::default(),
+        capture: Default::default(),
     };
     let lines = futures_util::stream::iter([
         Ok(Bytes::from_static(br#"data: {"a":1}"#)),
@@ -816,6 +817,7 @@ async fn apply_patch_hooks_follow_go_order() {
             raw: false,
             claude: ClaudeInputTokens::new(Format::OpenAI, Format::Gemini, Format::OpenAI, Bytes::new()),
             usage: Default::default(),
+            capture: Default::default(),
         };
         let lines = futures_util::stream::iter([
             Ok(Bytes::from_static(br#"data: {"a":1}"#)),

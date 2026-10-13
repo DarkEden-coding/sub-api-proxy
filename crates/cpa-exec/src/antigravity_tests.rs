@@ -191,6 +191,63 @@ async fn go_v8_0_27_scenarios() {
     assert_eq!(replay_go_scenarios(scenarios).await, scenarios.len());
 }
 
+/// Go v8.0.27 (4e4dede4): a payload split over stream lines is joined before its served
+/// model is observed, so the usage record names the model Go's record names; no part of
+/// it is read as a usage line.
+#[tokio::test]
+async fn a_split_payload_reports_its_served_model() {
+    #[derive(Default)]
+    struct Seen {
+        lines: std::sync::Mutex<Vec<Vec<u8>>>,
+        models: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+    impl cpa_core::exec::UsageObserver for Seen {
+        fn response_body(&self, _: Format, _: &[u8]) {}
+        fn response_line(&self, _: Format, line: &[u8]) {
+            self.lines.lock().unwrap().push(line.to_vec());
+        }
+        fn request(&self, _: Format, _: &[u8]) {}
+        fn response_model_line(&self, line: &[u8]) {
+            self.models.lock().unwrap().push(line.to_vec());
+        }
+    }
+    let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/antigravity_v8_0_27_go.json")).unwrap();
+    let s = fixture["executor"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "stream_split_payload_gemini")
+        .unwrap();
+    let mock = Mock::start(&s["upstream"]).await;
+    let mut req = request(s);
+    let seen = Arc::new(Seen::default());
+    req.usage = cpa_core::exec::UsageSink::new(seen.clone());
+    let response = AntigravityExecutor::default()
+        .execute(&credential(s, mock.addr()), req, &Config::default())
+        .await
+        .unwrap();
+    let ResponseBody::Stream(mut stream) = response.body else {
+        panic!("a stream")
+    };
+    while let Some(item) = stream.next().await {
+        item.unwrap();
+    }
+    let models = seen.models.lock().unwrap().clone();
+    assert_eq!(models.len(), 1, "one joined payload");
+    assert_eq!(
+        gj::get(&models[0], "response.modelVersion").str(),
+        s["usage"]["response_model"].as_str().unwrap()
+    );
+    assert!(
+        seen.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|l| !l.windows(7).any(|w| w == b"joined\"")),
+        "no part of the joined payload is a usage line"
+    );
+}
+
 /// Replays `scenarios` in order on one executor; returns how many ran.
 async fn replay_go_scenarios(scenarios: &[Value]) -> usize {
     let executor = AntigravityExecutor::default();
@@ -350,6 +407,20 @@ async fn replay_go_scenarios(scenarios: &[Value]) -> usize {
                 PROVIDER,
                 Some(("oauth", email)),
             );
+            // An error inside a 2xx stream that was read whole (a backend error object):
+            // Go's RecordAPIResponseError of it.
+            let streamed_ok = s["upstream"]["status"]
+                .as_u64()
+                .is_some_and(|s| (200..300).contains(&s))
+                && s["upstream"]["missing"].as_u64().unwrap_or(0) == 0;
+            if let Some(want) = want_error.filter(|_| streamed_ok) {
+                match normalized_events.pop_front() {
+                    Some(Captured::Error(text)) => {
+                        assert_eq!(text, want["message"].as_str().unwrap(), "{name}: capture")
+                    }
+                    other => panic!("{name}: expected the stream error capture, got {other:?}"),
+                }
+            }
             events = normalized_events;
         }
         assert!(events.is_empty(), "{name}: extra captures {events:?}");
