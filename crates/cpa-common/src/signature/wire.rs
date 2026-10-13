@@ -1,28 +1,36 @@
 //! Go `encoding/base64` decoding and `google.golang.org/protobuf/encoding/protowire`
 //! (v1.34.1) parsing, ported for exact accept/reject behaviour and error text.
 
-/// A base64 alphabet with Go's padding rule. Decoding is never `Strict` in the callers.
+/// A base64 alphabet with Go's padding rule, and whether decoding is `Strict` (trailing
+/// padding bits must be zero).
 #[derive(Clone, Copy)]
 pub(crate) struct Encoding {
     url: bool,
     padded: bool,
+    strict: bool,
 }
 
 pub(crate) const STD: Encoding = Encoding {
     url: false,
     padded: true,
+    strict: false,
 };
+/// `base64.StdEncoding.Strict()`.
+pub(crate) const STD_STRICT: Encoding = Encoding { strict: true, ..STD };
 pub(crate) const RAW_STD: Encoding = Encoding {
     url: false,
     padded: false,
+    strict: false,
 };
 pub(crate) const URL: Encoding = Encoding {
     url: true,
     padded: true,
+    strict: false,
 };
 pub(crate) const RAW_URL: Encoding = Encoding {
     url: true,
     padded: false,
+    strict: false,
 };
 
 impl Encoding {
@@ -97,6 +105,14 @@ impl Encoding {
         }
         let val = u32::from(dbuf[0]) << 18 | u32::from(dbuf[1]) << 12 | u32::from(dbuf[2]) << 6 | u32::from(dbuf[3]);
         let bytes = [(val >> 16) as u8, (val >> 8) as u8, val as u8];
+        // Strict: the bits past the last decoded byte must be zero.
+        if self.strict {
+            match dlen {
+                3 if bytes[2] != 0 => return (si, Err(si - 1)),
+                2 if bytes[1] != 0 || bytes[2] != 0 => return (si, Err(si - 2)),
+                _ => {}
+            }
+        }
         if dlen >= 2 {
             out.extend_from_slice(&bytes[..dlen - 1]);
         }
@@ -256,6 +272,25 @@ mod tests {
         assert_eq!(STD.decode(b"TW\r\nE=").unwrap(), b"Ma", "Go skips CR/LF");
         // Go ignores non-zero trailing bits outside Strict mode.
         assert_eq!(STD.decode(b"TWF=").unwrap(), b"Ma");
+        // Strict rejects them at the last data character (Go 1.26 `Strict()`).
+        assert_eq!(
+            STD_STRICT.decode(b"TWF=").unwrap_err(),
+            "illegal base64 data at input byte 3"
+        );
+        assert_eq!(
+            STD_STRICT.decode(b"TWB=").unwrap_err(),
+            "illegal base64 data at input byte 3"
+        );
+        assert_eq!(
+            STD_STRICT.decode(b"TR==").unwrap_err(),
+            "illegal base64 data at input byte 2"
+        );
+        assert_eq!(
+            STD_STRICT.decode(b"TWF=\n\n").unwrap_err(),
+            "illegal base64 data at input byte 5"
+        );
+        assert_eq!(STD_STRICT.decode(b"TWE=\r\n").unwrap(), b"Ma");
+        assert_eq!(STD_STRICT.decode(b"TQ==").unwrap(), b"M");
         assert_eq!(STD.decode(b"TWE").unwrap_err(), "illegal base64 data at input byte 0");
         assert_eq!(STD.decode(b"TWE=x").unwrap_err(), "illegal base64 data at input byte 4");
         assert_eq!(STD.decode(b"T===").unwrap_err(), "illegal base64 data at input byte 1");

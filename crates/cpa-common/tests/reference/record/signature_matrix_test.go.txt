@@ -28,6 +28,8 @@ func TestRecordSignatureMatrix(t *testing.T) {
 			_, _ = InspectGeminiThoughtSignature(sig, opt)
 		}
 		_, _ = InspectClaudeCAISSignature(sig)
+		_, _ = InspectAntigravityClaudeCAQSSignature(sig)
+		_, _ = NormalizeClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true})
 		_, _ = InspectGPTReasoningSignature(sig)
 		_, _ = InspectGrokEncryptedContent(sig)
 		_, _ = InspectKimiThinkingSignature(sig)

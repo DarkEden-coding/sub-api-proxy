@@ -45,7 +45,8 @@ pub mod session;
 pub mod signature;
 pub mod thinking;
 
-/// Calls recorded from Go's own test suites at 6fecc6e, one JSON object per line
+/// Calls recorded from Go's own test suites at v8.0.27, where the recorded thinking
+/// functions are unchanged since 6fecc6e, one JSON object per line
 /// (tests/reference/record/README.md).
 #[cfg(test)]
 pub(crate) fn go_calls() -> impl Iterator<Item = &'static str> {

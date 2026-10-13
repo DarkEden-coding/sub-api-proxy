@@ -158,8 +158,9 @@ pub fn provider_from_model_name(model: &str) -> Provider {
 }
 
 /// Base64 first characters a self-describing envelope can start with (Claude CAIS
-/// `C`, Claude/Gemini `E`, Claude double layer `R`, GPT Fernet `g`).
-const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"CERg";
+/// `C`, Claude/Gemini `E`, Antigravity double-layer CAQS `Q`, Claude double layer `R`,
+/// GPT Fernet `g`).
+const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"CEQRg";
 
 /// The alphanumeric base64 core plus `extra`, as Go's `base64AlphabetSet`.
 pub(crate) fn in_base64_alphabet(b: u8, extra: &[u8]) -> bool {
@@ -191,6 +192,10 @@ pub fn detect_provider_for_block(raw: impl AsRef<[u8]>, block_kind: BlockKind) -
         return Provider::Unknown;
     }
     if let Some((prefixed, unprefixed)) = split_provider_prefix(sig) {
+        // A second prefix would let detection and the replayed payload disagree.
+        if unprefixed.contains(&b'#') {
+            return Provider::Unknown;
+        }
         return match prefixed {
             Provider::Gemini if is_gemini_bypass(unprefixed) => Provider::GeminiBypass,
             Provider::Gemini if is_recognized_gemini_signature(unprefixed, block_kind) => Provider::Gemini,
@@ -264,12 +269,26 @@ pub fn decide_compatibility_for_model(
         normalized_signature: String::new(),
         reason: String::new(),
     };
-    if provider_matches_target(target, detected) {
-        decision.compatible = true;
-        decision.action = Action::Preserve;
-        decision.normalized_signature = normalize_compatible_signature(target, raw, block_kind);
-        decision.reason = claude_compatible_reason(target, raw, target_model);
+    // A Claude envelope in Antigravity's `Q` wrapper is replayable only to Antigravity
+    // (compatible_antigravity_claude_thinking_signature), never to a native Claude target.
+    if target == Provider::Claude
+        && detected == Provider::Claude
+        && payload_without_provider_prefix(raw).starts_with(b"Q")
+    {
+        decision.action = Action::DropBlock;
+        decision.reason = "Antigravity CAQS wrapper requires Antigravity replay".into();
         return decision;
+    }
+    // A matching family must also normalize, or a sanitizer would keep the input as is.
+    if provider_matches_target(target, detected) {
+        let normalized = normalize_compatible_signature(target, raw, block_kind);
+        if !normalized.is_empty() {
+            decision.compatible = true;
+            decision.action = Action::Preserve;
+            decision.normalized_signature = normalized;
+            decision.reason = claude_compatible_reason(target, raw, target_model);
+            return decision;
+        }
     }
     let (action, reason) = match target {
         Provider::Gemini => {
@@ -359,8 +378,8 @@ pub fn compatible_signature_for_provider_block(
     (decision.compatible && !decision.normalized_signature.is_empty()).then_some(decision.normalized_signature)
 }
 
-/// `CompatibleAntigravityClaudeThinkingSignature`: the double-layer `R` form, only for
-/// signatures strictly identifiable as Claude.
+/// `CompatibleAntigravityClaudeThinkingSignature`: the double-layer `R` form, or a `Q`
+/// envelope unchanged, only for signatures strictly identifiable as Claude.
 pub fn compatible_antigravity_claude_thinking_signature(raw: impl AsRef<[u8]>) -> Option<String> {
     let raw = raw.as_ref();
     if detect_provider_for_block(raw, BlockKind::ClaudeThinking) != Provider::Claude {
