@@ -2202,7 +2202,6 @@ fn track_usage(done: Done, tracker: Option<crate::usage_record::Tracker>) -> Don
             Done::Buffered { headers, body }
         }
         Done::Stream { headers, first, rest } => {
-            tracker.streams();
             if let Some(first) = &first {
                 tracker.event(first);
             }

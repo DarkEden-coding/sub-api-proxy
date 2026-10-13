@@ -1293,7 +1293,9 @@ pub struct Timings {
     pub upstream_started_ms: Option<i64>,
     /// The upstream client had a connection and started writing the request.
     pub upstream_connected_ms: Option<i64>,
-    /// The upstream request went out on a pooled connection.
+    /// `true`: the upstream request went out on a pooled connection. Left out when a
+    /// connection was dialled while it waited: the client may still have used a pooled
+    /// one that came free first, and does not say which.
     pub upstream_connection_reused: Option<bool>,
     /// The upstream client took the last of the request body into its write buffer.
     /// Handed over, not acknowledged: the client's buffer (it takes another piece below
@@ -1304,12 +1306,14 @@ pub struct Timings {
     pub upstream_headers_ms: Option<i64>,
     /// The first upstream response body bytes arrived.
     pub upstream_first_byte_ms: Option<i64>,
-    /// The first response bytes were handed to the client's connection. Streams only:
-    /// a buffered response's record is published before its body is written.
+    /// The request's first response bytes, a keep-alive included, were handed to the
+    /// client's connection before the record was published: a stream's first event, or
+    /// a keep-alive sent while a buffered response waited.
     pub client_first_byte_ms: Option<i64>,
     /// The client request body, as received.
     pub client_request_bytes: Option<i64>,
-    /// The upstream request body, as sent.
+    /// The upstream request body of the last hop: its size once handed over, 0 for a
+    /// hop without one (a redirect followed as a GET).
     pub upstream_request_bytes: Option<i64>,
     /// The upstream response body, as received (before any content decoding).
     pub upstream_response_bytes: Option<i64>,
@@ -1716,15 +1720,18 @@ struct Outcome {
     ttft: std::time::Duration,
 }
 
-/// The upstream exchange's stages as the shared HTTP client reported them; a later
-/// hop's mark replaces an earlier one, except the start.
+/// The upstream exchange's stages as the shared HTTP client reported them. Apart from
+/// its start, they describe the last hop sent: a new hop starts over, and what an
+/// earlier hop reports late is dropped.
 #[derive(Default)]
 struct Exchange {
     started: Option<std::time::Instant>,
+    hop: u32,
     connected: Option<std::time::Instant>,
     body_sent: Option<std::time::Instant>,
     headers: Option<std::time::Instant>,
     first_byte: Option<std::time::Instant>,
+    /// The request went out on a pooled connection; unknown after a dial.
     reused: Option<bool>,
     request_bytes: Option<u64>,
     response_bytes: Option<u64>,
@@ -1737,14 +1744,26 @@ impl Exchange {
             UpstreamStage::Started => {
                 self.started.get_or_insert(now);
             }
-            UpstreamStage::Connected => self.connected = Some(now),
-            UpstreamStage::BodySent { bytes } => {
+            UpstreamStage::Hop { hop, body } => {
+                *self = Self {
+                    started: self.started,
+                    hop,
+                    // A hop without a body sends none; one with a body says how much
+                    // once it is handed over.
+                    request_bytes: (!body).then_some(0),
+                    ..Self::default()
+                };
+            }
+            UpstreamStage::Connected { hop } if hop == self.hop => self.connected = Some(now),
+            UpstreamStage::BodySent { hop, bytes } if hop == self.hop => {
                 self.body_sent = Some(now);
                 self.request_bytes = Some(bytes);
             }
-            UpstreamStage::Headers { reused } => {
+            // An earlier hop's body, taken after its redirect arrived.
+            UpstreamStage::Connected { .. } | UpstreamStage::BodySent { .. } => {}
+            UpstreamStage::Headers { dialled } => {
                 self.headers = Some(now);
-                self.reused = Some(reused);
+                self.reused = (!dialled).then_some(true);
             }
             UpstreamStage::FirstByte => self.first_byte = Some(now),
             UpstreamStage::BodyRead { bytes } => self.response_bytes = Some(bytes),
@@ -1898,8 +1917,6 @@ pub struct Tracker {
     body: Option<Detail>,
     model: ResponseModel,
     first: Option<std::time::Duration>,
-    /// The client gets this attempt's response as a stream.
-    streamed: bool,
     published: bool,
     /// The request's client facts under this attempt's session, when it has its own:
     /// Home's canonical session for a dispatched credential, else its LCP pick's.
@@ -1986,7 +2003,6 @@ impl Tracker {
             body: None,
             model: ResponseModel::default(),
             first: None,
-            streamed: false,
             published: false,
             client: home_client,
             requested_at: now.fixed_offset(),
@@ -2027,13 +2043,6 @@ impl Tracker {
         for line in event.split(|b| *b == b'\n') {
             self.line(line);
         }
-    }
-
-    /// The client gets this attempt's response as a stream: the record reports when its
-    /// first bytes went out. A buffered response's record is published before its body
-    /// is written.
-    pub fn streams(&mut self) {
-        self.streamed = true;
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -2151,7 +2160,7 @@ impl Tracker {
             upstream_body_sent_ms: ms(exchange.body_sent),
             upstream_headers_ms: ms(exchange.headers),
             upstream_first_byte_ms: ms(exchange.first_byte),
-            client_first_byte_ms: ms(clock.response_started().filter(|_| self.streamed)),
+            client_first_byte_ms: ms(clock.response_started()),
             client_request_bytes: bytes(body.map(|(_, n)| n)),
             upstream_request_bytes: bytes(exchange.request_bytes),
             upstream_response_bytes: bytes(exchange.response_bytes),
@@ -3012,6 +3021,172 @@ mod tests {
             ]),
             (uuid("home-session"), Value::Null)
         );
+    }
+
+    /// A loopback upstream for redirected exchanges, on raw sockets with a small receive
+    /// window so an unread body stays with the sender. `/see-other` reads the body and
+    /// answers 303 to `/landing`, which answers `hello`; `/temporary` reads the body and
+    /// answers 307 to `/cut`, which reads the head and 64 KiB of the body, then closes.
+    async fn redirecting_upstream() -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(16).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut conn = tokio::io::BufReader::new(conn);
+                    loop {
+                        let (mut path, mut length) = (String::new(), 0);
+                        loop {
+                            let mut line = String::new();
+                            if conn.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let line = line.trim_end().to_ascii_lowercase();
+                            if line.is_empty() {
+                                break;
+                            }
+                            if path.is_empty() {
+                                path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+                            } else if let Some(value) = line.strip_prefix("content-length:") {
+                                length = value.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; if path == "/cut" { 64 << 10 } else { length }];
+                        if conn.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        let reply: &[u8] = match path.as_str() {
+                            "/see-other" => {
+                                b"HTTP/1.1 303 See Other\r\nLocation: /landing\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            "/temporary" => {
+                                b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /cut\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            "/landing" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+                            // Closed with the rest of the upload unread.
+                            _ => return,
+                        };
+                        conn.get_mut().write_all(reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// The published record of one timed POST of `body` to `url` through the shared
+    /// HTTP client, as the Claude executor sends it, within `timeout` if any.
+    async fn timed_exchange(
+        rt: &std::sync::Arc<crate::Runtime>,
+        url: &str,
+        body: bytes::Bytes,
+        timeout: Option<std::time::Duration>,
+    ) -> Value {
+        use futures_util::StreamExt;
+        let facts = std::sync::Arc::new(Facts::new(
+            Client::default(),
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            true,
+            &crate::dispatch::Trace::default(),
+        ));
+        let tracker = Tracker::start(rt, &facts, &credential_for("claude"), "m");
+        let sink = tracker.sink();
+        let clients = cpa_exec::proxy::GoClients::new(Default::default()).timed();
+        let sent = cpa_exec::proxy::send_routed(
+            &|_| {
+                Ok(cpa_exec::proxy::Route {
+                    client: clients.get(&cpa_exec::proxy::Proxy::Direct),
+                    order: None,
+                })
+            },
+            url,
+            cpa_exec::proxy::GoHeaders::new(),
+            body,
+            timeout,
+            Some(&sink),
+        )
+        .await;
+        match sent {
+            Ok(upstream) => {
+                let chunks: Vec<_> = upstream.body.collect().await;
+                assert!(chunks.iter().all(Result::is_ok));
+                tracker.succeed();
+            }
+            Err(error) => tracker.fail(&error),
+        }
+        let queued = rt.usage_queue().pop_oldest(10);
+        assert_eq!(queued.len(), 1);
+        serde_json::from_slice(&queued[0]).unwrap()
+    }
+
+    /// A redirect starts the upload measurements over. A POST answered with 303 and
+    /// followed as a GET reports no upload and no request body, not the POST's. A 307
+    /// whose second upload is cut short reports that hop's connection and no upload,
+    /// not the first hop's finished one. A request the deadline stops before it is sent
+    /// reports no request body.
+    #[tokio::test]
+    async fn redirects_start_the_upload_measurements_over() {
+        let rt = usage_runtime();
+        let upstream = redirecting_upstream().await;
+        let record = timed_exchange(
+            &rt,
+            &format!("{upstream}/see-other"),
+            bytes::Bytes::from_static(b"{}"),
+            None,
+        )
+        .await;
+        let timings = &record["timings"];
+        assert_eq!(record["failed"], false, "{record}");
+        assert_eq!(record["upstream_request_bytes"], 0, "{record}");
+        assert_eq!(record["upstream_response_bytes"], 5, "{record}");
+        assert!(timings["upstream_headers_ms"].is_i64(), "{record}");
+        for stale in ["upstream_connected_ms", "upstream_body_sent_ms"] {
+            assert!(timings.get(stale).is_none(), "{stale}: {record}");
+        }
+
+        // More than the client and the sockets hold, so the second upload cannot finish.
+        let body = bytes::Bytes::from(vec![b'x'; 6 << 20]);
+        let record = timed_exchange(&rt, &format!("{upstream}/temporary"), body, None).await;
+        let timings = &record["timings"];
+        assert_eq!(record["failed"], true, "{record}");
+        assert!(timings["upstream_connected_ms"].is_i64(), "{record}");
+        assert!(timings.get("upstream_body_sent_ms").is_none(), "{record}");
+        assert!(record.get("upstream_request_bytes").is_none(), "{record}");
+
+        let expired = Some(std::time::Duration::ZERO);
+        let record = timed_exchange(&rt, &format!("{upstream}/landing"), bytes::Bytes::new(), expired).await;
+        assert_eq!(record["failed"], true, "{record}");
+        assert!(record.get("upstream_request_bytes").is_none(), "{record}");
+    }
+
+    /// A late report from an earlier hop (its body, taken after its redirect arrived)
+    /// does not fill in the hop being sent.
+    #[test]
+    fn a_late_hop_report_is_dropped() {
+        use cpa_core::exec::UpstreamStage;
+        let start = std::time::Instant::now();
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        let mut exchange = Exchange::default();
+        for (ms, stage) in [
+            (0, UpstreamStage::Started),
+            (0, UpstreamStage::Hop { hop: 0, body: true }),
+            (1, UpstreamStage::Connected { hop: 0 }),
+            (2, UpstreamStage::Hop { hop: 1, body: true }),
+            (3, UpstreamStage::Connected { hop: 1 }),
+            (4, UpstreamStage::Connected { hop: 0 }),
+            (5, UpstreamStage::BodySent { hop: 0, bytes: 9 }),
+        ] {
+            exchange.mark(stage, at(ms));
+        }
+        assert_eq!((exchange.started, exchange.connected), (Some(at(0)), Some(at(3))));
+        assert_eq!((exchange.body_sent, exchange.request_bytes), (None, None));
     }
 
     /// Go's TTFT: from the upstream request to the first body byte; the first packet
