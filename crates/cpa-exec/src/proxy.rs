@@ -1182,11 +1182,11 @@ mod tests {
 
     /// A body read line by line fails with Go's scanner text `unexpected EOF` only when
     /// the upstream ended it early; a reset keeps the generic transport text. Every
-    /// reply sends five of the hundred bytes or a partial chunked body, then closes or
-    /// resets the connection.
+    /// reply sends five of the hundred bytes or a partial chunked body, then, once the
+    /// client holds the response, closes or resets the connection.
     #[tokio::test]
     async fn scanned_bodies_name_only_an_early_end_unexpected_eof() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         const LENGTH: &str = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello";
         const CHUNKED: &str = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
         for (head, reset, want) in [
@@ -1197,22 +1197,28 @@ mod tests {
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}/", listener.local_addr().unwrap());
+            let (holds_response, response_held) = tokio::sync::oneshot::channel::<()>();
             tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = [0u8; 4096];
-                let _ = socket.read(&mut request).await;
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio::io::BufReader::new(socket);
+                // The request has no body: its head ends with an empty line.
+                let mut line = String::new();
+                while socket.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+                    line.clear();
+                }
                 socket.write_all(head.as_bytes()).await.unwrap();
                 socket.flush().await.unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = response_held.await;
                 if reset {
                     #[allow(deprecated)]
-                    socket.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+                    socket.get_ref().set_linger(Some(std::time::Duration::ZERO)).unwrap();
                 }
             });
             let client = wreq::Client::builder().build().unwrap();
             let upstream = send_scanned(&client, &url, GoHeaders::new(), Bytes::new(), None)
                 .await
                 .unwrap();
+            holds_response.send(()).unwrap();
             let mut read = lines(upstream.body, 1 << 20);
             let error = loop {
                 match read.next().await.expect("a read error") {
