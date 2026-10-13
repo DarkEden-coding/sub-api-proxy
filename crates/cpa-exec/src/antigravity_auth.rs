@@ -47,7 +47,7 @@ pub const REFRESH_LEAD: chrono::TimeDelta = chrono::TimeDelta::minutes(30);
 /// `antigravityRequestTokenSafetyWindow`.
 const TOKEN_SAFETY_WINDOW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 /// `antigravityCredentialAcquisitionTimeout`.
-const ACQUISITION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const ACQUISITION_TIMEOUT: Duration = Duration::from_secs(30);
 const ONBOARD_ATTEMPTS: u32 = 5;
 const ONBOARD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 

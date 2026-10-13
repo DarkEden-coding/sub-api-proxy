@@ -154,6 +154,16 @@ pub(crate) fn begin_refresh(id: &str) -> bool {
     true
 }
 
+/// Whether a lookup for `id` is running.
+#[cfg(test)]
+pub(crate) fn refreshing(id: &str) -> bool {
+    REFRESHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(id)
+        .is_some_and(|(_, running)| *running)
+}
+
 /// A lookup ended. Its start still counts: Go retries a failed lookup only after the
 /// interval, like a successful one.
 pub(crate) fn end_refresh(id: &str) {

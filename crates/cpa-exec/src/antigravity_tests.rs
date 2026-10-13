@@ -679,6 +679,39 @@ async fn credits_lookup_loads_the_hint() {
     );
 }
 
+/// A credits lookup whose upstream accepts the connection and never answers ends at its
+/// budget, so the credential's later lookups are not blocked for good.
+#[tokio::test]
+async fn a_stalled_credits_lookup_ends_at_its_budget() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let held = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            open.push(socket);
+        }
+    });
+    let mut s = scenario("gemini_execute_basic").clone();
+    s["auth_id"] = Value::String("ag-credits-stalled".into());
+    s["attributes"] = serde_json::json!({ "base_url": base });
+    let cred = credential(&s, "");
+    let budget = Duration::from_millis(300);
+    AntigravityExecutor::default().queue_credits_refresh(&cred, &Config::default(), "ya29.fake-ag", budget);
+    assert!(credits::refreshing(&cred.id));
+    tokio::time::sleep(budget / 2).await;
+    assert!(credits::refreshing(&cred.id), "still waiting inside the budget");
+    let mut ended = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if !credits::refreshing(&cred.id) {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the stalled lookup ended");
+    held.abort();
+}
+
 /// Go TestAntigravityPoolConfigIdleTimeoutCustomAndCap.
 #[test]
 fn pool_settings_follow_go() {

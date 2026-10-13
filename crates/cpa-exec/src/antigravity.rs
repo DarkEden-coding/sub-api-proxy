@@ -256,7 +256,9 @@ impl AntigravityExecutor {
             for (key, value) in &patch.set {
                 current.metadata.insert(key.clone(), value.clone());
             }
-            self.queue_credits_refresh(&current, cfg, token, None);
+            // Go bounds this lookup by the refreshing caller's context; preparation has
+            // none here, so it gets the credential acquisition bound.
+            self.queue_credits_refresh(&current, cfg, token, auth::ACQUISITION_TIMEOUT);
         }
         Ok(patch)
     }
@@ -271,12 +273,13 @@ impl AntigravityExecutor {
             return;
         }
         let token = credential.str("access_token").map(str::trim).unwrap_or_default();
-        self.queue_credits_refresh(credential, cfg, token, Some(credits::REQUEST_REFRESH_TIMEOUT));
+        self.queue_credits_refresh(credential, cfg, token, credits::REQUEST_REFRESH_TIMEOUT);
     }
 
     /// `queueAntigravityCreditsRefresh` and `updateAntigravityCreditsBalanceForTask`: a
-    /// background `loadCodeAssist` whose `paidTier` credits become the hint.
-    fn queue_credits_refresh(&self, credential: &Credential, cfg: &Config, token: &str, timeout: Option<Duration>) {
+    /// background `loadCodeAssist` whose `paidTier` credits become the hint. Every lookup
+    /// ends within `budget`, so a stalled one never blocks the credential's later ones.
+    fn queue_credits_refresh(&self, credential: &Credential, cfg: &Config, token: &str, budget: Duration) {
         let id = credential.id.trim().to_owned();
         let token = token.trim().to_owned();
         if id.is_empty() || token.is_empty() || !credits::begin_refresh(&id) {
@@ -302,13 +305,14 @@ impl AntigravityExecutor {
                 let body = Bytes::from_static(br#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#);
                 let upstream = proxy::send(&client, &url, headers, body, None).await.ok()?;
                 let ok = (200..300).contains(&upstream.status);
-                let data = proxy::read_all(upstream.body, usize::MAX, false).await.ok()?;
+                // ponytail: Go reads the answer without a bound; a loadCodeAssist answer
+                // is a few KB, and the cap keeps a hostile upstream from filling memory.
+                let data = proxy::read_all(upstream.body, proxy::MAX_ERROR_BODY, false)
+                    .await
+                    .ok()?;
                 ok.then(|| credits::hint_from_load_code_assist(&data)).flatten()
             };
-            let hint = match timeout {
-                Some(budget) => tokio::time::timeout(budget, lookup).await.ok().flatten(),
-                None => lookup.await,
-            };
+            let hint = tokio::time::timeout(budget, lookup).await.ok().flatten();
             if let Some(hint) = hint {
                 credits::set_hint(&id, hint);
             }
