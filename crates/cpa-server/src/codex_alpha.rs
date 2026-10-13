@@ -156,7 +156,7 @@ async fn alpha_search(
             service_tier: "default".into(),
             generate: false,
             stream: false,
-            clock: crate::observability::Clock::now(),
+            clock: Default::default(),
             prompt_prefix_hash: String::new(),
         };
         return search(&rt, lease, &body, &headers, &model, &cfg, &capture, Some(&facts)).await;

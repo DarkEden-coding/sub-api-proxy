@@ -1296,15 +1296,16 @@ pub struct Timings {
     /// The upstream request went out on a pooled connection.
     pub upstream_connection_reused: Option<bool>,
     /// The upstream client took the last of the request body into its write buffer.
-    /// Handed over, not acknowledged: up to about 470 KiB of the body, plus what the
-    /// kernel's socket buffer holds, may not have reached the upstream yet.
+    /// Handed over, not acknowledged: the client's buffer (it takes another piece below
+    /// 408 KiB, so under 472 KiB) and the kernel's socket buffer may still hold the end
+    /// of the body.
     pub upstream_body_sent_ms: Option<i64>,
     /// The upstream response head arrived.
     pub upstream_headers_ms: Option<i64>,
     /// The first upstream response body bytes arrived.
     pub upstream_first_byte_ms: Option<i64>,
-    /// The server took the first response bytes for the client. Streams only: a
-    /// buffered response's record is published before its body is written.
+    /// The first response bytes were handed to the client's connection. Streams only:
+    /// a buffered response's record is published before its body is written.
     pub client_first_byte_ms: Option<i64>,
     /// The client request body, as received.
     pub client_request_bytes: Option<i64>,
@@ -1550,15 +1551,24 @@ pub struct Facts {
     pub generate: bool,
     pub stream: bool,
     /// When the request arrived: the origin of every attempt's [`Timings`].
-    pub clock: crate::observability::Clock,
+    pub clock: std::sync::Arc<crate::observability::Clock>,
     /// [`prompt_prefix`] of the client body.
     pub prompt_prefix_hash: String,
 }
 
 impl Facts {
     /// Go `setReasoningEffortMetadata`, `setServiceTierMetadata` and
-    /// `setGenerateMetadata` over the client body; the alias is the client's model.
-    pub fn new(client: Client, entry: Format, response: Format, model: &str, body: &[u8], stream: bool) -> Self {
+    /// `setGenerateMetadata` over the client body; the alias is the client's model. The
+    /// request's clock and prompt prefix come from its `trace`.
+    pub fn new(
+        client: Client,
+        entry: Format,
+        response: Format,
+        model: &str,
+        body: &[u8],
+        stream: bool,
+        trace: &crate::dispatch::Trace,
+    ) -> Self {
         let tier = gj::get(body, "service_tier");
         let tier = tier.str().trim().to_owned();
         let generate = gj::get(body, "generate");
@@ -1570,8 +1580,8 @@ impl Facts {
             service_tier: if tier.is_empty() { "auto".into() } else { tier },
             generate: !(generate.is_bool() && !generate.bool()),
             stream,
-            clock: crate::observability::Clock::now(),
-            prompt_prefix_hash: prompt_prefix(entry, body),
+            clock: trace.clock(),
+            prompt_prefix_hash: trace.prompt_prefix(entry, body),
         }
     }
 }
@@ -1588,7 +1598,7 @@ impl Facts {
 // ponytail: Chat Completions, Antigravity and Interactions bodies get none (their system
 // prompt is a message or sits in an envelope); add a lookup when a client of theirs
 // needs one.
-fn prompt_prefix(format: Format, body: &[u8]) -> String {
+pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
     use sha2::Digest;
     let system: &[&[u8]] = match format {
         Format::Claude => &[b"system"],
@@ -1888,8 +1898,8 @@ pub struct Tracker {
     body: Option<Detail>,
     model: ResponseModel,
     first: Option<std::time::Duration>,
-    /// The server took the first response bytes for the client.
-    client_first: Option<std::time::Instant>,
+    /// The client gets this attempt's response as a stream.
+    streamed: bool,
     published: bool,
     /// The request's client facts under this attempt's session, when it has its own:
     /// Home's canonical session for a dispatched credential, else its LCP pick's.
@@ -1976,7 +1986,7 @@ impl Tracker {
             body: None,
             model: ResponseModel::default(),
             first: None,
-            client_first: None,
+            streamed: false,
             published: false,
             client: home_client,
             requested_at: now.fixed_offset(),
@@ -2019,10 +2029,11 @@ impl Tracker {
         }
     }
 
-    /// The server took the response's first bytes for the client; later calls change
-    /// nothing.
-    pub fn client_first_byte(&mut self) {
-        self.client_first.get_or_insert_with(std::time::Instant::now);
+    /// The client gets this attempt's response as a stream: the record reports when its
+    /// first bytes went out. A buffered response's record is published before its body
+    /// is written.
+    pub fn streams(&mut self) {
+        self.streamed = true;
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -2125,21 +2136,23 @@ impl Tracker {
 impl Tracker {
     /// The record's [`Timings`]: each mark as an offset from the request's arrival.
     fn timings(&self, exchange: &Exchange) -> Timings {
-        let clock = self.facts.clock;
+        let clock = &self.facts.clock;
+        let accepted = clock.accepted();
         let ms = |at: Option<std::time::Instant>| {
-            at.map(|at| i64::try_from(at.saturating_duration_since(clock.accepted).as_millis()).unwrap_or(i64::MAX))
+            at.map(|at| i64::try_from(at.saturating_duration_since(accepted).as_millis()).unwrap_or(i64::MAX))
         };
         let bytes = |n: Option<u64>| n.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+        let body = clock.body_received();
         Timings {
-            client_body_received_ms: ms(clock.body.map(|(at, _)| at)),
+            client_body_received_ms: ms(body.map(|(at, _)| at)),
             upstream_started_ms: ms(exchange.started),
             upstream_connected_ms: ms(exchange.connected),
             upstream_connection_reused: exchange.reused,
             upstream_body_sent_ms: ms(exchange.body_sent),
             upstream_headers_ms: ms(exchange.headers),
             upstream_first_byte_ms: ms(exchange.first_byte),
-            client_first_byte_ms: ms(self.client_first),
-            client_request_bytes: bytes(clock.body.map(|(_, n)| n)),
+            client_first_byte_ms: ms(clock.response_started().filter(|_| self.streamed)),
+            client_request_bytes: bytes(body.map(|(_, n)| n)),
             upstream_request_bytes: bytes(exchange.request_bytes),
             upstream_response_bytes: bytes(exchange.response_bytes),
         }
@@ -2448,6 +2461,7 @@ mod tests {
             "claude-sonnet-4-6",
             b"{}",
             true,
+            &crate::dispatch::Trace::default(),
         ));
         let error = ExecError::local(502, FailureScope::Credential, "Invalid apply_patch tool arguments");
         let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
@@ -2702,6 +2716,7 @@ mod tests {
                 model,
                 b"{}",
                 true,
+                &crate::dispatch::Trace::default(),
             ));
             let tracker = Tracker::start(&rt, &facts, &credential_for(provider), model);
             let sink = tracker.sink();
@@ -2895,7 +2910,7 @@ mod tests {
                 },
                 generate: true,
                 stream: true,
-                clock: crate::observability::Clock::now(),
+                clock: Default::default(),
                 prompt_prefix_hash: String::new(),
             };
             rt.usage_queue().pop_oldest(100);
@@ -2952,7 +2967,16 @@ mod tests {
             parent_session_id: "request-parent".into(),
             ..Client::default()
         };
-        let facts = std::sync::Arc::new(Facts::new(client, Format::Claude, Format::Claude, "m", b"{}", false));
+        let trace = crate::dispatch::Trace::default();
+        let facts = std::sync::Arc::new(Facts::new(
+            client,
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            false,
+            &trace,
+        ));
         let record = |attrs: &[(&str, &str)]| {
             let mut credential = credential_for("claude");
             for (k, v) in attrs {

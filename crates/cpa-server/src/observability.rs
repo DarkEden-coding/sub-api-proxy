@@ -20,7 +20,7 @@ pub struct RequestId(pub String);
 
 tokio::task_local! {
     static REQUEST_ID: String;
-    static CLOCK: RequestClock;
+    static CLOCK: Arc<Clock>;
 }
 
 /// Request-local identity for dispatch code without an HTTP extractor. Captured
@@ -29,61 +29,64 @@ pub(crate) fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok().filter(|id| !id.is_empty())
 }
 
-/// When an inference request arrived and when its body was in, the origin of the
-/// usage record's timings.
-#[derive(Debug, Clone, Copy)]
+/// When an inference request arrived, when its body was in and when its response first
+/// went out: the usage record's timings (`crate::usage_record::Timings`) count from
+/// `accepted`. One per HTTP inference request, shared by its request body, its response
+/// body and the records of its attempts. Cost: one allocation per inference request.
+#[derive(Debug)]
 pub struct Clock {
-    /// The server accepted the request: its head was read and routing began.
-    pub accepted: Instant,
-    /// The request body was read to its end, and its size as received.
-    pub body: Option<(Instant, u64)>,
+    accepted: Instant,
+    body: std::sync::OnceLock<(Instant, u64)>,
+    response: std::sync::OnceLock<Instant>,
 }
 
-impl Clock {
+impl Default for Clock {
     /// A request that did not arrive over HTTP (a WebSocket turn, an internal call)
-    /// counts from now.
-    pub fn now() -> Self {
+    /// counts from now and reports neither body.
+    fn default() -> Self {
         Self {
             accepted: Instant::now(),
-            body: None,
+            body: std::sync::OnceLock::new(),
+            response: std::sync::OnceLock::new(),
         }
     }
 }
 
-impl Default for Clock {
-    fn default() -> Self {
-        Self::now()
+impl Clock {
+    /// The server accepted the request: its head was read and routing began.
+    pub fn accepted(&self) -> Instant {
+        self.accepted
+    }
+
+    /// The request body was read to its end, and its size as received.
+    pub fn body_received(&self) -> Option<(Instant, u64)> {
+        self.body.get().copied()
+    }
+
+    /// The first response bytes were handed to the connection for the client. A
+    /// keep-alive the server sent while waiting counts.
+    pub fn response_started(&self) -> Option<Instant> {
+        self.response.get().copied()
     }
 }
 
-struct RequestClock {
-    accepted: Instant,
-    body: std::cell::Cell<Option<(Instant, u64)>>,
+/// The clock of the HTTP request being handled, or a new one outside such a request.
+pub(crate) fn current_clock() -> Arc<Clock> {
+    CLOCK.try_with(Arc::clone).unwrap_or_default()
 }
 
-/// The clock of the HTTP request being handled, as far as it has run.
-pub(crate) fn current_clock() -> Clock {
-    CLOCK
-        .try_with(|clock| Clock {
-            accepted: clock.accepted,
-            body: clock.body.get(),
-        })
-        .unwrap_or_else(|_| Clock::now())
-}
-
-/// An inference request's body, counted as it is read: the end goes to [`CLOCK`].
+/// An inference request's body, counted as it is read; its end goes to the [`Clock`].
 /// Cost: one box per request and an addition per chunk.
 struct Received {
     body: Body,
     bytes: u64,
-    done: bool,
+    clock: Option<Arc<Clock>>,
 }
 
 impl Received {
     fn finish(&mut self) {
-        if !std::mem::replace(&mut self.done, true) {
-            let bytes = self.bytes;
-            let _ = CLOCK.try_with(|clock| clock.body.set(Some((Instant::now(), bytes))));
+        if let Some(clock) = self.clock.take() {
+            let _ = clock.body.set((Instant::now(), self.bytes));
         }
     }
 }
@@ -174,23 +177,26 @@ async fn access_log(State(state): State<Access>, mut request: Request, next: Nex
         id,
         health,
     }));
-    let response = if inference {
-        let request = request.map(|body| {
-            Body::new(Received {
-                body,
-                bytes: 0,
-                done: false,
-            })
-        });
-        let clock = RequestClock {
+    let clock = inference.then(|| {
+        Arc::new(Clock {
             accepted: start,
-            body: Default::default(),
-        };
-        REQUEST_ID
-            .scope(context_id, CLOCK.scope(clock, next.run(request)))
-            .await
-    } else {
-        REQUEST_ID.scope(context_id, next.run(request)).await
+            ..Clock::default()
+        })
+    });
+    let response = match &clock {
+        Some(clock) => {
+            let request = request.map(|body| {
+                Body::new(Received {
+                    body,
+                    bytes: 0,
+                    clock: Some(clock.clone()),
+                })
+            });
+            REQUEST_ID
+                .scope(context_id, CLOCK.scope(clock.clone(), next.run(request)))
+                .await
+        }
+        None => REQUEST_ID.scope(context_id, next.run(request)).await,
     };
     let status = response.status().as_u16();
     if health && (200..300).contains(&status) {
@@ -201,7 +207,7 @@ async fn access_log(State(state): State<Access>, mut request: Request, next: Nex
         line.status = status;
     }
     let (parts, body) = response.into_parts();
-    Response::from_parts(parts, Body::new(AccessBody { body, log }))
+    Response::from_parts(parts, Body::new(AccessBody { body, log, clock }))
 }
 
 struct AccessLine {
@@ -265,6 +271,8 @@ fn access_line(status: u16, latency: Duration, client: &str, method: &str, path:
 struct AccessBody {
     body: Body,
     log: AccessGuard,
+    /// An inference request's clock, until its first response bytes go out.
+    clock: Option<Arc<Clock>>,
 }
 
 struct AccessGuard(Option<AccessLine>);
@@ -292,6 +300,12 @@ impl HttpBody for AccessBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let result = Pin::new(&mut self.body).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(frame))) = &result
+            && frame.data_ref().is_some_and(|data| !data.is_empty())
+            && let Some(clock) = self.clock.take()
+        {
+            let _ = clock.response.set(Instant::now());
+        }
         if matches!(result, Poll::Ready(None | Some(Err(_)))) {
             self.log.finish();
         }

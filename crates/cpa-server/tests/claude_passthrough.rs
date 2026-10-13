@@ -450,10 +450,14 @@ const USAGE_SSE: &str = "event: message_start\ndata: {\"type\":\"message_start\"
                          event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n\
                          event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
+/// The first event of [`USAGE_SSE`].
+const FIRST_EVENT: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n";
+
 /// A mock Anthropic upstream on raw sockets with a small receive window, so a body it
 /// has not read stays with the sender. A request body over 1 MiB waits [`READ_PAUSE`]
 /// before it is read, [`HEAD_DELAY`] before the response head and [`FIRST_BYTE_DELAY`]
-/// before the events; smaller ones are answered at once. Connections are kept alive.
+/// before the events; smaller ones are answered at once, and one that says `MODE_CUT`
+/// gets its first event and then a closed connection. Connections are kept alive.
 /// Records each request's body length and whether its head had a Content-Length.
 async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -500,6 +504,10 @@ async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
                         USAGE_SSE.len()
                     );
                     conn.get_mut().write_all(head.as_bytes()).await.unwrap();
+                    if body.windows(8).any(|w| w == b"MODE_CUT") {
+                        let _ = conn.get_mut().write_all(FIRST_EVENT.as_bytes()).await;
+                        return;
+                    }
                     if slow {
                         tokio::time::sleep(FIRST_BYTE_DELAY).await;
                     }
@@ -600,10 +608,19 @@ async fn usage_record_times_each_stage() {
         .await
         .unwrap();
     assert_eq!(res.text().await.unwrap(), USAGE_SSE);
+    let cut = small.replace("hi", "MODE_CUT");
+    let res = client
+        .post(&url)
+        .header("x-api-key", "client-key-1")
+        .body(cut)
+        .send()
+        .await
+        .unwrap();
+    assert!(res.text().await.unwrap().starts_with(FIRST_EVENT));
 
-    let records = usage_records(&rt, 2).await;
+    let records = usage_records(&rt, 3).await;
     let upstream = seen.lock().unwrap().clone();
-    assert_eq!(upstream.len(), 2);
+    assert_eq!(upstream.len(), 3);
     let ms = |record: &serde_json::Value, key: &str| {
         record["timings"][key]
             .as_u64()
@@ -651,6 +668,11 @@ async fn usage_record_times_each_stage() {
         ms(quick, "client_first_byte_ms") >= ms(quick, "upstream_first_byte_ms"),
         "{quick}"
     );
+
+    // A stream cut short fails, and its record still has the bytes it got.
+    let cut = &records[2];
+    assert_eq!(cut["failed"], true, "{cut}");
+    assert_eq!(cut["upstream_response_bytes"], FIRST_EVENT.len(), "{cut}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
