@@ -1,6 +1,6 @@
 # Differences from Go CLIProxyAPI
 
-Where cliproxy-rs has a feature, it aims to behave exactly as CLIProxyAPI does at commit `6fecc6e`. This page lists the places where it behaves differently on purpose, and the one routing strategy it adds. Features that are not ported yet are listed under [Upcoming features](../README.md#upcoming-features) instead.
+Where cliproxy-rs has a feature, it aims to behave exactly as CLIProxyAPI does at commit `6fecc6e`, except for the Claude prompt-cache and prompt-shaping fixes that follow v8.0.27 ([PARITY.md](PARITY.md)). This page lists the places where it behaves differently on purpose, and the one routing strategy it adds. Features that are not ported yet are listed under [Upcoming features](../README.md#upcoming-features) instead.
 
 ## Additions in cliproxy-rs
 
