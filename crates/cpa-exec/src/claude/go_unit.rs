@@ -121,9 +121,6 @@ async fn replay_file(fixture: &Value, file: &str) {
     let mut failures = Vec::new();
     let mut count = 0;
     for (test, records) in tests {
-        if std::ptr::eq(fixture, self::fixture()) && FOLLOWS_V8_0_27.iter().any(|(t, ..)| t == test) {
-            continue;
-        }
         for (i, record) in records.as_array().unwrap().iter().enumerate() {
             count += 1;
             match replay(test, record).await {
@@ -147,45 +144,6 @@ async fn replay_file(fixture: &Value, file: &str) {
         failures.len(),
         failures.join("\n")
     );
-}
-
-/// 6fecc6e recordings of Go tests whose answer now follows v8.0.27, where an API-key
-/// cloak keeps the caller's system prompt top-level ahead of a terminal user run
-/// (5d89040, eca1d11, 39632e5): the Go test file, and the go_executor_v8.0.27.json
-/// scenarios that record the answer instead (none: the test itself is in
-/// go_unit_v8.0.27.json).
-const FOLLOWS_V8_0_27: &[(&str, &str, &[&str])] = &[
-    (
-        "TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked",
-        "claude_executor_test.go",
-        &[],
-    ),
-    (
-        "TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt",
-        "claude_mid_system_model_test.go",
-        // Its Execute and ExecuteStream calls.
-        &[
-            "apikey-cloak-payload-model-to-legacy",
-            "apikey-cloak-payload-model-to-legacy-stream",
-        ],
-    ),
-];
-
-#[test]
-fn superseded_recordings_are_recorded_at_v8_0_27() {
-    let scenarios = include_str!("testdata/go_executor_v8.0.27.json");
-    for (test, file, replacements) in FOLLOWS_V8_0_27 {
-        assert!(
-            fixture()["files"][file][test].is_array(),
-            "{test}: not in the 6fecc6e recording"
-        );
-        if replacements.is_empty() {
-            assert!(fixture_v8_0_27()["files"][file][test].is_array(), "{test}");
-        }
-        for name in *replacements {
-            assert!(scenarios.contains(&format!(r#""name": "{name}""#)), "{test}: {name}");
-        }
-    }
 }
 
 /// Go executor tests the replay cannot reproduce (context cancellation mid-call); their
@@ -304,14 +262,15 @@ macro_rules! go_file_v8_0_27 {
 
 go_file_v8_0_27!(
     /// eb6a768 explicit prompt cache options, 14dc4e0 OAuth system relocation for
-    /// count_tokens.
+    /// count_tokens; API-key placement as in `go_exec::RELOCATES_API_KEY_SYSTEM`.
     v8_0_27_prompt_cache_options,
     "claude_prompt_cache_options_test.go"
 );
 go_file_v8_0_27!(
     /// 6d57ac9: the replay runs on Go's swapped clock, so the reminder date compares
     /// as sent. TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate
-    /// is left out: it follows v8.0.27's payload rule ordering (868e137), not 6d57ac9.
+    /// is left out: its bodies follow v8.0.27's payload rule ordering (868e137, not
+    /// ported), and tests::declassified_probes_keep_their_own_date checks its dates.
     v8_0_27_cloaked_date_pin,
     "claude_cloaked_date_pin_test.go"
 );
@@ -321,7 +280,9 @@ go_file_v8_0_27!(
     "claude_effort_directive_test.go"
 );
 go_file_v8_0_27!(
-    /// The one test of this file whose answer changed for a fix ported here (5d89040).
+    /// The test of this file whose answer changed in v8.0.27 for API keys (5d89040),
+    /// replayed with the caller system text where cliproxy-rs keeps it
+    /// (`go_exec::RELOCATES_API_KEY_SYSTEM`); 6fecc6e's recording passes as recorded.
     v8_0_27_executor,
     "claude_executor_test.go"
 );

@@ -2,41 +2,41 @@
 
 cliproxy-rs follows CLIProxyAPI at [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/commit/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10). Go has since shipped v8.0.11 to v8.0.27 ([`bf93416`](https://github.com/router-for-me/CLIProxyAPI/commit/bf9341629ef2300ac9d846a2e80fe2756f63a671)): 167 commits, 21 of them merges. This file lists every one of them, grouped by area, and is the plan for porting them.
 
-The Claude prompt-cache and prompt-shaping fixes are ported already and follow v8.0.27; Go goldens recorded from v8.0.27 check them (`crates/cpa-exec/tests/reference/claude/README.md`). Everything else still follows `6fecc6e`.
+The Claude prompt-cache and prompt-shaping fixes are ported already and follow v8.0.27; Go goldens recorded from v8.0.27 check them (`crates/cpa-exec/tests/reference/claude/README.md`). The exception is where a cloaked API key's caller system prompt goes: it stays as at `6fecc6e`, because v8.0.27's placement changes between the first and second turn of a conversation and so misses the prompt cache (`docs/DIFFERENCES-FROM-GO.md`). Everything else still follows `6fecc6e`.
 
 Columns:
 
 - User-visible: whether the commit changes what a client, an operator or an upstream sees (bytes on the wire, answers, routing, config). Refactors, races fixed without a visible symptom, logs and tests are "no".
-- This PR: "ported here", "to port" (a later PR), "not applicable" (the code it changes has no counterpart in cliproxy-rs; Antigravity accounts are not ported, see the README's upcoming features), or "nothing to port" (docs, assets, Go tests, merges).
+- This PR: "ported here", "to port" (a later PR), "not applicable" (the code it changes has no counterpart in cliproxy-rs; Antigravity accounts are not ported, see the README's upcoming features), "nothing to port" (docs, assets, Go tests, merges, or behaviour cliproxy-rs already has), or "differs on purpose" (listed in `docs/DIFFERENCES-FROM-GO.md`).
 - Size: lines added and removed in Go, without tests and test data. S is under 50 lines, M under 300, L 300 or more. The size of the Rust port can differ.
 
 ## Totals
 
-| Area | Commits | Ported here | To port | Not applicable | Nothing to port |
-|---|---:|---:|---:|---:|---:|
-| Claude: prompt cache and prompt shaping | 10 | 10 | 0 | 0 | 0 |
-| Claude: thread continuation | 4 | 4 | 0 | 0 | 0 |
-| Claude: rate limits and error answers | 2 | 2 | 0 | 0 | 0 |
-| Claude: other executor work | 2 | 0 | 2 | 0 | 0 |
-| Claude: Responses tool_search | 12 | 0 | 12 | 0 | 0 |
-| Translation to and from Claude | 12 | 0 | 12 | 0 | 0 |
-| Payload rules | 1 | 0 | 1 | 0 | 0 |
-| Codex | 15 | 0 | 15 | 0 | 0 |
-| Gemini, Vertex and AI Studio | 9 | 0 | 9 | 0 | 0 |
-| xAI | 6 | 0 | 6 | 0 | 0 |
-| OpenAI-compatible and Responses translation | 5 | 0 | 5 | 0 | 0 |
-| Devin and Meta | 3 | 0 | 3 | 0 | 0 |
-| Credentials, selection and cooldowns | 10 | 0 | 10 | 0 | 0 |
-| Model registry and catalogs | 4 | 0 | 3 | 0 | 1 |
-| Config and Management API | 7 | 0 | 7 | 0 | 0 |
-| Plugins | 4 | 0 | 4 | 0 | 0 |
-| Server, handlers and streaming | 4 | 0 | 4 | 0 | 0 |
-| Usage and logging | 2 | 0 | 2 | 0 | 0 |
-| Antigravity | 19 | 0 | 0 | 19 | 0 |
-| Docs and assets | 11 | 0 | 0 | 0 | 11 |
-| Go tests only | 4 | 0 | 0 | 0 | 4 |
-| Merge commits | 21 | 0 | 0 | 0 | 21 |
-| **All** | **167** | **16** | **95** | **19** | **37** |
+| Area | Commits | Ported here | To port | Not applicable | Nothing to port | Differs on purpose |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude: prompt cache and prompt shaping | 10 | 6 | 0 | 0 | 1 | 3 |
+| Claude: thread continuation | 4 | 4 | 0 | 0 | 0 | 0 |
+| Claude: rate limits and error answers | 2 | 2 | 0 | 0 | 0 | 0 |
+| Claude: other executor work | 2 | 0 | 2 | 0 | 0 | 0 |
+| Claude: Responses tool_search | 12 | 0 | 12 | 0 | 0 | 0 |
+| Translation to and from Claude | 12 | 0 | 12 | 0 | 0 | 0 |
+| Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
+| Codex | 15 | 0 | 15 | 0 | 0 | 0 |
+| Gemini, Vertex and AI Studio | 9 | 0 | 9 | 0 | 0 | 0 |
+| xAI | 6 | 0 | 6 | 0 | 0 | 0 |
+| OpenAI-compatible and Responses translation | 5 | 0 | 5 | 0 | 0 | 0 |
+| Devin and Meta | 3 | 0 | 3 | 0 | 0 | 0 |
+| Credentials, selection and cooldowns | 10 | 0 | 10 | 0 | 0 | 0 |
+| Model registry and catalogs | 4 | 0 | 3 | 0 | 1 | 0 |
+| Config and Management API | 7 | 0 | 7 | 0 | 0 | 0 |
+| Plugins | 4 | 0 | 4 | 0 | 0 | 0 |
+| Server, handlers and streaming | 4 | 0 | 4 | 0 | 0 | 0 |
+| Usage and logging | 2 | 0 | 2 | 0 | 0 | 0 |
+| Antigravity | 19 | 0 | 0 | 19 | 0 | 0 |
+| Docs and assets | 11 | 0 | 0 | 0 | 11 | 0 |
+| Go tests only | 4 | 0 | 0 | 0 | 4 | 0 |
+| Merge commits | 21 | 0 | 0 | 0 | 21 | 0 |
+| **All** | **167** | **12** | **95** | **19** | **38** | **3** |
 
 Suggested order for the commits still to port: the rest of the Claude executor (`e9c8769`, `2bc236d`, `3b69068`) and Claude translation, then credentials and cooldowns (`c163bae`, `50d5fe1`, `935aa6e`), Codex, the payload rule barrier (`868e137`, which changes where every executor applies payload rules and removes the Claude post-rule repairs), the Responses `tool_search` series as one piece, and then the rest by area.
 
@@ -46,12 +46,12 @@ Suggested order for the commits still to port: the rest of the Claude executor (
 |---|---|---|---|---|---|
 | [`6d57ac90`](https://github.com/router-for-me/CLIProxyAPI/commit/6d57ac90) | fix(claude): pin session date in cloaked reminder to prevent prompt cache invalidation | yes | ported here | M (+77 −15) | currentDate reminder pinned per session; replays its Go tests |
 | [`5dbce4f3`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbce4f3) | perf(claude): prefilter JSON payloads before diagnostic walks | no | ported here | M (+59 −1) | byte prefilter before the title-helper and 1h-TTL walks |
-| [`5d890405`](https://github.com/router-for-me/CLIProxyAPI/commit/5d890405) | fix(claude): keep system messages top level for terminal user turns | yes | ported here | S (+31 −0) | caller system kept top-level for a terminal user run; API keys only since 14dc4e0 |
+| [`5d890405`](https://github.com/router-for-me/CLIProxyAPI/commit/5d890405) | fix(claude): keep system messages top level for terminal user turns | yes | differs on purpose | S (+31 −0) | keeps an API key's caller system text top-level for a terminal user run, then moves it on the second turn, which misses the cache; cliproxy-rs keeps it after the leading user run (DIFFERENCES-FROM-GO.md) |
 | [`26e5efbb`](https://github.com/router-for-me/CLIProxyAPI/commit/26e5efbb) | fix(claude): reserve cache breakpoint for thread continuation | yes | ported here | S (+6 −0) | a `thread` request keeps one breakpoint free |
 | [`eb6a768d`](https://github.com/router-for-me/CLIProxyAPI/commit/eb6a768d) | feat(claude): support explicit prompt cache options | yes | ported here | M (+235 −64) | `prompt_cache_options.mode: explicit`; also marks caller blocks kept beside advisor history |
-| [`eca1d113`](https://github.com/router-for-me/CLIProxyAPI/commit/eca1d113) | fix(claude): keep system prompt at top level for single terminal user turn | yes | ported here | S (+1 −1) | single terminal user turn |
-| [`39632e52`](https://github.com/router-for-me/CLIProxyAPI/commit/39632e52) | fix(claude): keep system prompt at top level for leading user message runs | yes | ported here | S (+1 −1) | leading user run |
-| [`14dc4e05`](https://github.com/router-for-me/CLIProxyAPI/commit/14dc4e05) | fix(claude): relocate caller system prompt to messages for OAuth requests | yes | ported here | S (+17 −8) | OAuth tokens always relocate caller system text; count_tokens follows |
+| [`eca1d113`](https://github.com/router-for-me/CLIProxyAPI/commit/eca1d113) | fix(claude): keep system prompt at top level for single terminal user turn | yes | differs on purpose | S (+1 −1) | single terminal user turn; as `5d890405` |
+| [`39632e52`](https://github.com/router-for-me/CLIProxyAPI/commit/39632e52) | fix(claude): keep system prompt at top level for leading user message runs | yes | differs on purpose | S (+1 −1) | leading user run of several turns; as `5d890405` |
+| [`14dc4e05`](https://github.com/router-for-me/CLIProxyAPI/commit/14dc4e05) | fix(claude): relocate caller system prompt to messages for OAuth requests | yes | nothing to port | S (+17 −8) | OAuth tokens always relocate caller system text, in Messages and count_tokens, as cliproxy-rs does for API keys too; checked by the v8.0.27 goldens |
 | [`2d8ec73b`](https://github.com/router-for-me/CLIProxyAPI/commit/2d8ec73b) | fix(claude): preserve mid-conversation effort directives during system insertion | yes | ported here | S (+25 −12) | effort directives do not end the leading user run |
 | [`be8c35f2`](https://github.com/router-for-me/CLIProxyAPI/commit/be8c35f2) | fix(claude): ignore invalid and null cache control entries in executor | yes | ported here | S (+14 −18) | null and non-ephemeral `cache_control` are not breakpoints |
 

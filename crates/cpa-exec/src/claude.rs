@@ -674,7 +674,7 @@ async fn finish(
 /// of it will need (`rememberClaudeOAuthToolAliases`).
 struct Completion {
     continuity: session::Continuity,
-    thread: Option<(thread::Thread, alias::Reverse, Arc<thread::Aliases>)>,
+    thread: Option<(thread::Thread, Arc<alias::Reverse>, Arc<thread::Aliases>)>,
 }
 
 impl Completion {
@@ -811,7 +811,9 @@ struct Prepared {
     body: String,
     headers: Vec<(String, String)>,
     order: Vec<String>,
-    reverse: alias::Reverse,
+    /// The tool aliases of the request, shared with the response relay and, for a
+    /// thread turn, with the thread alias store.
+    reverse: Arc<alias::Reverse>,
     continuity: session::Continuity,
     /// Set for a thread turn whose aliases its continuation may need.
     thread: Option<thread::Thread>,
@@ -1196,12 +1198,9 @@ impl<'a> Ctx<'a> {
             }
             let version = profile::default_version(&self.settings);
             let workload = detect::header(&req.headers, "x-cpa-claude-workload").to_owned();
-            // Without continuity (probes, helpers, no session) the date is today's.
-            let date = if continuity.pinned_date.is_empty() {
-                &self.today
-            } else {
-                &continuity.pinned_date
-            };
+            // 6d57ac9: a session keeps the date of its first request. Without
+            // continuity (probes, helpers, no session) the date is today's.
+            let date = session::pin_date(&continuity.key, &self.today);
             body = cloak::install_system(
                 body,
                 &cloak::SystemPlan {
@@ -1217,9 +1216,8 @@ impl<'a> Ctx<'a> {
                         prompt_id: &prompt,
                         human_turn: !probe_before && !subagent,
                     },
-                    date,
+                    date: &date,
                     explicit,
-                    keep_top_level: !self.oauth_token,
                 },
             );
             let model = rawjson::string(&body, "model").trim().to_lowercase();
@@ -1315,10 +1313,9 @@ impl<'a> Ctx<'a> {
             let (prev, prompt, begun) =
                 self.continuity_tags(&req.headers, &body, &session_id, &existing_prev, &existing_prompt);
             if begun.initialized {
-                // 6d57ac9: the declassified request joins its session's pinned date.
-                if !begun.pinned_date.is_empty() {
-                    body = cloak::inject_current_date(&body, &begun.pinned_date, explicit);
-                }
+                // The date stays the probe's own, today's: Go v8.0.27 classifies the
+                // request before payload rules run (868e137), so a probe they turn into
+                // a request neither sets nor reads its session's pinned date.
                 continuity = begun.clone();
                 body = signals::inject_billing_tags(&body, &prev, &prompt);
                 if self.cli_profile && self.first_party {
@@ -1375,7 +1372,7 @@ impl<'a> Ctx<'a> {
         let (extra_betas, stripped) = extract_betas(body);
         body = stripped;
         let thread = thread::Thread::of(&body);
-        let mut reverse = alias::Reverse::new();
+        let mut reverse = Arc::default();
         if self.cli_profile && cloaked {
             // `prepareClaudeOAuthToolNamesForRequest`: a continuation without tools
             // reuses its thread's aliases and is sent as is.
@@ -1388,7 +1385,9 @@ impl<'a> Ctx<'a> {
                 let secret = Some(req.caller.principal.trim())
                     .filter(|s| !s.is_empty())
                     .unwrap_or(alias::DEFAULT_SECRET);
-                (body, reverse) = alias::remap(&body, secret);
+                let aliases;
+                (body, aliases) = alias::remap(&body, secret);
+                reverse = Arc::new(aliases);
             }
         }
         body = sanitize_for_upstream(body, &self.base_model, self.is_compat);
@@ -1475,7 +1474,7 @@ impl<'a> Ctx<'a> {
             if !strict && let Some(message) = cloak::invalid_system_block(&body) {
                 return Err(ExecError::local(400, FailureScope::Request, message));
             }
-            body = cloak::relocate_system_for_count(&body, strict, explicit, !self.oauth_token);
+            body = cloak::relocate_system_for_count(&body, strict, explicit);
             if !words.is_empty()
                 && let Some(m) = cloak::SensitiveWords::new(&words)
             {
@@ -1651,7 +1650,6 @@ impl<'a> Ctx<'a> {
         if begun.key.is_empty() {
             return Default::default();
         }
-        let pinned_date = session::pin_date(&begun.key, &self.today);
         let prompt = if !existing_prompt.is_empty() {
             existing_prompt.to_owned()
         } else if !begun.previous_message_id.is_empty()
@@ -1684,7 +1682,6 @@ impl<'a> Ctx<'a> {
                 String::new()
             },
             prompt_id: prompt.clone(),
-            pinned_date,
             initialized: true,
         };
         (prev, prompt, continuity)

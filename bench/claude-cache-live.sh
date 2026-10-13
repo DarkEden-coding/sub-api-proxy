@@ -41,6 +41,8 @@ OUT=${1:-}
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 fail() { echo "$*" >&2; exit 2; }
 [[ $CPA_KEY != *$'\n'* && $CPA_KEY != *$'\r'* ]] || fail "CPA_KEY must be one line"
+# A shell variable from here on: curl, jq, sed and sleep do not inherit it.
+export -n CPA_KEY
 if ! [[ $IDLE_SECONDS =~ ^[0-9]+$ ]] || ((IDLE_SECONDS <= 300 || IDLE_SECONDS > 3300)); then
   fail "IDLE_SECONDS must be between 301 and 3300: past the 5-minute TTL, inside the 1-hour one"
 fi

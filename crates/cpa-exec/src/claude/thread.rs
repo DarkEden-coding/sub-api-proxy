@@ -27,8 +27,9 @@ pub const NOT_FOUND: &str = "No thread state was found for the requested previou
 /// (the Claude executor keeps a second one for Kimi, which Go runs as an executor of
 /// its own).
 ///
-/// Bounded at [`LIMIT`] keys with no expiry, as in Go: each saved turn costs its alias
-/// map (one entry per declared tool) under up to two keys that share it.
+/// Bounded at [`LIMIT`] keys with no expiry, as in Go. A turn's alias map (one entry
+/// per declared tool) is built once, when its request's tools are remapped; the turn
+/// and the continuations that reuse it share that map under their keys.
 #[derive(Default)]
 pub(crate) struct Aliases(Mutex<State>);
 
@@ -39,13 +40,12 @@ struct State {
 }
 
 impl Aliases {
-    fn load(&self, key: &str) -> Option<Reverse> {
+    fn load(&self, key: &str) -> Option<Arc<Reverse>> {
         let state = self.0.lock().expect("thread alias store");
-        state.entries.get(key).map(|aliases| (**aliases).clone())
+        state.entries.get(key).cloned()
     }
 
-    fn save(&self, keys: &[String], aliases: &Reverse) {
-        let aliases = Arc::new(aliases.clone());
+    fn save(&self, keys: &[String], aliases: &Arc<Reverse>) {
         let mut state = self.0.lock().expect("thread alias store");
         for key in keys {
             if !state.entries.contains_key(key) {
@@ -62,7 +62,7 @@ impl Aliases {
 
     /// `prepareClaudeOAuthToolNamesForRequest`'s continuation half: the aliases of the
     /// turn a tool-less continuation continues, or `None` when `body` is not one.
-    pub(crate) fn for_continuation(&self, thread: &Thread, body: &str) -> Option<Result<Reverse, ExecError>> {
+    pub(crate) fn for_continuation(&self, thread: &Thread, body: &str) -> Option<Result<Arc<Reverse>, ExecError>> {
         if !thread.continues || thread.previous.is_empty() {
             return None;
         }
@@ -74,9 +74,9 @@ impl Aliases {
     }
 
     /// `rememberClaudeOAuthToolAliases` once the upstream answered `message_id`.
-    /// Per completed thread turn: two copies of its alias map (one entry per declared
-    /// tool) and one lock; requests without a `thread` pay nothing.
-    pub(crate) fn remember(&self, thread: &Thread, aliases: &Reverse, message_id: &str) {
+    /// Per completed thread turn: one lock, up to two keys and two reference counts;
+    /// requests without a `thread` pay nothing.
+    pub(crate) fn remember(&self, thread: &Thread, aliases: &Arc<Reverse>, message_id: &str) {
         let keys: Vec<String> = [thread.previous.as_str(), message_id]
             .iter()
             .filter(|id| !id.is_empty())
@@ -128,8 +128,8 @@ fn not_found() -> ExecError {
 mod tests {
     use super::*;
 
-    fn reverse(alias: &str, name: &str) -> Reverse {
-        [(alias.to_owned(), name.to_owned())].into_iter().collect()
+    fn reverse(alias: &str, name: &str) -> Arc<Reverse> {
+        Arc::new([(alias.to_owned(), name.to_owned())].into_iter().collect())
     }
 
     /// Go TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound: the oldest key goes
@@ -138,12 +138,14 @@ mod tests {
     fn oldest_turn_is_evicted_past_the_limit() {
         let store = Aliases::default();
         let create = Thread::of(r#"{"thread":{"type":"create"}}"#).unwrap();
-        store.remember(&create, &reverse("alias", "Read"), "first-message");
+        let aliases = reverse("alias", "Read");
+        store.remember(&create, &aliases, "first-message");
         let continuation = r#"{"thread":{"type":"continue","previous_message_id":"first-message"}}"#;
         let lookup = |body: &str| store.for_continuation(&Thread::of(body).unwrap(), body);
-        assert_eq!(lookup(continuation).unwrap().unwrap(), reverse("alias", "Read"));
+        // The continuation shares the turn's map; nothing is copied.
+        assert!(Arc::ptr_eq(&lookup(continuation).unwrap().unwrap(), &aliases));
         for i in 0..LIMIT {
-            store.remember(&create, &Reverse::new(), &format!("message-{i}"));
+            store.remember(&create, &Arc::default(), &format!("message-{i}"));
         }
         let error = lookup(continuation).unwrap().unwrap_err();
         assert_eq!((error.status, error.scope), (404, FailureScope::Request));

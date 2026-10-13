@@ -462,6 +462,17 @@ fn unframe_chat(stream: &str) -> String {
 /// payload-rule params in one Go map): their bodies compare as JSON values.
 const GO_MAP_ORDER: &[&str] = &["TestClaudeExecutorPayloadOverrideDisabledThinking"];
 
+/// Go v8.0.27 tests that send an API key's caller system text upstream top-level,
+/// where cliproxy-rs moves it after the leading user run as for every request
+/// (docs/DIFFERENCES-FROM-GO.md): Rust's body is compared with Go's after
+/// `with_relocated_system`, which leaves 6fecc6e's recordings of them unchanged.
+const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
+    "TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked",
+    "TestClaudeExecutor_CountTokensUpstream_Cloaked_ExplicitPreservesClientSystemBreakpoint",
+    "TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientSystemBreakpoint",
+    "TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_SuppressesAllAutoCacheControl",
+];
+
 /// Go tests whose recorded exchange a replay cannot reproduce, with the reason.
 const NOT_REPLAYABLE: &[(&str, &str)] = &[
     (
@@ -733,7 +744,11 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
             want.remove(random);
             got.remove(random);
         }
-        sent.push((got, want, text(&rust.body), text(&bytes(&go["body"]))));
+        let mut go_body = text(&bytes(&go["body"]));
+        if RELOCATES_API_KEY_SYSTEM.contains(&test) {
+            go_body = super::tests::with_relocated_system(&go_body);
+        }
+        sent.push((got, want, text(&rust.body), go_body));
     }
     // Identifiers to keep verbatim: the recorded inputs (config, credential, request,
     // upstream replies) and whatever both implementations produced.

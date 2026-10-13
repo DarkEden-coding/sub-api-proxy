@@ -64,6 +64,14 @@ v8.0.27 checkout (`bf93416`) the same way; everything else stays on `6fecc6e`.
 - `../../../src/claude/testdata/go_unit_v8.0.27.json`: `unit/record.py` on Go's own
   v8.0.27 tests for those fixes, replayed by `claude::go_unit::v8_0_27_*`.
 
+Where a cloaked API key's caller system prompt goes stays as at `6fecc6e`
+(`docs/DIFFERENCES-FROM-GO.md`). The recordings in which Go v8.0.27 sends that prompt
+in the top-level `system` are listed by name (`RELOCATES_API_KEY_SYSTEM` in
+`claude/tests.rs` and `claude/go_exec.rs`) and compared with Go's body after
+`claude::tests::with_relocated_system` moves the prompt where cliproxy-rs sends it;
+every other byte is compared as recorded. `6fecc6e`'s recordings of the same requests
+replay unchanged.
+
 ```sh
 reference=/absolute/path/to/CLIProxyAPI   # at v8.0.27
 crate=/absolute/path/to/cliproxy-rs/crates/cpa-exec
@@ -87,5 +95,8 @@ RSFIX_ONLY='^(TestClaudeExecutor_PromptCacheOptions\w*|TestClaudeExecutor_CountT
 Both ran with the network denied (`unshare -rn` with loopback up), `GOTOOLCHAIN=local
 GOPROXY=off` and Go 1.26 after a `go mod download` in each checkout. The tests left out
 of the v8.0.27 recording are those whose answers depend on v8.0.27's later move of
-payload rules to the end of the pipeline (`868e137`), which is not ported yet.
+payload rules to the end of the pipeline (`868e137`), which is not ported yet. One of
+them, `TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate`, also
+checks the date a probe keeps when a payload rule makes it an ordinary request;
+`claude::tests::declassified_probes_keep_their_own_date` checks that date instead.
 
