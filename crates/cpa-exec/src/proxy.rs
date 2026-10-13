@@ -679,7 +679,7 @@ async fn exchange(
     let body = body.unwrap_or_default();
     let mut strip_sensitive = false;
     let mut hop_headers = headers.clone();
-    let mut sent = 0;
+    let mut sent: u32 = 0;
     // Go's `Client.Timeout`: one deadline for every hop, taken before the first. Cost:
     // one `Instant` per request and one clock read per hop.
     // ponytail: wreq starts the body's share of a hop timeout afresh when the headers
@@ -718,7 +718,7 @@ async fn exchange(
         // resendable watched body in wreq.
         let watched = timing.filter(|_| !go_transport || current.scheme() == "http");
         let builder = if let (true, Some(timing)) = (sends_body, watched) {
-            builder.body(wreq::Body::wrap(TimedBody::new(body.clone(), timing.clone())))
+            builder.body(wreq::Body::wrap(TimedBody::new(body.clone(), timing.clone(), sent)))
         } else if sends_body {
             builder.body(body.clone())
         } else if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
@@ -736,6 +736,14 @@ async fn exchange(
             Some(remaining) => builder.timeout(remaining),
             None => builder,
         };
+        // The hop goes out now: what an earlier hop measured no longer applies. Its
+        // body reports nothing before the client polls it.
+        if let Some(timing) = timing {
+            timing.upstream_stage(UpstreamStage::Hop {
+                hop: sent,
+                body: sends_body,
+            });
+        }
         // A timed hop learns from the connection hook whether it dialled.
         let (response, dialled) = match timing {
             Some(_) => {
@@ -860,7 +868,7 @@ async fn exchange(
     let stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
     let stream = match timing {
         Some(timing) => {
-            timing.upstream_stage(UpstreamStage::Headers { reused: !dialled });
+            timing.upstream_stage(UpstreamStage::Headers { dialled });
             futures_util::future::Either::Left(Counted::new(stream, timing.clone()))
         }
         None => futures_util::future::Either::Right(stream),
@@ -897,12 +905,13 @@ tokio::task_local! {
 }
 
 /// The connection hook of the clients that timed requests use (Claude's native client
-/// and [`GoClients::timed`]): a timed request learns whether its connection was dialled
-/// for it ([`UpstreamStage::Headers`]). The connector runs in the task that sends the
-/// request until the connection is ready; a dial that loses to a pooled connection
-/// finishes in the background and is not counted. One whose TCP and TLS setup finished
-/// just before a pooled connection came free, while its HTTP handshake was still
-/// running, is counted although the pooled one is used.
+/// and [`GoClients::timed`]): a timed request learns whether a connection was dialled
+/// while it waited ([`UpstreamStage::Headers`]). The connector runs in the task that
+/// sends the request until the connection is ready; a dial that loses to a pooled
+/// connection finishes in the background and is not counted. wreq races the pool
+/// against the whole new connection, its HTTP handshake included, so a dial that
+/// finished can still lose to a pooled connection that came free: a dial does not say
+/// which connection served the request, only its absence does (a pooled one).
 ///
 /// Cost, on every request of a hooked client, timed or not: wreq type-erases a
 /// connector stack with layers, so each request clones a few boxed services (also for a
@@ -955,22 +964,25 @@ fn dialled<T, E>(result: &Result<T, E>) {
 /// went to the socket.
 const BODY_PIECE: usize = 64 << 10;
 
-/// A timed request body: the same bytes and exact length as a plain one, in
-/// [`BODY_PIECE`] pieces of the same buffer, reporting [`UpstreamStage::Connected`] when the
-/// client first asks for it and [`UpstreamStage::BodySent`] when it takes the last piece.
+/// A timed request body for hop `hop`: the same bytes and exact length as a plain one,
+/// in [`BODY_PIECE`] pieces of the same buffer, reporting [`UpstreamStage::Connected`]
+/// when the client first asks for it and [`UpstreamStage::BodySent`] when it takes the
+/// last piece.
 struct TimedBody {
     rest: Bytes,
     len: u64,
     asked: bool,
+    hop: u32,
     timing: UsageSink,
 }
 
 impl TimedBody {
-    fn new(body: Bytes, timing: UsageSink) -> Self {
+    fn new(body: Bytes, timing: UsageSink, hop: u32) -> Self {
         Self {
             len: body.len() as u64,
             rest: body,
             asked: false,
+            hop,
             timing,
         }
     }
@@ -986,14 +998,17 @@ impl http_body::Body for TimedBody {
     ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
         let this = &mut *self;
         if !std::mem::replace(&mut this.asked, true) {
-            this.timing.upstream_stage(UpstreamStage::Connected);
+            this.timing.upstream_stage(UpstreamStage::Connected { hop: this.hop });
         }
         if this.rest.is_empty() {
             return std::task::Poll::Ready(None);
         }
         let piece = this.rest.split_to(this.rest.len().min(BODY_PIECE));
         if this.rest.is_empty() {
-            this.timing.upstream_stage(UpstreamStage::BodySent { bytes: this.len });
+            this.timing.upstream_stage(UpstreamStage::BodySent {
+                hop: this.hop,
+                bytes: this.len,
+            });
         }
         std::task::Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
     }
@@ -1977,7 +1992,7 @@ mod tests {
 
     /// A timed request goes out byte for byte as an untimed one (the same head with its
     /// `Content-Length`, the same body), and reports its stages in order, its sizes, and
-    /// whether its connection was dialled for it.
+    /// whether a connection was dialled for it.
     #[tokio::test]
     async fn timed_requests_send_the_same_bytes_and_report_their_stages() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -2051,7 +2066,7 @@ mod tests {
                 order: None,
             })
         };
-        for reused in [false, true] {
+        for dialled in [true, false] {
             let timed = send_routed(&route, &url, headers(), body.clone(), None, Some(&sink))
                 .await
                 .unwrap();
@@ -2061,11 +2076,13 @@ mod tests {
                 reported,
                 [
                     UpstreamStage::Started,
-                    UpstreamStage::Connected,
+                    UpstreamStage::Hop { hop: 0, body: true },
+                    UpstreamStage::Connected { hop: 0 },
                     UpstreamStage::BodySent {
+                        hop: 0,
                         bytes: body.len() as u64
                     },
-                    UpstreamStage::Headers { reused },
+                    UpstreamStage::Headers { dialled },
                     UpstreamStage::FirstByte,
                     UpstreamStage::BodyRead { bytes: 5 },
                 ]

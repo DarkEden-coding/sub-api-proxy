@@ -648,7 +648,8 @@ async fn usage_record_times_each_stage() {
     at_least(sent - connected, READ_PAUSE, "upstream body handed over", slow);
     at_least(headers - sent, HEAD_DELAY, "upstream response head", slow);
     at_least(first - headers, FIRST_BYTE_DELAY, "upstream first byte", slow);
-    assert_eq!(slow["timings"]["upstream_connection_reused"], false, "{slow}");
+    // A dial does not say which connection served the request: no answer.
+    assert!(slow["timings"].get("upstream_connection_reused").is_none(), "{slow}");
     assert_eq!(slow["client_request_bytes"], large.len(), "{slow}");
     // The timed body keeps the exact length on the wire, not a chunked one.
     assert_eq!(
