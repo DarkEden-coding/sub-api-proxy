@@ -660,6 +660,10 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
     };
     // Go resolves providers before the lifecycle starts: an unknown model never starts one.
     let resolved = route(rt, &rt.registry(), &call, routed.as_ref()).map_err(|e| e.failure)?;
+    // The usage record's prompt prefix is the client's, before interceptors rewrite it.
+    if call.operation == Operation::Generate && rt.usage_queue().accepts() {
+        trace.prompt_prefix(call.entry, &call.body);
+    }
     let mut call = call;
     let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1, true).await?;
     let result = retry_bootstrap(rt, call, trace, &resolved, hooks.as_ref()).await;
@@ -749,7 +753,10 @@ pub struct Trace(
     /// Response headers plugin interceptors changed (Go `downstreamHeadersAfterInterceptors`).
     std::sync::Mutex<HeaderMap>,
     /// When the request arrived, for the usage record's timings.
-    crate::observability::Clock,
+    Arc<crate::observability::Clock>,
+    /// The client's prompt prefix before plugin interceptors rewrite the body
+    /// (`crate::usage_record::prompt_prefix`).
+    std::sync::OnceLock<String>,
 );
 
 impl Trace {
@@ -764,6 +771,7 @@ impl Trace {
                 .unwrap_or_default(),
             Default::default(),
             crate::observability::current_clock(),
+            Default::default(),
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -823,8 +831,16 @@ impl Trace {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
-    pub(crate) fn clock(&self) -> crate::observability::Clock {
-        self.4
+    pub(crate) fn clock(&self) -> Arc<crate::observability::Clock> {
+        self.4.clone()
+    }
+
+    /// The prompt prefix hash of the request's body, from the first body it is asked
+    /// for: before plugin interceptors when [`run_with_bootstrap_retries`] asks.
+    pub(crate) fn prompt_prefix(&self, format: Format, body: &[u8]) -> String {
+        self.5
+            .get_or_init(|| crate::usage_record::prompt_prefix(format, body))
+            .clone()
     }
 }
 
@@ -922,17 +938,15 @@ async fn run_routed(
         && (rt.usage_queue().accepts() || rt.plugins().has_usage_plugins()))
         || (home_count && rt.usage_queue().accepts()))
     .then(|| {
-        Arc::new(crate::usage_record::Facts {
-            clock: trace.clock(),
-            ..crate::usage_record::Facts::new(
-                usage_client(&cfg, &call, trace, &session),
-                call.entry,
-                call.response,
-                &call.model,
-                &call.body,
-                call.stream,
-            )
-        })
+        Arc::new(crate::usage_record::Facts::new(
+            usage_client(&cfg, &call, trace, &session),
+            call.entry,
+            call.response,
+            &call.model,
+            &call.body,
+            call.stream,
+            trace,
+        ))
     });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
@@ -2188,30 +2202,29 @@ fn track_usage(done: Done, tracker: Option<crate::usage_record::Tracker>) -> Don
             Done::Buffered { headers, body }
         }
         Done::Stream { headers, first, rest } => {
+            tracker.streams();
             if let Some(first) = &first {
                 tracker.event(first);
             }
             Done::Stream {
                 headers,
+                first,
                 rest: Tracked {
                     inner: rest,
                     tracker: Some(tracker),
-                    sent: first.is_some(),
                 }
                 .boxed(),
-                first,
             }
         }
     }
 }
 
-/// A client stream that reports its events to the attempt's usage record.
+/// A client stream that reports its events to the attempt's usage record. The upstream
+/// stream goes before the record publishes, so the record has the upstream body's size:
+/// dropped on its end or error, and first when the client goes away (field order).
 struct Tracked {
     inner: ExecStream,
     tracker: Option<crate::usage_record::Tracker>,
-    /// An event went to the client: the next poll is the server asking for more, so
-    /// the client's first bytes were handed over.
-    sent: bool,
 }
 
 impl futures_util::Stream for Tracked {
@@ -2221,25 +2234,22 @@ impl futures_util::Stream for Tracked {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        if std::mem::take(&mut self.sent)
-            && let Some(t) = self.tracker.as_mut()
-        {
-            t.client_first_byte();
-        }
         let item = std::task::ready!(self.inner.poll_next_unpin(cx));
         match &item {
             Some(Ok(event)) => {
                 if let Some(t) = self.tracker.as_mut() {
                     t.event(event);
                 }
-                self.sent = true;
             }
+            // A boxed empty stream does not allocate.
             Some(Err(error)) => {
+                self.inner = futures_util::stream::empty().boxed();
                 if let Some(t) = self.tracker.take() {
                     t.fail(error);
                 }
             }
             None => {
+                self.inner = futures_util::stream::empty().boxed();
                 if let Some(t) = self.tracker.take() {
                     t.succeed();
                 }
@@ -2427,6 +2437,89 @@ mod tests {
         assert_eq!(response.status().as_u16(), 429);
         assert_eq!(response.headers()["content-type"], "text/plain");
         assert!(response.headers().get("retry-after").is_none());
+    }
+
+    /// A stream's usage record publishes once its upstream stream is gone, so it has the
+    /// upstream body size the stream reports when dropped: on an error the stream
+    /// yields while it still holds its upstream body, at its end, and when the client
+    /// goes away.
+    #[tokio::test]
+    async fn stream_records_publish_after_the_upstream_stream_is_dropped() {
+        use cpa_core::exec::{UpstreamStage, UsageSink};
+        use std::task::Poll;
+        /// What the upstream body reports when it is dropped.
+        struct UpstreamBody(UsageSink);
+        impl Drop for UpstreamBody {
+            fn drop(&mut self) {
+                self.0.upstream_stage(UpstreamStage::BodyRead { bytes: 42 });
+            }
+        }
+        let cfg = Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg.clone(), Vec::new(), executors));
+        rt.usage_queue().configure(true, &cfg);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("type".into(), "claude".into());
+        let credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/auth"),
+            std::path::Path::new("/auth/a.json"),
+            metadata,
+        )
+        .unwrap();
+        let facts = Arc::new(crate::usage_record::Facts::new(
+            Default::default(),
+            Format::Claude,
+            Format::Claude,
+            "m",
+            b"{}",
+            true,
+            &Trace::default(),
+        ));
+        for ending in ["error", "end", "client gone"] {
+            let tracker = crate::usage_record::Tracker::start(&rt, &facts, &credential, "m");
+            let body = UpstreamBody(tracker.sink());
+            // Polled, it answers without letting go of the upstream body.
+            let rest = futures_util::stream::poll_fn(move |_| {
+                let _held = &body;
+                match ending {
+                    "error" => Poll::Ready(Some(Err(ExecError::local(
+                        502,
+                        cpa_core::exec::FailureScope::Request,
+                        "restore failed",
+                    )))),
+                    "end" => Poll::Ready(None),
+                    _ => Poll::Pending,
+                }
+            })
+            .boxed();
+            let done = track_usage(
+                Done::Stream {
+                    headers: HeaderMap::new(),
+                    first: None,
+                    rest,
+                },
+                Some(tracker),
+            );
+            let Done::Stream { mut rest, .. } = done else {
+                unreachable!()
+            };
+            if ending == "client gone" {
+                assert!(futures_util::poll!(rest.next()).is_pending());
+                drop(rest);
+            } else {
+                assert!(!matches!(rest.next().await, Some(Ok(_))));
+            }
+            let records = rt.usage_queue().pop_oldest(10);
+            assert_eq!(records.len(), 1, "{ending}");
+            let record: serde_json::Value = serde_json::from_slice(&records[0]).unwrap();
+            assert_eq!(record["upstream_response_bytes"], 42, "{ending}: {record}");
+        }
     }
 
     /// Go `isConnectionLifecycleError` on the texts executors produce.

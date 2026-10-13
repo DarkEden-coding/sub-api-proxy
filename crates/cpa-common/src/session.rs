@@ -662,10 +662,7 @@ pub fn extract_session_info(
 
     // 3. OpenAI / Codex CLI headers.
     if let Some(info) = codex(headers, &body, parent) {
-        return finalize(SessionInfo {
-            source: "header",
-            ..info
-        });
+        return finalize(info);
     }
 
     // 4. Antigravity CLI.
@@ -756,14 +753,19 @@ fn codex(headers: &HeaderMap, body: &Body<'_>, parent: &str) -> Option<SessionIn
     if tid.is_empty() {
         tid = turn_get("thread_id");
     }
+    // A thread from the body makes a session the body named, not a header.
+    let mut tid_in_body = false;
     if tid.is_empty() && !sid.is_empty() && body.exists {
         tid = body.first(&["thread_id", "threadId", "metadata.thread_id"]);
+        tid_in_body = !tid.is_empty();
     }
+    let source = |chosen: &str| if tid_in_body && chosen == tid { "body" } else { "header" };
     if sid.is_empty() && tid.is_empty() {
         return None;
     }
     let mut info = SessionInfo {
         client_type: "codex",
+        source: "header",
         ..Default::default()
     };
     let mut parent_thread = first_header(headers, &["x-codex-parent-thread-id", "X-Codex-Parent-Thread-Id"]);
@@ -805,6 +807,7 @@ fn codex(headers: &HeaderMap, body: &Body<'_>, parent: &str) -> Option<SessionIn
         if fork_session == forked_from && !sid.is_empty() && sid != forked_from {
             fork_session = sid.clone();
         }
+        info.source = source(&fork_session);
         info.session_id = format!("codex:{fork_session}");
         info.parent_session_id = format!("codex:{forked_from}");
         info.agent_name = "main".into();
@@ -831,6 +834,7 @@ fn codex(headers: &HeaderMap, body: &Body<'_>, parent: &str) -> Option<SessionIn
                 info.parent_session_id = format!("codex:{parent}");
             }
         } else {
+            info.source = source(&child);
             info.session_id = format!("codex:{child}");
             info.agent_name = if agent_name.is_empty() {
                 "subagent".into()

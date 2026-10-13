@@ -171,8 +171,9 @@ pub enum UpstreamStage {
     Connected,
     /// The client took the last of the request body, `bytes` in all, into its write
     /// buffer. Handed to the transport is not acknowledged by the peer: the client's
-    /// own buffer (about 470 KiB at most) and the kernel's socket buffer may still hold
-    /// the end of the body, and nothing here learns when the peer received it.
+    /// own buffer (it takes another 64 KiB piece while it holds less than 408 KiB, so
+    /// under 472 KiB) and the kernel's socket buffer may still hold the end of the body,
+    /// and nothing here learns when the peer received it.
     BodySent { bytes: u64 },
     /// The response head arrived. `reused`: the request went out on a pooled
     /// connection; the client dialled none for it.

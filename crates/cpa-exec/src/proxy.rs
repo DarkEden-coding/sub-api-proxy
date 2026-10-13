@@ -904,9 +904,10 @@ tokio::task_local! {
 /// just before a pooled connection came free, while its HTTP handshake was still
 /// running, is counted although the pooled one is used.
 ///
-/// Cost, on every request of a hooked client: wreq type-erases a connector stack with
-/// layers, so each request clones three boxed services (a few dozen bytes) and each
-/// dial boxes three futures. Other clients have no hook and pay nothing.
+/// Cost, on every request of a hooked client, timed or not: wreq type-erases a
+/// connector stack with layers, so each request clones a few boxed services (also for a
+/// pooled connection) and each dial boxes a few more futures. Other clients have no
+/// hook and pay nothing.
 // ponytail: a caller-built client (`ClaudeExecutor::with_client`, unit tests) has no
 // hook, so its connections read as reused. Build clients through this function to time
 // them.
@@ -949,8 +950,9 @@ fn dialled<T, E>(result: &Result<T, E>) {
 }
 
 /// How much of a timed request body the client is handed at a time. The client takes
-/// the next piece once its write buffer has room, so the last piece marks the body as
-/// handed over only after all but about the buffer's size went to the socket.
+/// the next piece while its write buffer holds less than 408 KiB (wreq's HTTP/1.1
+/// limit), so the last piece marks the body as handed over once all but under 472 KiB
+/// went to the socket.
 const BODY_PIECE: usize = 64 << 10;
 
 /// A timed request body: the same bytes and exact length as a plain one, in
