@@ -286,11 +286,14 @@ fn sanitize_tool_schema_document(document: Vec<u8>, antigravity_schema: bool) ->
     }
     let mut edits = Vec::new();
     for (i, tool) in tools.array().iter().enumerate() {
-        for key in ["functionDeclarations", "function_declarations"] {
-            let declarations = tool.get(key);
-            if !declarations.is_array() {
-                continue;
-            }
+        // A tool can carry both spellings; their edits are spliced in document order.
+        let mut lists: Vec<_> = ["functionDeclarations", "function_declarations"]
+            .into_iter()
+            .map(|key| (key, tool.get(key)))
+            .filter(|(_, declarations)| declarations.is_array())
+            .collect();
+        lists.sort_by_key(|(_, declarations)| declarations.index);
+        for (key, declarations) in &lists {
             for (j, declaration) in declarations.array().iter().enumerate() {
                 let cleaned = sanitize_declaration(declaration.raw(), antigravity_schema);
                 if cleaned != declaration.raw() {
@@ -1337,28 +1340,29 @@ mod tests {
     }
 
     /// Cleaning the schemas of many tool declarations is one pass over the tools: a
-    /// search from the start of the tools for each declaration took minutes here.
+    /// search from the start of the tools for each declaration took minutes here. Both
+    /// spellings of the declarations key appear, in both orders.
     #[test]
     fn tool_schemas_are_cleaned_in_one_pass() {
         let declaration = r#"{"name":"t","parametersJsonSchema":{"type":"object","$schema":"x","properties":{"a":{"type":["string","null"]}},"additionalProperties":false}}"#;
-        let body = |declarations: Vec<&str>| {
-            format!(
-                r#"{{"request":{{"tools":[{{"functionDeclarations":[{}]}}]}}}}"#,
-                declarations.join(",")
-            )
-        };
-        let one = sanitize_request_schemas(body(vec![declaration]).into_bytes(), true);
+        let one = format!(r#"{{"request":{{"tools":[{{"functionDeclarations":[{declaration}]}}]}}}}"#);
+        let one = sanitize_request_schemas(one.into_bytes(), true);
         let cleaned = gj::get(&one, "request.tools.0.functionDeclarations.0").raw().to_vec();
         let cleaned = String::from_utf8(cleaned).unwrap();
         assert!(cleaned.contains(r#""parameters":"#) && !cleaned.contains("parametersJsonSchema"));
-        let count = 4_000;
+        let body = |declaration: &str| {
+            let list = vec![declaration; 1_000].join(",");
+            format!(
+                r#"{{"request":{{"tools":[{{"functionDeclarations":[{list}],"function_declarations":[{list}]}},{{"function_declarations":[{list}],"functionDeclarations":[{list}]}}]}}}}"#
+            )
+        };
         let started = std::time::Instant::now();
-        let many = sanitize_request_schemas(body(vec![declaration; count]).into_bytes(), true);
+        let many = sanitize_request_schemas(body(declaration).into_bytes(), true);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",
             started.elapsed()
         );
-        assert_eq!(String::from_utf8(many).unwrap(), body(vec![cleaned.as_str(); count]));
+        assert_eq!(String::from_utf8(many).unwrap(), body(&cleaned));
     }
 }
