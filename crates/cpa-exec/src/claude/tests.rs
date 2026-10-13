@@ -489,14 +489,71 @@ const FOLLOWS_V8_0_27: &[&str] = &[
     "oauth-fast-unified-429",
 ];
 
+/// v8.0.27 scenarios where Go keeps an API key's caller system text top-level and
+/// cliproxy-rs moves it after the leading user run, as it does for every request
+/// (docs/DIFFERENCES-FROM-GO.md). Rust's body is compared with Go's after
+/// [`with_relocated_system`].
+const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
+    "apikey-cloak-system-single-user",
+    "apikey-cloak-system-leading-run",
+    "apikey-cloak-count-system-single-user",
+    "apikey-cloak-effort-directive",
+];
+
+/// Go v8.0.27's upstream body with the caller system blocks it left top-level (those
+/// after the billing, Claude Code identity and Fable blocks) moved into one system
+/// turn each after the leading user run (the first user turn and the user turns and
+/// effort directives that follow it), where cliproxy-rs puts them for API keys too.
+/// Every other byte is Go's; a body without such blocks comes back unchanged.
+pub(super) fn with_relocated_system(go_body: &str) -> String {
+    let system = rawjson::get(go_body, "system");
+    let blocks = system.array();
+    let ours = |block: &gjson::Value| {
+        let text = block.get("text");
+        let text = text.str();
+        text.starts_with(cloak::BILLING_PREFIX) || text == cloak::CLI_IDENTITY || text == cloak::FABLE_REPORTING
+    };
+    let kept = blocks.iter().take_while(|b| ours(b)).count();
+    if kept == blocks.len() {
+        return go_body.to_owned();
+    }
+    let messages = rawjson::get(go_body, "messages");
+    let messages = messages.array();
+    let role = |i: usize| messages[i].get("role").str().to_owned();
+    let first = (0..messages.len()).find(|&i| role(i) == "user").expect("a user turn");
+    let mut at = first + 1;
+    while at < messages.len()
+        && (role(at) == "user" || (role(at) == "system" && messages[at].get("output_config").exists()))
+    {
+        at += 1;
+    }
+    let turns: Vec<String> = blocks[kept..]
+        .iter()
+        .map(|b| format!(r#"{{"role":"system","content":[{}]}}"#, b.json()))
+        .collect();
+    let list: Vec<&str> = messages[..at]
+        .iter()
+        .map(|m| m.json())
+        .chain(turns.iter().map(String::as_str))
+        .chain(messages[at..].iter().map(|m| m.json()))
+        .collect();
+    let body = rawjson::set_raw(go_body, "messages", &format!("[{}]", list.join(",")));
+    if kept == 0 {
+        return rawjson::delete(&body, "system");
+    }
+    let cpa: Vec<&str> = blocks[..kept].iter().map(|b| b.json()).collect();
+    rawjson::set_raw(&body, "system", &format!("[{}]", cpa.join(",")))
+}
+
 /// The prompt-cache and prompt-shaping fixes this executor follows from v8.0.27, run
 /// through Go v8.0.27's executor by the same generator (scenarios-v8.0.27.json): the
 /// session-pinned currentDate reminder (6d57ac9), thread breakpoint reservation and
 /// continuation aliases (26e5efb, 678a925, e7b2226), explicit prompt cache options
-/// (eb6a768), caller system placement (5d89040, eca1d11, 39632e5, 14dc4e0) and
-/// effort directives (2d8ec73), invalid markers (be8c35f) and overage billing resets
-/// (8080967). The scenarios run in order on one executor: a date pin and a thread's
-/// aliases carry from one scenario to the next, as in Go's run.
+/// (eb6a768), OAuth system placement and effort directives (14dc4e0, 2d8ec73),
+/// invalid markers (be8c35f) and overage billing resets (8080967). API-key system
+/// placement keeps 6fecc6e's ([`RELOCATES_API_KEY_SYSTEM`]). The scenarios run in
+/// order on one executor: a date pin and a thread's aliases carry from one scenario to
+/// the next, as in Go's run.
 #[tokio::test]
 async fn v8_0_27_cache_and_prompt_shaping_scenarios_match_go() {
     let fixture = include_str!("testdata/go_executor_v8.0.27.json");
@@ -638,9 +695,15 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
                 text.to_owned()
             }
         };
+        let mut go_body = upstream["body"].as_str().unwrap().to_owned();
+        if RELOCATES_API_KEY_SYSTEM.contains(&name) {
+            let relocated = with_relocated_system(&go_body);
+            assert_ne!(relocated, go_body, "{name}: Go kept no caller system text top-level");
+            go_body = relocated;
+        }
         assert_eq!(
             random_prompt(&normalize_random(&prepared.body)),
-            random_prompt(&normalize_random(upstream["body"].as_str().unwrap())),
+            random_prompt(&normalize_random(&go_body)),
             "{name}: upstream body"
         );
         let mut ours: Vec<(String, String)> = prepared.headers.clone();
@@ -734,32 +797,29 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// A coding client streams one long cloaked conversation through a Claude OAuth
-/// login. What Anthropic's prompt cache keys on stays byte for byte the same:
-///
-/// - warm: the next turn repeats the previous request's prefix;
-/// - changed context: an edited caller system prompt changes the request only from
-///   the turn it is moved to, after the first user message;
-/// - idle: a turn 45 minutes later, past local midnight, repeats the prefix too, and
-///   every breakpoint has the 1-hour TTL that outlives the gap. The currentDate
-///   reminder sits in the first user message; it keeps the session's first date (Go
-///   v8.0.27, 6d57ac9), and only a new conversation starts on the new date.
-#[tokio::test]
-async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
+/// A loopback Messages upstream that keeps the body of every request it gets and
+/// answers each with a minimal completed message, streamed when the request asks for
+/// a stream. Message IDs count the requests.
+async fn recording_upstream() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
     use axum::response::IntoResponse;
     let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let seen = sent.clone();
     let router = axum::Router::new().fallback(move |body: String| {
         let seen = seen.clone();
         async move {
-            let id = format!("msg_midnight_{}", {
+            let stream = rawjson::get(&body, "stream").bool();
+            let id = format!("msg_recorded_{}", {
                 let mut seen = seen.lock().unwrap();
                 seen.push(body);
                 seen.len()
             });
+            let message = serde_json::json!({"id": id, "type": "message", "role": "assistant",
+                "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 3, "output_tokens": 0}});
+            if !stream {
+                return ([(http::header::CONTENT_TYPE, "application/json")], message.to_string()).into_response();
+            }
             let events = [
-                serde_json::json!({"type": "message_start", "message": {"id": id, "type": "message", "role": "assistant",
-                    "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 3, "output_tokens": 0}}}),
+                serde_json::json!({"type": "message_start", "message": message}),
                 serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
                 serde_json::json!({"type": "message_stop"}),
             ];
@@ -773,6 +833,68 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (base, sent)
+}
+
+/// A native Messages request from a coding client, with the session the server
+/// derives for it.
+fn client_request(body: String, headers: http::HeaderMap) -> ExecRequest {
+    let model = rawjson::string(&body, "model");
+    let stream = rawjson::get(&body, "stream").bool();
+    let body = Bytes::from(body);
+    enrich(ExecRequest {
+        operation: Operation::Generate,
+        source_format: Format::Claude,
+        response_format: Format::Claude,
+        requested_model: model.clone(),
+        model,
+        original_body: body.clone(),
+        body,
+        stream,
+        alt: None,
+        session: None,
+        execution_session: None,
+        derived_session: None,
+        resolved_model: None,
+        usage: Default::default(),
+        request_path: String::new(),
+        headers,
+        caller: Caller {
+            principal: "agent-client-key".into(),
+            source: "authorization",
+        },
+    })
+}
+
+/// Sends `req` and reads the whole answer, so the turn is committed.
+async fn drain(executor: &ClaudeExecutor, credential: &Credential, cfg: &Config, req: ExecRequest) {
+    let response = executor.execute(credential, req, cfg).await.unwrap();
+    if let ResponseBody::Stream(mut events) = response.body {
+        while let Some(event) = events.next().await {
+            event.unwrap();
+        }
+    }
+}
+
+/// The date in the currentDate reminder of the first user message.
+fn reminder_date(body: &str) -> String {
+    let reminder = rawjson::string(body, "messages.0.content.0.text");
+    reminder.split("Today's date is ").nth(1).unwrap()[..10].to_owned()
+}
+
+/// A coding client streams one long cloaked conversation through a Claude OAuth
+/// login. What Anthropic's prompt cache keys on stays byte for byte the same:
+///
+/// - warm: the next turn repeats the previous request's prefix;
+/// - changed context: an edited caller system prompt changes the request only from
+///   the turn it is moved to, after the first user message;
+/// - idle: a turn 45 minutes later, past local midnight, repeats the prefix too, and
+///   every breakpoint has the 1-hour TTL that outlives the gap. The currentDate
+///   reminder sits in the first user message; it keeps the session's first date (Go
+///   v8.0.27, 6d57ac9), and only a new conversation starts on the new date.
+#[tokio::test]
+async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
+    let (base, sent) = recording_upstream().await;
     let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
     let mut credential = harness_credential();
     credential.id = "midnight.json".into();
@@ -790,43 +912,8 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
         )
     };
     let turn = |messages: &str| request(system, messages);
-    let send = |body: String| {
-        let body = Bytes::from(body);
-        enrich(ExecRequest {
-            operation: Operation::Generate,
-            source_format: Format::Claude,
-            response_format: Format::Claude,
-            requested_model: "claude-opus-5-5".into(),
-            model: "claude-opus-5-5".into(),
-            original_body: body.clone(),
-            body,
-            stream: true,
-            alt: None,
-            session: None,
-            execution_session: None,
-            derived_session: None,
-            resolved_model: None,
-            usage: Default::default(),
-            request_path: String::new(),
-            headers: Default::default(),
-            caller: Caller {
-                principal: "agent-client-key".into(),
-                source: "authorization",
-            },
-        })
-    };
-    let run = |req: ExecRequest| {
-        let (executor, credential, cfg) = (&executor, &credential, &cfg);
-        async move {
-            let response = executor.execute(credential, req, cfg).await.unwrap();
-            let ResponseBody::Stream(mut events) = response.body else {
-                panic!("not a stream");
-            };
-            while let Some(event) = events.next().await {
-                event.unwrap();
-            }
-        }
-    };
+    let send = |body: String| client_request(body, Default::default());
+    let run = |req: ExecRequest| drain(&executor, &credential, &cfg, req);
     let turn_two = format!(
         r#"{first},{{"role":"assistant","content":[{{"type":"text","text":"Done with the first half."}}]}},{{"role":"user","content":[{{"type":"text","text":"Now the second half."}}]}}"#
     );
@@ -849,12 +936,8 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     let [cold, warm, changed, idle, fresh] = &sent[..] else {
         panic!("{} requests", sent.len());
     };
-    let date = |body: &str| {
-        let reminder = rawjson::string(body, "messages.0.content.0.text");
-        reminder.split("Today's date is ").nth(1).unwrap()[..10].to_owned()
-    };
     assert_eq!(
-        [cold, warm, changed, idle, fresh].map(|b| date(b)),
+        [cold, warm, changed, idle, fresh].map(|b| reminder_date(b)),
         ["2026-10-13", "2026-10-13", "2026-10-13", "2026-10-13", "2026-10-14"]
     );
     // The selected content the cache is keyed on, in Anthropic's order (tools, system,
@@ -916,6 +999,119 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     assert_eq!(breakpoints(changed), with("messages.3.content.0"));
     assert_eq!(breakpoints(idle), with("messages.5.content.0"));
     assert_eq!(breakpoints(fresh), fixed);
+}
+
+/// A cloaked API key keeps the caller's system prompt where the next turn finds it:
+/// in a system turn after the first user message, on the first turn and every later
+/// one, as for an OAuth login. Go v8.0.27 keeps it top-level while that user message
+/// ends the conversation and moves it on the second turn, which then misses the cache
+/// from the Claude Code identity block on (docs/DIFFERENCES-FROM-GO.md).
+#[tokio::test]
+async fn api_key_cloak_keeps_the_caller_prompt_in_place_across_turns() {
+    let (base, sent) = recording_upstream().await;
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let mut credential = Credential::from_file(
+        Path::new("/fake"),
+        Path::new("/fake/claude-api-key.json"),
+        serde_json::json!({"type": "claude"}).as_object().unwrap().clone(),
+    )
+    .unwrap();
+    for (key, value) in [
+        ("api_key", "fake-gateway-key"),
+        ("base_url", &base),
+        ("cloak_mode", "always"),
+    ] {
+        credential.attributes.insert(key.into(), value.into());
+    }
+    let cfg = Config::parse("").unwrap();
+    let first = r#"{"role":"user","content":"Port the cache fixes."}"#;
+    let second =
+        format!(r#"{first},{{"role":"assistant","content":"Half done."}},{{"role":"user","content":"Go on."}}"#);
+    let third = format!(r#"{second},{{"role":"assistant","content":"Done."}},{{"role":"user","content":"Report."}}"#);
+    for messages in [first, &second, &third] {
+        let body = format!(
+            r#"{{"model":"claude-opus-5-5","max_tokens":64,"system":"You are a coding agent.","messages":[{messages}]}}"#
+        );
+        drain(&executor, &credential, &cfg, client_request(body, Default::default())).await;
+    }
+    let sent = sent.lock().unwrap();
+    let [one, two, three] = &sent[..] else {
+        panic!("{} requests", sent.len());
+    };
+    // The system blocks, the first user message and the caller's system turn.
+    let prefix = |body: &str| {
+        let mut out = rawjson::get(body, "system").json().to_owned();
+        for message in rawjson::get(body, "messages").array().iter().take(2) {
+            out.push_str(message.json());
+        }
+        out
+    };
+    assert_eq!(prefix(two), prefix(one));
+    assert_eq!(prefix(three), prefix(one));
+    assert_eq!(
+        rawjson::get(one, "system").array().len(),
+        2,
+        "billing and identity only"
+    );
+    assert_eq!(rawjson::get(one, "messages.1.role").str(), "system");
+    assert_eq!(
+        rawjson::string(one, "messages.1.content.0.text"),
+        "You are a coding agent."
+    );
+}
+
+/// A probe that a payload rule turns into an ordinary request keeps the probe's own
+/// date. As in Go v8.0.27
+/// (TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate), it
+/// neither reads the date its session pinned on an earlier day nor pins one for the
+/// session's later requests.
+#[tokio::test]
+async fn declassified_probes_keep_their_own_date() {
+    let (base, sent) = recording_upstream().await;
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let mut credential = harness_credential();
+    credential.id = "declassified-probe.json".into();
+    credential.attributes.insert("base_url".into(), base);
+    credential.attributes.insert("timezone".into(), "UTC".into());
+    // Raises max_tokens past a probe's 1 after classification.
+    let cfg = Config::parse(
+        "requests:\n  payload:\n    override:\n      - models:\n          - name: claude-opus-5\n            protocol: claude\n        params:\n          max_tokens: 100\n",
+    )
+    .unwrap();
+    let send = |session: &str, content: &str, max_tokens: u32, stream: bool| {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-session-id", session.parse().unwrap());
+        let body = format!(
+            r#"{{"model":"claude-opus-5","messages":[{{"role":"user","content":"{content}"}}],"max_tokens":{max_tokens},"stream":{stream}}}"#
+        );
+        drain(&executor, &credential, &cfg, client_request(body, headers))
+    };
+    let (pinned, fresh) = ("declassified-probe-session-1", "declassified-probe-session-2");
+    let _pins = Pins;
+    set_clock(Some("2026-08-01T23:59:00Z"));
+    send(pinned, "normal request", 100, false).await;
+    set_clock(Some("2026-08-02T00:01:00Z"));
+    send(pinned, "probe", 1, false).await;
+    send(pinned, "probe", 1, true).await;
+    send(pinned, "normal request", 100, false).await;
+    // A session that starts with a declassified probe pins its first ordinary date.
+    set_clock(Some("2026-08-02T23:59:30Z"));
+    send(fresh, "probe", 1, false).await;
+    set_clock(Some("2026-08-03T00:00:30Z"));
+    send(fresh, "normal request", 100, false).await;
+    let sent = sent.lock().unwrap();
+    assert_eq!(
+        sent.iter().map(|b| reminder_date(b)).collect::<Vec<_>>(),
+        [
+            "2026-08-01",
+            "2026-08-02",
+            "2026-08-02",
+            "2026-08-01",
+            "2026-08-02",
+            "2026-08-03"
+        ]
+    );
+    assert!(sent.iter().all(|b| rawjson::get(b, "max_tokens").i64() == 100));
 }
 
 /// Go's non-stream native path: a reply whose OAuth tool alias cannot be restored

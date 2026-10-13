@@ -7,6 +7,7 @@
 //! failure before `message_stop` becomes Go's `unexpected EOF`.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use cpa_core::exec::{ExecError, ExecStream, FailureScope};
@@ -68,7 +69,7 @@ pub(crate) type OnComplete = Box<dyn FnOnce(String) + Send>;
 
 struct Relay {
     body: ExecStream,
-    reverse: Reverse,
+    reverse: Arc<Reverse>,
     line: BytesMut,
     event: BytesMut,
     ready: VecDeque<Result<Bytes, ExecError>>,
@@ -212,7 +213,7 @@ impl Relay {
 /// Every upstream line is reported to `usage` and `capture` before alias restore.
 pub(crate) fn relay(
     body: ExecStream,
-    reverse: Reverse,
+    reverse: Arc<Reverse>,
     done: OnComplete,
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
@@ -223,7 +224,7 @@ pub(crate) fn relay(
 /// [`relay`] for a translated client: the stream ends on the `message_stop` data line.
 pub(crate) fn relay_translated(
     body: ExecStream,
-    reverse: Reverse,
+    reverse: Arc<Reverse>,
     done: OnComplete,
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
@@ -233,7 +234,7 @@ pub(crate) fn relay_translated(
 
 fn relay_with(
     body: ExecStream,
-    reverse: Reverse,
+    reverse: Arc<Reverse>,
     done: OnComplete,
     eager_terminal: bool,
     usage: cpa_core::exec::UsageSink,
@@ -355,7 +356,7 @@ mod tests {
     /// failure that ends the stream.
     #[tokio::test]
     async fn request_logs_record_lines_then_the_ending_error() {
-        let run = |body: ExecStream, reverse: Reverse| async move {
+        let run = |body: ExecStream, reverse: Arc<Reverse>| async move {
             let captured = std::sync::Arc::new(crate::claude::tests::Captured::default());
             let _: Vec<_> = relay(
                 body,
@@ -373,7 +374,7 @@ mod tests {
             Err(ExecError::local(502, FailureScope::Transport, "connection reset")),
         ]);
         assert_eq!(
-            run(broken, Reverse::new()).await,
+            run(broken, Arc::default()).await,
             [
                 "chunk event: ping",
                 "chunk data: {}",
@@ -390,7 +391,7 @@ mod tests {
         let ambiguous = chunks(vec![Ok(
             b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"mcp__virt__query\",\"input\":{}}}\n\n",
         )]);
-        let events = run(ambiguous, reverse).await;
+        let events = run(ambiguous, Arc::new(reverse)).await;
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(events[0].starts_with("chunk data: "), "{events:?}");
         assert!(
@@ -411,7 +412,7 @@ mod tests {
         };
         let out: Vec<_> = relay_translated(
             open(),
-            Reverse::new(),
+            Arc::default(),
             Box::new(|_| {}),
             Default::default(),
             Default::default(),
@@ -425,7 +426,7 @@ mod tests {
         );
         let mut native = relay(
             open(),
-            Reverse::new(),
+            Arc::default(),
             Box::new(|_| {}),
             Default::default(),
             Default::default(),
@@ -445,7 +446,7 @@ mod tests {
         ]);
         let out: Vec<_> = relay(
             body,
-            Reverse::new(),
+            Arc::default(),
             Box::new(move |id| *seen.lock().unwrap() = Some(id)),
             Default::default(),
             Default::default(),
@@ -474,7 +475,7 @@ mod tests {
         ]);
         let out: Vec<_> = relay(
             body,
-            Reverse::new(),
+            Arc::default(),
             Box::new(|_| panic!("not completed")),
             Default::default(),
             Default::default(),
@@ -497,7 +498,7 @@ mod tests {
         ]);
         let out: Vec<_> = relay(
             body,
-            reverse,
+            Arc::new(reverse),
             Box::new(|_| {}),
             cpa_core::exec::UsageSink::new(usage.clone()),
             Default::default(),

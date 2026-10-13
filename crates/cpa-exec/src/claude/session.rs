@@ -243,8 +243,6 @@ pub(crate) struct Continuity {
     pub previous_message_id: String,
     pub previous_request_id: String,
     pub prompt_id: String,
-    /// The calendar date the session was first seen on ([`pin_date`]).
-    pub pinned_date: String,
     pub initialized: bool,
 }
 
@@ -326,7 +324,6 @@ pub(crate) fn begin(credential: &str, session: &str, new_turn: bool, explicit_pr
         previous_message_id: entry.previous_message_id.clone(),
         previous_request_id: entry.previous_request_id.clone(),
         prompt_id: prompt,
-        pinned_date: String::new(),
         initialized: false,
     }
 }

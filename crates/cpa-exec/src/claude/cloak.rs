@@ -344,19 +344,6 @@ pub(crate) fn leading_user_run_end(messages: &[gjson::Value], first_user: usize)
     at
 }
 
-/// `claudeMidConversationSystemMessagesAtEnd` (v8.0.27, 5d89040, eca1d11, 39632e5):
-/// the leading user run ends the conversation or holds more than one turn, so caller
-/// system text may stay top-level when the policy allows it.
-fn leading_user_run_at_end(body: &str) -> bool {
-    let Some(first) = first_user_index(body) else {
-        return false;
-    };
-    let messages = rawjson::get(body, "messages");
-    let msgs = messages.array();
-    let at = leading_user_run_end(&msgs, first);
-    at == msgs.len() || at > first + 1
-}
-
 /// Current models: each caller system block becomes an operator-level system turn
 /// after the first user turn(s), leaving the cached top-level prefix untouched
 /// (`insertClaudeMidConversationSystemBlocks`).
@@ -497,14 +484,16 @@ pub(crate) struct SystemPlan<'a> {
     pub date: &'a str,
     /// `prompt_cache_options.mode: explicit`: CPA adds no breakpoints of its own.
     pub explicit: bool,
-    /// Caller system text may stay top-level when the leading user run ends the
-    /// conversation; false for OAuth tokens, where a top-level caller prompt trips
-    /// Anthropic's third-party classifier (v8.0.27, 14dc4e0).
-    pub keep_top_level: bool,
 }
 
 /// `checkSystemInstructionsWithSigningModeAt`. Takes the body so it is freed as soon as
 /// the first rewrite has copied it.
+///
+/// Without advisor history, caller system text on a current model goes after the
+/// leading user run, for API keys as for OAuth logins. Go v8.0.27 keeps it top-level
+/// for an API key while the leading user run ends the conversation or holds more than
+/// one turn (5d89040, eca1d11, 39632e5), so the second turn of a conversation moves it
+/// and misses the cache from the identity block on (docs/DIFFERENCES-FROM-GO.md).
 pub(crate) fn install_system(body: String, plan: &SystemPlan<'_>) -> String {
     let forwarded = forwarded_system_blocks(&body);
     let message = fingerprint_message(&body);
@@ -524,16 +513,11 @@ pub(crate) fn install_system(body: String, plan: &SystemPlan<'_>) -> String {
         rawjson::set_raw(&input, "system", &format!("[{}]", blocks.join(",")))
     };
     if !plan.strict && !forwarded.is_empty() {
-        let top_level = |blocks: &mut Vec<String>, body: &str| {
-            blocks.extend(forwarded.iter().map(|b| forwarded_block(&b.text, b, plan.explicit)));
-            rawjson::set_raw(body, "system", &format!("[{}]", blocks.join(",")))
-        };
         if has_advisor_history(&body) {
-            body = top_level(&mut blocks, &body);
+            blocks.extend(forwarded.iter().map(|b| forwarded_block(&b.text, b, plan.explicit)));
+            body = rawjson::set_raw(&body, "system", &format!("[{}]", blocks.join(",")));
         } else if legacy_system_reminder(&body) {
             body = prepend_reminders(&body, &forwarded, plan.explicit);
-        } else if plan.keep_top_level && leading_user_run_at_end(&body) {
-            body = top_level(&mut blocks, &body);
         } else {
             body = insert_mid_system(&body, &forwarded, plan.explicit);
         }
@@ -542,8 +526,9 @@ pub(crate) fn install_system(body: String, plan: &SystemPlan<'_>) -> String {
 }
 
 /// `relocateClaudeSystemPromptForCountTokensWithPolicy`: count_tokens carries no CLI
-/// blocks but caller system text is still counted in its Messages position.
-pub(crate) fn relocate_system_for_count(body: &str, strict: bool, explicit: bool, keep_top_level: bool) -> String {
+/// blocks but caller system text is still counted in its Messages position, which is
+/// [`install_system`]'s for API keys too.
+pub(crate) fn relocate_system_for_count(body: &str, strict: bool, explicit: bool) -> String {
     if !rawjson::get(body, "system").exists() {
         return body.to_owned();
     }
@@ -555,21 +540,16 @@ pub(crate) fn relocate_system_for_count(body: &str, strict: bool, explicit: bool
     if forwarded.is_empty() {
         return rawjson::delete(body, "system");
     }
-    let top_level = |body: &str| {
+    if has_advisor_history(body) {
         let blocks: Vec<_> = forwarded
             .iter()
             .map(|b| forwarded_block(&b.text, b, explicit))
             .collect();
-        rawjson::set_raw(body, "system", &format!("[{}]", blocks.join(",")))
-    };
-    if has_advisor_history(body) {
-        return top_level(body);
+        return rawjson::set_raw(body, "system", &format!("[{}]", blocks.join(",")));
     }
     let body = rawjson::delete(body, "system");
     if legacy_system_reminder(&body) {
         prepend_reminders(&body, &forwarded, explicit)
-    } else if keep_top_level && leading_user_run_at_end(&body) {
-        top_level(&body)
     } else {
         insert_mid_system(&body, &forwarded, explicit)
     }
