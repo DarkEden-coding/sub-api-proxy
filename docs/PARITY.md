@@ -8,8 +8,8 @@ cliproxy-rs aims to behave like CLIProxyAPI at commit [`6fecc6e`](https://github
 - Images and video: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, and the `/v1/videos` and `/openai/v1/videos` routes for xAI video.
 - WebSocket: the Responses WebSocket on `GET /v1/responses` and `GET /backend-api/codex/responses`, used by Codex clients, including response steering (`oauth.providers.codex.response-steering`).
 - Realtime and live through a Codex account: `/v1/realtime` (WebSocket and WebRTC calls), `/v1/live`, call sidebands and local ephemeral keys (`/v1/realtime/client_secrets`). The WebRTC media relay is an optional build feature (`cargo build --release -p cliproxy --features cpa-server/media-relay`) and is not in the release binaries.
-- Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import`, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
-- Account sign-in from the command line or the dashboard: Claude, Codex (browser or device code), Kimi, Meta, xAI and Devin.
+- Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Google Antigravity, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import`, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
+- Account sign-in from the command line or the dashboard: Claude, Codex (browser or device code), Kimi, Meta, xAI and Devin. Antigravity sign-in is command-line only (`-antigravity-login`).
 - Routing: round-robin, weighted and fill-first selection, retries, cooldowns, session affinity, model aliases and exclusions, payload rules, per-credential and global proxies.
 - The v8 Management API for configuration, credentials, OAuth sign-in, quota checks (`/requests/api-call`), usage counters, logs and model catalogs, plus the dashboard at `/management.html`.
 - HTTPS on the main port (`server.tls`), logging in Go's format to stdout or a rotating `main.log` with Go's per-request access log lines, request log files with client and upstream sections, LAN discovery (`-discover` and the `server.discovery` advertisement), `.env` loading, and remote model catalog updates as in Go (`--local-model` turns them off).
@@ -23,17 +23,17 @@ The dashboard says when the server lacks an endpoint instead of failing: actions
 ## Where it stands
 
 <!-- parity-summary:start -->
-Audit of 2026-10-05.
+Audit of 2026-10-13.
 
 | Milestone | Items | Covered | Partial | Missing |
 |---|---:|---:|---:|---:|
 | M1 | 118 | 53 | 65 | 0 |
 | M2 | 158 | 111 | 40 | 7 |
-| M3 | 350 | 190 | 112 | 48 |
-| M4 | 510 | 232 | 258 | 20 |
+| M3 | 350 | 208 | 125 | 17 |
+| M4 | 510 | 233 | 259 | 18 |
 | M5 | 303 | 180 | 102 | 21 |
-| M6 | 248 | 69 | 130 | 49 |
-| All | 1687 | 835 | 707 | 145 |
+| M6 | 248 | 69 | 131 | 48 |
+| All | 1687 | 854 | 722 | 111 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
@@ -49,7 +49,9 @@ An item is covered when it is implemented and a Rust test or a fixture recorded 
 | M5 | The Management API, WebSockets, realtime and live voice, and access control |
 | M6 | Plugins, the terminal UI, LAN discovery and Home (cluster) mode |
 
-Most missing items are in M6 (plugin runtime integration and parts of Home mode) and M3 (Antigravity). The plugin store and terminal UI exist, though some Go cases remain unported. The README's [Upcoming features](../README.md#upcoming-features) list summarises the feature gaps.
+Most missing items are in M6 (plugin runtime integration and parts of Home mode). The plugin store and terminal UI exist, though some Go cases remain unported.
+
+Antigravity (M3) is in: sign-in from the command line, the executor, AI credits, the connection pool settings, reasoning replay and the web-search capability probe, checked against scenarios recorded from Go's `AntigravityExecutor` with local mock upstreams. It also follows CLIProxyAPI v8.0.27 for the Claude 5.5 models, Claude 5.5's CAQS thinking signatures and backend errors inside streams; [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) lists what is left out. No live Antigravity account has been used in these tests. The remaining Antigravity items are Go test files not ported case by case (compaction, keep-alive, refresh, disable-cooling) and the conductor's Antigravity cases. The README's [Upcoming features](../README.md#upcoming-features) list summarises the feature gaps.
 
 The audit combines a source scan with saved route probes and manual judgments. Rerunning it reuses those saved probes and judgments. Live-provider compatibility needs separate testing. Counts can lag runtime wiring; a method implemented in a host library may still be unused by the server. The feature descriptions above follow the server's actual call paths.
 
