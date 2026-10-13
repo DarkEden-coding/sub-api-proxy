@@ -1,7 +1,8 @@
 // Generates crates/cpa-exec/src/claude/testdata/go_executor.json from CLIProxyAPI at
-// 6fecc6e by running the real Claude executor in-process. Upstream traffic goes to a
-// capturing http.RoundTripper (the executor's documented "cliproxy.roundtripper"
-// context hook); nothing leaves the process. Credentials are fake.
+// 6fecc6e (and go_executor_v8.0.27.json from v8.0.27) by running the real Claude
+// executor in-process. Upstream traffic goes to a capturing http.RoundTripper (the
+// executor's documented "cliproxy.roundtripper" context hook); nothing leaves the
+// process. Credentials are fake.
 package main
 
 import (
@@ -65,6 +66,9 @@ type scenario struct {
 	Resolved *resolvedModel `json:"resolved,omitempty"`
 	// RequestedModel is the client's route model when it differs from Model.
 	RequestedModel string `json:"requested_model,omitempty"`
+	// Executor names an executor instance shared with the other scenarios that name
+	// it (state an executor keeps between requests); empty is a fresh executor.
+	Executor string `json:"executor,omitempty"`
 }
 
 type resolvedModel struct {
@@ -206,6 +210,27 @@ func gjsonArray(raw, path string) []string {
 
 func gjsonString(raw, path string) string { return gjson.Get(raw, path).String() }
 
+// executors holds the named executors scenarios share.
+var executors = map[string]*executor.ClaudeExecutor{}
+
+// localDate is the date Go's claudeCodeCurrentTime reads: the credential's timezone,
+// then claude-header-defaults.timezone, then the process zone.
+func localDate(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	zone := strings.TrimSpace(auth.Attributes["timezone"])
+	if zone == "" {
+		zone, _ = auth.Metadata["timezone"].(string)
+		zone = strings.TrimSpace(zone)
+	}
+	if zone == "" {
+		zone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+	}
+	location := time.Local
+	if loaded, err := time.LoadLocation(zone); zone != "" && err == nil {
+		location = loaded
+	}
+	return time.Now().In(location).Format("2006-01-02")
+}
+
 func run(root string, s scenario) result {
 	dir := filepath.Join(root, s.Name)
 	must(os.MkdirAll(filepath.Join(dir, "auth"), 0o700))
@@ -236,6 +261,13 @@ func run(root string, s scenario) result {
 	// The Rust credential ID is the auth-dir-relative path; Go's file synthesizer
 	// uses the same relative ID, so continuity keys and seeds agree.
 	exec := executor.NewClaudeExecutor(cfg)
+	if s.Executor != "" {
+		if shared, ok := executors[s.Executor]; ok {
+			exec = shared
+		} else {
+			executors[s.Executor] = exec
+		}
+	}
 	cap := &capture{reply: s.Reply}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -290,7 +322,7 @@ func run(root string, s scenario) result {
 	}
 	req, opts = cliproxysession.Enrich(req, opts)
 
-	out := result{scenario: s, Date: time.Now().Format("2006-01-02"), ResolvedInfo: resolvedInfo}
+	out := result{scenario: s, Date: localDate(cfg, auth), ResolvedInfo: resolvedInfo}
 	var errRun error
 	switch {
 	case s.Count:
@@ -500,8 +532,12 @@ func must(err error) {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		panic("usage: generator SCENARIOS_JSON OUTPUT_JSON")
+	if len(os.Args) != 3 && len(os.Args) != 4 {
+		panic("usage: generator SCENARIOS_JSON OUTPUT_JSON [REFERENCE]")
+	}
+	reference := "6fecc6e"
+	if len(os.Args) == 4 {
+		reference = os.Args[3]
 	}
 	raw, err := os.ReadFile(os.Args[1])
 	must(err)
@@ -515,7 +551,7 @@ func main() {
 		results = append(results, run(root, s))
 	}
 	doc := map[string]any{
-		"source":    "CLIProxyAPI 6fecc6e ClaudeExecutor, in-process; see tests/reference/claude/README.md",
+		"source":    "CLIProxyAPI " + reference + " ClaudeExecutor, in-process; see tests/reference/claude/README.md",
 		"scenarios": results,
 		"sjson":     sjsonCases(),
 		"login": map[string]any{

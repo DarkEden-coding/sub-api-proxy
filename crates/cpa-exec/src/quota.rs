@@ -24,6 +24,11 @@ fn healthy(headers: &HeaderMap, window: &str) -> bool {
         .parse::<f64>()
         .is_ok_and(|n| n.is_finite() && (0.0..1.0).contains(&n))
 }
+fn overage_claim(headers: &HeaderMap) -> bool {
+    header(headers, "anthropic-ratelimit-unified-representative-claim")
+        .to_ascii_lowercase()
+        .contains("overage")
+}
 fn overage_only(headers: &HeaderMap) -> bool {
     let five = status(headers, "5h-");
     let seven = status(headers, "7d-");
@@ -33,13 +38,28 @@ fn overage_only(headers: &HeaderMap) -> bool {
     let overage = status(headers, "7d_oi-") == "rejected"
         || status(headers, "overage-") == "rejected"
         || !header(headers, "anthropic-ratelimit-unified-overage-disabled-reason").is_empty()
-        || header(headers, "anthropic-ratelimit-unified-representative-claim")
-            .to_ascii_lowercase()
-            .contains("overage");
-    overage
-        && ((allowed(&five) && allowed(&seven))
-            || (allowed(&seven) && five.is_empty() && healthy(headers, "5h"))
-            || (allowed(&five) && seven.is_empty() && healthy(headers, "7d")))
+        || overage_claim(headers);
+    if !overage {
+        return false;
+    }
+    if (allowed(&five) && allowed(&seven))
+        || (allowed(&seven) && five.is_empty() && healthy(headers, "5h"))
+        || (allowed(&five) && seven.is_empty() && healthy(headers, "7d"))
+    {
+        return true;
+    }
+    // v8.0.27 (8080967): Anthropic omits both shared-window statuses when it did not
+    // evaluate them; only a rejected overage claim relies on that absence.
+    let absent_or_healthy = |window: &str| {
+        header(headers, &format!("anthropic-ratelimit-unified-{window}-utilization")).is_empty()
+            || healthy(headers, window)
+    };
+    status(headers, "") == "rejected"
+        && five.is_empty()
+        && seven.is_empty()
+        && overage_claim(headers)
+        && absent_or_healthy("5h")
+        && absent_or_healthy("7d")
 }
 /// `ClaudeHeadersIndicateUnifiedRateLimitRejection`.
 pub(crate) fn shared_rejection(headers: &HeaderMap) -> bool {
@@ -94,6 +114,19 @@ fn fuzz() -> Duration {
     }
 }
 
+/// `maxClaudeRateLimitWindow` (v8.0.27, 8080967): the longest Anthropic window, 7 days,
+/// plus an hour of clock skew. A later reset is a billing boundary, not a rate limit.
+const MAX_WINDOW: Duration = Duration::from_secs(7 * 24 * 3600 + 3600);
+
+/// `claudeUnifiedResetIsOverageBillingBoundary`: with an overage claim, a unified reset
+/// equal to the overage reset is the billing period's end.
+fn overage_billing_boundary(headers: &HeaderMap, unified_reset: &str) -> bool {
+    overage_claim(headers)
+        && timestamp(unified_reset).is_some_and(|unified| {
+            timestamp(&header(headers, "anthropic-ratelimit-unified-overage-reset")) == Some(unified)
+        })
+}
+
 fn reset(headers: &HeaderMap, now: SystemTime, fuzz: Duration) -> Option<Duration> {
     let overage = overage_only(headers);
     let five = status(headers, "5h-");
@@ -118,8 +151,10 @@ fn reset(headers: &HeaderMap, now: SystemTime, fuzz: Duration) -> Option<Duratio
                     || (unified.is_empty() && !allowed(&five) && !allowed(&seven))),
         ),
     ] {
+        let raw = header(headers, &format!("anthropic-ratelimit-unified-{window}reset"));
         if rejected
-            && let Some(deadline) = timestamp(&header(headers, &format!("anthropic-ratelimit-unified-{window}reset")))
+            && !(window.is_empty() && overage_billing_boundary(headers, &raw))
+            && let Some(deadline) = timestamp(&raw)
         {
             deadlines.push(deadline);
         }
@@ -127,7 +162,7 @@ fn reset(headers: &HeaderMap, now: SystemTime, fuzz: Duration) -> Option<Duratio
     deadlines
         .into_iter()
         .filter_map(|t| t.duration_since(now).ok())
-        .filter(|d| !d.is_zero())
+        .filter(|d| !d.is_zero() && *d <= MAX_WINDOW)
         .max()
         .and_then(|d| d.checked_add(fuzz))
 }
@@ -305,6 +340,147 @@ mod tests {
         assert_eq!(timestamp("2026-10-02T12:00:00Z"), Some(expected));
         for bad in ["NaN", "inf", "-1", "0", "1e100", "wrong"] {
             assert_eq!(retry_after(bad, now), None);
+        }
+    }
+
+    /// The Issue6465 cases of v8.0.27's claude_ratelimit_test.go (8080967): whether the
+    /// shared windows rejected the credential, and the cooldown without fuzz.
+    #[test]
+    fn overage_billing_resets_and_far_deadlines_are_ignored_like_go() {
+        let now = |rfc3339: &str| SystemTime::from(chrono::DateTime::parse_from_rfc3339(rfc3339).unwrap());
+        let oct7 = now("2026-10-07T20:46:04Z");
+        let unix = |t: SystemTime, after: u64| (t.duration_since(UNIX_EPOCH).unwrap().as_secs() + after).to_string();
+        let five_hours = unix(oct7, 5 * 3600);
+        let oct29 = now("2026-10-29T00:00:00Z");
+        let billing = unix(oct29, 48 * 3600);
+        let h = |pairs: &[(&str, &str)]| headers(pairs);
+        let cases = [
+            (
+                "overage claim without shared windows",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-reset", "1793491200"),
+                    ("anthropic-ratelimit-unified-overage-status", "allowed"),
+                    ("anthropic-ratelimit-unified-overage-reset", "1793491200"),
+                    ("anthropic-ratelimit-unified-overage-utilization", "0.11"),
+                ]),
+                oct7,
+                false,
+                None,
+            ),
+            (
+                "rejected 5h window ignores the monthly unified reset",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-5h-status", "rejected"),
+                    ("anthropic-ratelimit-unified-5h-reset", &five_hours),
+                    ("anthropic-ratelimit-unified-reset", "1793491200"),
+                    ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+                ]),
+                oct7,
+                true,
+                Some(5 * 3600),
+            ),
+            (
+                "unified reset equal to the overage reset leaves Retry-After",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-7d-status", "allowed"),
+                    ("anthropic-ratelimit-unified-7d-utilization", "0.69"),
+                    ("anthropic-ratelimit-unified-reset", &billing),
+                    ("anthropic-ratelimit-unified-overage-status", "rejected"),
+                    ("anthropic-ratelimit-unified-overage-reset", &billing),
+                    ("retry-after", "60"),
+                ]),
+                oct29,
+                true,
+                Some(60),
+            ),
+            (
+                "five_hour claim with overage disabled stays credential-wide",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+                    (
+                        "anthropic-ratelimit-unified-overage-disabled-reason",
+                        "org_level_disabled",
+                    ),
+                    ("retry-after", "10800"),
+                ]),
+                oct7,
+                true,
+                Some(3 * 3600),
+            ),
+            (
+                "overage claim with exhausted 5h utilization stays credential-wide",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-5h-utilization", "1.0"),
+                    ("retry-after", "10800"),
+                ]),
+                oct7,
+                true,
+                Some(3 * 3600),
+            ),
+            (
+                "overage claim with healthy utilization stays model-scoped",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-5h-utilization", "0.00"),
+                    ("anthropic-ratelimit-unified-reset", "1793491200"),
+                    ("anthropic-ratelimit-unified-overage-reset", "1793491200"),
+                    ("retry-after", "10800"),
+                ]),
+                oct7,
+                false,
+                None,
+            ),
+            (
+                "Retry-After beyond seven days",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "rejected"),
+                    ("anthropic-ratelimit-unified-5h-status", "rejected"),
+                    ("retry-after", "2034192"),
+                ]),
+                oct7,
+                true,
+                None,
+            ),
+            (
+                "allowed unified status keeps a short Retry-After",
+                h(&[
+                    ("anthropic-ratelimit-unified-status", "allowed"),
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-overage-status", "allowed"),
+                    ("retry-after", "30"),
+                ]),
+                oct7,
+                false,
+                Some(30),
+            ),
+            (
+                "missing unified status keeps a short Retry-After",
+                h(&[
+                    ("anthropic-ratelimit-unified-representative-claim", "overage"),
+                    ("anthropic-ratelimit-unified-overage-status", "allowed"),
+                    ("retry-after", "30"),
+                ]),
+                oct7,
+                false,
+                Some(30),
+            ),
+        ];
+        for (name, headers, now, shared, cooldown) in cases {
+            assert_eq!(shared_rejection(&headers), shared, "{name}: shared rejection");
+            assert_eq!(
+                reset(&headers, now, Duration::ZERO),
+                cooldown.map(Duration::from_secs),
+                "{name}: cooldown"
+            );
         }
     }
 

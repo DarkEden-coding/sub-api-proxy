@@ -1,7 +1,7 @@
 package executor
 
 // Recorder for cliproxy-rs. record.py copies Go's own Claude test files into a scratch
-// copy of CLIProxyAPI 6fecc6e and rewrites selected call sites to the rsfix* wrappers
+// copy of CLIProxyAPI (6fecc6e, or v8.0.27 for the files it lists) and rewrites selected call sites to the rsfix* wrappers
 // below. Each wrapper calls the real function and records its inputs and outputs,
 // tagged with the Go test that made the call, so the Rust port can replay every case
 // against Go's results. Go's own assertions still run unchanged.
@@ -481,6 +481,23 @@ func rsfixCountTokens(e rsfixCountExecutor, ctx context.Context, auth *cliproxya
 	}
 	ctx, record, _ := rsfixBegin("count_tokens", claude, ctx, auth, req, opts)
 	resp, err := claude.CountTokens(ctx, auth, req, opts)
+	rsfixResponse(record, resp, err)
+	return resp, err
+}
+
+type rsfixUpstreamCounter interface {
+	countTokensUpstream(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+}
+
+// rsfixCountTokensUpstream records Go tests that call countTokensUpstream directly,
+// which counts on the upstream whatever the origin (a delegated upstream count).
+func rsfixCountTokensUpstream(e rsfixUpstreamCounter, ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	claude, ok := e.(*ClaudeExecutor)
+	if !ok || claude == nil {
+		return e.countTokensUpstream(ctx, auth, req, opts)
+	}
+	ctx, record, _ := rsfixBegin("count_tokens_upstream", claude, ctx, auth, req, opts)
+	resp, err := claude.countTokensUpstream(ctx, auth, req, opts)
 	rsfixResponse(record, resp, err)
 	return resp, err
 }

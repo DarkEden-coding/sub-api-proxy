@@ -1,7 +1,8 @@
 # Claude executor goldens
 
 `../../../src/claude/testdata/go_executor.json` holds outputs of CLIProxyAPI at
-`6fecc6e`, produced in-process by `main.go` from the inputs in `scenarios.json`.
+`6fecc6e`, produced in-process by `main.go` from the inputs in `scenarios.json` (the
+v8.0.27 goldens below use the same generator).
 
 For each scenario the generator writes the scenario's `config.yaml` and fake auth
 file, loads them with Go's `config.LoadConfig` and watcher synthesizers, and runs the
@@ -41,5 +42,50 @@ cp "$crate/tests/reference/claude/main.go" "$tmp/main.go"
 )
 ```
 
-The date in the current-date reminder is the generation date and is recorded per
-scenario; the replay pins its clock to it.
+The date in the current-date reminder is the generation date in the credential's
+time zone and is recorded per scenario; the replay pins its clock to it.
+
+## v8.0.27 goldens
+
+The Claude prompt-cache and prompt-shaping fixes this executor follows from v8.0.27
+(see `docs/parity-audit/upstream-v8.0.27.md`) have their own goldens, recorded from a
+v8.0.27 checkout (`bf93416`) the same way; everything else stays on `6fecc6e`.
+
+- `../../../src/claude/testdata/go_executor_v8.0.27.json`: this generator on
+  `scenarios-v8.0.27.json`, replayed by
+  `claude::tests::v8_0_27_cache_and_prompt_shaping_scenarios_match_go`. Scenarios that
+  name the same `executor` share one Go executor, so state it keeps between requests
+  (a thread's tool aliases) carries over as it does in the Rust replay. The recorded
+  `date` follows the credential's `timezone`; the date-pin scenarios use `Etc/GMT+12`
+  and `Etc/GMT-14`, which are always a calendar day apart, to cross midnight without a
+  clock hook. The continuation's reply names the alias Go gave `Read` in the scenario
+  before it (`mcp__private_pattern__magic_Read`); a continuation declares no tools, so
+  `{{ALIAS:...}}` cannot find it. Update that reply if the alias derivation changes.
+- `../../../src/claude/testdata/go_unit_v8.0.27.json`: `unit/record.py` on Go's own
+  v8.0.27 tests for those fixes, replayed by `claude::go_unit::v8_0_27_*`.
+
+```sh
+reference=/absolute/path/to/CLIProxyAPI   # at v8.0.27
+crate=/absolute/path/to/cliproxy-rs/crates/cpa-exec
+tmp=$(mktemp -d)
+cp "$crate/tests/reference/claude/main.go" "$tmp/main.go"
+(
+  cd "$tmp"
+  go mod init github.com/router-for-me/CLIProxyAPI/v8/fixture
+  go mod edit -require=github.com/router-for-me/CLIProxyAPI/v8@v8.0.0
+  go mod edit -replace=github.com/router-for-me/CLIProxyAPI/v8="$reference"
+  go mod tidy
+  go run . "$crate/tests/reference/claude/scenarios-v8.0.27.json" \
+    "$crate/src/claude/testdata/go_executor_v8.0.27.json" v8.0.27
+)
+RSFIX_REFERENCE=v8.0.27 \
+RSFIX_FILES=claude_prompt_cache_options_test.go,claude_cloaked_date_pin_test.go,claude_effort_directive_test.go,claude_executor_test.go \
+RSFIX_ONLY='^(TestClaudeExecutor_PromptCacheOptions\w*|TestClaudeExecutor_CountTokens_StripsPromptCacheOptions|TestClaudeExecutor_CountTokensUpstream_\w*|TestClaudeCloakedDateReminder(PinnedToSessionAcrossMidnight|SessionByteStability)|TestClaudeExecutor_EffortDirectiveAfterCompaction|TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked)$' \
+  python3 "$crate/tests/reference/claude/unit/record.py" "$reference" "$crate/src/claude/testdata/go_unit_v8.0.27.json"
+```
+
+Both ran with the network denied (`unshare -rn` with loopback up), `GOTOOLCHAIN=local
+GOPROXY=off` and Go 1.26 after a `go mod download` in each checkout. The tests left out
+of the v8.0.27 recording are those whose answers depend on v8.0.27's later move of
+payload rules to the end of the pipeline (`868e137`), which is not ported yet.
+

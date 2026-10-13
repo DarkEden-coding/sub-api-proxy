@@ -261,14 +261,14 @@ fn header_pairs(value: &Value) -> Vec<(String, String)> {
 }
 
 /// Wall-clock values and the body-dependent CCH, which differ in both implementations
-/// whenever the body carries a random identifier.
+/// whenever the body carries a random identifier. The currentDate reminder is compared
+/// as sent: the replay pins the executor's clock to the date Go's executor read.
 fn normalize(text: &str) -> String {
     use std::sync::OnceLock;
     static RULES: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
     let rules = RULES.get_or_init(|| {
         [
             (r"cch=[0-9a-f]{5};", "cch=<cch>;"),
-            (r"Today's date is \d{4}-\d{2}-\d{2}", "Today's date is <date>"),
             // Translators stamp responses with the wall clock.
             (r#""(created|created_at)":\d+"#, r#""$1":<unix>"#),
             (r#""createTime":"[0-9T:.Z-]+""#, r#""createTime":"<time>""#),
@@ -597,7 +597,7 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
     .map(|s| cpa_common::session::bound_session_identity(&s));
     let model = request["model"].as_str().unwrap_or_default().to_owned();
     let req = ExecRequest {
-        operation: if kind == "count_tokens" {
+        operation: if kind.starts_with("count_tokens") {
             Operation::CountTokens
         } else {
             Operation::Generate
@@ -630,7 +630,15 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
         },
     };
     let chat = req.response_format == Format::OpenAI && kind == "execute_stream";
-    let result = executor.execute(&credential, req, &cfg).await;
+    // Go's tests swap the executor's clock; the recorded date is what it read.
+    super::tests::set_today(record["date"].as_str());
+    // A direct countTokensUpstream call counts upstream whatever the origin.
+    let delegation = super::Delegation {
+        count_upstream: kind == "count_tokens_upstream",
+        ..Default::default()
+    };
+    let result = executor.execute_delegated(&credential, req, &cfg, delegation).await;
+    super::tests::set_today(None);
     let recorded = &record["result"];
     let go = if kind == "execute_stream" && recorded["error"].is_null() {
         let chunks = record["exchanges"]["chunks"].as_array().cloned().unwrap_or_default();

@@ -56,16 +56,20 @@ fn claude_type(status: u16) -> &'static str {
         404 => "not_found_error",
         413 => "request_too_large",
         429 => "rate_limit_error",
-        504 => "timeout_error",
+        // v8.0.27 (42d484f) adds 408.
+        408 | 504 => "timeout_error",
         529 => "overloaded_error",
         500.. => "api_error",
         _ => "invalid_request_error",
     }
 }
 
-/// Go `toClaudeError` + `claudeErrorDetailFromText`.
+/// Go `toClaudeError` + `claudeErrorDetailFromText`. A missing thread state also gets
+/// `details.error_code: thread_not_found`, Anthropic's signal to replay the whole
+/// conversation (v8.0.27, 5c959cb).
 pub fn claude_body(status: u16, text: &str) -> String {
     let mut message = text_for(status, text);
+    let thread_not_found = crate::classify::is_claude_thread_not_found(status, &message);
     let mut kind = claude_type(status).to_owned();
     if let Ok(Value::Object(payload)) = serde_json::from_str::<Value>(&message) {
         let field = |obj: &serde_json::Map<String, Value>, key: &str| {
@@ -87,16 +91,28 @@ pub fn claude_body(status: u16, text: &str) -> String {
             }
         }
     }
-    let detail = Obj::new().str("type", &kind).str("message", &message).finish();
-    Obj::new().str("type", "error").raw("error", &detail).finish()
+    let mut detail = Obj::new().str("type", &kind).str("message", &message);
+    if thread_not_found {
+        detail = detail.raw("details", r#"{"error_code":"thread_not_found"}"#);
+    }
+    Obj::new().str("type", "error").raw("error", &detail.finish()).finish()
 }
 
 /// Writes a failure with the route's body shape.
 pub fn write(failure: &Failure, body: fn(u16, &str) -> String) -> Response {
+    write_with(failure, body, |_, raw| raw.clone())
+}
+
+/// [`write`] with the direct response's body rewritten by `direct_body`.
+fn write_with(
+    failure: &Failure,
+    body: fn(u16, &str) -> String,
+    direct_body: impl FnOnce(u16, &bytes::Bytes) -> bytes::Bytes,
+) -> Response {
     // Go `writeDirectErrorResponse`: the filtered headers as given, JSON by default.
     if let Some(e) = failure.direct() {
         let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY);
-        let mut res = Response::new(axum::body::Body::from(e.body.clone()));
+        let mut res = Response::new(axum::body::Body::from(direct_body(e.status, &e.body)));
         *res.status_mut() = status;
         let headers = crate::respond::filter_upstream_headers(&e.headers);
         for name in headers.keys() {
@@ -124,7 +140,15 @@ pub fn openai(failure: &Failure) -> Response {
 }
 
 pub fn claude(failure: &Failure) -> Response {
-    write(failure, claude_body)
+    // Go's Claude `WriteErrorResponse` marks a direct missing-thread answer too.
+    write_with(failure, claude_body, |status, raw| {
+        let text = String::from_utf8_lossy(raw);
+        if crate::classify::is_claude_thread_not_found(status, &text) {
+            bytes::Bytes::from(claude_body(status, &text))
+        } else {
+            raw.clone()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -174,5 +198,45 @@ mod tests {
             claude_body(502, "  "),
             r#"{"type":"error","error":{"type":"api_error","message":"Bad Gateway"}}"#
         );
+        assert_eq!(
+            claude_body(408, "stream closed"),
+            r#"{"type":"error","error":{"type":"timeout_error","message":"stream closed"}}"#
+        );
+    }
+
+    /// v8.0.27 TestClaudeErrorMarks*MissingThreadForClientReplay: the executor's plain
+    /// message and Anthropic's own JSON both get the replay marker; nothing else does.
+    #[test]
+    fn missing_thread_is_marked_for_client_replay() {
+        const THREAD: &str = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.";
+        let marked = format!(
+            r#"{{"type":"error","error":{{"type":"not_found_error","message":"{THREAD}","details":{{"error_code":"thread_not_found"}}}}}}"#
+        );
+        assert_eq!(claude_body(404, THREAD), marked);
+        let upstream = format!(r#"{{"type":"error","error":{{"type":"not_found_error","message":"{THREAD}"}}}}"#);
+        assert_eq!(claude_body(404, &upstream), marked);
+        assert_eq!(
+            claude_body(404, r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#),
+            r#"{"type":"error","error":{"type":"not_found_error","message":"Not Found"}}"#
+        );
+        assert!(!claude_body(500, THREAD).contains("thread_not_found"));
+        // A direct (fast-mode) answer is rewritten on Claude routes only
+        // (TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay).
+        let direct = |body: &str| {
+            let mut error =
+                cpa_core::exec::ExecError::local(404, cpa_core::exec::FailureScope::Request, body.to_owned());
+            error.direct = true;
+            Failure::Exec(error)
+        };
+        let read = |res: Response| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(axum::body::to_bytes(res.into_body(), usize::MAX))
+                .unwrap()
+        };
+        assert_eq!(read(claude(&direct(&upstream))), marked.as_bytes());
+        assert_eq!(read(openai(&direct(&upstream))), upstream.as_bytes());
+        assert_eq!(read(claude(&direct("not found"))), "not found".as_bytes());
     }
 }

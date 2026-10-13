@@ -41,6 +41,7 @@ mod settings;
 mod signals;
 mod signing;
 mod stream;
+mod thread;
 
 use std::sync::Arc;
 
@@ -63,6 +64,8 @@ use crate::{quota, tokens, translate};
 use settings::Settings;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// The message of the executor's own 404 for a thread continuation whose state is gone.
+pub use thread::NOT_FOUND as THREAD_NOT_FOUND;
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Advertised in `CLIProxyAPI/<version>` when a caller-owned request has no User-Agent.
 pub(crate) const PROXY_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -122,6 +125,10 @@ pub struct ClaudeExecutor {
     replay: Arc<replay::ReplayCache>,
     /// Passive quota snapshots per credential, for the management credential entry.
     quota: Arc<crate::quota::Observations>,
+    /// Tool aliases thread continuations restore (thread.rs): this executor's, and a
+    /// delegating executor's (Kimi), which Go keeps in an executor of its own.
+    thread_aliases: Arc<thread::Aliases>,
+    delegated_thread_aliases: Arc<thread::Aliases>,
 }
 
 impl ClaudeExecutor {
@@ -145,6 +152,8 @@ impl ClaudeExecutor {
             oauth: OAuth::with_transport(transport.clone()),
             replay: replay::shared(),
             quota: Arc::default(),
+            thread_aliases: Arc::default(),
+            delegated_thread_aliases: Arc::default(),
             native: Native::Transport(transport),
             go: Arc::new(GoClients::new(hooks).timed()),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
@@ -158,6 +167,8 @@ impl ClaudeExecutor {
             oauth: OAuth::new(client.clone()),
             replay: replay::shared(),
             quota: Arc::default(),
+            thread_aliases: Arc::default(),
+            delegated_thread_aliases: Arc::default(),
             go: Arc::new(GoClients::with_default(client.clone())),
             native: Native::Fixed(client),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
@@ -331,20 +342,14 @@ impl ClaudeExecutor {
             }
         })?;
         let reverse = prepared.reverse.clone();
-        let continuity = prepared.continuity.clone();
+        let completion = ctx.completion(&mut prepared);
         let request_id = header_value(&response.headers, "request-id");
         let fast = ctx.first_party && prepared.fast;
         let wrap = |e| fast_request_error(fast, e);
         let body = match response.body {
             ResponseBody::Stream(raw) if upstream_stream && req.stream && req.operation == Operation::Generate => {
                 let done: stream::OnComplete = Box::new(move |message_id| {
-                    session::commit(
-                        &continuity.key,
-                        continuity.sequence,
-                        &message_id,
-                        &request_id,
-                        &continuity.prompt_id,
-                    );
+                    completion.complete(&message_id, &request_id);
                 });
                 // ExecuteStream publishes through its stream buffer only (no
                 // EnsurePublished): a stream that never carried usage records nothing.
@@ -374,13 +379,9 @@ impl ClaudeExecutor {
                         wrap(e)
                     })?;
                     let id = stream::buffered_message_id(&data);
-                    session::commit(
-                        &continuity.key,
-                        continuity.sequence,
-                        &id,
-                        &request_id,
-                        &continuity.prompt_id,
-                    );
+                    if !id.is_empty() {
+                        completion.complete(&id, &request_id);
+                    }
                     let mut out = Vec::with_capacity(data.len());
                     for (i, line) in data.split(|b| *b == b'\n').enumerate() {
                         if i > 0 {
@@ -404,13 +405,7 @@ impl ClaudeExecutor {
                     req.usage.response_body(Format::Claude, &data);
                     let text = String::from_utf8_lossy(&data).into_owned();
                     let id = rawjson::string(&text, "id").trim().to_owned();
-                    session::commit(
-                        &continuity.key,
-                        continuity.sequence,
-                        &id,
-                        &request_id,
-                        &continuity.prompt_id,
-                    );
+                    completion.complete(&id, &request_id);
                     // A failed restore returns before ParseClaudeUsage: Go's deferred
                     // TrackFailure publishes no tokens. The error is plain (wrapped for a
                     // fast request with the 2xx status), so Go records no status.
@@ -467,7 +462,7 @@ impl ClaudeExecutor {
             if ctx.rebuild_mid_system() {
                 body = rebuild_mid_system(&body);
             }
-            let body = sanitize_for_upstream(body, &ctx.base_model, ctx.is_compat);
+            let body = cloak::strip_prompt_cache_options(sanitize_for_upstream(body, &ctx.base_model, ctx.is_compat));
             return Ok(ExecResponse {
                 status: 200,
                 headers: Default::default(),
@@ -674,6 +669,24 @@ async fn finish(
     Err(upstream_error(status, headers, data, fast, model_level_cooling))
 }
 
+/// What a completed Messages response records: billing continuity
+/// (`commitClaudeContinuity`) and, for a thread turn, the tool aliases a continuation
+/// of it will need (`rememberClaudeOAuthToolAliases`).
+struct Completion {
+    continuity: session::Continuity,
+    thread: Option<(thread::Thread, alias::Reverse, Arc<thread::Aliases>)>,
+}
+
+impl Completion {
+    fn complete(&self, message_id: &str, request_id: &str) {
+        let c = &self.continuity;
+        session::commit(&c.key, c.sequence, message_id, request_id, &c.prompt_id);
+        if let Some((thread, aliases, store)) = &self.thread {
+            store.remember(thread, aliases, message_id);
+        }
+    }
+}
+
 struct RawResponse {
     status: u16,
     headers: http::HeaderMap,
@@ -786,10 +799,12 @@ struct Ctx<'a> {
     cli_profile: bool,
     /// Bearer vs x-api-key on first-party (`claudeCredentialUsesOAuth`).
     bearer: bool,
-    /// Local date for the currentDate reminder.
+    /// Local date for the currentDate reminder, unless the session pinned one.
     // ponytail: only UTC and the process zone are resolvable without a tz database;
     // other IANA names fall back to local time, as Go does for unknown zones.
     today: String,
+    /// The thread continuation aliases of the executor serving the request.
+    thread_aliases: Arc<thread::Aliases>,
 }
 
 struct Prepared {
@@ -798,6 +813,8 @@ struct Prepared {
     order: Vec<String>,
     reverse: alias::Reverse,
     continuity: session::Continuity,
+    /// Set for a thread turn whose aliases its continuation may need.
+    thread: Option<thread::Thread>,
     fast: bool,
 }
 
@@ -977,12 +994,31 @@ impl<'a> Ctx<'a> {
             api_key,
             base_url,
             today: String::new(),
+            thread_aliases: if delegation.request_log_provider.is_some() {
+                exec.delegated_thread_aliases.clone()
+            } else {
+                exec.thread_aliases.clone()
+            },
         }
-        .with_today(credential)
+        .with_today(credential, chrono::Utc::now())
+    }
+
+    /// What a completed response of `prepared` records.
+    fn completion(&self, prepared: &mut Prepared) -> Completion {
+        Completion {
+            continuity: prepared.continuity.clone(),
+            thread: prepared
+                .thread
+                .take()
+                .map(|thread| (thread, prepared.reverse.clone(), self.thread_aliases.clone())),
+        }
     }
 
     /// `claudeCodeTimezone`: credential `timezone`, then header defaults, else local.
-    fn with_today(mut self, credential: &Credential) -> Self {
+    fn with_today(mut self, credential: &Credential, now: chrono::DateTime<chrono::Utc>) -> Self {
+        // Go's tests swap the clock (`claudeCodeCurrentTimeFunc`); so do these.
+        #[cfg(test)]
+        let now = tests::clock().unwrap_or(now);
         let own = credential
             .attributes
             .get("timezone")
@@ -997,10 +1033,14 @@ impl<'a> Ctx<'a> {
             })
             .unwrap_or_else(|| self.settings.header_defaults.timezone.trim().to_owned());
         self.today = if matches!(zone.as_str(), "UTC" | "Etc/UTC") {
-            chrono::Utc::now().format("%Y-%m-%d").to_string()
+            now.format("%Y-%m-%d").to_string()
         } else {
-            chrono::Local::now().format("%Y-%m-%d").to_string()
+            now.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()
         };
+        #[cfg(test)]
+        if let Some(today) = tests::pinned_today() {
+            self.today = today;
+        }
         self
     }
 
@@ -1131,12 +1171,14 @@ impl<'a> Ctx<'a> {
         }
         let (cloak, strict, words, cache_user_id) = self.wire_policy(confirmed);
         let cch = signing::enabled(&self.api_key, self.cli_profile, self.first_party);
+        // v8.0.27 (eb6a768): the caller owns every breakpoint in explicit cache mode.
+        let explicit = cloak::explicit_cache_mode(&[&original, &utf8(&req.body), &body]);
         let probe_before = signals::probe_or_helper(&body);
         let mut continuity = session::Continuity::default();
         let mut cloaked = false;
         // What the post-payload reconciliations need from the uncloaked body.
         let before = if cloak {
-            reconcile::Before::read(&body)
+            reconcile::Before::read(&body, explicit)
         } else {
             reconcile::Before::default()
         };
@@ -1154,6 +1196,12 @@ impl<'a> Ctx<'a> {
             }
             let version = profile::default_version(&self.settings);
             let workload = detect::header(&req.headers, "x-cpa-claude-workload").to_owned();
+            // Without continuity (probes, helpers, no session) the date is today's.
+            let date = if continuity.pinned_date.is_empty() {
+                &self.today
+            } else {
+                &continuity.pinned_date
+            };
             body = cloak::install_system(
                 body,
                 &cloak::SystemPlan {
@@ -1169,7 +1217,9 @@ impl<'a> Ctx<'a> {
                         prompt_id: &prompt,
                         human_turn: !probe_before && !subagent,
                     },
-                    date: &self.today,
+                    date,
+                    explicit,
+                    keep_top_level: !self.oauth_token,
                 },
             );
             let model = rawjson::string(&body, "model").trim().to_lowercase();
@@ -1182,7 +1232,7 @@ impl<'a> Ctx<'a> {
             if !probe_before {
                 body = cloak_thinking_display(body);
             }
-            if probe_before || (subagent && !signals::subagent_requests_1h(&req.headers, &body)) {
+            if !explicit && (probe_before || (subagent && !signals::subagent_requests_1h(&req.headers, &body))) {
                 body = cloak::strip_ttl(body);
             }
             if !self.cli_profile && needs_fake_user_id(&body) {
@@ -1265,6 +1315,10 @@ impl<'a> Ctx<'a> {
             let (prev, prompt, begun) =
                 self.continuity_tags(&req.headers, &body, &session_id, &existing_prev, &existing_prompt);
             if begun.initialized {
+                // 6d57ac9: the declassified request joins its session's pinned date.
+                if !begun.pinned_date.is_empty() {
+                    body = cloak::inject_current_date(&body, &begun.pinned_date, explicit);
+                }
                 continuity = begun.clone();
                 body = signals::inject_billing_tags(&body, &prev, &prompt);
                 if self.cli_profile && self.first_party {
@@ -1291,19 +1345,25 @@ impl<'a> Ctx<'a> {
             touched("context_management"),
         );
         body = normalize_sampling(body, confirmed);
-        let cpa_owns_cache = !confirmed && (cloaked || cloak::count_cache_controls(&body) == 0);
+        // `shouldEnsureCacheControl`. Go v8.0.27 applies payload rules last, so a rule
+        // that sets prompt_cache_options only gets stripped; `explicit` was decided
+        // before the rules ran here for the same result.
+        let cpa_owns_cache = !explicit && !confirmed && (cloaked || cloak::count_cache_controls(&body) == 0);
         if cpa_owns_cache {
             body = cloak::ensure_cache_control(body);
         }
         body = cloak::enforce_cache_limit(body, 4);
+        body = cloak::strip_prompt_cache_options(body);
         let subagent = signals::subagent(&req.headers, &body);
         let subagent_1h = subagent && signals::subagent_requests_1h(&req.headers, &body);
         if cpa_owns_cache && self.cli_profile && (!subagent || subagent_1h) && !probe {
             body = cloak::upgrade_ttl(body, "1h");
-        } else if probe || (subagent && !subagent_1h) {
+        } else if (probe || (subagent && !subagent_1h)) && !explicit {
             body = cloak::strip_ttl(body);
         }
-        body = cloak::normalize_ttl(body);
+        if !explicit {
+            body = cloak::normalize_ttl(body);
+        }
         // Execute only: ExecuteStream forwards the body's own `stream` field.
         let stream_field = rawjson::get(&body, "stream");
         if !req.stream && (!detection.helper_profile || stream_field.exists() || upstream_stream) {
@@ -1314,12 +1374,22 @@ impl<'a> Ctx<'a> {
         }
         let (extra_betas, stripped) = extract_betas(body);
         body = stripped;
+        let thread = thread::Thread::of(&body);
         let mut reverse = alias::Reverse::new();
         if self.cli_profile && cloaked {
-            let secret = Some(req.caller.principal.trim())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(alias::DEFAULT_SECRET);
-            (body, reverse) = alias::remap(&body, secret);
+            // `prepareClaudeOAuthToolNamesForRequest`: a continuation without tools
+            // reuses its thread's aliases and is sent as is.
+            if let Some(restored) = thread
+                .as_ref()
+                .and_then(|thread| self.thread_aliases.for_continuation(thread, &body))
+            {
+                reverse = restored?;
+            } else {
+                let secret = Some(req.caller.principal.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(alias::DEFAULT_SECRET);
+                (body, reverse) = alias::remap(&body, secret);
+            }
         }
         body = sanitize_for_upstream(body, &self.base_model, self.is_compat);
         if self.cli_profile {
@@ -1369,6 +1439,7 @@ impl<'a> Ctx<'a> {
             order,
             reverse,
             continuity: diagnostics,
+            thread,
             fast,
         })
     }
@@ -1399,11 +1470,12 @@ impl<'a> Ctx<'a> {
             body = rebuild_mid_system(&body);
         }
         let (cloak, strict, words, _) = self.wire_policy(confirmed);
+        let explicit = cloak::explicit_cache_mode(&[&original, &utf8(&req.body), &body]);
         if cloak {
             if !strict && let Some(message) = cloak::invalid_system_block(&body) {
                 return Err(ExecError::local(400, FailureScope::Request, message));
             }
-            body = cloak::relocate_system_for_count(&body, strict);
+            body = cloak::relocate_system_for_count(&body, strict, explicit, !self.oauth_token);
             if !words.is_empty()
                 && let Some(m) = cloak::SensitiveWords::new(&words)
             {
@@ -1411,7 +1483,9 @@ impl<'a> Ctx<'a> {
             }
         }
         body = cloak::enforce_cache_limit(body, 4);
-        body = cloak::normalize_ttl(body);
+        if !explicit {
+            body = cloak::normalize_ttl(body);
+        }
         let (mut extra_betas, stripped) = extract_betas(body);
         body = stripped;
         extra_betas.push(betas::TOKEN_COUNTING.into());
@@ -1422,6 +1496,7 @@ impl<'a> Ctx<'a> {
             body = alias::remap(&body, secret).0;
         }
         body = sanitize_for_upstream(body, &self.base_model, self.is_compat);
+        body = cloak::strip_prompt_cache_options(body);
         if self.first_party || self.cli_profile {
             for field in ["metadata", "context_management", "diagnostics"] {
                 body = rawjson::delete(&body, field);
@@ -1450,6 +1525,7 @@ impl<'a> Ctx<'a> {
             order,
             reverse: Default::default(),
             continuity: Default::default(),
+            thread: None,
             fast: false,
         })
     }
@@ -1575,6 +1651,7 @@ impl<'a> Ctx<'a> {
         if begun.key.is_empty() {
             return Default::default();
         }
+        let pinned_date = session::pin_date(&begun.key, &self.today);
         let prompt = if !existing_prompt.is_empty() {
             existing_prompt.to_owned()
         } else if !begun.previous_message_id.is_empty()
@@ -1607,6 +1684,7 @@ impl<'a> Ctx<'a> {
                 String::new()
             },
             prompt_id: prompt.clone(),
+            pinned_date,
             initialized: true,
         };
         (prev, prompt, continuity)
