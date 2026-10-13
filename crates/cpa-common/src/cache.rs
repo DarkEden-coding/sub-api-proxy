@@ -165,7 +165,9 @@ impl Caches {
 
     /// GetAntigravityReasoningReplayItemsWithSnapshotRequired (in-process): a hit
     /// refreshes the entry (tombstones included); a miss or an expired entry reserves a
-    /// tombstone that counts toward capacity.
+    /// tombstone that counts toward capacity. The snapshot carries no items: the one
+    /// copy made under the lock is the returned items, and a caller that needs both
+    /// copies them after the lock is released ([`replay_get_with_snapshot`]).
     fn get(&mut self, key: String, now: Instant) -> (Option<Vec<Vec<u8>>>, ReplaySnapshot) {
         self.sweep(now, true);
         match self.replay.get_mut(&key) {
@@ -177,7 +179,7 @@ impl Caches {
             }
             Some(entry) => {
                 entry.at = now;
-                let mut snapshot = ReplaySnapshot {
+                let snapshot = ReplaySnapshot {
                     loaded: true,
                     found: true,
                     revision: entry.revision,
@@ -185,11 +187,8 @@ impl Caches {
                     eviction_epoch: self.eviction_epoch,
                     items: Vec::new(),
                 };
-                if entry.deleted || entry.items.is_empty() {
-                    return (None, snapshot);
-                }
-                snapshot.items = entry.items.clone();
-                (Some(entry.items.clone()), snapshot)
+                let items = (!entry.deleted && !entry.items.is_empty()).then(|| entry.items.clone());
+                (items, snapshot)
             }
         }
     }
@@ -395,17 +394,29 @@ pub fn replay_put(model: &str, session: &str, items: &[Vec<u8>]) -> bool {
     true
 }
 
-/// `GetAntigravityReasoningReplayItems`.
+/// `GetAntigravityReasoningReplayItems`: one copy of the items, made under the lock.
 pub fn replay_get(model: &str, session: &str) -> Option<Vec<Vec<u8>>> {
-    replay_get_with_snapshot(model, session).0
+    let key = key(model, session)?;
+    caches().get(key, Instant::now()).0
 }
 
-/// `GetAntigravityReasoningReplayItemsWithSnapshotRequired`.
+/// `GetAntigravityReasoningReplayItemsWithSnapshotRequired`. The snapshot's copy of the
+/// items is made after the lock is released.
 pub fn replay_get_with_snapshot(model: &str, session: &str) -> (Option<Vec<Vec<u8>>>, ReplaySnapshot) {
     let Some(key) = key(model, session) else {
         return (None, ReplaySnapshot::default());
     };
-    caches().get(key, Instant::now())
+    let read = caches().get(key, Instant::now());
+    with_items(read)
+}
+
+/// A read whose snapshot also holds the items read, for the branch rules of a later
+/// conditional write.
+fn with_items((items, mut snapshot): (Option<Vec<Vec<u8>>>, ReplaySnapshot)) -> (Option<Vec<Vec<u8>>>, ReplaySnapshot) {
+    if let Some(items) = &items {
+        snapshot.items.clone_from(items);
+    }
+    (items, snapshot)
 }
 
 /// `ReplaceAntigravityReasoningReplayItemsIfUnchanged`: publishes `items` unless a
