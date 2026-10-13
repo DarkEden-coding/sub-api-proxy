@@ -27,7 +27,8 @@
 # file change notifications.
 # 2026-10-13: Google Antigravity provider and Google upstream capture, +710 KB .text
 # (+0.84 MB binary, +0.35 MB archive) over master's build at 586eba0 in this job; the
-# rest of the rise from the values above came with master's changes since 2026-10-05.
+# rest of the rise from the previous budget values came with master's changes since
+# 2026-10-05.
 size.x86_64-unknown-linux-gnu.binary_bytes   41_287_408  2
 size.x86_64-unknown-linux-gnu.text_bytes     27_195_447  2
 size.x86_64-unknown-linux-gnu.rodata_bytes    8_508_896  2
