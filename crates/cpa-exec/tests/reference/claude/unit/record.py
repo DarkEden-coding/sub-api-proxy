@@ -3,6 +3,10 @@
 
 Usage: record.py <CLIProxyAPI checkout at 6fecc6e> <output.json>
 
+Environment: RSFIX_FILES (comma-separated) replaces DEFAULT_FILES, RSFIX_ONLY (a regular
+expression) selects tests by name, and RSFIX_REFERENCE (default 6fecc6e) names the
+checkout in the output; see ../README.md for the v8.0.27 recording.
+
 Copies the checkout's tracked files to a scratch directory under /tmp, rewrites call
 sites in the listed Go test files to the recording wrappers, runs those tests and the
 writer, and stores the records grouped by Go test. The checkout is never modified.
@@ -21,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = "internal/runtime/executor"
 
 # Go test files whose call sites are rewritten, relative to PKG.
-FILES = [
+DEFAULT_FILES = [
     "apply_patch_integration_test.go",
     "claude_cloaked_cache_repro_test.go",
     "claude_executor_auth_race_test.go",
@@ -67,7 +71,12 @@ CALLS = {
 
 # Executor entry points: `<receiver>.Execute(` -> `rsfixExecute(<receiver>, `. The
 # wrappers record only *ClaudeExecutor receivers (manager.Execute is the conductor).
-METHODS = {"Execute": "rsfixExecute", "ExecuteStream": "rsfixExecuteStream", "CountTokens": "rsfixCountTokens"}
+METHODS = {
+    "Execute": "rsfixExecute",
+    "ExecuteStream": "rsfixExecuteStream",
+    "CountTokens": "rsfixCountTokens",
+    "countTokensUpstream": "rsfixCountTokensUpstream",
+}
 RECEIVERS = ("executor", "exec", "ex", "e", "claudeExec", "claudeExecutor")
 
 
@@ -82,11 +91,13 @@ def rewrite(source: str) -> str:
 
 def main() -> None:
     checkout, output = sys.argv[1], os.path.abspath(sys.argv[2])
+    files = [f for f in os.environ.get("RSFIX_FILES", "").split(",") if f] or DEFAULT_FILES
+    reference = os.environ.get("RSFIX_REFERENCE", "6fecc6e")
     scratch = tempfile.mkdtemp(prefix="cpa-rsfix-", dir="/tmp")
     archive = subprocess.run(["git", "-C", checkout, "archive", "HEAD"], check=True, capture_output=True).stdout
     subprocess.run(["tar", "-x", "-C", scratch], input=archive, check=True)
     tests, owner = [], {}
-    for name in FILES:
+    for name in files:
         path = os.path.join(scratch, PKG, name)
         with open(path, encoding="utf-8") as f:
             source = f.read()
@@ -122,7 +133,7 @@ def main() -> None:
         test = record.pop("test") or "(helper)"
         grouped.setdefault(owner.get(test, "(other)"), {}).setdefault(test, []).append(record)
     result = {
-        "source": "CLIProxyAPI 6fecc6e, Go's own tests in " + PKG,
+        "source": "CLIProxyAPI " + reference + ", Go's own tests in " + PKG,
         "go_failures": failures,
         "files": grouped,
     }

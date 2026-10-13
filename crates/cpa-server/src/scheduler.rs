@@ -519,7 +519,7 @@ impl Policy {
                 .flatten()
         });
         if let Some(rules) = rules {
-            let body = crate::classify::error_text(error);
+            let body = crate::classify::rule_text(error);
             let status = i64::from(crate::classify::go_status(error));
             for rule in rules {
                 if rule.status <= 0 || rule.status != status {
@@ -3361,6 +3361,28 @@ mod tests {
             Some(Duration::from_secs(60)),
             "unlisted statuses ignore hint"
         );
+    }
+
+    /// Go matches rules against a local missing-thread error's structured body, which
+    /// names `not_found_error`; its message does not.
+    #[test]
+    fn rules_match_the_structured_body_of_a_missing_thread() {
+        let c = cred(
+            "a",
+            serde_json::json!({"request_scoped_errors":[{"status":404,"match":["not_found_error"],"action":"continue"}]}),
+        );
+        let e = ExecError::local(404, FailureScope::Request, cpa_exec::claude::THREAD_NOT_FOUND);
+        let action = Policy::default().error_action(&c, &e);
+        assert!(action.matched && !action.stop);
+        // Any other 404 is matched by its text, including an upstream answer with the
+        // same words.
+        let other = ExecError::local(404, FailureScope::Request, "not found");
+        assert!(!Policy::default().error_action(&c, &other).matched);
+        let mut upstream = e.clone();
+        upstream
+            .headers
+            .insert(axum::http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        assert!(!Policy::default().error_action(&c, &upstream).matched);
     }
 
     #[test]

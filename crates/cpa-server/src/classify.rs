@@ -17,6 +17,19 @@ pub fn error_text(e: &ExecError) -> String {
     }
 }
 
+/// Go `extractErrorBody`, what request-scoped error rules match: the error's text,
+/// except for the Claude executor's own missing-thread error, whose structured body
+/// (`claudeThreadNotFoundError.ResponseBody`, v8.0.27 e7b2226) is Anthropic's JSON
+/// while its message stays plain. That error is the local 404 with exactly the
+/// executor's message; an upstream answer carries headers.
+pub fn rule_text(e: &ExecError) -> String {
+    let text = error_text(e);
+    if e.status == 404 && explicit_request_scoped(e) && text == cpa_exec::claude::THREAD_NOT_FOUND {
+        return format!(r#"{{"type":"error","error":{{"type":"not_found_error","message":"{text}"}}}}"#);
+    }
+    text
+}
+
 /// A local executor error (no upstream response) that the executor marked as a
 /// request fault: Go's explicit `RequestScopedError`. Upstream responses always carry
 /// headers, so an upstream 404 marked `Request` by a provider is still classified here
@@ -103,16 +116,43 @@ fn any_path(v: &Value, paths: &[&str], pred: impl Fn(&str) -> bool) -> bool {
 const CODE_PATHS: [&str; 4] = ["error.code", "code", "response.error.code", "body.error.code"];
 const TYPE_PATHS: [&str; 4] = ["error.type", "type", "response.error.type", "body.error.type"];
 
+/// `clienterror.IsClaudeThreadNotFound` (v8.0.27, 5c959cb, e7b2226): Claude's 404 for
+/// a stale `previous_message_id` continuation, as a JSON error or plain text. Only a
+/// replay of the whole conversation helps, so no credential is cooled or rotated.
+pub fn is_claude_thread_not_found(status: u16, text: &str) -> bool {
+    let body = text.trim();
+    if status != 404 || body.is_empty() {
+        return false;
+    }
+    let names_thread = |message: &str| {
+        let lower = message.to_lowercase();
+        lower.contains("thread state") && lower.contains("previous_message_id")
+    };
+    match json_body(body) {
+        Some(value) => {
+            path_str(&value, "error.type").is_some_and(|t| t.trim().eq_ignore_ascii_case("not_found_error"))
+                && names_thread(path_str(&value, "error.message").unwrap_or_default())
+        }
+        None => names_thread(body),
+    }
+}
+
 /// `clienterror.IsRequestFault`.
 pub fn is_request_fault(status: u16, text: &str) -> bool {
     if status == 402 || status == 429 {
         return false;
     }
     let body = json_body(text);
+    if let Some(body) = &body
+        && status == 401
+        && any_path(body, &TYPE_PATHS, |t| t == "authentication_error")
+    {
+        return false;
+    }
+    if is_claude_thread_not_found(status, text) {
+        return true;
+    }
     if let Some(body) = &body {
-        if status == 401 && any_path(body, &TYPE_PATHS, |t| t == "authentication_error") {
-            return false;
-        }
         if any_path(body, &CODE_PATHS, |c| {
             c == "model_not_found" || c == "model_not_found_error"
         }) {
@@ -430,6 +470,17 @@ mod tests {
         )));
         // An upstream 404 marked Request by the executor is not a request fault in Go.
         assert!(!is_request_invalid(&upstream(404, "not found")));
+        // Except Claude's missing thread state (v8.0.27 TestIsRequestFault cases): only
+        // the client can recover, by replaying the conversation.
+        const THREAD: &str = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.";
+        let json = format!(r#"{{"type":"error","error":{{"type":"not_found_error","message":"{THREAD}"}}}}"#);
+        assert!(is_request_invalid(&upstream(404, &json)));
+        assert!(is_request_invalid(&upstream(404, THREAD)));
+        assert!(!is_request_invalid(&upstream(
+            404,
+            r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#
+        )));
+        assert!(!is_request_fault(500, &json));
         assert!(is_request_invalid(&upstream(422, "bad")));
         // Model-not-found is a capability mismatch, even on 400.
         assert!(!is_request_invalid(&upstream(

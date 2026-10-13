@@ -58,7 +58,48 @@ fn any_text(value: &gjson::Value, matches: impl Fn(&str) -> bool) -> bool {
     }
 }
 
+/// `jsonMayContainASCII` (v8.0.27, 5dbce4f): whether a decoded key or string of the
+/// JSON document `body` could contain one of `needles`, so the classifiers below can
+/// skip their walks. Each needle is printable ASCII without `\` or `/`, with a `"` only
+/// at either end (a string delimiter). JSON spells those characters as themselves or
+/// as a `\u00XX` escape, so unless such an escape occurs, a needle missing from the raw
+/// bytes is missing from every decoded string; with one the answer is yes and the
+/// caller walks as before. The answer never changes the result, only the cost.
+///
+/// Per call: one scan of the body per needle, plus one for `\u00`.
+pub(crate) fn may_contain(body: &str, needles: &[&str]) -> bool {
+    printable_ascii_escape(body) || needles.iter().any(|needle| body.contains(needle))
+}
+
+/// `hasPrintableASCIIUnicodeEscape`: a `\u00` followed by `2`..`7`. Errs only toward
+/// yes (DEL, malformed or truncated escapes, an escaped backslash before `u00`).
+fn printable_ascii_escape(body: &str) -> bool {
+    let mut rest = body;
+    while let Some(i) = rest.find("\\u00") {
+        match rest.as_bytes().get(i + 4) {
+            None => return false,
+            Some(b'2'..=b'7') => return true,
+            // `\u00` is ASCII, so `i + 4` is a character boundary.
+            Some(_) => rest = &rest[i + 4..],
+        }
+    }
+    false
+}
+
 fn title_helper(body: &str) -> bool {
+    // Without an output_config key the request is a helper only when one of the system
+    // title instructions below appears.
+    if !may_contain(
+        body,
+        &[
+            "output_config",
+            "naming a coding session",
+            "Return a short title",
+            "Write the title in the predominant language",
+        ],
+    ) {
+        return false;
+    }
     let system_title = |t: &str| {
         t.contains("naming a coding session")
             || t.contains("Return a short title")
@@ -158,9 +199,11 @@ pub(crate) fn blocks(body: &str) -> Vec<(String, Cow<'_, str>)> {
     out
 }
 
-/// `ClaudePayloadHas1hTTL`.
+/// `ClaudePayloadHas1hTTL`. A ttl of 1h is the JSON string `"1h"`, whose quotes are
+/// never escaped.
 pub(crate) fn has_1h_ttl(body: &str) -> bool {
     !body.is_empty()
+        && may_contain(body, &["\"1h\""])
         && gjson::valid(body)
         && blocks(body).iter().any(|(_, block)| {
             let cc = gjson::get(block, "cache_control");

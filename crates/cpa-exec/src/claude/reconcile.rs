@@ -11,7 +11,8 @@ use crate::rawjson;
 pub(crate) struct SystemPlacement {
     insert_at: usize,
     inserted: Vec<String>,
-    texts: Vec<String>,
+    blocks: Vec<cloak::Forwarded>,
+    explicit: bool,
 }
 
 /// What the captures below read from the request before cloaking rewrote it, taken
@@ -20,10 +21,13 @@ pub(crate) struct SystemPlacement {
 pub(crate) struct Before {
     empty: bool,
     legacy: bool,
-    /// The caller's system texts that cloaking moves into the messages.
-    texts: Vec<String>,
+    /// The caller's system blocks that cloaking moves into the messages.
+    blocks: Vec<cloak::Forwarded>,
+    /// `prompt_cache_options.mode: explicit`: the blocks keep their own breakpoints.
+    explicit: bool,
     messages: usize,
-    /// Where they go: after the first user turn and any user turns that follow it.
+    /// Where they go: after the first user turn and any user turns (or effort
+    /// directives) that follow it.
     insert_at: Option<usize>,
     fallbacks: bool,
     display: bool,
@@ -31,30 +35,25 @@ pub(crate) struct Before {
 }
 
 impl Before {
-    pub(crate) fn read(body: &str) -> Self {
+    pub(crate) fn read(body: &str, explicit: bool) -> Self {
         let legacy = cloak::legacy_system_reminder(body);
-        let texts = if legacy {
+        let blocks = if legacy {
             Vec::new()
         } else {
             cloak::forwarded_system_blocks(body)
         };
         let (mut messages, mut insert_at) = (0, None);
-        if !texts.is_empty() {
+        if !blocks.is_empty() {
             let msgs = rawjson::get(body, "messages");
             let msgs = msgs.array();
             messages = msgs.len();
-            insert_at = cloak::first_user_index(body).map(|first| {
-                let mut at = first + 1;
-                while at < msgs.len() && msgs[at].get("role").str() == "user" {
-                    at += 1;
-                }
-                at
-            });
+            insert_at = cloak::first_user_index(body).map(|first| cloak::leading_user_run_end(&msgs, first));
         }
         Self {
             empty: body.is_empty(),
             legacy,
-            texts,
+            blocks,
+            explicit,
             messages,
             insert_at,
             fallbacks: rawjson::get(body, "fallbacks").exists(),
@@ -68,25 +67,25 @@ impl SystemPlacement {
     /// `captureClaudeCodeSystemPlacement`. The message-count increase is part of the
     /// proof: turns that already existed belong to the caller.
     pub(crate) fn capture(before: &Before, after: &str, cloaked: bool) -> Self {
-        if !cloaked || before.legacy || before.texts.is_empty() {
+        if !cloaked || before.legacy || before.blocks.is_empty() {
             return Self::default();
         }
-        let texts = &before.texts;
+        let blocks = &before.blocks;
         let after_msgs = rawjson::get(after, "messages");
         let after_msgs = after_msgs.array();
-        if after_msgs.len() != before.messages + texts.len() {
+        if after_msgs.len() != before.messages + blocks.len() {
             return Self::default();
         }
         let Some(at) = before.insert_at else {
             return Self::default();
         };
-        if at + texts.len() > after_msgs.len() {
+        if at + blocks.len() > after_msgs.len() {
             return Self::default();
         }
-        let mut inserted = Vec::with_capacity(texts.len());
-        for (i, text) in texts.iter().enumerate() {
+        let mut inserted = Vec::with_capacity(blocks.len());
+        for (i, block) in blocks.iter().enumerate() {
             let message = &after_msgs[at + i];
-            if message.get("role").str() != "system" || cloak::message_text(&message.get("content")) != *text {
+            if message.get("role").str() != "system" || cloak::message_text(&message.get("content")) != block.text {
                 return Self::default();
             }
             inserted.push(message.json().to_owned());
@@ -94,7 +93,8 @@ impl SystemPlacement {
         Self {
             insert_at: at,
             inserted,
-            texts: texts.clone(),
+            blocks: blocks.clone(),
+            explicit: before.explicit,
         }
     }
 
@@ -122,7 +122,7 @@ impl SystemPlacement {
             .map(|(_, m)| m.json())
             .collect();
         let updated = rawjson::set_raw(&body, "messages", &format!("[{}]", kept.join(",")));
-        cloak::prepend_reminders(&updated, &self.texts)
+        cloak::prepend_reminders(&updated, &self.blocks, self.explicit)
     }
 }
 
@@ -289,8 +289,8 @@ mod tests {
 
     #[test]
     fn system_placement_moves_only_cpa_turns_to_reminders() {
-        let after = cloak::insert_mid_system(MID, &["rules".to_owned()]);
-        let placement = SystemPlacement::capture(&Before::read(MID), &after, true);
+        let after = cloak::insert_mid_system(MID, &[cloak::Forwarded::plain("rules")], false);
+        let placement = SystemPlacement::capture(&Before::read(MID, false), &after, true);
         assert_eq!(placement.inserted.len(), 1);
         // A rule that keeps a current model leaves the turn where it is.
         assert_eq!(placement.reconcile(after.clone()), after);
@@ -304,9 +304,24 @@ mod tests {
         assert_eq!(placement.reconcile(edited.clone()), edited);
         // Turns the caller already had are not CPA's.
         assert!(
-            SystemPlacement::capture(&Before::read(&after), &after, true)
+            SystemPlacement::capture(&Before::read(&after, false), &after, true)
                 .inserted
                 .is_empty()
+        );
+    }
+
+    /// In explicit cache mode the reminders rebuilt for a legacy model keep the
+    /// breakpoint the caller put on its system block, as Go's legacy placement does.
+    #[test]
+    fn system_placement_keeps_explicit_breakpoints() {
+        let body = r#"{"model":"claude-opus-5","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}"#;
+        let before = Before::read(body, true);
+        let after = cloak::insert_mid_system(body, &cloak::forwarded_system_blocks(body), true);
+        let placement = SystemPlacement::capture(&before, &after, true);
+        let legacy = rawjson::set_str(&after, "model", "claude-3-5-haiku-20241022");
+        assert_eq!(
+            rawjson::get(&placement.reconcile(legacy), "messages.0.content.0").json(),
+            r#"{"type":"text","text":"<system-reminder>\nrules\n</system-reminder>","cache_control":{"type":"ephemeral","ttl":"1h"}}"#
         );
     }
 }

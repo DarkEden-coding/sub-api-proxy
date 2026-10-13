@@ -243,6 +243,8 @@ pub(crate) struct Continuity {
     pub previous_message_id: String,
     pub previous_request_id: String,
     pub prompt_id: String,
+    /// The calendar date the session was first seen on ([`pin_date`]).
+    pub pinned_date: String,
     pub initialized: bool,
 }
 
@@ -251,6 +253,7 @@ struct Entry {
     previous_message_id: String,
     previous_request_id: String,
     prompt_id: String,
+    pinned_date: String,
     minimum_sequence: u64,
     committed_sequence: u64,
     last_access: u64,
@@ -323,8 +326,34 @@ pub(crate) fn begin(credential: &str, session: &str, new_turn: bool, explicit_pr
         previous_message_id: entry.previous_message_id.clone(),
         previous_request_id: entry.previous_request_id.clone(),
         prompt_id: prompt,
+        pinned_date: String::new(),
         initialized: false,
     }
+}
+
+/// `PinClaudeSessionDate` (v8.0.27, 6d57ac9): the cloaked currentDate reminder sits
+/// in the first user message, so a date that changed between two requests of one
+/// session would rewrite the cached prefix in front of the whole conversation. The
+/// first call for a session records `date`; later calls return that date. The pin
+/// lives in the session's continuity entry, so it expires with it (an hour after the
+/// session's last request) and is evicted with it; a new or expired session, or an
+/// unknown key, takes `date` as given.
+///
+/// Per request: one uncontended lock and one map lookup of a 64-byte key, plus a
+/// 10-byte copy of the date.
+pub(crate) fn pin_date(key: &str, date: &str) -> String {
+    let (key, date) = (key.trim(), date.trim());
+    if key.is_empty() || date.is_empty() {
+        return date.to_owned();
+    }
+    let mut s = store().lock().expect("continuity store");
+    let Some(entry) = s.entries.get_mut(key) else {
+        return date.to_owned();
+    };
+    if entry.pinned_date.is_empty() {
+        entry.pinned_date = date.to_owned();
+    }
+    entry.pinned_date.clone()
 }
 
 /// `CommitClaudeContinuity` after a completed response.

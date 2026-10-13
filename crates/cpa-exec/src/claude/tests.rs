@@ -4,6 +4,36 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
+thread_local! {
+    /// The clock requests prepared on this test thread read, when set.
+    static CLOCK: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>> = const { std::cell::Cell::new(None) };
+    /// The date the currentDate reminder reads on this test thread, when pinned.
+    static TODAY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The instant [`set_clock`] set for this thread.
+pub(super) fn clock() -> Option<chrono::DateTime<chrono::Utc>> {
+    CLOCK.get()
+}
+
+/// Sets (or with `None` releases) the clock requests prepared on this thread read, as
+/// Go's tests do with `claudeCodeCurrentTimeFunc`. `#[tokio::test]` runs the executor
+/// on the test's own thread.
+fn set_clock(now: Option<&str>) {
+    CLOCK.set(now.map(|now| chrono::DateTime::parse_from_rfc3339(now).unwrap().to_utc()));
+}
+
+/// The local date [`set_today`] pinned for this thread.
+pub(super) fn pinned_today() -> Option<String> {
+    TODAY.with_borrow(Clone::clone)
+}
+
+/// Pins (or with `None` releases) the date itself, for replays of a Go run that
+/// recorded only the date its clock gave in the credential's zone.
+pub(super) fn set_today(date: Option<&str>) {
+    TODAY.with_borrow_mut(|today| *today = date.map(str::to_owned));
+}
+
 /// The harness credential (harness/fixtures.py): fake, local-only.
 fn harness_credential() -> Credential {
     let metadata = serde_json::json!({
@@ -427,11 +457,42 @@ fn assert_go_error(name: &str, scenario: &Value, info: &serde_json::Map<String, 
     }
 }
 
+const GO_EXECUTOR: &str = include_str!("testdata/go_executor.json");
+
 #[tokio::test]
 async fn executor_scenarios_match_go() {
     // Sequenced through execute(): compat_replay_sequence_matches_go; config keys:
     // m1_0041_to_m1_0056_config_keys_match_go.
-    scenarios_match_go("all", |name| !name.starts_with("replay-") && !is_config_scenario(name)).await;
+    scenarios_match_go(GO_EXECUTOR, "all", |name| {
+        !name.starts_with("replay-") && !is_config_scenario(name) && !FOLLOWS_V8_0_27.contains(&name)
+    })
+    .await;
+}
+
+/// 6fecc6e scenarios whose outcome now follows Go v8.0.27: the v8.0.27 fixture runs
+/// each of them again and holds the answer the executor gives now.
+const FOLLOWS_V8_0_27: &[&str] = &[
+    // 8080967: a reset past the seven-day window is a billing boundary, not a retry hint.
+    "oauth-unified-429",
+    "oauth-fast-unified-429",
+];
+
+/// The prompt-cache and prompt-shaping fixes this executor follows from v8.0.27, run
+/// through Go v8.0.27's executor by the same generator (scenarios-v8.0.27.json): the
+/// session-pinned currentDate reminder (6d57ac9), thread breakpoint reservation and
+/// continuation aliases (26e5efb, 678a925, e7b2226), explicit prompt cache options
+/// (eb6a768), caller system placement (5d89040, eca1d11, 39632e5, 14dc4e0) and
+/// effort directives (2d8ec73), invalid markers (be8c35f) and overage billing resets
+/// (8080967). The scenarios run in order on one executor: a date pin and a thread's
+/// aliases carry from one scenario to the next, as in Go's run.
+#[tokio::test]
+async fn v8_0_27_cache_and_prompt_shaping_scenarios_match_go() {
+    let fixture = include_str!("testdata/go_executor_v8.0.27.json");
+    assert!(fixture.contains(r#""source": "CLIProxyAPI v8.0.27 "#));
+    for name in FOLLOWS_V8_0_27 {
+        assert!(fixture.contains(&format!(r#""name": "{name}""#)), "{name}");
+    }
+    scenarios_match_go(fixture, "v8.0.27", |_| true).await;
 }
 
 /// Scenarios whose only purpose is a `config.yaml` key (Go generator, same pipeline).
@@ -453,11 +514,11 @@ async fn m1_0041_to_m1_0056_config_keys_match_go() {
         .filter(|s| is_config_scenario(s["name"].as_str().unwrap()))
         .count();
     assert_eq!(count, 5);
-    scenarios_match_go("config", is_config_scenario).await;
+    scenarios_match_go(GO_EXECUTOR, "config", is_config_scenario).await;
 }
 
-async fn scenarios_match_go(run: &str, selected: fn(&str) -> bool) {
-    let fixture: Value = serde_json::from_str(include_str!("testdata/go_executor.json")).unwrap();
+async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool) {
+    let fixture: Value = serde_json::from_str(fixture).unwrap();
     let root = std::env::temp_dir().join(format!("cpa-claude-go-{run}-{}", std::process::id()));
     let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
     let prompt_id = regex::Regex::new(r"cc_prompt_id=[0-9a-f-]{36};").unwrap();
@@ -637,19 +698,12 @@ async fn scenarios_match_go(run: &str, selected: fn(&str) -> bool) {
             assert_eq!(output, [reply], "{name}: count passthrough");
         } else if stream {
             let raw = futures_util::stream::iter([Ok(Bytes::from(reply.to_owned()))]).boxed();
-            let continuity = prepared.continuity.clone();
+            let mut prepared = prepared;
+            let completion = ctx.completion(&mut prepared);
             let events: Vec<String> = stream::relay(
                 raw,
                 prepared.reverse.clone(),
-                Box::new(move |id| {
-                    session::commit(
-                        &continuity.key,
-                        continuity.sequence,
-                        &id,
-                        &request_id,
-                        &continuity.prompt_id,
-                    )
-                }),
+                Box::new(move |id| completion.complete(&id, &request_id)),
                 Default::default(),
                 Default::default(),
             )
@@ -660,17 +714,196 @@ async fn scenarios_match_go(run: &str, selected: fn(&str) -> bool) {
         } else {
             let restored = alias::restore_response(reply, &prepared.reverse).unwrap();
             assert_eq!([restored], output.as_slice(), "{name}: restored response");
-            let c = &prepared.continuity;
-            session::commit(
-                &c.key,
-                c.sequence,
-                &rawjson::string(reply, "id"),
-                &request_id,
-                &c.prompt_id,
-            );
+            let mut prepared = prepared;
+            ctx.completion(&mut prepared)
+                .complete(&rawjson::string(reply, "id"), &request_id);
         }
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A coding client streams one long cloaked conversation through a Claude OAuth
+/// login. What Anthropic's prompt cache keys on stays byte for byte the same:
+///
+/// - warm: the next turn repeats the previous request's prefix;
+/// - changed context: an edited caller system prompt changes the request only from
+///   the turn it is moved to, after the first user message;
+/// - idle: a turn 45 minutes later, past local midnight, repeats the prefix too, and
+///   every breakpoint has the 1-hour TTL that outlives the gap. The currentDate
+///   reminder sits in the first user message; it keeps the session's first date (Go
+///   v8.0.27, 6d57ac9), and only a new conversation starts on the new date.
+#[tokio::test]
+async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
+    use axum::response::IntoResponse;
+    let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = sent.clone();
+    let router = axum::Router::new().fallback(move |body: String| {
+        let seen = seen.clone();
+        async move {
+            let id = format!("msg_midnight_{}", {
+                let mut seen = seen.lock().unwrap();
+                seen.push(body);
+                seen.len()
+            });
+            let events = [
+                serde_json::json!({"type": "message_start", "message": {"id": id, "type": "message", "role": "assistant",
+                    "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 3, "output_tokens": 0}}}),
+                serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+                serde_json::json!({"type": "message_stop"}),
+            ];
+            let sse: String = events
+                .iter()
+                .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+                .collect();
+            ([(http::header::CONTENT_TYPE, "text/event-stream")], sse).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let mut credential = harness_credential();
+    credential.id = "midnight.json".into();
+    credential.attributes.insert("base_url".into(), base);
+    credential.attributes.insert("timezone".into(), "UTC".into());
+    let cfg = Config::parse("").unwrap();
+    let tools = r#"[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]"#;
+    let system = r#"[{"type":"text","text":"You are a coding agent. Project rules: keep diffs small."}]"#;
+    let first = r#"{"role":"user","content":[{"type":"text","text":"Port the cache fixes, then report."}]}"#;
+    let edited =
+        r#"[{"type":"text","text":"You are a coding agent. Project rules: keep diffs small. Run the tests."}]"#;
+    let request = |system: &str, messages: &str| {
+        format!(
+            r#"{{"model":"claude-opus-5-5","max_tokens":64,"stream":true,"system":{system},"tools":{tools},"messages":[{messages}]}}"#
+        )
+    };
+    let turn = |messages: &str| request(system, messages);
+    let send = |body: String| {
+        let body = Bytes::from(body);
+        enrich(ExecRequest {
+            operation: Operation::Generate,
+            source_format: Format::Claude,
+            response_format: Format::Claude,
+            requested_model: "claude-opus-5-5".into(),
+            model: "claude-opus-5-5".into(),
+            original_body: body.clone(),
+            body,
+            stream: true,
+            alt: None,
+            session: None,
+            execution_session: None,
+            derived_session: None,
+            resolved_model: None,
+            usage: Default::default(),
+            request_path: String::new(),
+            headers: Default::default(),
+            caller: Caller {
+                principal: "agent-client-key".into(),
+                source: "authorization",
+            },
+        })
+    };
+    let run = |req: ExecRequest| {
+        let (executor, credential, cfg) = (&executor, &credential, &cfg);
+        async move {
+            let response = executor.execute(credential, req, cfg).await.unwrap();
+            let ResponseBody::Stream(mut events) = response.body else {
+                panic!("not a stream");
+            };
+            while let Some(event) = events.next().await {
+                event.unwrap();
+            }
+        }
+    };
+    let turn_two = format!(
+        r#"{first},{{"role":"assistant","content":[{{"type":"text","text":"Done with the first half."}}]}},{{"role":"user","content":[{{"type":"text","text":"Now the second half."}}]}}"#
+    );
+    let turn_three = format!(
+        r#"{turn_two},{{"role":"assistant","content":[{{"type":"text","text":"Second half done."}}]}},{{"role":"user","content":[{{"type":"text","text":"Report."}}]}}"#
+    );
+    set_clock(Some("2026-10-13T23:59:30Z"));
+    run(send(turn(first))).await;
+    set_clock(Some("2026-10-13T23:59:40Z"));
+    run(send(turn(&turn_two))).await;
+    set_clock(Some("2026-10-13T23:59:50Z"));
+    run(send(request(edited, &turn_two))).await;
+    set_clock(Some("2026-10-14T00:45:00Z"));
+    run(send(turn(&turn_three))).await;
+    let fresh = r#"{"role":"user","content":[{"type":"text","text":"A new conversation."}]}"#;
+    run(send(turn(fresh))).await;
+    set_clock(None);
+
+    let sent = sent.lock().unwrap();
+    let [cold, warm, changed, idle, fresh] = &sent[..] else {
+        panic!("{} requests", sent.len());
+    };
+    let date = |body: &str| {
+        let reminder = rawjson::string(body, "messages.0.content.0.text");
+        reminder.split("Today's date is ").nth(1).unwrap()[..10].to_owned()
+    };
+    assert_eq!(
+        [cold, warm, changed, idle, fresh].map(|b| date(b)),
+        ["2026-10-13", "2026-10-13", "2026-10-13", "2026-10-13", "2026-10-14"]
+    );
+    // The selected content the cache is keyed on, in Anthropic's order (tools, system,
+    // messages), up to and including message `upto`. The billing block (system.0)
+    // carries a per-request signature, as in native Claude Code; that Anthropic leaves
+    // it out of the key is an upstream assumption, which bench/claude-cache-live.sh
+    // confirms with real cache reads. The rolling breakpoint on the last message moves
+    // on with each turn, so markers after the first two messages are left out here and
+    // checked by path below.
+    const ROLLING: &str = r#","cache_control":{"type":"ephemeral","ttl":"1h"}"#;
+    let prefix = |body: &str, upto: usize| {
+        assert!(rawjson::string(body, "system.0.text").starts_with(cloak::BILLING_PREFIX));
+        let mut out = rawjson::get(body, "tools").json().to_owned();
+        for block in rawjson::get(body, "system").array().iter().skip(1) {
+            out.push_str(block.json());
+        }
+        let messages = rawjson::get(body, "messages");
+        for (i, message) in messages.array().iter().enumerate().take(upto + 1) {
+            out.push_str(&if i < 2 {
+                message.json().to_owned()
+            } else {
+                message.json().replace(ROLLING, "")
+            });
+        }
+        out
+    };
+    let messages = |body: &str| rawjson::get(body, "messages").array().len();
+    // Warm: the whole cold request (first user message, then the caller's system turn).
+    assert_eq!(messages(cold), 2);
+    assert_eq!(prefix(warm, 1), prefix(cold, 1));
+    // Changed context: equal through the first user message, different from the
+    // relocated system turn on.
+    assert_eq!(prefix(changed, 0), prefix(warm, 0));
+    assert_ne!(prefix(changed, 1), prefix(warm, 1));
+    // Idle: the whole warm request, past midnight.
+    assert_eq!(messages(warm), 4);
+    assert_eq!(prefix(idle, 3), prefix(warm, 3));
+    // The breakpoints: the Claude Code identity block, the first user text, the caller
+    // prompt's turn and the rolling last turn, each in the 1-hour pool (an OAuth login
+    // selects it, as native Claude Code does), so none lapses after 5 minutes.
+    let breakpoints = |body: &str| -> Vec<String> {
+        signals::blocks(body)
+            .into_iter()
+            .filter(|(_, block)| gjson::get(block, "cache_control").exists())
+            .map(|(path, block)| {
+                assert_eq!(
+                    gjson::get(&block, "cache_control").json(),
+                    r#"{"type":"ephemeral","ttl":"1h"}"#,
+                    "{path}"
+                );
+                path
+            })
+            .collect()
+    };
+    let fixed = ["system.1", "messages.0.content.1", "messages.1.content.0"];
+    let with = |last: &'static str| [&fixed[..], &[last]].concat();
+    assert_eq!(breakpoints(cold), fixed);
+    assert_eq!(breakpoints(warm), with("messages.3.content.0"));
+    assert_eq!(breakpoints(changed), with("messages.3.content.0"));
+    assert_eq!(breakpoints(idle), with("messages.5.content.0"));
+    assert_eq!(breakpoints(fresh), fixed);
 }
 
 /// Go's non-stream native path: a reply whose OAuth tool alias cannot be restored
