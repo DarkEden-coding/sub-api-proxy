@@ -16,22 +16,34 @@ pub(super) fn clock() -> Option<chrono::DateTime<chrono::Utc>> {
     CLOCK.get()
 }
 
-/// Sets (or with `None` releases) the clock requests prepared on this thread read, as
-/// Go's tests do with `claudeCodeCurrentTimeFunc`. `#[tokio::test]` runs the executor
-/// on the test's own thread.
+/// Sets the clock requests prepared on this thread read, as Go's tests do with
+/// `claudeCodeCurrentTimeFunc`, until a [`Pins`] guard drops. `#[tokio::test]` runs the
+/// executor on the test's own thread.
 fn set_clock(now: Option<&str>) {
     CLOCK.set(now.map(|now| chrono::DateTime::parse_from_rfc3339(now).unwrap().to_utc()));
 }
 
-/// The local date [`set_today`] pinned for this thread.
+/// The local date [`pin_today`] pinned for this thread.
 pub(super) fn pinned_today() -> Option<String> {
     TODAY.with_borrow(Clone::clone)
 }
 
-/// Pins (or with `None` releases) the date itself, for replays of a Go run that
-/// recorded only the date its clock gave in the credential's zone.
-pub(super) fn set_today(date: Option<&str>) {
+/// Pins the date itself, for replays of a Go run that recorded only the date its clock
+/// gave in the credential's zone, until the returned guard drops.
+pub(super) fn pin_today(date: Option<&str>) -> Pins {
     TODAY.with_borrow_mut(|today| *today = date.map(str::to_owned));
+    Pins
+}
+
+/// Releases this thread's clock and date pins when it drops, so a test that panics
+/// leaves neither behind.
+pub(super) struct Pins;
+
+impl Drop for Pins {
+    fn drop(&mut self) {
+        CLOCK.set(None);
+        TODAY.with_borrow_mut(|today| *today = None);
+    }
 }
 
 /// The harness credential (harness/fixtures.py): fake, local-only.
@@ -821,6 +833,7 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     let turn_three = format!(
         r#"{turn_two},{{"role":"assistant","content":[{{"type":"text","text":"Second half done."}}]}},{{"role":"user","content":[{{"type":"text","text":"Report."}}]}}"#
     );
+    let _pins = Pins;
     set_clock(Some("2026-10-13T23:59:30Z"));
     run(send(turn(first))).await;
     set_clock(Some("2026-10-13T23:59:40Z"));
@@ -831,7 +844,6 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     run(send(turn(&turn_three))).await;
     let fresh = r#"{"role":"user","content":[{"type":"text","text":"A new conversation."}]}"#;
     run(send(turn(fresh))).await;
-    set_clock(None);
 
     let sent = sent.lock().unwrap();
     let [cold, warm, changed, idle, fresh] = &sent[..] else {
