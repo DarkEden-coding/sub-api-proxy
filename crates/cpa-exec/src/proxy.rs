@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
-use cpa_core::exec::{ExecError, FailureScope};
+use cpa_core::exec::{ExecError, FailureScope, UpstreamStage, UsageSink};
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 use http::HeaderMap;
@@ -245,6 +245,8 @@ pub struct GoClients {
     /// Injected default (tests point it at local mocks); used for Inherit/Invalid.
     default: Option<wreq::Client>,
     cache: Mutex<Vec<(Proxy, wreq::Client)>>,
+    /// The clients tell timed requests whether they dialled ([`watch_connections`]).
+    timed: bool,
 }
 
 impl GoClients {
@@ -253,6 +255,7 @@ impl GoClients {
             hooks,
             default: None,
             cache: Mutex::default(),
+            timed: false,
         }
     }
 
@@ -262,7 +265,15 @@ impl GoClients {
             hooks: Hooks::default(),
             default: Some(client),
             cache: Mutex::default(),
+            timed: false,
         }
+    }
+
+    /// Clients for an executor that times its requests (`send_routed` with a usage
+    /// sink): they report whether a request dialled its connection.
+    pub fn timed(mut self) -> Self {
+        self.timed = true;
+        self
     }
 
     pub fn get(&self, proxy: &Proxy) -> wreq::Client {
@@ -274,7 +285,7 @@ impl GoClients {
         }
         self.try_get(proxy).unwrap_or_else(|| {
             tracing::warn!(proxy = %match proxy { Proxy::Url(u) => redact(u), _ => String::new() }, "proxy client failed; using the default transport");
-            self.default.clone().unwrap_or_else(default_client)
+            self.default.clone().unwrap_or_else(|| plain_client(self.timed))
         })
     }
 
@@ -288,12 +299,12 @@ impl GoClients {
             cache.insert(0, entry);
             return Some(client);
         }
+        let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+        if self.timed {
+            builder = watch_connections(builder);
+        }
         let built = proxy
-            .apply(
-                self.hooks
-                    .apply(wreq::Client::builder().redirect(wreq::redirect::Policy::none())),
-                true,
-            )
+            .apply(self.hooks.apply(builder), true)
             .and_then(wreq::ClientBuilder::build);
         let client = built.ok()?;
         cache.insert(0, (proxy.clone(), client.clone()));
@@ -305,7 +316,14 @@ impl GoClients {
 /// A plain client whose redirects are followed by [`send`], not by wreq, with Go's
 /// environment proxy rules.
 pub fn default_client() -> wreq::Client {
-    let builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+    plain_client(false)
+}
+
+fn plain_client(timed: bool) -> wreq::Client {
+    let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+    if timed {
+        builder = watch_connections(builder);
+    }
     EnvProxy::current()
         .apply(builder)
         .and_then(wreq::ClientBuilder::build)
@@ -547,15 +565,18 @@ pub async fn request(
     send_request(&route, method, url, headers, body, timeout).await
 }
 
-/// [`send`] with the client and header order chosen per hop.
+/// [`send`] with the client and header order chosen per hop. With `timing`, the
+/// exchange reports its stages to the attempt's usage record ([`UpstreamStage`]).
 pub async fn send_routed(
     route: &(dyn Fn(&url::Url) -> Result<Route, ExecError> + Sync),
     url: &str,
     headers: GoHeaders,
     body: Bytes,
     timeout: Option<std::time::Duration>,
+    timing: Option<&UsageSink>,
 ) -> Result<Upstream, ExecError> {
-    send_request(route, wreq::Method::POST, url, headers, Some(body), timeout).await
+    let raw = exchange(route, wreq::Method::POST, url, headers, Some(body), timeout, timing).await;
+    upstream(raw)
 }
 
 /// [`send_routed`] for any method. `None` is Go's nil body: no body and no
@@ -568,14 +589,16 @@ pub async fn send_request(
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Upstream, ExecError> {
-    let raw = send_request_raw(route, method, url, headers, body, timeout)
-        .await
-        .map_err(|e| match e {
-            SendError::Transport { error, .. } => crate::upstream::transport_error(error),
-            SendError::Local { error, .. } => error,
-            // What `transport_error` makes of the transport's own timeout.
-            SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
-        })?;
+    upstream(exchange(route, method, url, headers, body, timeout, None).await)
+}
+
+fn upstream(raw: Result<RawUpstream, SendError>) -> Result<Upstream, ExecError> {
+    let raw = raw.map_err(|e| match e {
+        SendError::Transport { error, .. } => crate::upstream::transport_error(error),
+        SendError::Local { error, .. } => error,
+        // What `transport_error` makes of the transport's own timeout.
+        SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
+    })?;
     Ok(Upstream {
         status: raw.status,
         headers: raw.headers,
@@ -618,6 +641,18 @@ pub async fn send_request_raw(
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
 ) -> Result<RawUpstream, SendError> {
+    exchange(route, method, url, headers, body, timeout, None).await
+}
+
+async fn exchange(
+    route: &(dyn Fn(&url::Url) -> Result<Route, ExecError> + Sync),
+    method: wreq::Method,
+    url: &str,
+    headers: GoHeaders,
+    body: Option<Bytes>,
+    timeout: Option<std::time::Duration>,
+    timing: Option<&UsageSink>,
+) -> Result<RawUpstream, SendError> {
     let local = |error: ExecError, url: &str| SendError::Local {
         error,
         url: url.to_owned(),
@@ -652,7 +687,10 @@ pub async fn send_request_raw(
     // exchange stays under twice `timeout`). Bounding it by the deadline needs a second
     // timer per response; add one if a caller ever reads long bodies under a timeout.
     let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
-    let (response, auto_gzip) = loop {
+    if let Some(timing) = timing {
+        timing.upstream_stage(UpstreamStage::Started);
+    }
+    let (response, auto_gzip, dialled) = loop {
         // The URL Go's client reports for this hop.
         let hop_url = if sent == 0 { url.to_owned() } else { current.to_string() };
         let hop = route(&current).map_err(|e| local(e, &hop_url))?;
@@ -672,7 +710,16 @@ pub async fn send_request_raw(
             go_transport && expects_http2(&current),
         );
         let sends_body = has_body && include_body && !body.is_empty();
-        let builder = if sends_body {
+        // A timed body is watched where the hop speaks HTTP/1.1: Claude's native
+        // transport, and plain `http://`, which Go's transport never upgrades (no h2c).
+        // ponytail: an `https://` hop on the standard transport may speak HTTP/2, where
+        // wreq resends a request a graceful GOAWAY refused only if its body is a plain
+        // one, so those hops report no `Connected` or `BodySent`. Watching them needs a
+        // resendable watched body in wreq.
+        let watched = timing.filter(|_| !go_transport || current.scheme() == "http");
+        let builder = if let (true, Some(timing)) = (sends_body, watched) {
+            builder.body(wreq::Body::wrap(TimedBody::new(body.clone(), timing.clone())))
+        } else if sends_body {
             builder.body(body.clone())
         } else if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
             // transferWriter.shouldSendContentLength: these methods always carry a length,
@@ -689,7 +736,19 @@ pub async fn send_request_raw(
             Some(remaining) => builder.timeout(remaining),
             None => builder,
         };
-        let response = builder.send().await.map_err(|error| SendError::Transport {
+        // A timed hop learns from the connection hook whether it dialled.
+        let (response, dialled) = match timing {
+            Some(_) => {
+                DIALLED
+                    .scope(std::cell::Cell::new(false), async {
+                        let response = builder.send().await;
+                        (response, DIALLED.with(std::cell::Cell::get))
+                    })
+                    .await
+            }
+            None => (builder.send().await, false),
+        };
+        let response = response.map_err(|error| SendError::Transport {
             error,
             url: hop_url.clone(),
         })?;
@@ -705,7 +764,7 @@ pub async fn send_request_raw(
             .unwrap_or_default()
             .to_owned();
         if !matches!(status, 301 | 302 | 303 | 307 | 308) || location.is_empty() {
-            break (response, auto_gzip);
+            break (response, auto_gzip, dialled);
         }
         let from_exact = exact.as_deref().filter(|_| sent == 1);
         let next = match from_exact {
@@ -799,6 +858,13 @@ pub async fn send_request_raw(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
     let stream = response.bytes_stream().map(|r| r.map_err(std::io::Error::other));
+    let stream = match timing {
+        Some(timing) => {
+            timing.upstream_stage(UpstreamStage::Headers { reused: !dialled });
+            futures_util::future::Either::Left(Counted::new(stream, timing.clone()))
+        }
+        None => futures_util::future::Either::Right(stream),
+    };
     let body = if gzip {
         headers.remove(http::header::CONTENT_ENCODING);
         headers.remove(http::header::CONTENT_LENGTH);
@@ -815,6 +881,183 @@ pub async fn send_request_raw(
         headers,
         body,
     })
+}
+
+// ---- exchange timings ------------------------------------------------------------
+//
+// Cost for a timed request (one with a usage record): a clock read and a lock of the
+// attempt's record per stage, one boxed body per HTTP/1.1 hop, a task-local scope per
+// hop, and an addition per response chunk; a request body piece costs a reference
+// count. Untimed requests pay nothing here.
+
+tokio::task_local! {
+    /// Set by [`watch_connections`]' hook: the timed hop being sent dialled a
+    /// connection.
+    static DIALLED: std::cell::Cell<bool>;
+}
+
+/// The connection hook of the clients that timed requests use (Claude's native client
+/// and [`GoClients::timed`]): a timed request learns whether its connection was dialled
+/// for it ([`UpstreamStage::Headers`]). The connector runs in the task that sends the
+/// request until the connection is ready; a dial that loses to a pooled connection
+/// finishes in the background and is not counted. One whose TCP and TLS setup finished
+/// just before a pooled connection came free, while its HTTP handshake was still
+/// running, is counted although the pooled one is used.
+///
+/// Cost, on every request of a hooked client: wreq type-erases a connector stack with
+/// layers, so each request clones three boxed services (a few dozen bytes) and each
+/// dial boxes three futures. Other clients have no hook and pay nothing.
+// ponytail: a caller-built client (`ClaudeExecutor::with_client`, unit tests) has no
+// hook, so its connections read as reused. Build clients through this function to time
+// them.
+pub(crate) fn watch_connections(builder: wreq::ClientBuilder) -> wreq::ClientBuilder {
+    builder.connector_layer(Dials)
+}
+
+#[derive(Clone, Copy)]
+struct Dials;
+
+impl<S> tower::Layer<S> for Dials {
+    type Service = Dialling<S>;
+    fn layer(&self, inner: S) -> Dialling<S> {
+        Dialling(inner)
+    }
+}
+
+#[derive(Clone)]
+struct Dialling<S>(S);
+
+impl<S: tower::Service<R>, R> tower::Service<R> for Dialling<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = futures_util::future::Inspect<S::Future, fn(&Result<S::Response, S::Error>)>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), S::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, target: R) -> Self::Future {
+        use futures_util::FutureExt;
+        self.0.call(target).inspect(dialled::<S::Response, S::Error>)
+    }
+}
+
+fn dialled<T, E>(result: &Result<T, E>) {
+    if result.is_ok() {
+        let _ = DIALLED.try_with(|dialled| dialled.set(true));
+    }
+}
+
+/// How much of a timed request body the client is handed at a time. The client takes
+/// the next piece once its write buffer has room, so the last piece marks the body as
+/// handed over only after all but about the buffer's size went to the socket.
+const BODY_PIECE: usize = 64 << 10;
+
+/// A timed request body: the same bytes and exact length as a plain one, in
+/// [`BODY_PIECE`] pieces of the same buffer, reporting [`UpstreamStage::Connected`] when the
+/// client first asks for it and [`UpstreamStage::BodySent`] when it takes the last piece.
+struct TimedBody {
+    rest: Bytes,
+    len: u64,
+    asked: bool,
+    timing: UsageSink,
+}
+
+impl TimedBody {
+    fn new(body: Bytes, timing: UsageSink) -> Self {
+        Self {
+            len: body.len() as u64,
+            rest: body,
+            asked: false,
+            timing,
+        }
+    }
+}
+
+impl http_body::Body for TimedBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        let this = &mut *self;
+        if !std::mem::replace(&mut this.asked, true) {
+            this.timing.upstream_stage(UpstreamStage::Connected);
+        }
+        if this.rest.is_empty() {
+            return std::task::Poll::Ready(None);
+        }
+        let piece = this.rest.split_to(this.rest.len().min(BODY_PIECE));
+        if this.rest.is_empty() {
+            this.timing.upstream_stage(UpstreamStage::BodySent { bytes: this.len });
+        }
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.rest.len() as u64)
+    }
+}
+
+/// A timed response body: reports [`UpstreamStage::FirstByte`] at its first bytes and
+/// [`UpstreamStage::BodyRead`] when it ends or is dropped.
+struct Counted<S> {
+    inner: S,
+    bytes: u64,
+    done: bool,
+    timing: UsageSink,
+}
+
+impl<S> Counted<S> {
+    fn new(inner: S, timing: UsageSink) -> Self {
+        Self {
+            inner,
+            bytes: 0,
+            done: false,
+            timing,
+        }
+    }
+
+    fn finish(&mut self) {
+        if !std::mem::replace(&mut self.done, true) {
+            self.timing
+                .upstream_stage(UpstreamStage::BodyRead { bytes: self.bytes });
+        }
+    }
+}
+
+impl<S: futures_util::Stream<Item = std::io::Result<Bytes>> + Unpin> futures_util::Stream for Counted<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let item = std::task::ready!(self.inner.poll_next_unpin(cx));
+        match &item {
+            Some(Ok(chunk)) if !chunk.is_empty() => {
+                if self.bytes == 0 {
+                    self.timing.upstream_stage(UpstreamStage::FirstByte);
+                }
+                self.bytes += chunk.len() as u64;
+            }
+            None => self.finish(),
+            Some(_) => {}
+        }
+        std::task::Poll::Ready(item)
+    }
+}
+
+impl<S> Drop for Counted<S> {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// Origins (`scheme://host:port`) and whether their last answer came over HTTP/2.
@@ -1715,6 +1958,122 @@ mod tests {
             (transport.status, transport.scope, transport.body)
         );
         assert_eq!(hits.load(SeqCst), 0, "the redirect target got a request");
+    }
+
+    /// The stages a timed exchange reported, in order.
+    #[derive(Default)]
+    struct Stages(Mutex<Vec<UpstreamStage>>);
+
+    impl cpa_core::exec::UsageObserver for Stages {
+        fn response_body(&self, _: cpa_core::format::Format, _: &[u8]) {}
+        fn response_line(&self, _: cpa_core::format::Format, _: &[u8]) {}
+        fn request(&self, _: cpa_core::format::Format, _: &[u8]) {}
+        fn upstream_stage(&self, stage: UpstreamStage) {
+            self.0.lock().unwrap().push(stage);
+        }
+    }
+
+    /// A timed request goes out byte for byte as an untimed one (the same head with its
+    /// `Content-Length`, the same body), and reports its stages in order, its sizes, and
+    /// whether its connection was dialled for it.
+    #[tokio::test]
+    async fn timed_requests_send_the_same_bytes_and_report_their_stages() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+        let wire = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = wire.clone();
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut conn = tokio::io::BufReader::new(conn);
+                    loop {
+                        let (mut raw, mut length) = (Vec::new(), 0);
+                        loop {
+                            let mut line = String::new();
+                            if conn.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            raw.extend_from_slice(line.as_bytes());
+                            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                length = v.trim().parse().unwrap();
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        conn.read_exact(&mut body).await.unwrap();
+                        raw.extend_from_slice(&body);
+                        seen.lock().unwrap().push(raw);
+                        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+                        conn.get_mut().write_all(reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        // Several pieces, and a tail that is not a whole piece.
+        let body = Bytes::from(vec![b'a'; 2 * BODY_PIECE + 123]);
+        let clients = GoClients::new(Hooks::default()).timed();
+        let route = |_: &url::Url| {
+            Ok(Route {
+                client: clients.get(&Proxy::Direct),
+                order: None,
+            })
+        };
+        let headers = || {
+            let mut h = GoHeaders::new();
+            h.set("Content-Type", "application/json");
+            h
+        };
+        let stages = Arc::new(Stages::default());
+        let sink = UsageSink::new(stages.clone());
+        let read = |up: Upstream| async move {
+            let chunks: Vec<_> = up.body.collect().await;
+            chunks.into_iter().map(Result::unwrap).collect::<Vec<_>>().concat()
+        };
+        let plain = send_routed(&route, &url, headers(), body.clone(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(read(plain).await, b"hello");
+        assert!(
+            stages.0.lock().unwrap().is_empty(),
+            "an untimed request reports nothing"
+        );
+        // A new client, so the first timed request dials.
+        let clients = GoClients::new(Hooks::default()).timed();
+        let route = |_: &url::Url| {
+            Ok(Route {
+                client: clients.get(&Proxy::Direct),
+                order: None,
+            })
+        };
+        for reused in [false, true] {
+            let timed = send_routed(&route, &url, headers(), body.clone(), None, Some(&sink))
+                .await
+                .unwrap();
+            assert_eq!(read(timed).await, b"hello");
+            let reported = std::mem::take(&mut *stages.0.lock().unwrap());
+            assert_eq!(
+                reported,
+                [
+                    UpstreamStage::Started,
+                    UpstreamStage::Connected,
+                    UpstreamStage::BodySent {
+                        bytes: body.len() as u64
+                    },
+                    UpstreamStage::Headers { reused },
+                    UpstreamStage::FirstByte,
+                    UpstreamStage::BodyRead { bytes: 5 },
+                ]
+            );
+        }
+        let wire = wire.lock().unwrap();
+        assert_eq!(wire.len(), 3);
+        assert!(String::from_utf8_lossy(&wire[0]).contains(&format!("Content-Length: {}", body.len())));
+        assert_eq!(wire[0], wire[1], "timed and untimed requests differ on the wire");
+        assert_eq!(wire[0], wire[2]);
     }
 
     #[test]

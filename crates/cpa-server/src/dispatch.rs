@@ -748,6 +748,8 @@ pub struct Trace(
     cpa_core::exec::CaptureSink,
     /// Response headers plugin interceptors changed (Go `downstreamHeadersAfterInterceptors`).
     std::sync::Mutex<HeaderMap>,
+    /// When the request arrived, for the usage record's timings.
+    crate::observability::Clock,
 );
 
 impl Trace {
@@ -761,6 +763,7 @@ impl Trace {
                 .map(|log| log.capture_sink())
                 .unwrap_or_default(),
             Default::default(),
+            crate::observability::current_clock(),
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -818,6 +821,10 @@ impl Trace {
     /// The trace ID once a credential was selected.
     pub(crate) fn id(&self) -> Option<String> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn clock(&self) -> crate::observability::Clock {
+        self.4
     }
 }
 
@@ -915,14 +922,17 @@ async fn run_routed(
         && (rt.usage_queue().accepts() || rt.plugins().has_usage_plugins()))
         || (home_count && rt.usage_queue().accepts()))
     .then(|| {
-        Arc::new(crate::usage_record::Facts::new(
-            usage_client(&cfg, &call, trace, &session),
-            call.entry,
-            call.response,
-            &call.model,
-            &call.body,
-            call.stream,
-        ))
+        Arc::new(crate::usage_record::Facts {
+            clock: trace.clock(),
+            ..crate::usage_record::Facts::new(
+                usage_client(&cfg, &call, trace, &session),
+                call.entry,
+                call.response,
+                &call.model,
+                &call.body,
+                call.stream,
+            )
+        })
     });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
@@ -2126,6 +2136,7 @@ fn usage_client(
         is_fork: session.fork,
         node_kind: String::new(),
         is_compaction: false,
+        session_source: session.source,
         request_id: trace.request_id(),
         // Session turns arrive on the WebSocket upgrade (a GET).
         endpoint: format!(
@@ -2182,12 +2193,13 @@ fn track_usage(done: Done, tracker: Option<crate::usage_record::Tracker>) -> Don
             }
             Done::Stream {
                 headers,
-                first,
                 rest: Tracked {
                     inner: rest,
                     tracker: Some(tracker),
+                    sent: first.is_some(),
                 }
                 .boxed(),
+                first,
             }
         }
     }
@@ -2197,6 +2209,9 @@ fn track_usage(done: Done, tracker: Option<crate::usage_record::Tracker>) -> Don
 struct Tracked {
     inner: ExecStream,
     tracker: Option<crate::usage_record::Tracker>,
+    /// An event went to the client: the next poll is the server asking for more, so
+    /// the client's first bytes were handed over.
+    sent: bool,
 }
 
 impl futures_util::Stream for Tracked {
@@ -2206,12 +2221,18 @@ impl futures_util::Stream for Tracked {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        if std::mem::take(&mut self.sent)
+            && let Some(t) = self.tracker.as_mut()
+        {
+            t.client_first_byte();
+        }
         let item = std::task::ready!(self.inner.poll_next_unpin(cx));
         match &item {
             Some(Ok(event)) => {
                 if let Some(t) = self.tracker.as_mut() {
                     t.event(event);
                 }
+                self.sent = true;
             }
             Some(Err(error)) => {
                 if let Some(t) = self.tracker.take() {

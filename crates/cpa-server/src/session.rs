@@ -20,6 +20,11 @@ pub struct Session {
     /// `extractExplicitSessionIDs`). Without one, session affinity asks the LCP matcher
     /// first (`crate::lcp`).
     pub explicit: bool,
+    /// Where `id` came from, for the usage record (not in Go): an explicit source
+    /// ([`identity::SessionInfo::source`]), `derived` (Go `derived_session_id`: the
+    /// leading instructions and first user input) or `messages` (the first-messages
+    /// hash); empty without `id`.
+    pub source: &'static str,
 }
 
 /// Resolves the session of a request in `format` from its client headers and body.
@@ -31,10 +36,15 @@ pub fn resolve(format: Format, headers: &HeaderMap, body: &[u8], execution: Opti
         execution_session: execution,
         derived: derived.as_deref(),
     };
-    let (mut primary, mut parent, fork) = identity::explicit_session_ids(headers, body, &meta);
+    let (mut primary, mut parent, fork, mut source) = identity::explicit_session(headers, body, &meta);
     let explicit = !primary.is_empty();
     if !explicit {
         (primary, parent) = identity::session_ids(headers, body, &meta);
+        source = match primary.as_str() {
+            "" => "",
+            id if id.starts_with("derived:") => "derived",
+            _ => "messages",
+        };
     }
     let some = |s: String| (!s.is_empty()).then(|| identity::bound_session_identity(&s));
     Session {
@@ -43,6 +53,7 @@ pub fn resolve(format: Format, headers: &HeaderMap, body: &[u8], execution: Opti
         fork,
         derived,
         explicit,
+        source,
     }
 }
 

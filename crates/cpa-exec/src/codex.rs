@@ -240,7 +240,7 @@ impl CodexExecutor {
                 order: None,
             })
         };
-        crate::proxy::send_routed(&route, url, go_headers(headers), body, None).await
+        crate::proxy::send_routed(&route, url, go_headers(headers), body, None, None).await
     }
 
     /// One POST to the Codex backend, captured as Go's call sites record it: the
