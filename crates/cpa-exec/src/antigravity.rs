@@ -305,11 +305,7 @@ impl AntigravityExecutor {
                 let body = Bytes::from_static(br#"{"metadata":{"ideType":"ANTIGRAVITY"}}"#);
                 let upstream = proxy::send(&client, &url, headers, body, None).await.ok()?;
                 let ok = (200..300).contains(&upstream.status);
-                // ponytail: Go reads the answer without a bound; a loadCodeAssist answer
-                // is a few KB, and the cap keeps a hostile upstream from filling memory.
-                let data = proxy::read_all(upstream.body, proxy::MAX_ERROR_BODY, false)
-                    .await
-                    .ok()?;
+                let data = proxy::read_all(upstream.body, usize::MAX, false).await.ok()?;
                 ok.then(|| credits::hint_from_load_code_assist(&data)).flatten()
             };
             let hint = tokio::time::timeout(budget, lookup).await.ok().flatten();

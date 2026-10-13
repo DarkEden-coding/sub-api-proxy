@@ -83,6 +83,7 @@ Antigravity follows CLIProxyAPI `6fecc6e`, plus these v8.0.27 changes: the Claud
 - A credential's web-search capability probe runs when the model registry first sees a new revision of the credential. Its previous hints stay until that probe finishes, and a config reload alone does not probe again.
 - A negative retry delay in a 429 answer counts as zero.
 - A token that expires within five minutes is refreshed through credential preparation before the request is sent, and the new token is saved; Go refreshes it inside the request. Two credential files with the same refresh token refresh separately; Go shares one refresh between them.
+- The AI credits lookup queued after a token refresh ends after 30 seconds, the bound of a credential acquisition. Go ends it when the request or refresh that queued it ends.
 - When an upstream 401 inside an AI credits attempt refreshes the token, the retry is sent without the credits flag.
 - Pooled connections (`connection-pool.enabled`) are kept per credential ID.
 - A forged compaction capsule fails with cliproxy-rs's own error text, not Go's `json.Unmarshal` message.

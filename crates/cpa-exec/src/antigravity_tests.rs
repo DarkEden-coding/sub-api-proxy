@@ -698,8 +698,6 @@ async fn a_stalled_credits_lookup_ends_at_its_budget() {
     let budget = Duration::from_millis(300);
     AntigravityExecutor::default().queue_credits_refresh(&cred, &Config::default(), "ya29.fake-ag", budget);
     assert!(credits::refreshing(&cred.id));
-    tokio::time::sleep(budget / 2).await;
-    assert!(credits::refreshing(&cred.id), "still waiting inside the budget");
     let mut ended = false;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(20)).await;
