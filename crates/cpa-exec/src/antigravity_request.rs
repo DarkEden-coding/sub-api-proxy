@@ -272,28 +272,71 @@ fn sanitize_tool_schemas(body: Vec<u8>, antigravity_schema: bool) -> Vec<u8> {
 }
 
 /// `sanitizeAntigravityToolSchemaDocument`: `parametersJsonSchema` renamed onto
-/// `parameters`, then every declaration schema cleaned nested one level down.
-fn sanitize_tool_schema_document(mut document: Vec<u8>, antigravity_schema: bool) -> Vec<u8> {
-    for base in declaration_paths(&document) {
-        let old = format!("{base}.parametersJsonSchema");
-        let value = gj::get(&document, &old);
-        if !value.exists() {
-            continue;
-        }
-        // util.RenameKey: set the new key, then delete the old one.
-        let raw = value.raw().to_vec();
-        if let Ok(renamed) = gj::try_set_raw(&document, &format!("{base}.parameters"), raw)
-            && let Ok(renamed) = gj::try_delete(&renamed, &old)
-        {
-            document = renamed;
+/// `parameters`, then every declaration schema cleaned nested one level down. Go edits
+/// the document by path, each edit searching it from the start; every edit stays inside
+/// one declaration, so each declaration is edited on its own bytes and the results are
+/// spliced back in one pass.
+// ponytail: when one tool object repeats `functionDeclarations` (or its snake_case key),
+// only the first occurrence is cleaned, where Go's path edits can land on either. JSON
+// encoders do not repeat keys; fall back to Go's path edits if a client ever does.
+fn sanitize_tool_schema_document(document: Vec<u8>, antigravity_schema: bool) -> Vec<u8> {
+    let tools = gj::get(&document, "request.tools");
+    if !tools.is_array() {
+        return document;
+    }
+    let mut edits = Vec::new();
+    for (i, tool) in tools.array().iter().enumerate() {
+        for key in ["functionDeclarations", "function_declarations"] {
+            let declarations = tool.get(key);
+            if !declarations.is_array() {
+                continue;
+            }
+            for (j, declaration) in declarations.array().iter().enumerate() {
+                let cleaned = sanitize_declaration(declaration.raw(), antigravity_schema);
+                if cleaned != declaration.raw() {
+                    edits.push(Replace::new(
+                        &document,
+                        declaration,
+                        format!("request.tools.{i}.{key}.{j}"),
+                        cleaned,
+                    ));
+                }
+            }
         }
     }
-    let paths = declaration_schema_paths(&document);
-    clean_schemas_at(document, &paths, |schema| {
-        nested_clean(schema, |s| {
+    drop(tools);
+    replace_values(document, edits)
+}
+
+/// The edits [`sanitize_tool_schema_document`] makes to one declaration, in Go's order.
+fn sanitize_declaration(declaration: &[u8], antigravity_schema: bool) -> Vec<u8> {
+    let mut declaration = declaration.to_vec();
+    let value = gj::get(&declaration, "parametersJsonSchema");
+    if value.exists() {
+        // util.RenameKey: set the new key, then delete the old one.
+        let raw = value.raw().to_vec();
+        if let Ok(renamed) = gj::try_set_raw(&declaration, "parameters", raw)
+            && let Ok(renamed) = gj::try_delete(&renamed, "parametersJsonSchema")
+        {
+            declaration = renamed;
+        }
+    }
+    for key in DECLARATION_SCHEMA_KEYS {
+        let schema = gj::get(&declaration, key);
+        if !schema.is_object() {
+            continue;
+        }
+        let cleaned = nested_clean(schema.raw(), |s| {
             cpa_common::gemini_schema::for_antigravity_tool(s, antigravity_schema)
-        })
-    })
+        });
+        if cleaned == schema.raw() {
+            continue;
+        }
+        if let Ok(updated) = gj::try_set_raw(&declaration, key, cleaned) {
+            declaration = updated;
+        }
+    }
+    declaration
 }
 
 /// `sanitizeAntigravityGenerationSchemas`: all schema edits of one generation config,
@@ -329,24 +372,6 @@ fn sanitize_generation_schemas(mut body: Vec<u8>) -> Vec<u8> {
     body
 }
 
-/// `cleanAntigravitySchemasAtPaths`.
-fn clean_schemas_at(mut body: Vec<u8>, paths: &[String], clean: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
-    for path in paths {
-        let schema = gj::get(&body, path);
-        if !schema.exists() {
-            continue;
-        }
-        let cleaned = clean(schema.raw());
-        if cleaned == schema.raw() {
-            continue;
-        }
-        if let Ok(updated) = gj::try_set_raw(&body, path, cleaned) {
-            body = updated;
-        }
-    }
-    body
-}
-
 /// `cleanNestedSchema`: the cleaner sees the schema under a `schema` key, as
 /// whole-payload cleaning saw tool schemas, so its nested-only rules apply.
 fn nested_clean(schema: &[u8], clean: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
@@ -360,41 +385,6 @@ fn nested_clean(schema: &[u8], clean: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
     } else {
         clean(schema)
     }
-}
-
-/// `antigravityFunctionDeclarationPaths`: camelCase and snake_case declarations.
-fn declaration_paths(body: &[u8]) -> Vec<String> {
-    let tools = gj::get(body, "request.tools");
-    if !tools.is_array() {
-        return Vec::new();
-    }
-    let mut paths = Vec::new();
-    for (i, tool) in tools.array().iter().enumerate() {
-        for key in ["functionDeclarations", "function_declarations"] {
-            let decls = tool.get(key);
-            if !decls.is_array() {
-                continue;
-            }
-            for j in 0..decls.array().len() {
-                paths.push(format!("request.tools.{i}.{key}.{j}"));
-            }
-        }
-    }
-    paths
-}
-
-/// `antigravityDeclarationSchemaPaths`.
-fn declaration_schema_paths(body: &[u8]) -> Vec<String> {
-    let mut paths = Vec::new();
-    for base in declaration_paths(body) {
-        for key in DECLARATION_SCHEMA_KEYS {
-            let path = format!("{base}.{key}");
-            if gj::get(body, &path).is_object() {
-                paths.push(path);
-            }
-        }
-    }
-    paths
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1344,5 +1334,31 @@ mod tests {
             decide_429(br#"{"error":{"status":"UNAVAILABLE","message":"quota exhausted"}}"#).0,
             RateLimit::SoftRetry
         );
+    }
+
+    /// Cleaning the schemas of many tool declarations is one pass over the tools: a
+    /// search from the start of the tools for each declaration took minutes here.
+    #[test]
+    fn tool_schemas_are_cleaned_in_one_pass() {
+        let declaration = r#"{"name":"t","parametersJsonSchema":{"type":"object","$schema":"x","properties":{"a":{"type":["string","null"]}},"additionalProperties":false}}"#;
+        let body = |declarations: Vec<&str>| {
+            format!(
+                r#"{{"request":{{"tools":[{{"functionDeclarations":[{}]}}]}}}}"#,
+                declarations.join(",")
+            )
+        };
+        let one = sanitize_request_schemas(body(vec![declaration]).into_bytes(), true);
+        let cleaned = gj::get(&one, "request.tools.0.functionDeclarations.0").raw().to_vec();
+        let cleaned = String::from_utf8(cleaned).unwrap();
+        assert!(cleaned.contains(r#""parameters":"#) && !cleaned.contains("parametersJsonSchema"));
+        let count = 4_000;
+        let started = std::time::Instant::now();
+        let many = sanitize_request_schemas(body(vec![declaration; count]).into_bytes(), true);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(String::from_utf8(many).unwrap(), body(vec![cleaned.as_str(); count]));
     }
 }

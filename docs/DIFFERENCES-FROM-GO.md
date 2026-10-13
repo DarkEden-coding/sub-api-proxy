@@ -86,6 +86,7 @@ Antigravity follows CLIProxyAPI `6fecc6e`, plus these v8.0.27 changes: the Claud
 - The AI credits lookup queued after a token refresh ends after 30 seconds, the bound of a credential acquisition. Go ends it when the request or refresh that queued it ends.
 - When an upstream 401 inside an AI credits attempt refreshes the token, the retry is sent without the credits flag.
 - Pooled connections (`connection-pool.enabled`) are kept per credential ID.
+- Tool declaration schemas are cleaned in one pass over the tools. When one tool object repeats the `functionDeclarations` or `function_declarations` key, only the declarations of the first occurrence are renamed and cleaned; Go edits by path, and its edits can land on either occurrence. JSON encoders do not repeat keys.
 - A forged compaction capsule fails with cliproxy-rs's own error text, not Go's `json.Unmarshal` message.
 - When Google's token endpoint refuses a sign-in code exchange or a token refresh, the error keeps the status and the OAuth error code (such as `invalid_grant`) and leaves out the rest of the response body, as for the other providers' sign-ins. Go shows the whole body, which reaches logs and client answers; that endpoint is sent the code, the refresh token and the client secret. A refused refresh reads `token refresh failed with status 400: invalid_grant`.
 - An AI credits attempt, which runs on a credential selection had passed over, never ends a cooldown window or frees another request's probe of it, whatever its outcome: those stay with the window's own probe.
