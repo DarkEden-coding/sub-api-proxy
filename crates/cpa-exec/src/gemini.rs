@@ -345,7 +345,10 @@ pub(crate) fn capture_request(
 pub(crate) use crate::kimi_http::capture_metadata;
 
 /// `RecordAPIRequest`, `Client.Do`, then `RecordAPIResponseMetadata`, or
-/// `RecordAPIResponseError` when the request fails.
+/// `RecordAPIResponseError` when the request fails. `lines`: the caller scans the body
+/// line by line, so a body cut short fails with Go's `unexpected EOF`
+/// ([`proxy::send_scanned`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_captured(
     capture: &CaptureSink,
     credential: &Credential,
@@ -354,9 +357,15 @@ pub(crate) async fn send_captured(
     url: &str,
     headers: GoHeaders,
     body: Bytes,
+    lines: bool,
 ) -> Result<Upstream, ExecError> {
     capture_request(capture, credential, provider, url, headers.pairs(), &body);
-    match proxy::send(client, url, headers, body, None).await {
+    let sent = if lines {
+        proxy::send_scanned(client, url, headers, body, None).await
+    } else {
+        proxy::send(client, url, headers, body, None).await
+    };
+    match sent {
         Ok(upstream) => {
             capture_metadata(capture, upstream.status, &upstream.headers);
             Ok(upstream)
@@ -383,21 +392,9 @@ pub(crate) async fn read_captured(capture: &CaptureSink, upstream: Upstream, lim
     }
 }
 
-/// `scanner.Err()` of a body the transport cut short: Go's `unexpected EOF`.
-// ponytail: like `upstream::io_text`, every transport failure mid-body reads as a cut
-// body; Go names resets and timeouts differently.
-fn scan_error(error: ExecError) -> ExecError {
-    if error.scope == cpa_core::exec::FailureScope::Transport {
-        ExecError::local(error.status, cpa_core::exec::FailureScope::Transport, "unexpected EOF")
-    } else {
-        error
-    }
-}
-
 /// Go's scanner loops: `AppendAPIResponseChunk` of every line read and
 /// `RecordAPIResponseError` of the scanner's error.
 pub(crate) fn captured_lines(lines: ExecStream, capture: CaptureSink) -> ExecStream {
-    let lines = lines.map(|item| item.map_err(scan_error)).boxed();
     if !capture.enabled() {
         return lines;
     }
@@ -551,6 +548,7 @@ impl GeminiExecutor {
             &url,
             headers,
             body.clone(),
+            req.stream,
         )
         .await?;
         if !(200..300).contains(&upstream.status) {
@@ -632,6 +630,7 @@ impl GeminiExecutor {
             &url,
             headers,
             body.clone(),
+            req.stream,
         )
         .await?;
         if !req.stream {
@@ -693,6 +692,7 @@ impl GeminiExecutor {
             &url,
             headers,
             body.clone(),
+            false,
         )
         .await?;
         let (response_headers, data) = read_then_check(capture, upstream).await?;
