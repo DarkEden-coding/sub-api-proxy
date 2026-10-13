@@ -2,7 +2,7 @@
 
 cliproxy-rs follows CLIProxyAPI at [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/commit/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10). Go has since shipped v8.0.11 to v8.0.27 ([`bf93416`](https://github.com/router-for-me/CLIProxyAPI/commit/bf9341629ef2300ac9d846a2e80fe2756f63a671)): 167 commits, 21 of them merges. This file lists every one of them, grouped by area, and is the plan for porting them.
 
-The Claude prompt-cache and prompt-shaping fixes are ported already and follow v8.0.27; Go goldens recorded from v8.0.27 check them (`crates/cpa-exec/tests/reference/claude/README.md`). The exception is where a cloaked API key's caller system prompt goes: it stays as at `6fecc6e`, because v8.0.27's placement changes between the first and second turn of a conversation and so misses the prompt cache (`docs/DIFFERENCES-FROM-GO.md`). Everything else still follows `6fecc6e`.
+The 12 commits marked "ported here" are ported already and follow v8.0.27: the Claude prompt-cache and prompt-shaping fixes, Claude thread continuation, and Claude rate-limit and error answers. Go goldens recorded from v8.0.27 (`crates/cpa-exec/tests/reference/claude/README.md`) or Rust tests ported from Go's own cases check them. The exception is where a cloaked API key's caller system prompt goes: it stays as at `6fecc6e`, because v8.0.27's placement changes between the first and second turn of a conversation and so misses the prompt cache (`docs/DIFFERENCES-FROM-GO.md`). Everything else still follows `6fecc6e`.
 
 Columns:
 
