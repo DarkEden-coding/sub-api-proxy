@@ -11,13 +11,23 @@
 //!
 //! [`Readiness`] separates the two reasons Go prepares a credential. Requests block only
 //! on [`Readiness::PrepareNow`] (Go `RequestAuthPreparer`: Claude identity, Meta API-key
-//! mint, Antigravity project ID). Token refresh is [`Readiness::RefreshSoon`]: the
+//! mint, Antigravity project ID; also an Antigravity token inside five minutes of
+//! expiry, which Go's executor refreshes inline). Token refresh is
+//! [`Readiness::RefreshSoon`]: the
 //! background loop refreshes inside the provider's refresh lead while requests keep
 //! using the current token, and an upstream 401 triggers one refresh-and-retry (Go
 //! `tryRefreshAfterUnauthorized`). An already expired token is still `RefreshSoon`:
 //! Go sends it and recovers on 401.
 
 pub mod aistudio;
+pub mod antigravity;
+pub mod antigravity_auth;
+mod antigravity_compaction;
+pub mod antigravity_credits;
+mod antigravity_models;
+mod antigravity_replay;
+mod antigravity_request;
+pub mod antigravity_version;
 pub mod catalog_etag;
 pub mod claude;
 pub mod claude_login;
@@ -127,6 +137,8 @@ pub struct GoogleExecutors {
     pub vertex: vertex::VertexExecutor,
     /// `aistudio` sessions on the `/v1/ws` relay, which the server route shares.
     pub aistudio: aistudio::AiStudioExecutor,
+    /// `antigravity` OAuth credentials.
+    pub antigravity: antigravity::AntigravityExecutor,
 }
 
 /// OpenAI-wire executors, grouped like [`DeviceExecutors`].
@@ -162,6 +174,7 @@ impl Executors {
             p if gemini::handles(p) => self.google.gemini.execute(credential, req, cfg).await,
             p if vertex::handles(p) => self.google.vertex.execute(credential, req, cfg).await,
             p if aistudio::handles(p) => self.google.aistudio.execute(credential, req, cfg).await,
+            antigravity::PROVIDER => self.google.antigravity.execute(credential, req, cfg).await,
             xai::PROVIDER => self.openai.xai.execute(credential, req, cfg, false).await,
             other => Err(no_executor(other)),
         }
@@ -260,6 +273,7 @@ impl Executors {
             || gemini::handles(provider)
             || vertex::handles(provider)
             || aistudio::handles(provider)
+            || antigravity::handles(provider)
     }
 
     /// Go `authHasRefreshCredential`: whether an upstream 401 on `credential` should be
@@ -287,6 +301,7 @@ impl Executors {
         match credential.provider.as_str() {
             "claude" if oauth::needs_identity(credential) => Readiness::PrepareNow,
             meta::PROVIDER if self.devices.meta.must_mint(credential) => Readiness::PrepareNow,
+            antigravity::PROVIDER if self.google.antigravity.must_prepare(credential) => Readiness::PrepareNow,
             _ => Readiness::RefreshSoon,
         }
     }
@@ -309,6 +324,7 @@ impl Executors {
             meta::PROVIDER => self.devices.meta.needs_prepare_at(credential, cfg, now),
             xai::PROVIDER => self.openai.xai.needs_prepare_at(credential, cfg, now),
             devin::PROVIDER => self.devices.devin.needs_prepare_at(credential, cfg, now),
+            antigravity::PROVIDER => self.google.antigravity.needs_prepare_at(credential, cfg, now),
             _ => false,
         }
     }
@@ -343,6 +359,12 @@ impl Executors {
         Some(hi)
     }
 
+    /// The runtime registered models for `credentials` (Go `registerModelsForAuth`):
+    /// providers that probe capabilities after registration start here. Must not block.
+    pub fn models_registered(&self, credentials: &[std::sync::Arc<Credential>], cfg: &Config) {
+        self.google.antigravity.models_registered(credentials, cfg);
+    }
+
     /// Prepares `credential` and returns the metadata change to commit.
     pub async fn prepare(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
         match credential.provider.as_str() {
@@ -352,6 +374,7 @@ impl Executors {
             meta::PROVIDER => self.devices.meta.prepare(credential, cfg).await,
             xai::PROVIDER => self.openai.xai.prepare(credential, cfg).await,
             devin::PROVIDER => self.devices.devin.prepare(credential, cfg).await,
+            antigravity::PROVIDER => self.google.antigravity.prepare(credential, cfg).await,
             other => Err(no_executor(other)),
         }
     }
@@ -434,6 +457,75 @@ mod readiness_tests {
                     "expired": rfc3339(-chrono::Duration::hours(1)),
                 })),
                 Readiness::RefreshSoon,
+            ),
+            // Antigravity: requests wait for the project ID and for a token valid five
+            // more minutes (Go's inline refresh); otherwise the token refreshes 30
+            // minutes ahead in the background.
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "access_token": "fake-access",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::hours(5)),
+                })),
+                Readiness::PrepareNow,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "access_token": "fake-access",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::minutes(20)),
+                })),
+                Readiness::RefreshSoon,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "access_token": "fake-access",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::minutes(6)),
+                })),
+                Readiness::RefreshSoon,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "access_token": "fake-access",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::minutes(4)),
+                })),
+                Readiness::PrepareNow,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::minutes(40)),
+                })),
+                Readiness::PrepareNow,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "access_token": "fake-access",
+                })),
+                Readiness::PrepareNow,
+            ),
+            (
+                credential(serde_json::json!({
+                    "type": "antigravity",
+                    "project_id": "proj-1",
+                    "access_token": "fake-access",
+                    "refresh_token": "fake-refresh",
+                    "expired": rfc3339(chrono::Duration::minutes(40)),
+                })),
+                Readiness::Ready,
             ),
         ];
         for (i, (c, expected)) in cases.iter().enumerate() {

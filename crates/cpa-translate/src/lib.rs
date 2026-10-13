@@ -115,6 +115,28 @@ pub use codex_responses::{
 };
 pub use replay_cache::set_signature_cache_config as set_antigravity_signature_cache_config;
 
+/// util.GeminiClaudeToolUseID: the Claude-facing provenance ID of a native Gemini call,
+/// which the Antigravity executor's replay ledger resolves back.
+pub fn gemini_claude_tool_use_id(call_id: &[u8], name: &[u8], args: &[u8]) -> Vec<u8> {
+    antigravity_claude_response::gemini_claude_tool_use_id(call_id, name, args)
+}
+
+/// util.SanitizedFunctionNameMap, for executors that key tool schemas like Go.
+pub fn sanitized_function_name_map(raw: &[u8]) -> std::collections::HashMap<Vec<u8>, Vec<u8>> {
+    responses_tools::sanitized_function_name_map(raw)
+}
+
+/// util.MapSanitizedFunctionName.
+pub fn map_sanitized_function_name(map: &std::collections::HashMap<Vec<u8>, Vec<u8>>, name: &[u8]) -> Vec<u8> {
+    responses_tools::map_sanitized_function_name(map, name)
+}
+
+/// StripInvalidGeminiSignatureThinkingBlocks (internal/translator/antigravity/claude):
+/// the Antigravity executor's cleanup of Claude requests for Gemini-family models.
+pub fn strip_invalid_gemini_signature_thinking_blocks(payload: &[u8]) -> Vec<u8> {
+    antigravity_claude::strip_invalid_gemini_signature_thinking_blocks(payload)
+}
+
 // Go's `...WithCompat` request converters, exported beside the registered pairs for
 // compatibility endpoints; deeply nested bodies run on a sized stack as registered
 // requests do.

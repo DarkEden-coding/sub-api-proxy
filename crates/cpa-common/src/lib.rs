@@ -21,12 +21,15 @@
 //!   tool and response schemas; owner: translators).
 //! - `session`: sdk/cliproxy/session (session identity, parent/child relationships and the
 //!   derived identity executors key provider sessions on; owner: server).
+//! - `cache`: internal/cache's Antigravity reasoning replay and thinking signature
+//!   caches, shared by the Antigravity translators and executor.
 //! - `gostr`: Go's `strings.ToLower`, `strings.EqualFold`, `strings.TrimSpace` and
 //!   `strconv.Quote` on Go's own Unicode tables (owner: Google).
 //!
 //! The proxy-aware HTTP client (executor/helps/proxy_helpers.go) touches the network and
 //! lives in cpa-exec instead.
 
+pub mod cache;
 pub mod codex_catalog;
 pub mod codex_client;
 pub mod gemini_schema;

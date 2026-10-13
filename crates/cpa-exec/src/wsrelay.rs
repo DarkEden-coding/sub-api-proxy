@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use bytes::Bytes;
 use cpa_common::json::{self as gj, GoValue};
 use tokio::sync::{mpsc, watch};
 
@@ -150,7 +151,7 @@ pub struct HttpRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, Vec<String>)>,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 impl HttpRequest {

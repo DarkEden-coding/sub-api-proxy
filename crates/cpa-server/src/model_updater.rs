@@ -7,8 +7,10 @@
 //!
 //! The Codex client and Devin catalogs describe one provider each, so their updaters
 //! start only once something needs them: a Codex or Devin credential, or (Codex) the
-//! first `GET /v1/models?client_version=` from a Codex client. Go starts both at launch
-//! whatever is configured. Every refresh is conditional ([`cpa_exec::catalog_etag`]).
+//! first `GET /v1/models?client_version=` from a Codex client. The Antigravity client
+//! version updater likewise starts with the first Antigravity credential. Go starts all
+//! three at launch whatever is configured. Every catalog refresh is conditional
+//! ([`cpa_exec::catalog_etag`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,44 +60,52 @@ pub fn plan(local_model: bool, home_enabled: bool) -> Plan {
     }
 }
 
-/// Go `startModelCatalogUpdaters`. Safe to call more than once: one updater runs.
-/// Cost while no Codex or Devin credential exists: one parked task that looks at the
-/// credentials' providers after each change to the set. In Home mode the local store
-/// stays empty, so both updaters start at once, as in Go.
+/// Go `startModelCatalogUpdaters` and `misc.StartAntigravityVersionUpdater`. Safe to
+/// call more than once: one updater of each kind runs. Cost while no Codex, Devin or
+/// Antigravity credential exists: one parked task that looks at the credentials'
+/// providers after each change to the set. In Home mode the local store stays empty, so
+/// every updater starts at once, as in Go.
 pub fn start(rt: &Arc<Runtime>, home_enabled: bool) {
     let plan = plan(rt.local_model(), home_enabled);
+    // Updaters that serve one provider, each started by that provider's first credential.
+    let mut wanted: Vec<(&'static str, fn())> = Vec::new();
+    if plan.codex_client {
+        wanted.push((
+            "codex",
+            cpa_exec::codex_catalog_updater::start_codex_client_models_updater,
+        ));
+    }
+    if plan.devin {
+        wanted.push((
+            cpa_exec::devin::PROVIDER,
+            cpa_exec::devin_models::start_devin_models_updater,
+        ));
+    }
+    // The client version Antigravity requests carry; Go refreshes it whatever the plan.
+    wanted.push((cpa_exec::antigravity::PROVIDER, cpa_exec::antigravity_version::start));
     if home_enabled {
-        if plan.codex_client {
-            cpa_exec::codex_catalog_updater::start_codex_client_models_updater();
+        for (_, start) in wanted {
+            start();
         }
-        if plan.devin {
-            cpa_exec::devin_models::start_devin_models_updater();
-        }
-    } else if plan.codex_client || plan.devin {
+    } else {
         let weak = Arc::downgrade(rt);
         let mut changes = rt.store().subscribe();
         tokio::spawn(async move {
-            // True once started, or when the plan leaves it off.
-            let (mut codex, mut devin) = (!plan.codex_client, !plan.devin);
             loop {
                 {
                     let Some(rt) = weak.upgrade() else { return };
                     changes.borrow_and_update();
                     for c in rt.store().snapshot().iter() {
-                        match c.provider.as_str() {
-                            "codex" if !codex => {
-                                cpa_exec::codex_catalog_updater::start_codex_client_models_updater();
-                                codex = true;
+                        wanted.retain(|(provider, start)| {
+                            let found = c.provider == *provider;
+                            if found {
+                                start();
                             }
-                            cpa_exec::devin::PROVIDER if !devin => {
-                                cpa_exec::devin_models::start_devin_models_updater();
-                                devin = true;
-                            }
-                            _ => {}
-                        }
+                            !found
+                        });
                     }
                 }
-                if (codex && devin) || changes.changed().await.is_err() {
+                if wanted.is_empty() || changes.changed().await.is_err() {
                     return;
                 }
             }

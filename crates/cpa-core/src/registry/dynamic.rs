@@ -864,6 +864,55 @@ fn apply_prefix(models: Vec<Spec>, prefix: &str, force: bool) -> Vec<Spec> {
     out
 }
 
+/// Go `asyncProbeAntigravityCapabilities`: the upstream model IDs (lowercased) that each
+/// Antigravity credential's capability probe reported in `webSearchModelIds`, written by
+/// the Antigravity executor ([`set_web_search_hints`]). [`models_for`] marks those
+/// models, and so their aliases and prefixed copies, `supports_web_search`.
+static WEB_SEARCH_HINTS: std::sync::LazyLock<std::sync::RwLock<HashMap<String, std::collections::HashSet<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+static HINTS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Replaces the web-search hints of one credential (empty clears them) and reports
+/// whether they changed; a change bumps [`capabilities_generation`].
+pub fn set_web_search_hints(credential: &str, ids: std::collections::HashSet<String>) -> bool {
+    let mut hints = WEB_SEARCH_HINTS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let changed = if ids.is_empty() {
+        hints.remove(credential).is_some()
+    } else if hints.get(credential) == Some(&ids) {
+        false
+    } else {
+        hints.insert(credential.to_owned(), ids);
+        true
+    };
+    if changed {
+        HINTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    changed
+}
+
+/// Bumped whenever [`set_web_search_hints`] changes a credential's hints; registries
+/// derived from credentials key on it.
+pub fn capabilities_generation() -> u64 {
+    HINTS_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// `applyAntigravityFetchedModelCapabilities` with the credential's probe result.
+fn with_web_search_hints(credential: &str, mut models: Vec<Spec>) -> Vec<Spec> {
+    let hints = WEB_SEARCH_HINTS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(ids) = hints.get(credential) {
+        for model in &mut models {
+            if ids.contains(&model.id.trim().to_lowercase()) {
+                model.supports_web_search = true;
+            }
+        }
+    }
+    models
+}
+
 /// The models one credential registers (Go `registerModelsForAuth`), or none.
 pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &Credential, now: i64) -> Vec<Spec> {
     if c.disabled {
@@ -889,7 +938,7 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
         "gemini" | "gemini-interactions" => with_config(channel("gemini"), "google", "gemini", "gemini"),
         "vertex" => with_config(channel("vertex"), "google", "vertex", "vertex"),
         "aistudio" => channel("aistudio"),
-        "antigravity" => channel("antigravity"),
+        "antigravity" => with_web_search_hints(&c.id, channel("antigravity")),
         "claude" => with_config(channel("claude"), "anthropic", "claude", "claude"),
         "codex" if api_key => {
             if configured.is_empty() {

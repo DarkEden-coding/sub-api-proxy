@@ -23,6 +23,12 @@ pub use gpt::*;
 pub use grok::*;
 pub use kimi::*;
 
+/// Go `base64.RawURLEncoding.DecodeString`; `Err` is Go's error text
+/// (`illegal base64 data at input byte N`).
+pub fn raw_url_base64_decode(src: &[u8]) -> Result<Vec<u8>, String> {
+    wire::RAW_URL.decode(src)
+}
+
 /// A validation failure. The text matches Go's error string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);

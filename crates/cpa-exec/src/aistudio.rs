@@ -15,7 +15,9 @@ use cpa_common::json::{self as gj, GoValue};
 use cpa_common::thinking::parse_suffix;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
-use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, FailureScope, Operation, ResponseBody};
+use cpa_core::exec::{
+    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, FailureScope, Operation, ResponseBody,
+};
 use cpa_core::format::Format;
 use cpa_translate::stream::StreamOptions;
 use futures_util::StreamExt;
@@ -111,19 +113,6 @@ fn normalize_thinking_level(body: Vec<u8>) -> Vec<u8> {
     gj::try_set_str(&body, PATH, &upper).unwrap_or(body)
 }
 
-/// Go's `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(char::from(b)),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 /// `buildEndpoint`.
 fn endpoint(model: &str, action: &str, alt: &str) -> String {
     let base = format!("{}/{}/models/{model}:{action}", g::DEFAULT_BASE_URL, g::API_VERSION);
@@ -131,11 +120,11 @@ fn endpoint(model: &str, action: &str, alt: &str) -> String {
         return if alt.is_empty() {
             format!("{base}?alt=sse")
         } else {
-            format!("{base}?$alt={}", query_escape(alt))
+            format!("{base}?$alt={}", cpa_common::gostr::query_escape(alt))
         };
     }
     if !alt.is_empty() && action != "countTokens" {
-        return format!("{base}?$alt={}", query_escape(alt));
+        return format!("{base}?$alt={}", cpa_common::gostr::query_escape(alt));
     }
     base
 }
@@ -184,7 +173,7 @@ fn translate(req: &ExecRequest, cfg: &Config, count: bool) -> Result<(Vec<u8>, &
 
 /// The relayed request: JSON content type and, except for countTokens, the
 /// credential's custom headers (`Header.Set`, so a Host entry is relayed as a header).
-fn http_request(url: String, body: &[u8], custom: Vec<(String, String)>) -> HttpRequest {
+fn http_request(url: String, body: Bytes, custom: Vec<(String, String)>) -> HttpRequest {
     let mut headers = vec![("Content-Type".to_owned(), vec!["application/json".to_owned()])];
     for (name, value) in custom {
         let name = crate::proxy::canonical_header(&name);
@@ -196,8 +185,54 @@ fn http_request(url: String, body: &[u8], custom: Vec<(String, String)>) -> Http
         method: "POST".into(),
         url,
         headers,
-        body: body.to_vec(),
+        body,
     }
+}
+
+/// A relayed header map as Go's `http.Header` pairs.
+fn header_pairs<'a>(headers: impl IntoIterator<Item = (&'a String, &'a Vec<String>)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .flat_map(|(name, values)| values.iter().map(move |v| (name.clone(), v.clone())))
+        .collect()
+}
+
+/// `RecordAPIRequest` for the relayed request.
+fn capture_request(capture: &CaptureSink, credential: &Credential, relayed: &HttpRequest) {
+    if capture.enabled() {
+        let headers = header_pairs(relayed.headers.iter().map(|(n, v)| (n, v)));
+        g::capture_request(capture, credential, PROVIDER, &relayed.url, &headers, &relayed.body);
+    }
+}
+
+/// `RecordAPIResponseMetadata` for a relayed status and headers.
+fn capture_metadata(capture: &CaptureSink, status: i64, headers: &std::collections::BTreeMap<String, Vec<String>>) {
+    if capture.enabled() {
+        let pairs = header_pairs(headers);
+        capture.record(CaptureEvent::ResponseMetadata(
+            u16::try_from(status).unwrap_or(0),
+            &pairs,
+        ));
+    }
+}
+
+/// `NonStream` with Go's capture: the error, or the metadata and a non-empty body.
+async fn non_stream_captured(
+    relay: &Relay,
+    capture: &CaptureSink,
+    credential: &Credential,
+    relayed: &HttpRequest,
+) -> Result<wsrelay::HttpResponse, ExecError> {
+    capture_request(capture, credential, relayed);
+    let resp = relay.non_stream(&credential.id, relayed).await.map_err(|e| {
+        capture.record(CaptureEvent::ResponseError(&e));
+        plain_error(e)
+    })?;
+    capture_metadata(capture, resp.status, &resp.headers);
+    if !resp.body.is_empty() {
+        capture.record(CaptureEvent::ResponseChunk(&resp.body));
+    }
+    Ok(resp)
 }
 
 fn custom_headers(credential: &Credential, req: &ExecRequest) -> Vec<(String, String)> {
@@ -222,15 +257,12 @@ impl AiStudioExecutor {
         let (body, action) = translate(&req, cfg, false)?;
         req.usage.request(Format::Gemini, &body);
         let url = endpoint(&base_model, action, req.alt.as_deref().unwrap_or_default());
-        let relayed = http_request(url, &body, custom_headers(credential, &req));
+        let body = Bytes::from(body);
+        let relayed = http_request(url, body.clone(), custom_headers(credential, &req));
         if req.stream {
             return self.stream(credential, &req, relayed, body).await;
         }
-        let resp = self
-            .relay
-            .non_stream(&credential.id, &relayed)
-            .await
-            .map_err(plain_error)?;
+        let resp = non_stream_captured(&self.relay, req.capture(), credential, &relayed).await?;
         if !(200..300).contains(&resp.status) {
             return Err(status_error(resp.status, resp.body));
         }
@@ -250,22 +282,36 @@ impl AiStudioExecutor {
         credential: &Credential,
         req: &ExecRequest,
         relayed: HttpRequest,
-        body: Vec<u8>,
+        body: Bytes,
     ) -> Result<ExecResponse, ExecError> {
-        let mut events = self.relay.stream(&credential.id, &relayed).await.map_err(plain_error)?;
+        let capture = req.capture().clone();
+        let fail = |message: String| {
+            capture.record(CaptureEvent::ResponseError(&message));
+            plain_error(message)
+        };
+        capture_request(&capture, credential, &relayed);
+        let mut events = self.relay.stream(&credential.id, &relayed).await.map_err(fail)?;
         let first = events
             .recv()
             .await
-            .ok_or_else(|| plain_error("wsrelay: stream closed before start"))?;
+            .ok_or_else(|| fail("wsrelay: stream closed before start".into()))?;
         if first.status > 0 && first.status != 200 {
+            capture_metadata(&capture, first.status, &first.headers);
+            if !first.payload.is_empty() {
+                capture.record(CaptureEvent::ResponseChunk(&first.payload));
+            }
             let mut error_body = first.payload.clone();
             if first.kind != wsrelay::STREAM_END {
                 while let Some(event) = events.recv().await {
                     if let Some(error) = &event.error {
+                        capture.record(CaptureEvent::ResponseError(error));
                         if error_body.is_empty() {
                             error_body.extend_from_slice(error.as_bytes());
                         }
                         break;
+                    }
+                    if !event.payload.is_empty() {
+                        capture.record(CaptureEvent::ResponseChunk(&event.payload));
                     }
                     error_body.extend_from_slice(&event.payload);
                     if event.kind == wsrelay::STREAM_END {
@@ -291,6 +337,8 @@ impl AiStudioExecutor {
             first: Some(first),
             events,
             ended: false,
+            capture,
+            metadata_logged: false,
         };
         let stream = futures_util::stream::unfold(state, |mut state| async move {
             loop {
@@ -326,12 +374,8 @@ impl AiStudioExecutor {
         for path in ["generationConfig", "tools", "safetySettings"] {
             body = payload::delete(body, path);
         }
-        let relayed = http_request(endpoint(&base_model, "countTokens", ""), &body, Vec::new());
-        let resp = self
-            .relay
-            .non_stream(&credential.id, &relayed)
-            .await
-            .map_err(plain_error)?;
+        let relayed = http_request(endpoint(&base_model, "countTokens", ""), body.into(), Vec::new());
+        let resp = non_stream_captured(&self.relay, req.capture(), credential, &relayed).await?;
         if !(200..300).contains(&resp.status) {
             return Err(status_error(resp.status, resp.body));
         }
@@ -355,6 +399,9 @@ struct Events {
     first: Option<StreamEvent>,
     events: tokio::sync::mpsc::Receiver<StreamEvent>,
     ended: bool,
+    capture: CaptureSink,
+    /// Go's `metadataLogged`: the first status-bearing event's metadata only.
+    metadata_logged: bool,
 }
 
 impl Events {
@@ -385,11 +432,18 @@ impl Events {
             return;
         };
         if let Some(error) = event.error {
+            self.capture.record(CaptureEvent::ResponseError(&error));
             self.fail(plain_error(format!("wsrelay: {error}")));
             return;
         }
+        let status_event = matches!(event.kind.as_str(), wsrelay::STREAM_START | wsrelay::HTTP_RESPONSE);
+        if status_event && !self.metadata_logged && event.status > 0 {
+            capture_metadata(&self.capture, event.status, &event.headers);
+            self.metadata_logged = true;
+        }
         match event.kind.as_str() {
             wsrelay::STREAM_CHUNK if !event.payload.is_empty() => {
+                self.capture.record(CaptureEvent::ResponseChunk(&event.payload));
                 let filtered = crate::gemini_stream::filter_sse_usage_metadata(&event.payload);
                 self.output.usage.response_line(Format::Gemini, &filtered);
                 let translated = self.output.translate(&filtered);
@@ -401,6 +455,9 @@ impl Events {
                 self.ended = true;
             }
             wsrelay::HTTP_RESPONSE => {
+                if !event.payload.is_empty() {
+                    self.capture.record(CaptureEvent::ResponseChunk(&event.payload));
+                }
                 let translated = self.output.translate(&event.payload);
                 if self.emit(translated) {
                     return;

@@ -889,6 +889,16 @@ impl Scheduler {
         }
     }
 
+    /// The generation of a lease picked outside selection (the Antigravity credits
+    /// fallback, which runs on credentials selection refused): one that every bounded
+    /// window and probe reservation within 2^30 generations of now, before or after, is
+    /// newer than. Such a lease answers none of them: a cancelled or successful credits
+    /// attempt neither frees another request's probe nor ends a window, which stays with
+    /// its own probe.
+    pub fn outside_selection_generation(&self) -> u32 {
+        self.generation.wrapping_sub(1 << 30)
+    }
+
     /// Reserves the probe of `c` for `model` when its pick ends a bounded window: until
     /// the probe's result is recorded (or [`PROBE_HOLD`] passes), the window's keys keep
     /// cooling, so concurrent requests do not each go upstream. Returns the generation
@@ -2479,6 +2489,37 @@ mod tests {
                 assert_eq!(s.wait(&c, "a", second_end), Some(secs(H)), "the count is cleared");
             }
         }
+    }
+
+    /// A lease picked outside selection (the credits fallback) on a credential whose
+    /// ended window has a probe in flight neither frees that probe nor ends the window,
+    /// whatever its outcome; nor does it answer a window opened after it.
+    #[test]
+    fn outside_selection_leases_answer_no_bounded_window() {
+        let c = cred("a", serde_json::json!({}));
+        let p = Policy::default();
+        let start = Instant::now();
+        let mut s = Scheduler::default();
+        s.record(&c, "m", &hinted(FailureScope::Model, secs(6 * 24 * H)), &p, start);
+        let ended = start + secs(H);
+        let probe = s.reserve_probe(&c, "m", ended);
+        let credits = s.outside_selection_generation();
+        for outcome in [Outcome::Cancelled, Outcome::Success] {
+            s.record_picked(&c, "m", &outcome, &p, credits, ended);
+            assert!(s.wait(&c, "m", ended).is_some(), "the reserved probe holds the window");
+        }
+        s.accept_probe_picked(&c, "m", credits, ended);
+        assert!(s.wait(&c, "m", ended).is_some(), "a credits stream accepts nothing");
+        s.record_picked(&c, "m", &Outcome::Success, &p, probe, ended);
+        assert_eq!(s.wait(&c, "m", ended), None, "the probe's own success ends it");
+        // A window opened after the credits lease was picked is newer than it too.
+        let credits = s.outside_selection_generation();
+        let later = ended + secs(MIN);
+        s.record(&c, "m", &hinted(FailureScope::Model, secs(6 * 24 * H)), &p, later);
+        let reopened = later + secs(H);
+        s.reserve_probe(&c, "m", reopened);
+        s.record_picked(&c, "m", &Outcome::Cancelled, &p, credits, reopened);
+        assert!(s.wait(&c, "m", reopened).is_some(), "the later probe still holds");
     }
 
     /// Generations compare in serial-number order: a window opened just after the counter

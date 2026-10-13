@@ -12,7 +12,7 @@ use cpa_core::exec::Caller;
 use serde_json::Value;
 
 use super::*;
-use crate::gemini::tests::{UsageReports, client_bytes};
+use crate::gemini::tests::{Captured, Captures, UsageReports, client_bytes};
 
 const FIXTURE: &str = include_str!("../tests/fixtures/aistudio_go.json");
 const CHANNEL: &str = "aistudio-test";
@@ -93,7 +93,8 @@ async fn go_reference_scenarios() {
         }
         let mut req = request(s);
         let reports = Arc::new(UsageReports::default());
-        req.usage = reports.sink();
+        let captures = Arc::new(Captures::default());
+        req.usage = reports.sink().with_capture(captures.sink());
         let client = req.response_format;
         let alt = req.alt.as_deref().is_some_and(|a| !a.is_empty());
         let replies = s["replies"].as_array().cloned().unwrap_or_default();
@@ -167,8 +168,107 @@ async fn go_reference_scenarios() {
             "{name}: stream"
         );
         reports.check(s);
+        check_capture(s, &captures.events());
     }
     assert!(!session.is_closed());
+}
+
+/// Go's capture for a relayed attempt: the request as the browser received it, the
+/// first status-bearing reply's metadata, every non-empty reply payload, and one error
+/// per relay error.
+fn check_capture(s: &Value, events: &[Captured]) {
+    let name = s["name"].as_str().unwrap();
+    if s["error"]["status"] == 501 {
+        assert!(events.is_empty(), "{name}: {events:?}");
+        return;
+    }
+    let Some(Captured::Request {
+        url,
+        headers,
+        body,
+        provider,
+        auth_id,
+        auth_type,
+        auth_value,
+    }) = events.first()
+    else {
+        panic!("{name}: no request capture in {events:?}");
+    };
+    let channel = if s["disconnected"] == true {
+        "aistudio-missing"
+    } else {
+        CHANNEL
+    };
+    assert_eq!(
+        (
+            provider.as_str(),
+            auth_id.as_str(),
+            auth_type.as_str(),
+            auth_value.as_str()
+        ),
+        ("aistudio", channel, "oauth", channel),
+        "{name}: account"
+    );
+    if let Some(frame) = s["frames"].as_array().and_then(|f| f.first()) {
+        let frame: Value = serde_json::from_str(frame.as_str().unwrap()).unwrap();
+        let payload = &frame["payload"];
+        assert_eq!(url, payload["url"].as_str().unwrap(), "{name}: url");
+        assert_eq!(
+            String::from_utf8_lossy(body),
+            payload["body"].as_str().unwrap(),
+            "{name}: body"
+        );
+        let mut want: Vec<(String, String)> = Vec::new();
+        for (k, values) in payload["headers"].as_object().unwrap() {
+            for v in values.as_array().unwrap() {
+                want.push((k.clone(), v.as_str().unwrap().to_owned()));
+            }
+        }
+        assert_eq!(headers, &want, "{name}: headers");
+    }
+    let rest = &events[1..];
+    let replies = s["replies"].as_array().cloned().unwrap_or_default();
+    let status_of = |r: &Value| match r.get("payload") {
+        None => 502,
+        Some(p) => p["status"].as_u64().unwrap_or(200) as u16,
+    };
+    let want_status = replies
+        .iter()
+        .find(|r| matches!(r["type"].as_str(), Some("http_response" | "stream_start")))
+        .map(status_of);
+    let statuses: Vec<u16> = rest
+        .iter()
+        .filter_map(|e| match e {
+            Captured::Metadata(status) => Some(*status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        want_status.into_iter().collect::<Vec<_>>(),
+        "{name}: metadata"
+    );
+    let chunks: Vec<u8> = rest
+        .iter()
+        .filter_map(|e| match e {
+            Captured::Chunk(c) => Some(c.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let payloads: Vec<u8> = replies
+        .iter()
+        .filter_map(|r| r["payload"]["data"].as_str().or(r["payload"]["body"].as_str()))
+        .flat_map(|p| p.bytes())
+        .collect();
+    assert_eq!(
+        String::from_utf8_lossy(&chunks),
+        String::from_utf8_lossy(&payloads),
+        "{name}: chunks"
+    );
+    let errors = rest.iter().filter(|e| matches!(e, Captured::Error(_))).count();
+    let want_errors = replies.iter().filter(|r| r["type"] == "error").count() + usize::from(s["disconnected"] == true);
+    assert_eq!(errors, want_errors, "{name}: errors in {rest:?}");
 }
 
 /// Go's `ensureColonSpacedJSON` on the shapes its comment names: escaped quotes inside

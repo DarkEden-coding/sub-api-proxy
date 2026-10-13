@@ -19,7 +19,8 @@ use cpa_common::thinking::{self, RequestThinking, parse_suffix};
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_core::exec::{
-    ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody, UsageSink,
+    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody,
+    UpstreamRequest, UsageSink,
 };
 use cpa_core::format::Format;
 use cpa_translate::{RequestCtx, ResponseCtx, StreamTranslator};
@@ -158,7 +159,7 @@ pub(crate) fn translate(
 /// schema walkers recurse per nesting level like Go's, whose stacks grow.
 // ponytail: duplicate of cpa_translate's private guard until its exported `...WithCompat`
 // entry points guard themselves (owner: translators).
-fn deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> T + Send) -> T {
+pub(crate) fn deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> T + Send) -> T {
     const DEEP: usize = 256;
     let (mut depth, mut max, mut in_string, mut escaped) = (0usize, 0usize, false, false);
     for &b in body {
@@ -308,26 +309,138 @@ pub(crate) struct Resolved {
     pub is_compat: bool,
 }
 
-pub(crate) async fn error_from(upstream: Upstream) -> ExecError {
+/// Go `helps.RecordAPIRequest` for one physical attempt: `headers` are the request's
+/// header map in Go spelling (the observer sorts and masks them). The log may keep the
+/// body for the whole exchange, so it gets a handle to the body being sent.
+pub(crate) fn capture_request(
+    capture: &CaptureSink,
+    credential: &Credential,
+    provider: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &Bytes,
+) {
+    if !capture.enabled() {
+        return;
+    }
+    let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
+    capture.record_request(
+        UpstreamRequest {
+            url,
+            method: "POST",
+            headers,
+            body,
+            provider,
+            auth_id: &credential.id,
+            auth_label: &credential.label,
+            auth_type,
+            auth_value: &auth_value,
+        },
+        body,
+    );
+}
+
+/// Go `helps.RecordAPIResponseMetadata` for an upstream answer, with the headers as
+/// Go's `http.Response` holds them.
+pub(crate) use crate::kimi_http::capture_metadata;
+
+/// `RecordAPIRequest`, `Client.Do`, then `RecordAPIResponseMetadata`, or
+/// `RecordAPIResponseError` when the request fails.
+pub(crate) async fn send_captured(
+    capture: &CaptureSink,
+    credential: &Credential,
+    provider: &str,
+    client: &wreq::Client,
+    url: &str,
+    headers: GoHeaders,
+    body: Bytes,
+) -> Result<Upstream, ExecError> {
+    capture_request(capture, credential, provider, url, headers.pairs(), &body);
+    match proxy::send(client, url, headers, body, None).await {
+        Ok(upstream) => {
+            capture_metadata(capture, upstream.status, &upstream.headers);
+            Ok(upstream)
+        }
+        Err(error) => {
+            capture.record(CaptureEvent::ResponseError(&String::from_utf8_lossy(&error.body)));
+            Err(error)
+        }
+    }
+}
+
+/// `io.ReadAll` of a response body, then `AppendAPIResponseChunk` of it, or
+/// `RecordAPIResponseError` when the read fails.
+pub(crate) async fn read_captured(capture: &CaptureSink, upstream: Upstream, limit: usize) -> Result<Bytes, ExecError> {
+    match proxy::read_all(upstream.body, limit, false).await {
+        Ok(data) => {
+            capture.record(CaptureEvent::ResponseChunk(&data));
+            Ok(data)
+        }
+        Err(error) => {
+            capture.record(CaptureEvent::ResponseError(&String::from_utf8_lossy(&error.body)));
+            Err(error)
+        }
+    }
+}
+
+/// `scanner.Err()` of a body the transport cut short: Go's `unexpected EOF`.
+// ponytail: like `upstream::io_text`, every transport failure mid-body reads as a cut
+// body; Go names resets and timeouts differently.
+fn scan_error(error: ExecError) -> ExecError {
+    if error.scope == cpa_core::exec::FailureScope::Transport {
+        ExecError::local(error.status, cpa_core::exec::FailureScope::Transport, "unexpected EOF")
+    } else {
+        error
+    }
+}
+
+/// Go's scanner loops: `AppendAPIResponseChunk` of every line read and
+/// `RecordAPIResponseError` of the scanner's error.
+pub(crate) fn captured_lines(lines: ExecStream, capture: CaptureSink) -> ExecStream {
+    let lines = lines.map(|item| item.map_err(scan_error)).boxed();
+    if !capture.enabled() {
+        return lines;
+    }
+    lines
+        .inspect(move |item| match item {
+            Ok(line) => capture.record(CaptureEvent::ResponseChunk(line)),
+            Err(error) => capture.record(CaptureEvent::ResponseError(&String::from_utf8_lossy(&error.body))),
+        })
+        .boxed()
+}
+
+/// A non-2xx answer: its body (`AppendAPIResponseChunk`, read errors ignored as Go's
+/// `b, _ := io.ReadAll` does) becomes the status error.
+pub(crate) async fn error_from(capture: &CaptureSink, upstream: Upstream) -> ExecError {
     let status = upstream.status;
     let body = proxy::read_all(upstream.body, proxy::MAX_ERROR_BODY, true)
         .await
         .unwrap_or_default();
+    capture.record(CaptureEvent::ResponseChunk(&body));
     status_err(status, body)
 }
 
 /// `io.ReadAll` of the whole response, then Go's status check (countTokens and
 /// Interactions read before checking).
-async fn read_then_check(upstream: Upstream) -> Result<(http::HeaderMap, Bytes), ExecError> {
+async fn read_then_check(capture: &CaptureSink, upstream: Upstream) -> Result<(http::HeaderMap, Bytes), ExecError> {
     let status = upstream.status;
     let headers = upstream.headers.clone();
     let ok = (200..300).contains(&status);
     let limit = if ok { usize::MAX } else { proxy::MAX_ERROR_BODY };
-    let data = proxy::read_all(upstream.body, limit, false).await?;
+    let data = read_captured(capture, upstream, limit).await?;
     if !ok {
         return Err(status_err(status, data));
     }
     Ok((headers, data))
+}
+
+/// The executor identity Go logs for a Gemini-family key (`GeminiExecutor.Identifier`).
+fn identifier(credential: &Credential) -> &'static str {
+    if credential.provider == "gemini-interactions" {
+        "gemini-interactions"
+    } else {
+        "gemini"
+    }
 }
 
 /// `TranslateNonStream`: the registered transform, or the body itself when Go registers
@@ -426,13 +539,26 @@ impl GeminiExecutor {
         body = payload::delete(body, "session_id");
         req.usage.request(to, &body);
         let headers = request_headers(credential, req);
-        let upstream = proxy::send(&self.client(credential, cfg), &url, headers, body.clone(), None).await?;
+        let capture = req.capture();
+        let client = self.client(credential, cfg);
+        // One buffer for the send, the request log and the translators below.
+        let body = Bytes::from(body);
+        let upstream = send_captured(
+            capture,
+            credential,
+            identifier(credential),
+            &client,
+            &url,
+            headers,
+            body.clone(),
+        )
+        .await?;
         if !(200..300).contains(&upstream.status) {
-            return Err(error_from(upstream).await);
+            return Err(error_from(capture, upstream).await);
         }
         let response_headers = upstream.headers.clone();
         if !req.stream {
-            let data = proxy::read_all(upstream.body, usize::MAX, false).await?;
+            let data = read_captured(capture, upstream, usize::MAX).await?;
             req.usage.response_body(to, &data);
             let out = translate_non_stream(req, to, &body, &data)?;
             return Ok(ExecResponse {
@@ -442,7 +568,8 @@ impl GeminiExecutor {
             });
         }
         let output = Output::new(req, to, &body);
-        let stream = gemini_lines(proxy::lines(upstream.body, MAX_LINE), output);
+        let lines = captured_lines(proxy::lines(upstream.body, MAX_LINE), capture.clone());
+        let stream = gemini_lines(lines, output, Format::Gemini);
         Ok(ExecResponse {
             status: 200,
             headers: response_headers,
@@ -493,9 +620,22 @@ impl GeminiExecutor {
         if headers.get("Api-Revision").is_none_or(str::is_empty) {
             headers.set("Api-Revision", INTERACTIONS_REVISION);
         }
-        let upstream = proxy::send(&self.client(credential, cfg), &url, headers, body.clone(), None).await?;
+        let capture = req.capture();
+        let client = self.client(credential, cfg);
+        // One buffer for the send, the request log and the translators below.
+        let body = Bytes::from(body);
+        let upstream = send_captured(
+            capture,
+            credential,
+            identifier(credential),
+            &client,
+            &url,
+            headers,
+            body.clone(),
+        )
+        .await?;
         if !req.stream {
-            let (response_headers, data) = read_then_check(upstream).await?;
+            let (response_headers, data) = read_then_check(capture, upstream).await?;
             req.usage.response_body(to, &data);
             let out = translate_non_stream(req, to, &body, &data)?;
             return Ok(ExecResponse {
@@ -505,11 +645,12 @@ impl GeminiExecutor {
             });
         }
         if !(200..300).contains(&upstream.status) {
-            return Err(error_from(upstream).await);
+            return Err(error_from(capture, upstream).await);
         }
         let response_headers = upstream.headers.clone();
         let output = Output::new(req, to, &body);
-        let stream = interactions_lines(proxy::lines(upstream.body, MAX_LINE), output);
+        let lines = captured_lines(proxy::lines(upstream.body, MAX_LINE), capture.clone());
+        let stream = interactions_lines(lines, output);
         Ok(ExecResponse {
             status: 200,
             headers: response_headers,
@@ -540,8 +681,21 @@ impl GeminiExecutor {
         body = payload::ensure_leading_user_content(body, "contents");
         let url = format!("{}/{API_VERSION}/models/{base_model}:countTokens", base_url(credential));
         let headers = request_headers(credential, req);
-        let upstream = proxy::send(&self.client(credential, cfg), &url, headers, body, None).await?;
-        let (response_headers, data) = read_then_check(upstream).await?;
+        let capture = req.capture();
+        let client = self.client(credential, cfg);
+        // One buffer for the send, the request log and the translators below.
+        let body = Bytes::from(body);
+        let upstream = send_captured(
+            capture,
+            credential,
+            identifier(credential),
+            &client,
+            &url,
+            headers,
+            body.clone(),
+        )
+        .await?;
+        let (response_headers, data) = read_then_check(capture, upstream).await?;
         let count = gj::get(&data, "totalTokens").int();
         let out = cpa_translate::translate_token_count(req.response_format, to, count, &data);
         Ok(ExecResponse {
@@ -636,6 +790,13 @@ impl Output {
             claude: ClaudeInputTokens::new(req.source_format, upstream, client, original_request(req).clone()),
             usage: req.usage.clone(),
         }
+    }
+
+    /// The Claude `message_start` estimate over `original` instead of the client's
+    /// original request (Antigravity estimates its cleaned request).
+    pub(crate) fn with_claude_original(mut self, original: Bytes) -> Self {
+        self.claude = self.claude.with_original(original);
+        self
     }
 
     /// helps.EndApplyPatchStream, then the client side's pending frames: the end of a
@@ -755,6 +916,11 @@ impl Output {
 pub(crate) trait LineState: Send + 'static {
     fn line(&mut self, line: &[u8]) -> Emit;
     fn end(&mut self) -> Emit;
+    /// `end` before a scanner error is reported; executors that skip the synthetic
+    /// terminal after a read error override it.
+    fn end_after_error(&mut self) -> Emit {
+        self.end()
+    }
     /// Client frames still pending when a terminal error is written.
     fn flush(&mut self) -> Vec<Bytes>;
 }
@@ -781,7 +947,11 @@ pub(crate) fn drive<S: LineState>(lines: ExecStream, state: S) -> ExecStream {
                 let scanned = lines.next().await;
                 let emit = match &scanned {
                     Some(Ok(line)) => state.line(line),
-                    Some(Err(_)) | None => {
+                    Some(Err(_)) => {
+                        ended = true;
+                        state.end_after_error()
+                    }
+                    None => {
                         ended = true;
                         state.end()
                     }
@@ -799,9 +969,10 @@ pub(crate) fn drive<S: LineState>(lines: ExecStream, state: S) -> ExecStream {
     .boxed()
 }
 
-/// The streamGenerateContent loop: usage filtering and the JSON payload of each line
-/// through the translator; at EOF the tool-input finalization, then `[DONE]`.
-struct GeminiLines(Output);
+/// The streamGenerateContent loop of Gemini and Antigravity upstreams: usage filtering
+/// and the JSON payload of each line through the translator; at EOF the tool-input
+/// finalization, then `[DONE]`.
+struct GeminiLines(Output, Format);
 
 impl LineState for GeminiLines {
     fn line(&mut self, line: &[u8]) -> Emit {
@@ -809,7 +980,7 @@ impl LineState for GeminiLines {
         // Go observes the response model on the raw line and usage on the filtered
         // payload; the filter only drops non-terminal usageMetadata, which the model
         // reader ignores.
-        self.0.usage.response_line(Format::Gemini, &filtered);
+        self.0.usage.response_line(self.1, &filtered);
         match sse::json_payload(&filtered) {
             Some(payload) => self.0.translate(payload),
             None => Emit::default(),
@@ -820,13 +991,24 @@ impl LineState for GeminiLines {
         self.0.end_with_done()
     }
 
+    /// Gemini translates `[DONE]` before checking the scanner; Antigravity finalizes
+    /// tool input only, so a truncated stream never reads as a completed one.
+    fn end_after_error(&mut self) -> Emit {
+        if self.1 == Format::Antigravity {
+            self.0.finalize()
+        } else {
+            self.0.end_with_done()
+        }
+    }
+
     fn flush(&mut self) -> Vec<Bytes> {
         self.0.flush_frames()
     }
 }
 
-fn gemini_lines(lines: ExecStream, output: Output) -> ExecStream {
-    drive(lines, GeminiLines(output))
+/// [`GeminiLines`] over `lines` for an `upstream` (Gemini or Antigravity) stream.
+pub(crate) fn gemini_lines(lines: ExecStream, output: Output, upstream: Format) -> ExecStream {
+    drive(lines, GeminiLines(output, upstream))
 }
 
 /// The terminator executors append to a scanned line to pass it as one translator

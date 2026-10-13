@@ -245,6 +245,12 @@ pub struct GoClients {
     /// Injected default (tests point it at local mocks); used for Inherit/Invalid.
     default: Option<wreq::Client>,
     cache: Mutex<Vec<(Proxy, wreq::Client)>>,
+    /// Never offer HTTP/2 (Go transports with `ForceAttemptHTTP2` off and an empty
+    /// `TLSNextProto`, as Antigravity's).
+    http1: bool,
+    /// Idle connections kept per host and how long (Go `MaxIdleConnsPerHost` and
+    /// `IdleConnTimeout`); `None` keeps wreq's defaults.
+    pool: Option<(usize, Option<std::time::Duration>)>,
 }
 
 impl GoClients {
@@ -253,7 +259,23 @@ impl GoClients {
             hooks,
             default: None,
             cache: Mutex::default(),
+            http1: false,
+            pool: None,
         }
+    }
+
+    /// Clients keeping at most `max_idle_per_host` idle connections per host (0 closes
+    /// each connection after its response), each for at most `idle_timeout`. Additive
+    /// (Antigravity's connection pool settings).
+    pub fn pool(mut self, max_idle_per_host: usize, idle_timeout: Option<std::time::Duration>) -> Self {
+        self.pool = Some((max_idle_per_host, idle_timeout));
+        self
+    }
+
+    /// Clients that speak only HTTP/1.1. Additive (Antigravity).
+    pub fn http1_only(mut self) -> Self {
+        self.http1 = true;
+        self
     }
 
     /// Every unproxied request uses `client` (local mock servers in tests).
@@ -262,6 +284,8 @@ impl GoClients {
             hooks: Hooks::default(),
             default: Some(client),
             cache: Mutex::default(),
+            http1: false,
+            pool: None,
         }
     }
 
@@ -288,13 +312,16 @@ impl GoClients {
             cache.insert(0, entry);
             return Some(client);
         }
-        let built = proxy
-            .apply(
-                self.hooks
-                    .apply(wreq::Client::builder().redirect(wreq::redirect::Policy::none())),
-                true,
-            )
-            .and_then(wreq::ClientBuilder::build);
+        let mut builder = self
+            .hooks
+            .apply(wreq::Client::builder().redirect(wreq::redirect::Policy::none()));
+        if self.http1 {
+            builder = builder.http1_only();
+        }
+        if let Some((max_idle, idle_timeout)) = self.pool {
+            builder = builder.pool_max_idle_per_host(max_idle).pool_idle_timeout(idle_timeout);
+        }
+        let built = proxy.apply(builder, true).and_then(wreq::ClientBuilder::build);
         let client = built.ok()?;
         cache.insert(0, (proxy.clone(), client.clone()));
         cache.truncate(CACHE_CAPACITY);
@@ -568,19 +595,20 @@ pub async fn send_request(
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
 ) -> Result<Upstream, ExecError> {
-    let raw = send_request_raw(route, method, url, headers, body, timeout)
+    send_request_raw(route, method, url, headers, body, timeout)
         .await
-        .map_err(|e| match e {
-            SendError::Transport { error, .. } => crate::upstream::transport_error(error),
-            SendError::Local { error, .. } => error,
-            // What `transport_error` makes of the transport's own timeout.
-            SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
-        })?;
-    Ok(Upstream {
-        status: raw.status,
-        headers: raw.headers,
-        body: raw.body.map(|r| r.map_err(body_error)).boxed(),
-    })
+        .map(RawUpstream::sanitized)
+        .map_err(sanitize)
+}
+
+/// The error [`send_request`] reports for a [`SendError`].
+fn sanitize(error: SendError) -> ExecError {
+    match error {
+        SendError::Transport { error, .. } => crate::upstream::transport_error(error),
+        SendError::Local { error, .. } => error,
+        // What `transport_error` makes of the transport's own timeout.
+        SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
+    }
 }
 
 /// Why [`send_request_raw`] failed: the transport's own error (which may name the URL,
@@ -608,6 +636,17 @@ pub struct RawUpstream {
     pub body: BoxStream<'static, Result<Bytes, std::io::Error>>,
 }
 
+impl RawUpstream {
+    /// The [`Upstream`] [`send_request`] returns: body errors sanitised.
+    fn sanitized(self) -> Upstream {
+        Upstream {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(|r| r.map_err(body_error)).boxed(),
+        }
+    }
+}
+
 /// [`send_request`] without error sanitising, for callers that report Go's own error
 /// text (the plugin host's `host.http.*`).
 pub async fn send_request_raw(
@@ -617,6 +656,40 @@ pub async fn send_request_raw(
     headers: GoHeaders,
     body: Option<Bytes>,
     timeout: Option<std::time::Duration>,
+) -> Result<RawUpstream, SendError> {
+    send_hops(route, method, url, headers, body, timeout, true).await
+}
+
+/// [`request`] without following redirects: a client whose `CheckRedirect` returns
+/// `http.ErrUseLastResponse` hands back the first answer, 3xx included.
+pub async fn request_once(
+    client: &wreq::Client,
+    method: wreq::Method,
+    url: &str,
+    headers: GoHeaders,
+    body: Option<Bytes>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Upstream, ExecError> {
+    let route = |_: &url::Url| {
+        Ok(Route {
+            client: client.clone(),
+            order: None,
+        })
+    };
+    send_hops(&route, method, url, headers, body, timeout, false)
+        .await
+        .map(RawUpstream::sanitized)
+        .map_err(sanitize)
+}
+
+async fn send_hops(
+    route: &(dyn Fn(&url::Url) -> Result<Route, ExecError> + Sync),
+    method: wreq::Method,
+    url: &str,
+    headers: GoHeaders,
+    body: Option<Bytes>,
+    timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
 ) -> Result<RawUpstream, SendError> {
     let local = |error: ExecError, url: &str| SendError::Local {
         error,
@@ -704,7 +777,7 @@ pub async fn send_request_raw(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        if !matches!(status, 301 | 302 | 303 | 307 | 308) || location.is_empty() {
+        if !follow_redirects || !matches!(status, 301 | 302 | 303 | 307 | 308) || location.is_empty() {
             break (response, auto_gzip);
         }
         let from_exact = exact.as_deref().filter(|_| sent == 1);

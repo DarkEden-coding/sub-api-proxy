@@ -569,12 +569,6 @@ async fn wait_for_cloud_deploy() {
     tracing::info!("Cloud deploy mode: Shutdown signal received; exiting");
 }
 
-fn unsupported(what: &str) -> ! {
-    // ponytail: these Go modes have no Rust port yet; refuse instead of starting a server.
-    tracing::error!("{what} is not supported by cliproxy-rs yet");
-    std::process::exit(1);
-}
-
 /// Binds like Go's `net.Listen("tcp", host:port)`. An empty host is one dual-stack socket
 /// on `[::]` with `IPV6_V6ONLY` cleared, falling back to `0.0.0.0` only when the host has
 /// no usable IPv6. Other errors, such as the port being in use, are returned.
@@ -1184,7 +1178,22 @@ async fn command(args: &Args, config: &Config) -> anyhow::Result<bool> {
         return Ok(true);
     }
     if args.antigravity_login {
-        unsupported("Antigravity login (-antigravity-login)");
+        // Go DoAntigravityLogin: a failure is logged and the command still exits normally.
+        let options = cpa_exec::antigravity_auth::LoginOptions {
+            no_browser: args.no_browser,
+            callback_port: args.oauth_callback_port,
+        };
+        match cpa_exec::antigravity_auth::login(&config.auth_dir, config, &options).await {
+            Ok((path, label)) => {
+                println!("Authentication saved to {}", path.display());
+                if !label.is_empty() {
+                    println!("Authenticated as {label}");
+                }
+                println!("Antigravity authentication successful!");
+            }
+            Err(error) => tracing::error!("Antigravity authentication failed: {error}"),
+        }
+        return Ok(true);
     }
     if args.codex_login || args.codex_device_login {
         let options = cpa_exec::codex_oauth::LoginOptions {
@@ -1338,7 +1347,7 @@ async fn serve(
     if let Some(cooldown) = store.as_ref().and_then(|store| store.cooldown.clone()) {
         rt.set_cooldown_backend(cooldown);
     }
-    // Go `startModelCatalogUpdaters`.
+    // Go `misc.StartAntigravityVersionUpdater` and `startModelCatalogUpdaters`.
     cpa_server::model_updater::start(&rt, home_config.is_some());
     let home = home_config.map(|home_config| {
         let dispatcher = Arc::new(home::Dispatcher::new(&rt));
