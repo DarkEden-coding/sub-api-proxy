@@ -93,6 +93,7 @@ jobs:
             cargo nextest run --workspace --locked --profile ci 2>&1 | tee test.log
             cargo test --workspace --doc --locked 2>&1 | tee -a test.log
             cargo test --locked --manifest-path vendor/gjson/Cargo.toml --target-dir target 2>&1 | tee -a test.log
+            python3 bench/test-claude-cache-replay.py 2>&1 | tee -a test.log
           '
           # shellcheck disable=SC2016 # $1 to $3 belong to the inner shell
           sudo env "PATH=$PATH" "HOME=$HOME" \

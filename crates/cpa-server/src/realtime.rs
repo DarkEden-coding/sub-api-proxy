@@ -405,6 +405,7 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         stream: false,
         clock: Default::default(),
         prompt_prefix_hash: String::new(),
+        attempts: Default::default(),
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

@@ -44,6 +44,8 @@ pub struct Detail {
     pub cached: i64,
     pub cache_read: i64,
     pub cache_creation: i64,
+    pub cache_creation_5m: Option<i64>,
+    pub cache_creation_1h: Option<i64>,
     pub total: i64,
     pub breakdown: Option<Breakdown>,
     pub response_service_tier: String,
@@ -546,6 +548,14 @@ fn parse_claude_node(node: &Res<'_>) -> Detail {
         cached: cache_read,
         cache_read,
         cache_creation,
+        cache_creation_5m: node
+            .get("cache_creation.ephemeral_5m_input_tokens")
+            .exists()
+            .then(|| node.get("cache_creation.ephemeral_5m_input_tokens").int()),
+        cache_creation_1h: node
+            .get("cache_creation.ephemeral_1h_input_tokens")
+            .exists()
+            .then(|| node.get("cache_creation.ephemeral_1h_input_tokens").int()),
         ..Detail::default()
     };
     if d.cached == 0 {
@@ -842,6 +852,8 @@ impl StreamUsage {
         if m.response_service_tier.is_empty() {
             m.response_service_tier = existing.response_service_tier.clone();
         }
+        m.cache_creation_5m = m.cache_creation_5m.or(existing.cache_creation_5m);
+        m.cache_creation_1h = m.cache_creation_1h.or(existing.cache_creation_1h);
         let mut cached = m.cache_read + m.cache_creation;
         if cached == 0 {
             cached = m.cached;
@@ -1277,6 +1289,7 @@ pub struct Record {
     pub response_headers: Vec<(String, Vec<String>)>,
     /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
     pub prompt_prefix_hash: String,
+    pub claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
     pub timings: Timings,
 }
 
@@ -1458,6 +1471,12 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
         t.int("cache_read_tokens", detail.cache_read);
         t.bool("cache_read_tokens_present", true);
         t.int("cache_creation_tokens", detail.cache_creation);
+        if let Some(n) = detail.cache_creation_5m {
+            t.int("cache_creation_5m_tokens", n);
+        }
+        if let Some(n) = detail.cache_creation_1h {
+            t.int("cache_creation_1h_tokens", n);
+        }
         t.int("total_tokens", detail.total);
     });
     w.bool("failed", record.failed);
@@ -1535,6 +1554,10 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     // Not in Go's record (docs/DIFFERENCES-FROM-GO.md).
     w.opt_str("session_source", client.session_source);
     w.opt_str("prompt_prefix_hash", &record.prompt_prefix_hash);
+    if let Some(cache) = &record.claude_cache {
+        w.key("claude_cache");
+        serde_json::to_writer(&mut w.0, cache).expect("cache telemetry contains only JSON primitives");
+    }
     record.timings.write(&mut w);
     w.0.push(b'}');
     w.0
@@ -1558,6 +1581,8 @@ pub struct Facts {
     pub clock: std::sync::Arc<crate::observability::Clock>,
     /// [`prompt_prefix`] of the client body.
     pub prompt_prefix_hash: String,
+    /// Shared by failover/refresh attempts, independent of credential changes.
+    pub attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Facts {
@@ -1586,6 +1611,7 @@ impl Facts {
             stream,
             clock: trace.clock(),
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
+            attempts: Default::default(),
         }
     }
 }
@@ -1786,6 +1812,7 @@ struct Reported {
     /// Go created no reporter for this attempt: publish nothing.
     discarded: bool,
     exchange: Exchange,
+    claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
 }
 
 impl Reported {
@@ -1799,6 +1826,7 @@ impl Reported {
 struct Observer {
     provider: String,
     started: std::time::Instant,
+    cache_telemetry: bool,
     state: std::sync::Mutex<Reported>,
 }
 
@@ -1830,6 +1858,14 @@ impl Observer {
 }
 
 impl cpa_core::exec::UsageObserver for Observer {
+    fn wants_claude_cache(&self) -> bool {
+        self.cache_telemetry
+    }
+
+    fn claude_cache(&self, telemetry: cpa_core::exec::ClaudeCacheTelemetry) {
+        self.lock().claude_cache = Some(telemetry);
+    }
+
     fn response_body(&self, format: Format, body: &[u8]) {
         let mut r = self.lock();
         r.seen = true;
@@ -1929,6 +1965,7 @@ pub struct Tracker {
     requested_at: chrono::DateTime<chrono::FixedOffset>,
     /// Go `baseURL`: the credential's `base_url` attribute, else its metadata's.
     base_url: String,
+    attempt: usize,
 }
 
 impl Tracker {
@@ -2001,6 +2038,7 @@ impl Tracker {
             observer: std::sync::Arc::new(Observer {
                 provider,
                 started,
+                cache_telemetry: rt.usage_queue().accepts(),
                 state: std::sync::Mutex::default(),
             }),
             stream: StreamUsage::default(),
@@ -2011,6 +2049,7 @@ impl Tracker {
             client: home_client,
             requested_at: now.fixed_offset(),
             base_url,
+            attempt: facts.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -2082,7 +2121,11 @@ impl Tracker {
         if reported.discarded {
             return;
         }
+        // Go can publish a tokenless failure after observing a Claude response.
+        // Keep the returned TTL buckets as observations, not inferred accounting.
+        let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
         let mut record = std::mem::take(&mut self.record);
+        let mut telemetry_only = false;
         let (latency, ttft);
         if let Some(outcome) = reported.outcome {
             record.failed = outcome.failed;
@@ -2098,7 +2141,15 @@ impl Tracker {
                 self.body.take().or_else(|| self.stream.detail().cloned())
             };
             let detail = match ending {
-                Ending::Done if reported.usage_required && usage.is_none() => return,
+                Ending::Done if reported.usage_required && usage.is_none() => {
+                    if reported.claude_cache.is_none() {
+                        return;
+                    }
+                    // Keep activity and timestamps even when a Claude stream never
+                    // returns usage. Go plugins still receive nothing on this path.
+                    telemetry_only = true;
+                    Detail::default()
+                }
                 Ending::Done => usage.unwrap_or_default(),
                 Ending::Failed(error) => {
                     record.failed = true;
@@ -2129,12 +2180,39 @@ impl Tracker {
         }
         record.latency_ms = latency.as_millis() as i64;
         record.ttft_ms = ttft.as_millis() as i64;
+        if let Some((five, hour)) = returned_cache {
+            record.detail.cache_creation_5m = five;
+            record.detail.cache_creation_1h = hour;
+        }
         record.timings = self.timings(&reported.exchange);
         record.prompt_prefix_hash = self.facts.prompt_prefix_hash.clone();
+        if let Some(mut cache) = reported.claude_cache {
+            let at = |instant: Option<std::time::Instant>| {
+                instant.map(|instant| {
+                    let offset = instant.saturating_duration_since(self.started).as_millis() as i64;
+                    self.requested_at.timestamp_millis().saturating_add(offset)
+                })
+            };
+            cache.request_start_unix_ms = at(reported.exchange.started);
+            cache.first_response_byte_unix_ms = at(reported.exchange.first_byte);
+            // Completion of this upstream attempt, not the downstream socket flush.
+            cache.end_unix_ms = Some(self.requested_at.timestamp_millis().saturating_add(record.latency_ms));
+            cache.attempt = self.attempt;
+            if self.client.as_ref().unwrap_or(&self.facts.client).is_compaction {
+                cache.base_request_type = "compaction".into();
+                if cache.request_type != "retry" {
+                    cache.request_type = "compaction".into();
+                }
+            }
+            if self.attempt > 0 {
+                cache.request_type = "retry".into();
+            }
+            record.claude_cache = Some(cache);
+        }
         if let Some(effort) = reported.effort {
             record.reasoning_effort = effort;
         }
-        if plugins {
+        if plugins && !telemetry_only {
             self.queue
                 .plugins()
                 .publish_usage(self.plugin_record(&record, latency, ttft));
@@ -2479,14 +2557,29 @@ mod tests {
         let error = ExecError::local(502, FailureScope::Credential, "Invalid apply_patch tool arguments");
         let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
         let sink = tracker.sink();
+        sink.claude_cache(cpa_core::exec::ClaudeCacheTelemetry {
+            request_type: "compaction".into(),
+            base_request_type: "compaction".into(),
+            ..Default::default()
+        });
         sink.usage_required();
         sink.response_line(
             Format::Claude,
-            br#"data: {"type":"message_start","message":{"model":"claude-upstream","usage":{"input_tokens":9,"output_tokens":1}}}"#,
+            br#"data: {"type":"message_start","message":{"model":"claude-upstream","usage":{"input_tokens":9,"output_tokens":1,"cache_creation_input_tokens":12,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":5}}}}"#,
         );
         sink.publish_failure(502, "Invalid apply_patch tool arguments");
         tracker.fail(&error);
-        let got: Vec<Value> = rt.usage_queue().pop_oldest(10).iter().map(|q| summary(q)).collect();
+        let raw = rt.usage_queue().pop_oldest(10);
+        let observation: Value = serde_json::from_slice(&raw[0]).unwrap();
+        assert_eq!(
+            observation["tokens"]["cache_creation_tokens"], 0,
+            "Go failure accounting unchanged"
+        );
+        assert_eq!(observation["tokens"]["cache_creation_5m_tokens"], 7);
+        assert_eq!(observation["tokens"]["cache_creation_1h_tokens"], 5);
+        assert_eq!(observation["claude_cache"]["request_type"], "compaction");
+        assert_eq!(observation["claude_cache"]["attempt"], 0);
+        let got: Vec<Value> = raw.iter().map(|q| summary(q)).collect();
         assert_eq!(
             got,
             [serde_json::json!({
@@ -2498,6 +2591,11 @@ mod tests {
         // Without the executor's report the server keeps Claude's buffered usage
         // (StreamUsageBuffer.PublishFailure), so the report above is what drops it.
         let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        tracker.sink().claude_cache(cpa_core::exec::ClaudeCacheTelemetry {
+            request_type: "compaction".into(),
+            base_request_type: "compaction".into(),
+            ..Default::default()
+        });
         tracker.sink().response_line(
             Format::Claude,
             br#"data: {"type":"message_start","message":{"model":"claude-upstream","usage":{"input_tokens":9,"output_tokens":1}}}"#,
@@ -2505,6 +2603,24 @@ mod tests {
         tracker.fail(&error);
         let got = rt.usage_queue().pop_oldest(10);
         assert_eq!(summary(&got[0])["input"], 9);
+        let observation: Value = serde_json::from_slice(&got[0]).unwrap();
+        assert_eq!(observation["claude_cache"]["request_type"], "retry");
+        assert_eq!(observation["claude_cache"]["base_request_type"], "compaction");
+        assert_eq!(observation["claude_cache"]["attempt"], 1);
+        assert!(observation["tokens"].get("cache_creation_5m_tokens").is_none());
+        let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        tracker.sink().usage_required();
+        tracker.sink().claude_cache(cpa_core::exec::ClaudeCacheTelemetry {
+            request_type: "main".into(),
+            base_request_type: "main".into(),
+            ..Default::default()
+        });
+        tracker.succeed();
+        let got = rt.usage_queue().pop_oldest(10);
+        assert_eq!(got.len(), 1, "tokenless Claude activity is still observed");
+        let observation: Value = serde_json::from_slice(&got[0]).unwrap();
+        assert_eq!(observation["tokens"]["total_tokens"], 0);
+        assert!(observation["claude_cache"].is_object());
         for fail in [true, false] {
             let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
             tracker.sink().discard();
@@ -2620,6 +2736,7 @@ mod tests {
                     .unwrap_or_default(),
                 // Go's record has neither: none are written.
                 prompt_prefix_hash: String::new(),
+                claude_cache: None,
                 timings: Timings::default(),
             };
             let client = Client {
@@ -2925,6 +3042,7 @@ mod tests {
                 stream: true,
                 clock: Default::default(),
                 prompt_prefix_hash: String::new(),
+                attempts: Default::default(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();
