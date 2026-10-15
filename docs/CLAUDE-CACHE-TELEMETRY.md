@@ -21,12 +21,23 @@ record format.
 
 `claude_cache.schema_version` is `2`. Each record covers one upstream attempt,
 including failed attempts that reached request preparation.
-Completed or client-dropped attempts without observed usage (`Ending::Done`)
-produce an additional queue observation marked `usage_observed: false`, without
-a Go plugin record. Failed attempts do not receive this marker.
-The additional records' zero tokens are unknown usage, not measured zeros;
-`failed: false` on these records does not establish successful completion. Ordinary
-records omit this marker and retain Go's accounting.
+An additional queue observation marked `usage_observed: false` is emitted on
+`Ending::Done` (completion or client drop) only when all these conditions hold:
+
+- The attempt was not discarded and has not already been published.
+- The executor has not published an outcome.
+- The executor marked the attempt as usage-required, but no usage was observed.
+- Collected Claude telemetry is present, requiring the telemetry opt-in and usage
+  collection to be enabled.
+- The usage queue accepts records (management and usage statistics are enabled).
+
+These additional observations do not reach Go plugins. Failed attempts do not
+receive the marker. A native non-streaming Claude JSON response without usage
+still calls `UsageSink::publish()` without `usage_required()`: its pre-set outcome
+produces an ordinary record without this marker. Absence of the marker therefore
+does not prove that usage was observed. The additional records' zero tokens mean
+unknown usage, and `failed: false` does not establish successful completion.
+Ordinary records retain Go's accounting.
 
 - `breakpoints` lists the final upstream cache markers in tools, system, and
   messages order. Each entry has `path`, `ttl`, a cumulative `prefix`, and
@@ -37,7 +48,8 @@ records omit this marker and retain Go's accounting.
   thinking and empty text suffixes are skipped. A same-TTL explicit marker at
   that target is a no-op, not a duplicate breakpoint. `automatic_cache_ttl`
   retains the top-level TTL even when no target exists or explicit TTLs conflict.
-- `tools`, `system`, and `history_prefix` contain `hash` and serialized `bytes`.
+- `tools`, `system`, and `history_prefix` contain `hash` and `bytes`, the byte size
+  of the serialized fingerprint input described below, not the raw section size.
   No online tokenizer runs. History ends at the last message cache breakpoint. No cached
   history leaves an empty fingerprint. Cumulative breakpoint fingerprints include
   the preceding tools, system, and message roles.
@@ -98,12 +110,16 @@ are normalized by decoding and serializing the observation copy. Field order,
 text, tool names, signatures, and other content remain significant. These are
 proxy fingerprints, not Anthropic's private cache keys.
 
-Byte lengths include JSON block syntax and omit provider framing. Anthropic
-returns exact aggregate usage, not per-section lengths. Offline replay scales
-text byte positions to that returned aggregate; relative section token lengths
-remain estimates. Media lengths cannot be scaled this way, so replay leaves
-media requests unmodelled. Exact section counts would require additional provider
-calls, which this feature does not make.
+Each `bytes` value sums the sizes of JSON-serialized `(path, role, block)` tuples,
+with each block's `cache_control` removed. This includes path and role strings
+and tuple JSON framing. It excludes the eight-byte length frame added to the
+hash for each tuple, model/configuration hash inputs, and provider framing.
+These are fingerprint-input byte sizes, not section byte lengths or token counts.
+Anthropic returns exact aggregate usage, not per-section lengths. Offline replay
+scales these byte positions to that returned aggregate; relative section token
+lengths remain estimates. Media lengths cannot be scaled this way, so replay
+leaves media requests unmodelled. Exact section counts would require additional
+provider calls, which this feature does not make.
 
 Work is linear in body size, with a bounded lookback ring. Tokenization and the
 tokenizer's resident allocation are absent. The observation copy and hashing are
@@ -158,9 +174,9 @@ The simulation anchors sliding expiry at request start and makes a cold entry
 available at the first response byte. Concurrent cold starts can both write. It
 uses the longest matching live prefix within the recorded lookback, accounts for
 new tail writes, and separates account and workspace scopes. Prefix positions are
-scaled from serialized text bytes to each attempt's exact returned cache-read plus
-cache-write total. Media and `usage_observed: false` records remain unmodelled,
-cancel session maintenance timers, and never schedule simulated pings.
+scaled from serialized fingerprint-input bytes to each attempt's exact returned
+cache-read plus cache-write total. Media and `usage_observed: false` records remain
+unmodelled, cancel session maintenance timers, and never schedule simulated pings.
 The relative positions of mixed-TTL segments remain estimates.
 `replay_validation` compares the observed-TTL simulation with actual reads and
 writes. Large residuals indicate missing cache state, collection gaps, or model
