@@ -16,8 +16,8 @@ API = runpy.run_path(str(SCRIPT))
 
 def record(seconds, *, first_delay=1, scope="account-a", history="history-a", kind="main"):
     def point(name, size, path):
-        return {"path": path, "ttl": "1h", "prefix": {"hash": name, "tokens_estimate": size}, "lookback": []}
-    cache = {"schema_version": 1, "model": "claude-opus-5-5", "speed": "",
+        return {"path": path, "ttl": "1h", "prefix": {"hash": name, "bytes": size * 3}, "lookback": []}
+    cache = {"schema_version": 2, "media_present": False, "model": "claude-opus-5-5", "speed": "",
              "session_hash": "session-a", "scope_hash": scope, "thinking_hash": "adaptive",
              "effort": "high", "betas": [], "tools": {"hash": "tools"}, "system": {"hash": "system"},
              "history_prefix": {"hash": history}, "request_type": kind, "base_request_type": kind,
@@ -73,10 +73,10 @@ class ReplayTests(unittest.TestCase):
 
     def test_prefix_tail_lookback_and_scope_isolation(self):
         changed = record(10, history="history-b")
-        changed["claude_cache"]["breakpoints"][-1]["prefix"]["tokens_estimate"] = 10000
+        changed["claude_cache"]["breakpoints"][-1]["prefix"]["bytes"] = 30000
         changed["tokens"]["cache_creation_tokens"] = 10000
         changed["tokens"]["cache_creation_1h_tokens"] = 10000
-        changed["claude_cache"]["breakpoints"][-1]["lookback"] = [{"hash": "history-a", "tokens_estimate": 8000}]
+        changed["claude_cache"]["breakpoints"][-1]["lookback"] = [{"hash": "history-a", "bytes": 24000}]
         tail = self.replay([record(0), changed], "1h")
         self.assertEqual(tail["read_tokens"], 8000)
         self.assertEqual(tail["write_1h_tokens"], 10000, "8000 first write + 2000 new tail")
@@ -110,6 +110,16 @@ class ReplayTests(unittest.TestCase):
         result = self.replay([failed], "1h")
         self.assertEqual(result["unknown_ttl_write_tokens"], 8000)
         self.assertAlmostEqual(result["api_equivalent_usd_high"] - result["api_equivalent_usd_low"], 8000 * 3 / 1_000_000)
+
+    def test_media_is_charged_but_never_weighted_as_text_or_pinged(self):
+        media = record(0)
+        media["claude_cache"]["media_present"] = True
+        media["claude_cache"]["breakpoints"][-1]["prefix"]["bytes"] = 30_000_000
+        result = self.replay([media], "1h+bounded-pings", end=4 * 3_600_000)
+        self.assertEqual(result["media_requests"], 1)
+        self.assertEqual(result["unmodelled_requests"], 1)
+        self.assertEqual(result["write_1h_tokens"], 8000)
+        self.assertEqual(result.get("pings", 0), 0)
 
     def test_cli_failure_buckets_cannot_cancel_another_requests_unknown_writes(self):
         failed = record(0)

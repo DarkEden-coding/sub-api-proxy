@@ -209,13 +209,12 @@ pub enum UpstreamStage {
 #[derive(Clone, Default)]
 pub struct UsageSink(Option<std::sync::Arc<dyn UsageObserver>>, CaptureSink);
 
-/// No payloads or credentials: hashes and local size estimates only. Anthropic does
-/// not return per-section token counts; these estimates are not billable usage.
+/// No payloads or credentials: keyed fingerprints and serialized byte lengths only.
+/// Replay estimates token positions offline from returned aggregate usage.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct CacheFingerprint {
     pub hash: String,
     pub bytes: usize,
-    pub tokens_estimate: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -231,7 +230,7 @@ pub struct CacheBreakpoint {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ClaudeCacheTelemetry {
     pub schema_version: u8,
-    pub token_estimator: &'static str,
+    pub media_present: bool,
     pub session_hash: String,
     pub account_hash: String,
     pub scope_hash: String,

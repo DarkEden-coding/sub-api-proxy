@@ -2,35 +2,60 @@
 //! the wire body or sends a token-count request.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 use cpa_core::exec::{CacheBreakpoint, CacheFingerprint, ClaudeCacheTelemetry, ExecRequest};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Ctx, Prepared, detect, identity, session, signals};
+use super::{Ctx, Prepared, alias, detect, identity, session, signals};
 
-fn hash(bytes: &[u8]) -> String {
-    session::hex(&Sha256::digest(bytes))
+fn hash(secret: &str, domain: &str, value: &str) -> String {
+    session::hex(&alias::digest(secret, &format!("cache-telemetry-{domain}"), value))
 }
 
-fn identifier(domain: &str, value: &str) -> String {
+fn identifier(secret: &str, domain: &str, value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    hash(format!("cpa:claude-cache:{domain}:v1\0{value}").as_bytes())
+    hash(secret, domain, value)
 }
 
-fn snapshot(hasher: &Sha256, bytes: usize, tokens_estimate: usize) -> CacheFingerprint {
+fn snapshot(secret: &str, hasher: &Sha256, bytes: usize) -> CacheFingerprint {
     CacheFingerprint {
-        hash: session::hex(&hasher.clone().finalize()),
+        hash: hash(secret, "content", &session::hex(&hasher.clone().finalize())),
         bytes,
-        tokens_estimate,
+    }
+}
+
+fn contains_media(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            matches!(
+                fields.get("type").and_then(Value::as_str),
+                Some("image" | "document" | "audio" | "video")
+            ) || fields.values().any(contains_media)
+        }
+        Value::Array(values) => values.iter().any(contains_media),
+        _ => false,
     }
 }
 
 pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> Option<ClaudeCacheTelemetry> {
+    // Never export a credential verifier, including a key-derived credential ID,
+    // wire identity or aliased tool name. A process-local secret also keys content
+    // hashes. Restarts begin a new observation epoch; no secret is persisted/logged.
+    // ponytail: process-local identity; persist a private installation key only
+    // if the study later needs joins across restarts.
+    static SECRET: OnceLock<Option<String>> = OnceLock::new();
+    let secret = SECRET
+        .get_or_init(|| {
+            let mut bytes = [0; 32];
+            getrandom::fill(&mut bytes).ok()?;
+            Some(session::hex(&bytes))
+        })
+        .as_ref()?;
     let mut root: Value = serde_json::from_str(&prepared.body).ok()?;
-    let encoder = crate::tokenizer::encoder(crate::tokenizer::Encoding::O200kBase).ok()?;
     let string = |key: &str| root[key].as_str().unwrap_or_default().to_owned();
     let mut betas: Vec<String> = prepared
         .headers
@@ -67,7 +92,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
     } else {
         &account
     };
-    let account_hash = identifier("account", account);
+    let account_hash = identifier(secret, "account", account);
     let session_id = user["session_id"]
         .as_str()
         .map(str::to_owned)
@@ -84,7 +109,9 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
         })
         .collect();
     let scope_hash = hash(
-        &serde_json::to_vec(&(
+        secret,
+        "scope",
+        &serde_json::to_string(&(
             &account_hash,
             &ctx.base_url,
             &req.caller.principal,
@@ -99,15 +126,14 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
         > 0
         || declared == "retry";
     let mut telemetry = ClaudeCacheTelemetry {
-        schema_version: 1,
-        token_estimator: "o200k_base_json_blocks_256b_chunks",
-        session_hash: identifier("session", &session_id),
+        schema_version: 2,
+        session_hash: identifier(secret, "session", &session_id),
         account_hash,
         scope_hash,
         model: string("model"),
         thinking_type: root["thinking"]["type"].as_str().unwrap_or_default().to_owned(),
         thinking_budget: root["thinking"]["budget_tokens"].as_i64(),
-        thinking_hash: hash(&serde_json::to_vec(&root["thinking"]).ok()?),
+        thinking_hash: hash(secret, "thinking", &serde_json::to_string(&root["thinking"]).ok()?),
         effort: root["output_config"]["effort"].as_str().unwrap_or_default().to_owned(),
         betas,
         speed: if prepared.fast { "fast".into() } else { string("speed") },
@@ -140,13 +166,11 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
     telemetry.automatic_cache_ttl = automatic.as_ref().map(|c| c["ttl"].as_str().unwrap_or("5m").into());
     let mut automatic_candidate = None;
     let mut prefix_bytes = 0;
-    let mut prefix_tokens = 0;
     let mut recent: VecDeque<Vec<CacheFingerprint>> = VecDeque::new();
     let mut previous_group = None;
     for section in ["tools", "system", "messages"] {
         let mut section_hash = Sha256::new();
         let mut section_bytes = 0;
-        let mut section_tokens = 0;
         let mut blocks = Vec::new();
         let value = root.get_mut(section);
         if let Some(value) = value {
@@ -195,23 +219,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
                 .as_object_mut()
                 .and_then(|o| o.remove("cache_control"))
                 .filter(valid_control);
-            let json = serde_json::to_string(&block).ok()?;
-            // ponytail: O200k is the existing local Claude count estimator, not
-            // Anthropic's tokenizer. Counts exclude media tokenization and framing;
-            // replay calibrates cumulative positions to returned read+write usage.
-            // Bound regex recursion and BPE work on long repeated strings: an
-            // unbounded encode_ordinary can panic with regex StackOverflow. Chunk
-            // seams affect only this labelled estimate, never the upstream payload.
-            let mut text = json.as_str();
-            let mut tokens = 0;
-            while !text.is_empty() {
-                let mut end = text.len().min(256);
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                tokens += encoder.encode_ordinary(&text[..end]).len();
-                text = &text[end..];
-            }
+            telemetry.media_present |= contains_media(block);
             let bytes = serde_json::to_vec(&(&path, &role, &*block)).ok()?;
             // Length framing prevents concatenation ambiguities. Only cache_control
             // is excluded: every final text, tool name, signature and role participates.
@@ -221,9 +229,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
             }
             prefix_bytes += bytes.len();
             section_bytes += bytes.len();
-            prefix_tokens += tokens;
-            section_tokens += tokens;
-            let current = snapshot(&prefix, prefix_bytes, prefix_tokens);
+            let current = snapshot(secret, &prefix, prefix_bytes);
             // Anthropic checks 20 positions including the breakpoint. A parallel
             // run shares one position; keep its boundaries for explicit mid-run writes.
             let group = block["type"]
@@ -258,7 +264,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
                     lookback: lookback.clone(),
                 });
                 if section == "messages" {
-                    telemetry.history_prefix = snapshot(&section_hash, section_bytes, section_tokens);
+                    telemetry.history_prefix = snapshot(secret, &section_hash, section_bytes);
                 }
             }
             if let Some(automatic) = &automatic
@@ -276,7 +282,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
                             lookback,
                         },
                         if section == "messages" {
-                            snapshot(&section_hash, section_bytes, section_tokens)
+                            snapshot(secret, &section_hash, section_bytes)
                         } else {
                             CacheFingerprint::default()
                         },
@@ -285,8 +291,8 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
             }
         }
         match section {
-            "tools" => telemetry.tools = snapshot(&section_hash, section_bytes, section_tokens),
-            "system" => telemetry.system = snapshot(&section_hash, section_bytes, section_tokens),
+            "tools" => telemetry.tools = snapshot(secret, &section_hash, section_bytes),
+            "system" => telemetry.system = snapshot(secret, &section_hash, section_bytes),
             _ => {}
         }
     }
