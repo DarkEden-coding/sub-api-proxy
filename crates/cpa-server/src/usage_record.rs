@@ -1290,6 +1290,8 @@ pub struct Record {
     /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
     pub prompt_prefix_hash: String,
     pub claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
+    /// Present only for additional telemetry-only records that Go omits.
+    pub usage_observed: Option<bool>,
     pub timings: Timings,
 }
 
@@ -1480,6 +1482,9 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
         t.int("total_tokens", detail.total);
     });
     w.bool("failed", record.failed);
+    if let Some(observed) = record.usage_observed {
+        w.bool("usage_observed", observed);
+    }
     w.bool("generate", record.generate);
     w.bool("stream", record.stream);
     w.object("fail", |f| {
@@ -2038,7 +2043,7 @@ impl Tracker {
             observer: std::sync::Arc::new(Observer {
                 provider,
                 started,
-                cache_telemetry: rt.usage_queue().accepts(),
+                cache_telemetry: rt.usage_queue().wants_claude_cache(),
                 state: std::sync::Mutex::default(),
             }),
             stream: StreamUsage::default(),
@@ -2148,6 +2153,7 @@ impl Tracker {
                     // Keep activity and timestamps even when a Claude stream never
                     // returns usage. Go plugins still receive nothing on this path.
                     telemetry_only = true;
+                    record.usage_observed = Some(false);
                     Detail::default()
                 }
                 Ending::Done => usage.unwrap_or_default(),
@@ -2621,6 +2627,20 @@ mod tests {
         let observation: Value = serde_json::from_slice(&got[0]).unwrap();
         assert_eq!(observation["tokens"]["total_tokens"], 0);
         assert!(observation["claude_cache"].is_object());
+        assert_eq!(observation["usage_observed"], false);
+        assert_eq!(
+            observation["failed"], false,
+            "absence of usage is not a successful completion signal"
+        );
+        let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        tracker.sink().usage_required();
+        tracker
+            .sink()
+            .claude_cache(cpa_core::exec::ClaudeCacheTelemetry::default());
+        drop(tracker); // Same path as a client dropping its stream before usage.
+        let got = rt.usage_queue().pop_oldest(10);
+        let observation: Value = serde_json::from_slice(&got[0]).unwrap();
+        assert_eq!(observation["usage_observed"], false);
         for fail in [true, false] {
             let tracker = Tracker::start(&rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
             tracker.sink().discard();
@@ -2737,6 +2757,7 @@ mod tests {
                 // Go's record has neither: none are written.
                 prompt_prefix_hash: String::new(),
                 claude_cache: None,
+                usage_observed: None,
                 timings: Timings::default(),
             };
             let client = Client {

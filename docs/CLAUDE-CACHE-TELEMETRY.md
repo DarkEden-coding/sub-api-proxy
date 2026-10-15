@@ -1,16 +1,31 @@
 # Claude cache telemetry
 
 Claude Messages attempts add `claude_cache` to the existing usage queue and RESP
-`usage` channel when usage statistics are enabled. This is observation only: it
+`usage` channel only when usage statistics and the separate, default-off
+`observability.usage.claude-cache-telemetry` setting are enabled. For example:
+
+```yaml
+observability:
+  usage:
+    usage-statistics-enabled: true
+    claude-cache-telemetry: true
+```
+
+Management must also be enabled for the usage queue to accept records.
+This is observation only: it
 does not change request bytes, cache markers, TTLs, routing, or responses. It never
 sends maintenance requests or token-count requests. Usage plugins retain the Go
 record format.
 
 ## Record fields
 
-`claude_cache.schema_version` is `1`. Each record covers one upstream attempt,
+`claude_cache.schema_version` is `2`. Each record covers one upstream attempt,
 including failed attempts that reached request preparation.
-Tokenless streams still produce a queue observation, without a Go plugin record.
+Streams without observed usage still produce an additional queue observation,
+marked `usage_observed: false`, without a Go plugin record. This includes streams
+dropped by the client. Their zero tokens are unknown usage, not measured zeros;
+`failed: false` on these records does not establish successful completion. Ordinary
+records omit this marker and retain Go's accounting.
 
 - `breakpoints` lists the final upstream cache markers in tools, system, and
   messages order. Each entry has `path`, `ttl`, a cumulative `prefix`, and
@@ -21,10 +36,12 @@ Tokenless streams still produce a queue observation, without a Go plugin record.
   thinking and empty text suffixes are skipped. A same-TTL explicit marker at
   that target is a no-op, not a duplicate breakpoint. `automatic_cache_ttl`
   retains the top-level TTL even when no target exists or explicit TTLs conflict.
-- `tools`, `system`, and `history_prefix` contain `hash`, `bytes`, and
-  `tokens_estimate`. History ends at the last message cache breakpoint. No cached
+- `tools`, `system`, and `history_prefix` contain `hash` and serialized `bytes`.
+  No online tokenizer runs. History ends at the last message cache breakpoint. No cached
   history leaves an empty fingerprint. Cumulative breakpoint fingerprints include
   the preceding tools, system, and message roles.
+- `media_present` flags image, document, audio, or video blocks, including nested
+  tool results. Their full contents still participate in hashes and byte lengths.
 - `model`, `thinking_type`, `thinking_budget`, `thinking_hash`, `effort`, `betas`,
   `speed`, and `service_tier` describe the final body and beta headers. The full
   thinking configuration is hashed, not stored. Prefix hashes also bind the
@@ -37,7 +54,8 @@ Tokenless streams still produce a queue observation, without a Go plugin record.
   `scope_hash` also binds the wire account UUID, upstream base URL, caller isolation, and final
   organization, project, and workspace headers. No identifiers or header values
   are stored in these additions. Without an explicit client session, a derived
-  session can change when its instructions change.
+  session can change when its instructions change. All hashes are keyed with a
+  private process-local secret; they are stable only until the proxy restarts.
 - `request_start_unix_ms`, `first_response_byte_unix_ms`, and `end_unix_ms` are UTC
   Unix milliseconds. Start is the upstream send, not client arrival. End is the
   attempt's completion or cancellation, not the downstream socket flush. Missing
@@ -64,32 +82,44 @@ not inferred from the requested TTL. Aggregate reads and writes remain unchanged
 Returned TTL buckets survive an executor-published failure even when Go's
 aggregate failure accounting reports zero tokens.
 
-## Fingerprint and token-count limits
+## Fingerprint and length limits
 
-Hashes are full SHA-256. Identity hashes have separate domain prefixes. Content
-hashes use the final prepared JSON blocks, paths, and roles, with length framing.
+Exported hashes are domain-separated HMAC-SHA256, keyed with a random 256-bit
+process-local secret. The secret never leaves memory, is not persisted or logged,
+and is not derived from credentials. Collection is skipped if secure randomness
+is unavailable. This prevents exported identities, key-derived credential IDs,
+tool aliases, or wire metadata from becoming offline credential verifiers.
+Content hashes wrap SHA-256 over the final prepared JSON blocks, paths, and roles,
+with length framing.
 Only the blocks' `cache_control` objects are omitted, so moving a marker or choosing
 another TTL does not change the matching content fingerprint. JSON string escapes
 are normalized by decoding and serializing the observation copy. Field order,
 text, tool names, signatures, and other content remain significant. These are
 proxy fingerprints, not Anthropic's private cache keys.
 
-`token_estimator` is `o200k_base_json_blocks_256b_chunks`. It uses the existing
-local O200k tokenizer in bounded, UTF-8-safe chunks. This bounds regex and BPE work
-on long repeated strings. Counts include JSON block syntax, omit provider framing,
-and do not implement Anthropic's media tokenization. Chunk seams can change the
-estimate. **These are not exact Anthropic section counts.** Anthropic returns exact
-aggregate usage, not per-section lengths. Exact section counts would require
-additional provider calls, which this feature does not make.
+Byte lengths include JSON block syntax and omit provider framing. Anthropic
+returns exact aggregate usage, not per-section lengths. Offline replay scales
+text byte positions to that returned aggregate; relative section token lengths
+remain estimates. Media lengths cannot be scaled this way, so replay leaves
+media requests unmodelled. Exact section counts would require additional provider
+calls, which this feature does not make.
 
 Work is linear in body size, with a bounded lookback ring. Tokenization and the
-observation copy are skipped when the usage queue is disabled. Enabling telemetry
-also initializes the existing shared O200k tokenizer if it was not already used.
+tokenizer's resident allocation are absent. The observation copy and hashing are
+skipped unless both usage collection and the separate telemetry opt-in are enabled.
+Collection still parses and hashes the final payload synchronously before sending;
+large bodies can delay async workers. Use the mock load check below before enabling
+collection on a constrained host.
+
+Restarts rotate every fingerprint and identity. Do not interpret a hash change
+across a restart as a prompt change or cold-cache proof. Restart boundaries cannot
+join sessions or detect double writes; use wake-up exports from the same process
+epoch. The replay does not model reuse across epochs.
 
 The new fields contain no prompt content or credentials. Existing Go-compatible
 usage fields are unchanged and can contain client keys and account metadata. A
 collector must protect the full record or export an allowlist containing
-`execution_id`, `request_id`, `failed`, `tokens`, and `claude_cache`.
+`execution_id`, `request_id`, `failed`, `usage_observed`, `tokens`, and `claude_cache`.
 
 ## Offline replay
 
@@ -127,7 +157,9 @@ The simulation anchors sliding expiry at request start and makes a cold entry
 available at the first response byte. Concurrent cold starts can both write. It
 uses the longest matching live prefix within the recorded lookback, accounts for
 new tail writes, and separates account and workspace scopes. Prefix positions are
-calibrated to each attempt's exact returned cache-read plus cache-write total.
+scaled from serialized text bytes to each attempt's exact returned cache-read plus
+cache-write total. Media and `usage_observed: false` records remain unmodelled,
+cancel session maintenance timers, and never schedule simulated pings.
 The relative positions of mixed-TTL segments remain estimates.
 `replay_validation` compares the observed-TTL simulation with actual reads and
 writes. Large residuals indicate missing cache state, collection gaps, or model
@@ -185,3 +217,33 @@ network-free replay fixtures. A week of new production telemetry is still needed
 before choosing a TTL or evaluating a maintenance policy. Publishing a release
 or replacing Core's running proxy requires Vayun's explicit approval. No live
 Claude login is exercised by these tests.
+
+### Mock load check
+
+The existing release latency harness supports telemetry on/off, a synthetic
+base64 image, two proxy workers, and an unrelated 10 ms SSE stream. Run alternating
+off/on pairs at least five times, for both workloads and both transport modes:
+
+```sh
+cargo build --release -p cpa-server --example claude_latency --locked
+for workload in text media; do
+  size=1000000; media=0
+  if [ "$workload" = media ]; then size=30000000; media=1; fi
+  for repeat in 1 2 3 4 5; do
+    for telemetry in off on; do
+      CACHE_TELEMETRY="$telemetry" MEDIA="$media" UNRELATED_STREAM=1 \
+        WORKERS=2 N=2 WARMUP=2 CONC=2 SIZES="$size" \
+        bench/latency.sh /tmp/cache-load.jsonl target/release/examples/claude_latency
+    done
+  done
+done
+```
+
+`bench/latency.sh` requires a loopback-only network namespace. Set `CPUS` to the
+host's permitted CPU list. Every timed request must reach the mock, return HTTP
+200 and `message_stop`; the harness asserts that the telemetry toggle takes effect.
+Compare `proxy.up_first_ms`, `proxy.process_cpu_ms`, `process_vmhwm_kb`, and
+`proxy.unrelated_stream_max_gap_ms`. CPU and peak RSS cover the entire harness
+(proxy, mock, and client), not an isolated proxy process. The media source is
+synthetic and is accepted only by the mock; it is not an Anthropic media validation
+test. These measurements do not substitute for host-specific deployment evidence.

@@ -522,7 +522,7 @@ async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
 /// `upstream_url`: the runtime, and the proxy's `/v1/messages` URL.
 async fn usage_proxy(dir: &Path, upstream_url: &str) -> (Arc<cpa_server::Runtime>, String) {
     let mut config = Config::parse(&format!(
-        "observability:\n  usage:\n    usage-statistics-enabled: true\n\
+        "observability:\n  usage:\n    usage-statistics-enabled: true\n    claude-cache-telemetry: true\n\
          claude-api-key:\n  - api-key: sk-upstream-usage\n    base-url: {upstream_url}\n"
     ))
     .unwrap();
@@ -744,7 +744,7 @@ async fn usage_record_names_the_conversation_and_prompt_prefix() {
     assert_eq!(cache(0)["system"], cache(2)["system"]);
     assert_ne!(cache(0)["system"], cache(3)["system"]);
     assert_ne!(cache(0)["history_prefix"], cache(1)["history_prefix"]);
-    assert!(cache(0)["history_prefix"]["tokens_estimate"].as_u64().unwrap() > 0);
+    assert!(cache(0)["history_prefix"]["bytes"].as_u64().unwrap() > 0);
     for record in &records {
         let text = record.to_string();
         for prompt in [
@@ -761,7 +761,7 @@ async fn usage_record_names_the_conversation_and_prompt_prefix() {
 }
 
 /// Both response modes keep the returned TTL buckets and final wire facts. Turning
-/// usage off changes neither the prepared request bytes nor the response bytes.
+/// telemetry off changes neither the prepared request bytes nor the response bytes.
 #[tokio::test]
 async fn claude_cache_telemetry_is_final_content_free_and_observational() {
     let _registry = REGISTRY.lock().await;
@@ -816,9 +816,30 @@ async fn claude_cache_telemetry_is_final_content_free_and_observational() {
         );
     }
     let records = usage_records(&rt, 5).await;
+    // Reproduce the former offline verifier with the configured API-key ID.
+    // None of its inputs are secret to an attacker guessing that key.
+    let credential = cpa_core::config::credentials::from_config(&rt.config()).remove(0);
+    use sha2::{Digest, Sha256};
+    let old_account = format!(
+        "{:x}",
+        Sha256::digest(format!("cpa:claude-cache:account:v1\0{}", credential.id))
+    );
+    assert_ne!(records[0]["claude_cache"]["account_hash"], old_account);
+    let old_session = format!(
+        "{:x}",
+        Sha256::digest(b"cpa:claude-cache:session:v1\0cache-session-private")
+    );
+    assert_ne!(records[0]["claude_cache"]["session_hash"], old_session);
     for (i, kind) in ["main", "helper", "subagent", "compaction", "retry"].iter().enumerate() {
         let record = &records[i];
         let cache = &record["claude_cache"];
+        assert_eq!(cache["schema_version"], 2);
+        assert_eq!(cache["media_present"], false);
+        assert!(cache["history_prefix"].get("tokens_estimate").is_none());
+        assert!(
+            record.get("usage_observed").is_none(),
+            "ordinary records keep Go accounting"
+        );
         assert_eq!(cache["request_type"], *kind, "{record}");
         assert_eq!(cache["model"], "claude-opus-5-5");
         assert_eq!(cache["thinking_type"], "adaptive");
@@ -861,24 +882,70 @@ async fn claude_cache_telemetry_is_final_content_free_and_observational() {
         assert!(wire.get("prompt_cache_options").is_none(), "final body was shaped");
         assert_eq!(wire["messages"][0]["content"][0]["text"], "secret history text");
     }
-    rt.usage_queue().configure(true, &Config::parse("{}").unwrap());
-    let mut plain = body;
-    plain["stream"] = false.into();
-    let off_reply = client
-        .post(&url)
-        .header("x-api-key", "client-key-1")
-        .header("x-claude-code-session-id", "cache-session-private")
-        .header("x-cliproxy-request-type", "main")
-        .json(&plain)
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert_eq!(off_reply, replies[0]);
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen[0].body, seen[5].body);
+    // Usage remains enabled: only the new, separate telemetry opt-in is off.
+    rt.usage_queue().configure(
+        true,
+        &Config::parse("observability: {usage: {usage-statistics-enabled: true}}\n").unwrap(),
+    );
+    for (kind, original) in [("main", 0), ("subagent", 2)] {
+        let mut plain = body.clone();
+        plain["stream"] = (kind == "subagent").into();
+        let off_reply = client
+            .post(&url)
+            .header("x-api-key", "client-key-1")
+            .header("x-claude-code-session-id", "cache-session-private")
+            .header("x-cliproxy-request-type", kind)
+            .json(&plain)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(off_reply, replies[original], "both response modes keep their bytes");
+    }
+    let off_records = usage_records(&rt, 2).await;
+    assert!(
+        off_records.iter().all(|r| r.get("claude_cache").is_none()),
+        "statistics alone never enable telemetry"
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].body, seen[5].body);
+        assert_eq!(seen[2].body, seen[6].body, "streaming on/off upstream identity");
+    }
+    rt.usage_queue().configure(true, &rt.config());
+    for data in ["c2VjcmV0LWltYWdlLWE=", "c2VjcmV0LWltYWdlLWI="] {
+        let mut media = body.clone();
+        media["messages"] = serde_json::json!([
+            {"role":"assistant","content":[{"type":"tool_use","id":"image-call","name":"private_tool_name","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"image-call","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":data}}
+            ],"cache_control":{"type":"ephemeral"}}]}
+        ]);
+        let response = client
+            .post(&url)
+            .header("x-api-key", "client-key-1")
+            .json(&media)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+    }
+    let media = usage_records(&rt, 2).await;
+    let first = &media[0]["claude_cache"];
+    let second = &media[1]["claude_cache"];
+    assert_eq!(first["media_present"], true, "nested tool-result media must be flagged");
+    assert_eq!(second["media_present"], true);
+    assert_eq!(first["history_prefix"]["bytes"], second["history_prefix"]["bytes"]);
+    assert_ne!(
+        first["history_prefix"]["hash"], second["history_prefix"]["hash"],
+        "media bytes remain in the hash"
+    );
+    for row in media {
+        assert!(!row["claude_cache"].to_string().contains("c2VjcmV0LWltYWdl"));
+    }
     assert!(rt.usage_queue().pop_oldest(10).is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }

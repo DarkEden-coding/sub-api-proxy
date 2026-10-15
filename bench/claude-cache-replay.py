@@ -47,8 +47,8 @@ def replay(records, policy, start, end, *, ping_minutes=57, max_pings=3,
            read_multiplier=0.05, model=None):
     """Sliding TTL from request start; cold writes become visible at first byte.
 
-    Prefix positions are estimates calibrated to each request's actual read+write
-    total. Retain real input/output (including compaction); only cache buckets vary.
+    Text byte positions are scaled to each request's actual read+write total.
+    Media requests remain unmodelled. Retain real input/output (including compaction).
     The ping policy is causal: it pays even if the user never returns.
     """
     entries, generations = {}, Counter()
@@ -128,19 +128,21 @@ def replay(records, policy, start, end, *, ping_minutes=57, max_pings=3,
         write_5m, write_1h, unknown_write = cache_writes(tokens)
         total = tokens.get("cache_read_tokens", 0) + write_5m + write_1h + unknown_write
         first = cache.get("first_response_byte_unix_ms")
-        if record.get("failed") or not points or total <= 0 or first is None:
+        if (record.get("failed") or record.get("usage_observed") is False
+                or cache.get("media_present") or not points or total <= 0 or first is None):
             if counted:
                 totals["unmodelled_requests"] += 1
+                totals["media_requests"] += bool(cache.get("media_present"))
                 totals["unmodelled_cache_tokens"] += total
                 totals["read_tokens"] += tokens.get("cache_read_tokens", 0)
                 totals["write_5m_tokens"] += write_5m
                 totals["write_1h_tokens"] += write_1h
                 totals["unknown_ttl_write_tokens"] += unknown_write
             continue
-        last_estimate = points[-1]["prefix"]["tokens_estimate"]
-        if last_estimate <= 0:
-            raise ValueError("non-positive final prefix estimate")
-        scale = total / last_estimate
+        last_bytes = points[-1]["prefix"]["bytes"]
+        if last_bytes <= 0:
+            raise ValueError("non-positive final prefix length")
+        scale = total / last_bytes
         read = 0
         matches = {}
         for point in points:
@@ -148,9 +150,9 @@ def replay(records, policy, start, end, *, ping_minutes=57, max_pings=3,
                 key = (cache["scope_hash"], candidate["hash"])
                 entry = entries.get(key)
                 if entry is not None and entry[0] > now:
-                    read = max(read, candidate["tokens_estimate"])
+                    read = max(read, candidate["bytes"])
                     matches[key] = entry[1]
-        read = min(read, last_estimate)
+        read = min(read, last_bytes)
         if counted:
             totals["read_tokens"] += read * scale
             totals["cold_requests"] += read == 0
@@ -159,7 +161,7 @@ def replay(records, policy, start, end, *, ping_minutes=57, max_pings=3,
         cursor = read
         for point in points:
             duration = ttl(policy, point)
-            position = point["prefix"]["tokens_estimate"]
+            position = point["prefix"]["bytes"]
             written = max(0, position - cursor) * scale
             if counted:
                 totals[f"write_{'1h' if duration == 3600 else '5m'}_tokens"] += written
@@ -239,7 +241,7 @@ def main():
     records, skipped, seen = [], Counter(), set()
     for record in read_jsonl(args.logs):
         cache = record.get("claude_cache")
-        if not cache or cache.get("schema_version") != 1 or cache.get("request_start_unix_ms") is None:
+        if not cache or cache.get("schema_version") != 2 or cache.get("request_start_unix_ms") is None:
             skipped["missing_telemetry"] += 1
             continue
         execution = record.get("execution_id")
@@ -283,6 +285,9 @@ def main():
               "assumptions": {"prices_usd_per_million": {"input": args.input_usd, "output": args.output_usd},
                               **options, "not_subscription_quota": True,
                               "counterfactual_token_positions_are_estimates": True,
+                              "position_estimator": "serialized_text_bytes_scaled_to_aggregate_usage",
+                              "media_requests_are_unmodelled": True,
+                              "fingerprints_rotate_on_proxy_restart": True,
                               "ping_compatibility_and_success_are_unverified": True,
                               "left_boundary_is_cold_without_earlier_logs": True,
                               "right_boundary_return_or_abandonment_is_unknown": True},
