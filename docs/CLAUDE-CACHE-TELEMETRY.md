@@ -21,9 +21,10 @@ record format.
 
 `claude_cache.schema_version` is `2`. Each record covers one upstream attempt,
 including failed attempts that reached request preparation.
-Streams without observed usage still produce an additional queue observation,
-marked `usage_observed: false`, without a Go plugin record. This includes streams
-dropped by the client. Their zero tokens are unknown usage, not measured zeros;
+Completed or client-dropped attempts without observed usage (`Ending::Done`)
+produce an additional queue observation marked `usage_observed: false`, without
+a Go plugin record. Failed attempts do not receive this marker.
+The additional records' zero tokens are unknown usage, not measured zeros;
 `failed: false` on these records does not establish successful completion. Ordinary
 records omit this marker and retain Go's accounting.
 
