@@ -37,3 +37,21 @@ A Rust rewrite of CLIProxyAPI (https://github.com/router-for-me/CLIProxyAPI) tar
 ## Review guidelines
 
 Flag, in order: behaviour that differs from Go at `6fecc6e` without an entry in `docs/DIFFERENCES-FROM-GO.md`; request or response bytes changed on passthrough; credentials or client keys reaching logs or the wrong side; tests that can touch the network or a real `auth-dir`; work on a request body that grows faster than linearly with its size. Skip style nits that `cargo fmt` and clippy already cover.
+
+## Claude cache telemetry deployment check
+
+Publishing a release or replacing Core's running proxy requires Vayun's explicit
+approval. Mock tests do not prove that Core's collector retains the new fields.
+After an approved deployment, inspect the collector's protected JSONL file without
+printing legacy credential fields:
+
+```sh
+jq -c 'select(.claude_cache.schema_version == 1) | {execution_id, tokens: {cache_read_tokens: .tokens.cache_read_tokens, cache_creation_5m_tokens: .tokens.cache_creation_5m_tokens, cache_creation_1h_tokens: .tokens.cache_creation_1h_tokens}, claude_cache}' "$USAGE_JSONL"
+```
+
+Confirm that normal existing Amp traffic produces ordered start, first-byte, and
+end timestamps, final TTLs, stable hashes, and returned TTL buckets. Check both
+buffered and streaming requests if both occur naturally. Do not send synthetic
+requests to a live login. The usage queue holds at most one hour, so a week-long
+study needs a continuous collector and a separate hashed schedule export. See
+[Claude cache telemetry](docs/CLAUDE-CACHE-TELEMETRY.md) for replay and limitations.
