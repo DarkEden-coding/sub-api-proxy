@@ -273,7 +273,8 @@ fn router() -> Router {
                     Some(query) => format!("/debug/pprof/?{query}"),
                     None => "/debug/pprof/".into(),
                 };
-                (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, location)])
+                // Go 1.26 ServeMux (CLIProxyAPI v8.0.35's release toolchain) answers 307.
+                (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, location)])
             }),
         )
         .route("/debug/pprof/", any(index))
@@ -389,8 +390,10 @@ async fn profile(OriginalUri(uri): OriginalUri, req: Request) -> Response {
     // net/http FormValue prefers POST, PUT and PATCH form bodies to the URL query.
     let mut seconds = None;
     if matches!(*req.method(), Method::POST | Method::PUT | Method::PATCH)
+        // mime.ParseMediaType: the type is case-insensitive, parameters and spaces ignored.
         && req.headers().get(header::CONTENT_TYPE).is_some_and(|v| {
-            v.to_str().unwrap_or_default().split(';').next() == Some("application/x-www-form-urlencoded")
+            v.to_str().unwrap_or_default().split(';').next().unwrap_or_default().trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
         })
     {
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::MAX_REQUEST_BYTES).await else {
@@ -488,7 +491,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), 301);
+        assert_eq!(response.status(), 307);
         assert_eq!(response.headers()[header::LOCATION], "/debug/pprof/?seconds=2");
         for (path, expected) in [("", 200), ("cmdline", 200), ("symbol", 200), ("unknown", 404)] {
             let response = router()
@@ -709,6 +712,10 @@ mod tests {
         // Terminal accept failures do not spin on rebind or close active sockets.
         let mut keep = tokio::net::TcpStream::connect(&next).await.unwrap();
         symbol_on(&mut keep).await;
+        let mut held = tokio::net::TcpStream::connect(&next).await.unwrap();
+        held.write_all(b"POST /debug/pprof/symbol HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+        let mut interim = [0; 25];
+        held.read_exact(&mut interim).await.unwrap();
         let (accepted, observed) = tokio::sync::oneshot::channel();
         server
             .accept_errors
@@ -718,7 +725,18 @@ mod tests {
         symbol_on(&mut keep).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(tokio::net::TcpStream::connect(&next).await.is_err());
+        // Unlike Go, the next publication drains surviving connections before binding:
+        // the held request keeps running and the replacement waits for it.
         rt.publish_config(config(true, &next, false));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(tokio::net::TcpStream::connect(&next).await.is_err());
+        held.write_all(b"0x0").await.unwrap();
+        let mut completed = String::new();
+        tokio::time::timeout(Duration::from_secs(5), held.read_to_string(&mut completed))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(completed.starts_with("HTTP/1.1 200"), "{completed}");
         fetch(next.clone()).await;
         server.shutdown().await;
         assert!(tokio::net::TcpStream::connect(&next).await.is_err());
@@ -770,14 +788,21 @@ mod tests {
                 .is_err()
         );
         drop(pending);
-        for method in [Method::POST, Method::PUT, Method::PATCH] {
+        let types = [
+            "application/x-www-form-urlencoded",
+            " Application/X-Www-Form-Urlencoded ; charset=utf-8",
+        ];
+        for (method, content_type) in [Method::POST, Method::PUT, Method::PATCH]
+            .into_iter()
+            .flat_map(|m| types.map(|t| (m.clone(), t)))
+        {
             let response = tokio::time::timeout(
                 Duration::from_secs(5),
                 router().oneshot(
                     Request::builder()
                         .method(method)
                         .uri("/debug/pprof/profile?seconds=30")
-                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(header::CONTENT_TYPE, content_type)
                         .body(axum::body::Body::from("seconds=1"))
                         .unwrap(),
                 ),
