@@ -66,6 +66,6 @@ Everything behind the numbers is in [`docs/parity-audit/`](parity-audit):
 - [`status.md`](parity-audit/status.md) gives each item its status, the evidence (the Rust code and tests that cover it) and a note.
 - [`manual.tsv`](parity-audit/manual.tsv) holds the judgments made by reading code, with their evidence.
 - [`audit.py`](parity-audit/audit.py) rebuilds `status.md`, the table above, and the README parity sentence from the same totals. [`probe.py`](parity-audit/probe.py) starts the binary and requests every route in the checklist with a private test configuration, to see which ones are routed; its results are in `routes.json`.
-- [`verify_reference.py`](parity-audit/verify_reference.py) checks the frozen checklist's IDs, test declarations, RPC methods and citation bounds against a read-only Go clone. It does not establish Rust behavior coverage.
+- [`verify_reference.py`](parity-audit/verify_reference.py) checks the frozen checklist's IDs and retained text, test declarations, routes (method and full path), config leaves, CLI flags, RPC methods and citation bounds against a read-only Go clone. It does not establish Rust behavior coverage.
 
 Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh all three. The [v0.2.6 rebaseline](parity-audit/rebaseline.md) records the review against `6fecc6e`; the [v8.0.35 reference update](parity-audit/reference-v8.0.35.md) records the new target's inventory and count changes.

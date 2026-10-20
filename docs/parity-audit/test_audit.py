@@ -12,6 +12,9 @@ spec.loader.exec_module(audit)
 spec = importlib.util.spec_from_file_location("probe", Path(__file__).with_name("probe.py"))
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+spec = importlib.util.spec_from_file_location("verify_reference", Path(__file__).with_name("verify_reference.py"))
+verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify)
 
 
 class SummaryTests(unittest.TestCase):
@@ -120,6 +123,111 @@ class SummaryTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "exactly one parity summary"):
                             audit.render([])
                     self.assertEqual(before, [p.read_text() for p in paths])
+
+
+class RouteRegistrationTests(unittest.TestCase):
+    def test_full_paths_resolve_groups_constants_loops_and_muxes(self):
+        source = """
+func (s *Server) routes() {
+	const prefix = "/v8/management"
+	s.engine.GET(prefix+"/oauth/callback", h)
+	v1 := s.engine.Group("/v1")
+	v1.POST("/audio/speech", h)
+	nested := v1.Group("/models")
+	nested.Any("/*model", h)
+	v8 := s.engine.Group(prefix)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		v8.Handle(method, "/config/*path", h)
+	}
+	v8.Handle("PUT", "/config.yaml", h)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback", h)
+	_, _ = windows.LocalFree(windows.Handle(ptr))
+}
+"""
+        self.assertEqual(verify.registrations_in("x.go", source), [
+            (4, "GET", "/v8/management/oauth/callback"),
+            (6, "POST", "/v1/audio/speech"),
+            (8, "ANY", "/v1/models/*model"),
+            (11, "GET", "/v8/management/config/*path"),
+            (11, "DELETE", "/v8/management/config/*path"),
+            (13, "PUT", "/v8/management/config.yaml"),
+            (15, "ANY", "/auth/callback"),
+        ])
+
+    def test_unresolved_registrations_fail(self):
+        for line in ('router.GET("/v1/x", h)', "s.engine.POST(path, h)", 'g := s.engine.Group(base)'):
+            with self.subTest(line=line), self.assertRaises(SystemExit):
+                verify.registrations_in("x.go", line)
+
+
+class SuiteSkeletonTests(unittest.TestCase):
+    ROW = ("**a/x_test.go:1-90** — golden/behavior cases: `TestA` (L3). Removed upstream declarations: "
+           "`TestB`, `TestC` (historical, not active requirements). Moved upstream declarations: "
+           "`TestD` to a/y_test.go:4; `TestE` to a/y_test.go:9.")
+
+    def test_regenerated_fragments_are_ignored(self):
+        regenerated = (self.ROW.replace("1-90", "1-95").replace("(L3)", "(L5)").replace("`TestC`", "`TestF`")
+                       .replace("y_test.go:9", "z_test.go:12"))
+        self.assertEqual(verify.suite_skeleton(regenerated), verify.suite_skeleton(self.ROW))
+
+    def test_every_stripped_fragment_is_returned_for_validation(self):
+        extra = self.ROW + (" Removed upstream declarations: `TestG` (historical, not active requirements)."
+                            " Moved upstream declarations: `TestH` to a/w_test.go:7.")
+        _, _, retired, moved = verify.suite_parts(extra)
+        self.assertEqual(retired, ["TestB", "TestC", "TestG"])
+        self.assertEqual(moved, [("TestD", "a/y_test.go", 4), ("TestE", "a/y_test.go", 9), ("TestH", "a/w_test.go", 7)])
+
+    def test_a_moved_entry_without_a_target_line_stays_compared(self):
+        bogus = self.ROW + " Moved upstream declarations: `TestBogus` to missing_test.go."
+        self.assertNotEqual(verify.suite_skeleton(bogus), verify.suite_skeleton(self.ROW))
+        self.assertNotIn("TestBogus", [name for name, _, _ in verify.suite_parts(bogus)[3]])
+
+    def test_removing_one_fragment_cannot_form_another_that_goes_unchecked(self):
+        nested = self.ROW.replace(
+            " Removed upstream declarations:",
+            " Moved upstream declarations: `TestBogus` to missing_test.go:3 Removed upstream declarations:")
+        nested = nested.replace("requirements).", "requirements)..")
+        stripped, _, _, moved = verify.suite_parts(nested)
+        self.assertIn("TestBogus", stripped)
+        self.assertNotIn("TestBogus", [name for name, _, _ in moved])
+        self.assertNotEqual(verify.suite_skeleton(nested), verify.suite_skeleton(self.ROW))
+
+    def test_removing_history_cannot_form_a_declaration_that_goes_unchecked(self):
+        forged = self.ROW.replace(
+            "(L3).",
+            "(L3); `TestBogus` (L999 Removed upstream declarations: `TestZ` (historical, not active requirements).).")
+        skeleton, declared, retired, _ = verify.suite_parts(forged)
+        self.assertEqual(declared, [("TestA", 3)])
+        self.assertIn("TestZ", retired)
+        self.assertTrue(verify.MARKER.search(skeleton))
+        self.assertNotEqual(skeleton, verify.suite_skeleton(self.ROW))
+
+    def test_removing_history_cannot_form_a_link_that_hides_text(self):
+        one = " Removed upstream declarations: `{}` (historical, not active requirements)."
+        forged = self.ROW.replace(
+            " Removed upstream declarations: `TestB`, `TestC` (historical, not active requirements).",
+            "[`" + one.format("TestB") + "`](`TestBogus` (L999" + one.format("TestC") + ")")
+        skeleton, declared, retired, _ = verify.suite_parts(forged)
+        self.assertEqual(retired, ["TestB", "TestC"])
+        self.assertEqual(declared, [("TestA", 3)])
+        self.assertIn("TestBogus", skeleton)
+        self.assertNotEqual(skeleton, verify.suite_skeleton(self.ROW))
+
+    def test_the_sentinel_is_rejected_in_input(self):
+        with self.assertRaises(SystemExit):
+            verify.suite_parts(self.ROW + verify.SENTINEL)
+
+    def test_a_clean_skeleton_keeps_no_markers(self):
+        self.assertIsNone(verify.MARKER.search(verify.suite_skeleton(self.ROW)))
+
+    def test_prose_around_or_inside_history_stays_compared(self):
+        for changed in (self.ROW + " All cases are optional.",
+                        self.ROW.replace("(L3).", "(L3). Optional."),
+                        self.ROW.replace("`TestB`, `TestC`", "`TestB`, optional, `TestC`"),
+                        self.ROW.replace("y_test.go:4; ", "y_test.go:4; optional; ")):
+            with self.subTest(changed=changed):
+                self.assertNotEqual(verify.suite_skeleton(changed), verify.suite_skeleton(self.ROW))
 
 
 if __name__ == "__main__":
