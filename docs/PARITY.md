@@ -33,10 +33,10 @@ Audit of 2026-10-13.
 | M1 | 118 | 53 | 65 | 0 |
 | M2 | 158 | 111 | 40 | 7 |
 | M3 | 350 | 208 | 125 | 17 |
-| M4 | 510 | 233 | 259 | 18 |
+| M4 | 510 | 245 | 259 | 6 |
 | M5 | 303 | 180 | 102 | 21 |
 | M6 | 248 | 69 | 131 | 48 |
-| All | 1687 | 854 | 722 | 111 |
+| All | 1687 | 866 | 722 | 99 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.

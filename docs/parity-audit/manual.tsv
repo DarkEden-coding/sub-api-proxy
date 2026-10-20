@@ -344,17 +344,17 @@ M3-0289	partial	crates/cpa-exec/src/xai*.rs; xai_tests.rs go_reference_scenarios
 M3-0290	partial	crates/cpa-exec/src/xai*.rs; xai_tests.rs go_reference_scenarios (81 Go-generated scenarios, tests/fixtures/xai_go.json)	openai-xai	146 Go cases; not ported by name. The apply_patch path still uses the seam in xai_apply_patch.rs (cpa_translate::apply_patch_responses is now on master).
 M3-0291	partial	crates/cpa-exec/src/xai*.rs; xai_tests.rs go_reference_scenarios (81 Go-generated scenarios, tests/fixtures/xai_go.json)	openai-xai	Not ported by name.
 # ---------------------------------------------------------------------------------------- M4
-M4-0001	missing	no pprof listener yet	observe	To be implemented for real (listener, index, cmdline, symbol).
-M4-0002	missing	no pprof listener yet	observe	To be implemented for real (listener, index, cmdline, symbol).
-M4-0003	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: the CPU profile sits behind a non-default cargo feature.
-M4-0004	missing	no pprof listener yet	observe	To be implemented for real (listener, index, cmdline, symbol).
-M4-0005	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0006	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0007	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0008	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0009	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0010	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
-M4-0011	missing	no pprof listener yet	observe	Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501.
+M4-0001	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols, pprof_listener_reload_failure_and_shutdown	observe	Separate optional listener; index and config lifecycle checked against v8.0.35.
+M4-0002	covered	crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown	observe	NUL-separated command line checked through the actual listener.
+M4-0003	covered	crates/cpa-server/src/pprof.rs pprof_cpu_profile_is_decodable_and_exclusive, pprof_routes_and_symbols; .github/workflows/ci.yml	observe	Deliberate difference: CPU sampling requires cpa-server/pprof on Unix; default and release builds exclude the profiler, and return 501 naming the feature.
+M4-0004	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols	observe	GET raw query and POST body resolve real program counters to symbol names.
+M4-0005	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime trace returns plain-text 501.
+M4-0006	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime allocs profile returns plain-text 501.
+M4-0007	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime block profile returns plain-text 501.
+M4-0008	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime goroutine profile returns plain-text 501.
+M4-0009	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime heap profile returns plain-text 501.
+M4-0010	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime mutex profile returns plain-text 501.
+M4-0011	covered	crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md	observe	Deliberate difference: Go runtime threadcreate profile returns plain-text 501.
 M4-0012	covered	crates/cpa-core/src/credential.rs keeps open metadata; runtime.rs patch_persists_atomically_preserves_unknown_fields_and_rejects_stale; manage_go.json credentials and synth		
 M4-0013	partial	crates/cpa-core/src/config/credentials.rs, crates/cpa-server/src/management/auth_files.rs	manage	Spelling normalization is not tested case by case.
 M4-0014	partial	crates/cpa-core/src/credential.rs; manage_go.json credentials	manage	Not tested case by case.
@@ -621,7 +621,7 @@ M4-0481	partial	crates/cpa-home/src/registry.rs	home	Not ported by name.
 M4-0482	partial	crates/cpa-home/src/registry.rs	home	Not ported by name.
 M4-0483	partial	crates/cpa-server/src/runtime.rs, registry.rs	server	Not ported by name.
 M4-0484	partial	crates/cpa-server/src/runtime.rs, registry.rs	server	Not ported by name.
-M4-0485	missing	no pprof listener yet	observe	
+M4-0485	covered	crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown	observe	Serialized listener ownership replaces Go pointer/owner guards; real TCP checks cover stale replacement during drain, same-address keepalive, failed-bind retry and shutdown.
 M4-0486	partial	crates/cpa-server/src/runtime.rs, registry.rs	server	Not ported by name.
 M4-0487	partial	crates/cpa-server/src/runtime.rs, registry.rs	server	Not ported by name.
 M4-0488	partial	crates/cpa-server/src/runtime.rs, registry.rs	server	Not ported by name.

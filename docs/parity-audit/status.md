@@ -19,7 +19,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M1 | 118 | 53 | 65 | 0 |
 | M2 | 158 | 111 | 40 | 7 |
 | M3 | 350 | 208 | 125 | 17 |
-| M4 | 510 | 233 | 259 | 18 |
+| M4 | 510 | 245 | 259 | 6 |
 | M5 | 303 | 180 | 102 | 21 |
 | M6 | 248 | 69 | 131 | 48 |
 
@@ -31,7 +31,6 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | manage | 13 | 125 | M5-0090, M5-0091, M5-0097, M5-0098, M5-0099, M5-0100, M5-0128, M5-0129, M5-0130, M5-0228, M5-0276, M6-0155, M6-0162 |
 | codex | 12 | 63 | M2-0145, M2-0146, M2-0147, M2-0148, M2-0149, M3-0142, M3-0246, M3-0262, M3-0263, M4-0268, M4-0269, M6-0214 |
 | google | 12 | 28 | M3-0036, M3-0227, M3-0229, M3-0232, M3-0240, M3-0241, M3-0342, M3-0344, M5-0021, M5-0032, M5-0235, M5-0300 |
-| observe | 12 | 1 | M4-0001, M4-0002, M4-0003, M4-0004, M4-0005, M4-0006, M4-0007, M4-0008, M4-0009, M4-0010, M4-0011, M4-0485 |
 | openai-xai | 8 | 27 | M2-0139, M2-0150, M3-0056, M3-0057, M3-0154, M4-0259, M6-0216, M6-0217 |
 | home | 5 | 22 | M6-0173, M6-0225, M6-0230, M6-0231, M6-0237 |
 | server | 4 | 221 | M3-0221, M4-0307, M4-0371, M4-0372 |
@@ -40,6 +39,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | realtime | 1 | 7 | M3-0209 |
 | claude | 0 | 60 | — |
 | translate | 0 | 30 | — |
+| observe | 0 | 1 | — |
 
 ## M1
 
@@ -799,17 +799,17 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 
 | ID | Item | Status | Evidence | Area | Note |
 |---|---|---|---|---|---|
-| M4-0001 | Optional separate pprof listener `ANY /debug/pprof/` (ServeMux imposes no method constrain… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0002 | Optional separate pprof listener `ANY /debug/pprof/cmdline` (ServeMux imposes no method co… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0003 | Optional separate pprof listener `ANY /debug/pprof/profile` (ServeMux imposes no method co… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: the CPU profile sits behind a non-default cargo feature. |
-| M4-0004 | Optional separate pprof listener `ANY /debug/pprof/symbol` (ServeMux imposes no method con… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0005 | Optional separate pprof listener `ANY /debug/pprof/trace` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0006 | Optional separate pprof listener `ANY /debug/pprof/allocs` (ServeMux imposes no method con… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0007 | Optional separate pprof listener `ANY /debug/pprof/block` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0008 | Optional separate pprof listener `ANY /debug/pprof/goroutine` (ServeMux imposes no method … | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0009 | Optional separate pprof listener `ANY /debug/pprof/heap` (ServeMux imposes no method const… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0010 | Optional separate pprof listener `ANY /debug/pprof/mutex` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0011 | Optional separate pprof listener `ANY /debug/pprof/threadcreate` (ServeMux imposes no meth… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
+| M4-0001 | Optional separate pprof listener `ANY /debug/pprof/` (ServeMux imposes no method constrain… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols, pprof_listener_reload_failure_and_shutdown |  | Separate optional listener; index and config lifecycle checked against v8.0.35. |
+| M4-0002 | Optional separate pprof listener `ANY /debug/pprof/cmdline` (ServeMux imposes no method co… | covered | crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown |  | NUL-separated command line checked through the actual listener. |
+| M4-0003 | Optional separate pprof listener `ANY /debug/pprof/profile` (ServeMux imposes no method co… | covered | crates/cpa-server/src/pprof.rs pprof_cpu_profile_is_decodable_and_exclusive, pprof_routes_and_symbols; .github/workflows/ci.yml |  | Deliberate difference: CPU sampling requires cpa-server/pprof on Unix; default and release builds exclude the profiler, and return 501 naming the feature. |
+| M4-0004 | Optional separate pprof listener `ANY /debug/pprof/symbol` (ServeMux imposes no method con… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols |  | GET raw query and POST body resolve real program counters to symbol names. |
+| M4-0005 | Optional separate pprof listener `ANY /debug/pprof/trace` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime trace returns plain-text 501. |
+| M4-0006 | Optional separate pprof listener `ANY /debug/pprof/allocs` (ServeMux imposes no method con… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime allocs profile returns plain-text 501. |
+| M4-0007 | Optional separate pprof listener `ANY /debug/pprof/block` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime block profile returns plain-text 501. |
+| M4-0008 | Optional separate pprof listener `ANY /debug/pprof/goroutine` (ServeMux imposes no method … | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime goroutine profile returns plain-text 501. |
+| M4-0009 | Optional separate pprof listener `ANY /debug/pprof/heap` (ServeMux imposes no method const… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime heap profile returns plain-text 501. |
+| M4-0010 | Optional separate pprof listener `ANY /debug/pprof/mutex` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime mutex profile returns plain-text 501. |
+| M4-0011 | Optional separate pprof listener `ANY /debug/pprof/threadcreate` (ServeMux imposes no meth… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime threadcreate profile returns plain-text 501. |
 
 ### M4: 3a. Exact provider storage fields and open metadata contract
 
@@ -1318,7 +1318,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0482 | sdk/cliproxy/executionregistry/registry_test.go | partial | crates/cpa-home/src/registry.rs | home | Not ported by name. |
 | M4-0483 | sdk/cliproxy/executor/lifecycle_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
 | M4-0484 | sdk/cliproxy/executor/types_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
-| M4-0485 | sdk/cliproxy/pprof_server_test.go | missing | no pprof listener yet | observe |  |
+| M4-0485 | sdk/cliproxy/pprof_server_test.go | covered | crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown |  | Serialized listener ownership replaces Go pointer/owner guards; real TCP checks cover stale replacement during drain, same-address keepalive, failed-bind retry and shutdown. |
 | M4-0486 | sdk/cliproxy/rtprovider_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
 | M4-0487 | sdk/cliproxy/service_auth_sync_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
 | M4-0488 | sdk/cliproxy/service_config_weight_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
