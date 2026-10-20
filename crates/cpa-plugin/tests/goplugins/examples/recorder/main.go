@@ -269,6 +269,24 @@ func handle(method string, request []byte) ([]byte, int) {
 	mu.Unlock()
 	if method != pluginabi.MethodPluginRegister && method != pluginabi.MethodPluginReconfigure {
 		if raw, rc, found := canned(name, method); found {
+			// Optional nested callbacks let integration tests exercise context inheritance
+			// from an interceptor, rather than only from management.handle.
+			var callbacks struct {
+				Calls []hostCall `json:"host_calls"`
+			}
+			_ = json.Unmarshal(raw, &callbacks)
+			var parent struct {
+				HostCallbackID string `json:"host_callback_id"`
+			}
+			_ = json.Unmarshal(request, &parent)
+			for _, call := range callbacks.Calls {
+				var fields map[string]any
+				_ = json.Unmarshal(call.Request, &fields)
+				fields["host_callback_id"] = parent.HostCallbackID
+				payload, _ := json.Marshal(fields)
+				response, _ := callHost(call.Method, payload)
+				record("host_callback", response)
+			}
 			return raw, rc
 		}
 	}

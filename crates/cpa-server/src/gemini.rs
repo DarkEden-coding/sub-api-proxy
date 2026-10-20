@@ -82,9 +82,9 @@ struct GeminiSse {
 }
 
 impl Writer for GeminiSse {
-    /// The Gemini executor emits exact client bytes for the requested `alt`.
+    /// Internal execution and interceptors see bare Gemini chunks; only HTTP frames them.
     fn chunk(&mut self, event: Bytes) -> Vec<Bytes> {
-        vec![event]
+        vec![if self.raw { event } else { respond::ensure_frame(event) }]
     }
 
     fn error(&mut self, error: &ExecError) -> Vec<Bytes> {
