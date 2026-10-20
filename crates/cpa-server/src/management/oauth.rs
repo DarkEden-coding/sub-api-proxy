@@ -1,14 +1,11 @@
 //! Management-started logins (Go auth_files_provider_oauth.go, oauth_sessions.go,
 //! oauth_callback.go, auth_files_oauth_callback.go, auth_files_v8.go):
 //! `GET /oauth/auth-url`, `GET /oauth/status`, `DELETE /oauth/session`,
-//! `GET|POST /oauth/callback` and `POST /oauth/import`.
+//! `GET|POST /oauth/callback` and `POST /oauth/import` (vertex_import.go).
 //!
 //! Go hands callbacks to the waiting login through `.oauth-<provider>-<state>.oauth`
 //! files in auth-dir; cliproxy-rs keeps the callback with the pending session in
 //! memory, so nothing extra appears in the watched directory.
-//!
-//! ponytail: the antigravity login and Vertex import answer `provider_not_found` (no
-//! executor or auth module for them yet); no plugin logins.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use cpa_core::exec::ExecError;
 use cpa_exec::proxy::Proxy;
@@ -340,6 +337,7 @@ pub(crate) async fn auth_url(State(state): State<Arc<Management>>, RawQuery(raw)
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
         "claude" => start_claude(state, webui).await,
         "codex" => start_codex(state, webui).await,
+        "antigravity" => start_antigravity(state, webui).await,
         "kimi" => {
             // Go `RequestKimiToken`: `domain`, else `channel`, else kimi.com.
             let domain = [q.first("domain"), q.first("channel")]
@@ -366,10 +364,79 @@ pub(crate) async fn auth_url(State(state): State<Arc<Management>>, RawQuery(raw)
 }
 
 /// Go `ImportOAuthV8`.
-pub(crate) async fn import(RawQuery(raw): RawQuery) -> Response {
-    match Query::parse(raw).first("provider").trim() {
+pub(crate) async fn import(
+    State(state): State<Arc<Management>>,
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = Query::parse(raw);
+    match query.first("provider").trim().to_lowercase().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
+        "vertex" => import_vertex(state, &query, &headers, &body).await,
         _ => fail(StatusCode::NOT_FOUND, "provider_not_found"),
+    }
+}
+
+/// Go `ImportVertexCredential`: a service-account key uploaded as the `file` form field;
+/// `location` from the form, else the query.
+async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMap, body: &[u8]) -> Response {
+    use cpa_exec::vertex_auth::{UploadError, import_upload};
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    // Go `FormFile("file")`: any form error reads as a missing file.
+    let Ok((mut files, values)) = super::multipart::form(content_type, body) else {
+        return fail(StatusCode::BAD_REQUEST, "file required");
+    };
+    let Some(file) = files.remove("file").and_then(|parts| parts.into_iter().next()) else {
+        return fail(StatusCode::BAD_REQUEST, "file required");
+    };
+    let mut location = values
+        .get("location")
+        .and_then(|v| v.first())
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_default();
+    if location.is_empty() {
+        location = query.first("location").trim().to_owned();
+    }
+    let auth_dir = state.rt.config().auth_dir.clone();
+    let worker = state;
+    let saved = tokio::task::spawn_blocking(move || {
+        let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let saved = import_upload(&auth_dir, &file.data, &location);
+        if saved.is_ok() {
+            worker.publish((*worker.rt.config()).clone(), None);
+        }
+        saved
+    })
+    .await;
+    let message = |error: &str, message: String| {
+        reply(
+            StatusCode::BAD_REQUEST,
+            [("error", Value::from(error)), ("message", Value::from(message))],
+        )
+    };
+    match saved {
+        Ok(Ok(upload)) => reply(
+            StatusCode::OK,
+            [
+                ("status", "ok".into()),
+                ("auth-file", upload.path.to_string_lossy().into_owned().into()),
+                ("project_id", upload.project.into()),
+                ("email", upload.email.into()),
+                ("location", upload.location.into()),
+            ],
+        ),
+        Ok(Err(UploadError::InvalidJson(e))) => message("invalid json", e),
+        Ok(Err(UploadError::InvalidServiceAccount(e))) => message("invalid service account", e),
+        Ok(Err(UploadError::ProjectMissing)) => fail(StatusCode::BAD_REQUEST, "project_id missing"),
+        Ok(Err(UploadError::Save(e))) => reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("error", Value::from("save_failed")), ("message", Value::from(e))],
+        ),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "save_failed"),
     }
 }
 
@@ -544,6 +611,85 @@ async fn start_codex(state: Arc<Management>, webui: bool) -> Response {
     started(url, sid)
 }
 
+/// Go `RequestAntigravityToken`: reuse the CLI exchange and storage, but unlike
+/// `CompleteAntigravityOAuth`, a project discovery failure does not fail the login.
+async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
+    use cpa_exec::antigravity_auth::{DEFAULT_CALLBACK_PORT, OAuth, auth_url, build_auth, redirect_uri, write_login};
+    let Some(sid) = random_state() else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "failed to generate state parameter");
+    };
+    let redirect = redirect_uri(DEFAULT_CALLBACK_PORT);
+    let url = auth_url(&sid, &redirect);
+    state.oauth.register(&sid, "antigravity");
+    let forwarder = if webui {
+        match start_forwarder(&state, DEFAULT_CALLBACK_PORT, "/antigravity/callback").await {
+            Ok(id) => Some(id),
+            Err(message) => return fail(StatusCode::INTERNAL_SERVER_ERROR, message),
+        }
+    } else {
+        None
+    };
+    let worker = state.clone();
+    let flow = sid.clone();
+    tokio::spawn(async move {
+        if let Some(cb) = next_callback(&worker, &flow, "antigravity").await {
+            let outcome = async {
+                if !cb.error.is_empty() {
+                    return Outcome::Failed("Authentication failed".into());
+                }
+                if !cb.state.is_empty() && cb.state != flow {
+                    return Outcome::Failed("Authentication failed: state mismatch".into());
+                }
+                if cb.code.is_empty() {
+                    return Outcome::Failed("Authentication failed: code not found".into());
+                }
+                let client = login_client(&worker);
+                let oauth = match &worker.login_base {
+                    Some(base) => OAuth::with_endpoints(
+                        client,
+                        &format!("{base}/token"),
+                        &format!("{base}/oauth2/v2/userinfo?alt=json"),
+                        base,
+                        base,
+                    ),
+                    None => OAuth::new(client),
+                };
+                let tokens = match oauth.exchange_code(&cb.code, &redirect).await {
+                    Ok(tokens) if !tokens.access_token.trim().is_empty() => tokens,
+                    _ => return Outcome::Failed("Failed to exchange token".into()),
+                };
+                let access = tokens.access_token.trim();
+                let email = match oauth.user_info(access).await {
+                    Ok(email) if !email.trim().is_empty() => email,
+                    _ => return Outcome::Failed("Failed to fetch user info".into()),
+                };
+                let project = oauth.project_id(access).await.unwrap_or_else(|_| {
+                    // Upstream bodies can contain credentials; do not log the cause.
+                    tracing::warn!("antigravity: failed to fetch project ID during management login");
+                    String::new()
+                });
+                let record = build_auth(&tokens, &email, &project, chrono::Utc::now());
+                let write = |dir: PathBuf, (name, metadata): (String, serde_json::Map<String, Value>)| {
+                    write_login(&dir, &name, &metadata)
+                };
+                save_if_pending(
+                    &worker,
+                    &flow,
+                    "antigravity",
+                    record,
+                    write,
+                    "Failed to save token to file",
+                )
+                .await
+            }
+            .await;
+            settle(&worker, &flow, outcome);
+        }
+        stop_forwarder(&worker, DEFAULT_CALLBACK_PORT, forwarder);
+    });
+    started(url, sid)
+}
+
 /// Go's callback wait: every 500 ms for up to five minutes, until the callback
 /// arrives, the session stops being pending, or the deadline passes (recorded as the
 /// session's error).
@@ -554,7 +700,12 @@ async fn next_callback(state: &Management, sid: &str, provider: &str) -> Option<
             return None;
         }
         if Instant::now() > deadline {
-            state.oauth.set_error(sid, "Timeout waiting for OAuth callback");
+            let message = if provider == "antigravity" {
+                "OAuth flow timed out"
+            } else {
+                "Timeout waiting for OAuth callback"
+            };
+            state.oauth.set_error(sid, message);
             return None;
         }
         if let Some(cb) = state.oauth.take_callback(sid) {
