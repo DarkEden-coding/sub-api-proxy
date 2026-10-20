@@ -271,6 +271,7 @@ async fn run_executor(
             &call.body,
             stream,
         )
+        .map_err(Failure::Exec)?
     };
     let request = ExecutorRequest {
         model: call.model.clone(),
@@ -348,7 +349,7 @@ pub(crate) async fn execute_credential(
             &req.model,
             &req.body,
             stream,
-        )
+        )?
     };
     // Go `storageJSONFromAuth` without a plugin token storage: the metadata as JSON.
     let auth_metadata: Metadata = credential.metadata.clone().into_iter().collect();
@@ -459,17 +460,19 @@ pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     meta
 }
 
-/// Go `sdktranslator.TranslateRequest` between two executor format names.
+/// Go `sdktranslator.TranslateRequestEnvelope` between two executor format names
+/// (`prepareExecutorCall`). A refusal, such as an unsupported content part, is a
+/// request-scoped 400 and nothing is sent, as on the built-in path.
 /// ponytail: a format outside the built-in set passes the body through; Go would still
 /// rewrite a differing top-level `model`.
-fn translate_request(from: &str, to: &str, model: &str, body: &Bytes, stream: bool) -> Bytes {
+fn translate_request(from: &str, to: &str, model: &str, body: &Bytes, stream: bool) -> Result<Bytes, ExecError> {
     let (Some(from), Some(to)) = (Format::parse(from), Format::parse(to)) else {
-        return body.clone();
+        return Ok(body.clone());
     };
     let ctx = cpa_translate::RequestCtx { model, stream };
     cpa_translate::translate_request(from, to, &ctx, body)
         .map(Bytes::from)
-        .unwrap_or_else(|_| body.clone())
+        .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
 
 /// The plugin's `http.Header` as response headers (invalid names or values dropped).
