@@ -22,6 +22,7 @@ use crate::scheduler::{ErrorRule, Policy};
 mod access;
 mod api_call;
 mod auth_files;
+mod auth_index;
 mod iso_currency;
 pub(crate) mod legacy;
 mod logs;
@@ -823,6 +824,10 @@ pub(crate) fn config_sync(
             Ok(v) => v,
             Err(_) => return error(500, "decode_failed"),
         };
+        // Go parses the stored document for this, falling back to the live config.
+        let cfg = doc.yaml().ok().and_then(|text| Config::parse(&text).ok());
+        let cfg = cfg.map_or_else(|| state.rt.config(), Arc::new);
+        auth_index::inject(&mut result, &cfg, &live_auth_indexes(state));
         // TURN passwords are omitted from JSON reads, never from YAML downloads.
         if let Some(servers) = result
             .pointer_mut("/oauth/providers/codex/live-media-relay/ice-servers")
@@ -878,6 +883,7 @@ pub(crate) fn config_sync(
         if parts.is_empty() && !value.is_mapping() {
             return error(400, "config_must_be_object");
         }
+        auth_index::strip_update(&parts, &mut value);
         if doc.update(&parts, value.clone(), method == Method::PATCH).is_err() {
             return error(400, "invalid_path");
         }
@@ -886,6 +892,7 @@ pub(crate) fn config_sync(
         }
         written = Some(value);
     }
+    auth_index::strip_root(doc.value_mut());
     for field in [
         "credentials/concurrency/lifecycle-config-revision",
         "credentials/concurrency/observation-barrier-revision",
@@ -977,6 +984,18 @@ pub(crate) fn config_sync(
         response.headers_mut().insert(header::ETAG, config_etag(&saved));
     }
     response
+}
+
+/// Go `liveAuthIndexFromManager`: the index each config-backed credential carries.
+fn live_auth_indexes(state: &Management) -> std::collections::HashMap<String, String> {
+    state
+        .rt
+        .store()
+        .snapshot()
+        .iter()
+        .filter(|c| matches!(c.source, Source::Config { .. }))
+        .map(|c| (c.id.clone(), credentials::auth_index(c)))
+        .collect()
 }
 
 /// Go `configV8ETag(ComputeSourceHash(raw))`: a strong tag of the file's SHA-256.

@@ -1182,6 +1182,56 @@ async fn model_definitions_fall_back_to_registered_models_by_channel() {
     server.abort();
 }
 
+/// Go v8.0.35 `injectV8APIKeyAuthIndexesLocked` (`0fb50a18`): JSON reads of
+/// `api-keys` carry each key's `auth_index` (fixture recorded from Go), and writes drop
+/// echoed `auth_index`/`auth-index` fields instead of saving them.
+#[tokio::test]
+async fn v8_api_keys_carry_auth_indexes_and_writes_drop_them() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/config_v8_auth_index_go.json")).unwrap();
+    let f = Fixture::from_yaml("authindex", |auth, hash| {
+        fixture["config"].as_str().unwrap().replace(
+            "config-version: 8\n",
+            &format!(
+                "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+                auth.display()
+            ),
+        )
+    });
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let send = |method, at: &str, body: String| {
+        client
+            .request(method, format!("{base}/v8/management/config{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body)
+            .send()
+    };
+    let read = send(wreq::Method::GET, "/api-keys", String::new()).await.unwrap();
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read, fixture["response"]);
+
+    // Echo the read back, at the provider list and at the root.
+    let acme = read["openai-compatibility"].clone();
+    let r = send(wreq::Method::PUT, "/api-keys/openai-compatibility", acme.to_string())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = send(wreq::Method::PATCH, "", json!({"api-keys": read}).to_string())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let file = f.file();
+    assert!(!file.contains("auth_index") && !file.contains("auth-index"), "{file}");
+    let again: Value = send(wreq::Method::GET, "/api-keys", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again, fixture["response"]);
+    server.abort();
+}
+
 /// A relative auth-dir: an unclaimed upload is one fallback credential with a
 /// relative ID, and once a field patch makes it claimable it is exactly one
 /// synthesized credential (no leftover absolute-path fallback).
