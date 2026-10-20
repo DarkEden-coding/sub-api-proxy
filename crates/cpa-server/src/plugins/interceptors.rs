@@ -666,23 +666,33 @@ impl ChunkInterceptor {
 }
 
 /// Go `WriteModelListResponse`: a model list goes through the response interceptors
-/// (and a lifecycle of its own) before it is written. `response` is the built 200 list.
+/// (and a lifecycle of its own) before it is written. `response` is the built 200 list;
+/// with `detail`, the answer is that model's entry from the final list.
 pub(crate) async fn model_list(
     rt: &Runtime,
     source_format: &str,
     request_headers: &HeaderMap,
     response: axum::response::Response,
+    detail: Option<&str>,
 ) -> axum::response::Response {
     let host = rt.plugins();
-    if response.status() != axum::http::StatusCode::OK
-        || !(host.has_response_interceptors() || host.has_request_lifecycle_plugins())
-    {
+    if response.status() != axum::http::StatusCode::OK {
+        return response;
+    }
+    let hooked = host.has_response_interceptors() || host.has_request_lifecycle_plugins();
+    if !hooked && detail.is_none() {
         return response;
     }
     let (mut parts, body) = response.into_parts();
     let Ok(body) = axum::body::to_bytes(body, usize::MAX).await else {
         return axum::response::Response::from_parts(parts, axum::body::Body::empty());
     };
+    if !hooked {
+        let (status, body) = model_detail(body, detail.unwrap_or_default());
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        parts.status = axum::http::StatusCode::from_u16(status).unwrap_or_default();
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(body));
+    }
     let trace = Trace::with_request_id(crate::observability::current_request_id());
     let lifecycle = Lifecycle::start(
         rt,
@@ -732,8 +742,36 @@ pub(crate) async fn model_list(
             HeaderValue::from_static("application/json; charset=utf-8"),
         );
     }
-    lifecycle.complete(COMPLETION_SUCCEEDED, 200, "");
+    let (status, body) = match detail {
+        Some(id) => model_detail(body, id),
+        None => (200, body),
+    };
+    // ponytail: Go reports encoding/json's error text for an undecodable catalog; this
+    // reports a fixed one. Only a lifecycle plugin sees it.
+    match status {
+        200 => lifecycle.complete(COMPLETION_SUCCEEDED, 200, ""),
+        404 => lifecycle.complete(COMPLETION_FAILED, 404, ""),
+        _ => lifecycle.complete(COMPLETION_FAILED, status, "invalid model catalog"),
+    }
+    parts.status = axum::http::StatusCode::from_u16(status).unwrap_or_default();
     axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+}
+
+/// The status and body Go writes for a model detail lookup in a final model list.
+fn model_detail(body: bytes::Bytes, id: &str) -> (u16, bytes::Bytes) {
+    match crate::models::select_detail(&body, id) {
+        Ok(Some(entry)) => (200, body.slice_ref(entry)),
+        Ok(None) => (
+            404,
+            bytes::Bytes::from_static(
+                br#"{"error":{"code":"model_not_found","message":"Model not found","type":"invalid_request_error"}}"#,
+            ),
+        ),
+        Err(()) => (
+            502,
+            bytes::Bytes::from_static(br#"{"error":{"message":"Invalid model catalog","type":"api_error"}}"#),
+        ),
+    }
 }
 
 /// Starts the request's lifecycle and runs the before-auth interceptors, rewriting

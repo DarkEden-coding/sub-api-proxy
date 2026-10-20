@@ -879,6 +879,137 @@ async fn writes_normalize_only_what_they_touch() {
     server.abort();
 }
 
+/// Go v8.0.35 `TestConfigV8ETagIfMatch`: reads carry the file's SHA-256 as a strong
+/// ETag, and a write whose `If-Match` names another version fails with 412.
+#[tokio::test]
+async fn config_writes_honour_if_match_against_the_file_etag() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new("etag");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let etag = || {
+        let hex: String = Sha256::digest(f.file()).iter().map(|b| format!("{b:02x}")).collect();
+        format!("\"{hex}\"")
+    };
+    let send = |method, at: &str, body: &str, if_match: &[&str]| {
+        let mut req = client
+            .request(method, format!("{base}/v8/management{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body.to_owned());
+        for v in if_match {
+            req = req.header("If-Match", *v);
+        }
+        req.send()
+    };
+    // `TestConfigV8ETagExposedForCORS`: every answer lets a cross-origin page read it.
+    let tag = |r: &wreq::Response| {
+        let exposed = r.headers()["access-control-expose-headers"].to_str().unwrap();
+        assert!(exposed.split(',').any(|h| h.trim() == "ETag"), "{exposed}");
+        r.headers()["etag"].to_str().unwrap().to_owned()
+    };
+    let (put, patch, delete, get) = (
+        wreq::Method::PUT,
+        wreq::Method::PATCH,
+        wreq::Method::DELETE,
+        wreq::Method::GET,
+    );
+
+    let before = f.file();
+    let r = send(
+        patch.clone(),
+        "/config",
+        r#"{"routing":{"retry":{"request-retry":1}}}"#,
+        &[r#""stale""#],
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.status().as_u16(), tag(&r)), (412, etag()));
+    assert_eq!(r.text().await.unwrap(), r#"{"error":"precondition_failed"}"#);
+    assert_eq!(f.file(), before, "a stale PATCH writes nothing");
+    let current = etag();
+    let r = send(
+        patch,
+        "/config",
+        r#"{"routing":{"retry":{"request-retry":1}}}"#,
+        &[&current],
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_ne!(tag(&r), current);
+    assert_eq!(tag(&r), etag(), "the write answers with the new version on disk");
+
+    for at in ["/config.yaml", "/config", "/config/server"] {
+        let r = send(get.clone(), at, "", &[r#""stale""#]).await.unwrap();
+        assert_eq!(
+            (r.status().as_u16(), tag(&r)),
+            (200, etag()),
+            "{at}: reads ignore If-Match"
+        );
+    }
+    let stale = etag();
+    let r = send(put.clone(), "/config/access/api-keys", r#"["other-key"]"#, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        (r.status().as_u16(), tag(&r)),
+        (200, etag()),
+        "absent If-Match stays unconditional"
+    );
+    let before = f.file();
+    let r = send(
+        put.clone(),
+        "/config.yaml",
+        &before.replace("other-key", "revoked-key"),
+        &[&stale],
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.status().as_u16(), tag(&r)), (412, etag()));
+    let r = send(delete.clone(), "/config/access/api-keys", "", &[&stale])
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 412);
+    assert_eq!(f.file(), before);
+
+    // Strong comparison only; a quoted comma is tag content and `*` must be the whole field.
+    let current = etag();
+    let weak = format!("W/{current}");
+    let comma = format!("{},\"", current.trim_end_matches('"'));
+    for bad in [
+        &weak,
+        "not-an-etag",
+        r#""unterminated"#,
+        r#""a"b""#,
+        r#""stale,*,tag""#,
+        r#"W/"stale,*,tag""#,
+        r#""stale", *"#,
+        &comma,
+        "",
+        "  \t  ",
+    ] {
+        let r = send(put.clone(), "/config/server/port", "8318", &[bad]).await.unwrap();
+        assert_eq!(r.status(), 412, "{bad:?}");
+    }
+    assert_eq!(f.file(), before);
+    let r = send(put.clone(), "/config/server/port", "8318", &[r#""stale""#, &current])
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "repeated lines form one list");
+    let list = format!(r#""stale", {} , W/{}"#, etag(), etag());
+    let r = send(delete, "/config/access/api-keys", "", &[&list]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(!f.file().contains("other-key"));
+    let r = send(put.clone(), "/config/server/port", "8320", &["*"]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let next = tag(&r);
+    // Go `strings.TrimSpace` also trims Unicode white space (here U+00A0).
+    let padded = format!("\u{a0}{next}\u{a0}");
+    let r = send(put, "/config/server/port", "8321", &[&padded]).await.unwrap();
+    assert_eq!(r.status(), 200, "the response ETag chains into the next write");
+    server.abort();
+}
+
 /// The status toggle edits only the targeted key, located in the file it edits
 /// (here reordered externally and not yet published), and keeps sibling text.
 #[tokio::test]
@@ -1011,6 +1142,198 @@ async fn credential_models_come_from_registrations() {
     server.abort();
 }
 
+/// Go v8.0.35 `GetStaticModelDefinitions` (`50cfd238`): a channel without a built-in
+/// catalog lists the models its credentials registered, sorted by ID, as Go's
+/// `registry.ModelInfo` encodes them; a channel with neither is still unknown
+/// (`TestGetStaticModelDefinitions_FallsBackToRegistryModelsForPerAuthPlugin`,
+/// `TestGetStaticModelDefinitions_BuiltInChannel`,
+/// `TestGetStaticModelDefinitions_RejectsUnknownChannel`).
+#[tokio::test]
+async fn model_definitions_fall_back_to_registered_models_by_channel() {
+    let f = Fixture::from_yaml("definitions", |auth, hash| {
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: http://127.0.0.1:9/v1\n      models: [{{name: up-z, alias: zeta}}, {{name: up-a, alias: alpha}}]\n      keys: [{{api-key: fake-acme}}]\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let get = |channel: &str| {
+        wreq::Client::new()
+            .get(format!("{base}/v8/management/routing/model-definitions/{channel}"))
+            .bearer_auth("fake-management-only")
+            .send()
+    };
+    let r = get("OpenAI-Compatible-Acme").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["channel"], "openai-compatible-acme");
+    let models = v["models"].as_array().unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["alpha", "zeta"]);
+    for internal in [
+        "user_defined",
+        "is_compat",
+        "max_context_length",
+        "support_configuration_update",
+    ] {
+        assert!(
+            models.iter().all(|m| m.get(internal).is_none()),
+            "{internal}: {models:?}"
+        );
+    }
+    let v0: Value = wreq::Client::new()
+        .get(format!("{base}/v0/management/model-definitions/openai-compatible-acme"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v0, v, "v0 serves the same handler");
+    let r = get("claude").await.unwrap();
+    assert_eq!(r.status(), 200, "the built-in catalog still wins");
+    let r = get("nobody").await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"channel": "nobody", "error": "unknown channel"})
+    );
+    server.abort();
+}
+
+/// Go v8.0.35 `TestGetStaticModelDefinitions_FallsBackToPluginStaticModels`: a plugin
+/// channel lists the plugin's static models in plugin order. The plugin is the Go
+/// recorder test plugin.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_definitions_fall_back_to_plugin_static_models() {
+    let tmp = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "model_definitions_plugin") else {
+        return;
+    };
+    let dir = cpa_plugin::testing::scratch(tmp, "definitions-plugin");
+    let (plugins, records) = (dir.join("plugins"), dir.join("records"));
+    let respond = records.join("respond/workbuddy");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&respond).unwrap();
+    std::fs::copy(built.join("recorder.so"), plugins.join("workbuddy.so")).unwrap();
+    // pluginapi.ModelInfo has no JSON tags: the wire names are Go's field names.
+    let models = json!({"provider": "workbuddy", "models": [
+        {"ID": "workbuddy-pro", "DisplayName": "WorkBuddy Pro"},
+        {"ID": "workbuddy-lite", "DisplayName": "WorkBuddy Lite"}]});
+    std::fs::write(
+        respond.join("model.static.json"),
+        json!({"ok": true, "result": models}).to_string(),
+    )
+    .unwrap();
+    let f = Fixture::from_yaml("definitions-plugin", |auth, hash| {
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    workbuddy:\n      enabled: true\n      label: workbuddy\n      record: {}\n      caps: model_provider\n",
+            auth.display(),
+            plugins.display(),
+            records.display()
+        )
+    });
+    // The startup sync registers the plugin's static models.
+    cpa_server::plugins::start(&f.rt).await;
+    let (base, server) = f.server().await;
+    let r = wreq::Client::new()
+        .get(format!("{base}/v8/management/routing/model-definitions/WorkBuddy"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["channel"], "workbuddy");
+    let ids: Vec<_> = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("workbuddy-pro"), json!("workbuddy-lite")]);
+    assert_eq!(v["models"][0]["display_name"], "WorkBuddy Pro");
+    server.abort();
+}
+
+/// Go v8.0.35 `injectV8APIKeyAuthIndexesLocked` (`0fb50a18`): JSON reads of
+/// `api-keys` carry each key's `auth_index` (fixture recorded from Go), and writes drop
+/// echoed `auth_index`/`auth-index` fields instead of saving them.
+#[tokio::test]
+async fn v8_api_keys_carry_auth_indexes_and_writes_drop_them() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/config_v8_auth_index_go.json")).unwrap();
+    let f = Fixture::from_yaml("authindex", |auth, hash| {
+        fixture["config"].as_str().unwrap().replace(
+            "config-version: 8\n",
+            &format!(
+                "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+                auth.display()
+            ),
+        )
+    });
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let send = |method, at: &str, body: String| {
+        client
+            .request(method, format!("{base}/v8/management/config{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body)
+            .send()
+    };
+    let read = send(wreq::Method::GET, "/api-keys", String::new()).await.unwrap();
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read, fixture["response"]);
+    // `TestConfigV8APIKeysExposeAuthIndex_Issue6287`: a provider sub-path and the root
+    // carry the same indexes; the YAML document carries none.
+    let codex: Value = send(wreq::Method::GET, "/api-keys/codex", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(codex, fixture["response"]["codex"]);
+    let root: Value = send(wreq::Method::GET, "", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(root["api-keys"], fixture["response"]);
+    let yaml = client
+        .get(format!("{base}/v8/management/config.yaml"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(yaml.contains("fake-o2") && !yaml.contains("896fb130477af684"), "{yaml}");
+
+    // Echo the read back, at the provider list and at the root.
+    let acme = read["openai-compatibility"].clone();
+    let r = send(wreq::Method::PUT, "/api-keys/openai-compatibility", acme.to_string())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = send(wreq::Method::PATCH, "", json!({"api-keys": read}).to_string())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let file = f.file();
+    assert!(!file.contains("auth_index") && !file.contains("auth-index"), "{file}");
+    let again: Value = send(wreq::Method::GET, "/api-keys", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again, fixture["response"]);
+    server.abort();
+}
+
 /// A relative auth-dir: an unclaimed upload is one fallback credential with a
 /// relative ID, and once a field patch makes it claimable it is exactly one
 /// synthesized credential (no leftover absolute-path fallback).
@@ -1059,6 +1382,52 @@ async fn fallback_with_relative_auth_dir_is_retired_once_synthesized() {
     .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(ids(&f), [("a.json".to_owned(), "claude".to_owned())]);
+    server.abort();
+}
+
+/// Go v8.0.35 stale-reload guard (`1631875b`): a watcher reload that read the file
+/// before a management save never publishes the older value after it. Here reloads
+/// read and publish under the same lock as saves, so every save stays visible and Go's
+/// paused-reload interleavings cannot occur
+/// (`TestSetConfigIgnoresConfigLoadedBeforeManagementSave_Issue6631`,
+/// `TestManagementWritesSurviveConcurrentReloadPublications_Issue6631`,
+/// `TestManagementSequentialWritesSurviveStaleReload_Issue6631`,
+/// `TestManagementWriteDuringReloadReachesRuntime_Issue6631`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reloads_never_publish_a_value_older_than_a_save() {
+    let f = Fixture::new("reloadfence");
+    let (base, server) = f.server().await;
+    let state = f.state.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reloader = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let mut reloads = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                watching::reload(&state).unwrap();
+                reloads += 1;
+            }
+            reloads
+        }
+    });
+    let client = wreq::Client::new();
+    let retry = || f.rt.config().document["routing"]["retry"]["request-retry"].clone();
+    for i in 0..30 {
+        let r = client
+            .put(format!("{base}/v8/management/config/routing/retry/request-retry"))
+            .bearer_auth("fake-management-only")
+            .body(i.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        for _ in 0..5 {
+            assert_eq!(retry().as_i64(), Some(i), "save {i} was replaced by an older reload");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(reloader.join().unwrap() > 30, "the reloads raced the saves");
     server.abort();
 }
 
@@ -2620,4 +2989,46 @@ async fn kimi_channel_selects_kimi_ai_and_codex_exchange_errors_read_like_go() {
     server.abort();
     bad_server.abort();
     fake_server.abort();
+}
+
+/// Go v8.0.35 `TestConfigV8SaveNormalizesCollectionStylesToBlockYAML` (`0a23627d`):
+/// JSON written through the v8 config API lands as block YAML with plain keys, and an
+/// empty list stays `[]`. Untouched text keeps its own style (DIFFERENCES-FROM-GO.md).
+#[tokio::test]
+async fn config_writes_render_json_values_as_block_yaml() {
+    let f = Fixture::new("styles");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let send = |method, at: &str, body: &str| {
+        client
+            .request(method, format!("{base}/v8/management{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body.to_owned())
+            .send()
+    };
+    let compat = |n: &str| {
+        format!(
+            r#"[{{"name":"compat-{n}","base-url":"https://api.example.com","headers":{{"User-Agent":"$User-Agent"}},"models":[{{"alias":"coding","name":"gpt-4o"}}],"keys":[{{"api-key":"fake-compat-{n}"}}]}}]"#
+        )
+    };
+    let block = "api-keys:\n  openai-compatibility:\n    - name: compat-N\n      base-url: https://api.example.com\n      headers:\n        User-Agent: $User-Agent\n      models:\n        - alias: coding\n          name: gpt-4o\n      keys:\n        - api-key: fake-compat-N\n";
+    let r = send(wreq::Method::PUT, "/config/api-keys/openai-compatibility", &compat("1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(f.file().ends_with(&block.replace('N', "1")), "{}", f.file());
+    let patch = format!(
+        r#"{{"api-keys":{{"openai-compatibility":{}}},"server":{{"trusted-proxies":[]}}}}"#,
+        compat("2")
+    );
+    let r = send(wreq::Method::PATCH, "/config", &patch).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let file = f.file();
+    assert!(file.ends_with(&block.replace('N', "2")), "{file}");
+    assert!(file.contains("  trusted-proxies: []\n"), "{file}");
+    assert!(
+        file.contains("  api-keys: [fake-client]\n"),
+        "untouched text keeps its style: {file}"
+    );
+    server.abort();
 }

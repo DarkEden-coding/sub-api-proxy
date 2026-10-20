@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::handler::Handler;
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
@@ -22,6 +22,7 @@ use crate::scheduler::{ErrorRule, Policy};
 mod access;
 mod api_call;
 mod auth_files;
+mod auth_index;
 mod iso_currency;
 pub(crate) mod legacy;
 mod logs;
@@ -705,11 +706,17 @@ pub(crate) async fn config(
     State(state): State<Arc<Management>>,
     OriginalUri(uri): OriginalUri,
     method: Method,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
-    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &body))
+    let if_match: Vec<_> = headers
+        .get_all(header::IF_MATCH)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
 }
@@ -757,12 +764,27 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
 /// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
-pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: &[u8]) -> Response {
+///
+/// Reads carry an `ETag` with the SHA-256 of the file bytes; a write with `If-Match`
+/// lines that do not name the current version fails with 412 (v8.0.35 `fa68946a`).
+pub(crate) fn config_sync(
+    state: &Management,
+    path: &str,
+    method: Method,
+    if_match: &[String],
+    body: &[u8],
+) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
     };
+    let etag = config_etag(original.as_bytes());
+    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
+        let mut response = error(412, "precondition_failed");
+        response.headers_mut().insert(header::ETAG, etag);
+        return response;
+    }
     let mut doc = match ConfigDocument::parse(&original) {
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -785,8 +807,12 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             return match doc.render_preserving(&basis) {
                 Ok(text) => (
                     [
-                        (header::CONTENT_TYPE, "application/yaml; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-store"),
+                        (
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/yaml; charset=utf-8"),
+                        ),
+                        (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                        (header::ETAG, etag),
                     ],
                     text + &archive_comments(&archived),
                 )
@@ -798,6 +824,10 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             Ok(v) => v,
             Err(_) => return error(500, "decode_failed"),
         };
+        // Go parses the stored document for this, falling back to the live config.
+        let cfg = doc.yaml().ok().and_then(|text| Config::parse(&text).ok());
+        let cfg = cfg.map_or_else(|| state.rt.config(), Arc::new);
+        auth_index::inject(&mut result, &cfg, &live_auth_indexes(state));
         // TURN passwords are omitted from JSON reads, never from YAML downloads.
         if let Some(servers) = result
             .pointer_mut("/oauth/providers/codex/live-media-relay/ice-servers")
@@ -818,9 +848,9 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             selected = next;
         }
         let mut response = json(StatusCode::OK, selected);
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::ETAG, etag);
         return response;
     }
     let before = doc.clone();
@@ -853,6 +883,7 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         if parts.is_empty() && !value.is_mapping() {
             return error(400, "config_must_be_object");
         }
+        auth_index::strip_update(&parts, &mut value);
         if doc.update(&parts, value.clone(), method == Method::PATCH).is_err() {
             return error(400, "invalid_path");
         }
@@ -861,6 +892,7 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         }
         written = Some(value);
     }
+    auth_index::strip_root(doc.value_mut());
     for field in [
         "credentials/concurrency/lifecycle-config-revision",
         "credentials/concurrency/observation-barrier-revision",
@@ -946,7 +978,53 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         );
     }
     state.publish(cfg, None);
-    json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}))
+    let mut response = json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}));
+    // The version actually on disk; none when it cannot be read back.
+    if let Ok(saved) = std::fs::read(&state.path) {
+        response.headers_mut().insert(header::ETAG, config_etag(&saved));
+    }
+    response
+}
+
+/// Go `liveAuthIndexFromManager`: the index each config-backed credential carries.
+fn live_auth_indexes(state: &Management) -> std::collections::HashMap<String, String> {
+    state
+        .rt
+        .store()
+        .snapshot()
+        .iter()
+        .filter(|c| matches!(c.source, Source::Config { .. }))
+        .map(|c| (c.id.clone(), credentials::auth_index(c)))
+        .collect()
+}
+
+/// Go `configV8ETag(ComputeSourceHash(raw))`: a strong tag of the file's SHA-256.
+fn config_etag(raw: &[u8]) -> HeaderValue {
+    use sha2::{Digest, Sha256};
+    let hex: String = Sha256::digest(raw).iter().map(|b| format!("{b:02x}")).collect();
+    HeaderValue::try_from(format!("\"{hex}\"")).expect("hex is a valid header value")
+}
+
+/// Go `ifMatchSatisfied`: RFC 9110 strong comparison over every `If-Match` line as one
+/// list. Absent passes, blank fails, a whole-field `*` matches any version, and weak
+/// or malformed tags never match. A comma inside a quoted tag is not a separator.
+fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    // `strings.TrimSpace`: Unicode white space too.
+    let trim = |s: &[u8]| cpa_common::gostr::trim_space(s).to_vec();
+    let field = trim(values.join(",").as_bytes());
+    if field == b"*" {
+        return true;
+    }
+    let mut quoted = false;
+    field
+        .split(|&c| {
+            quoted ^= c == b'"';
+            c == b',' && !quoted
+        })
+        .any(|tag| trim(tag) == etag.as_bytes())
 }
 
 async fn legacy_yaml(State(state): State<Arc<Management>>) -> Response {

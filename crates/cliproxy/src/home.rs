@@ -1632,7 +1632,7 @@ mod tests {
     }
 
     /// Go `handleHomeModels`, `handleGrokModels` and `handleHomeGeminiModels`: every
-    /// catalog route serves what Home answers for this client.
+    /// catalog route, model details included, serves what Home answers for this client.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn model_routes_serve_the_home_catalog() {
         let catalog = r#"{"xai":[{"id":"grok-4","display_name":"Grok 4","context_length":256000,"owned_by":"xai"}],"claude":[{"id":"claude-x","owned_by":"anthropic","created":1700000000}]}"#;
@@ -1690,6 +1690,14 @@ mod tests {
         assert_eq!(claude["data"][0]["display_name"], "Grok 4");
         assert_eq!(claude["data"][1]["created_at"], "2023-11-14T22:13:20Z");
         assert_eq!(claude["data"][1]["max_input_tokens"], 200000);
+        // Go `TestIssue5190ModelDetailHomeVisibility`: a detail comes from Home's catalog.
+        let (status, body) = get("/v1/models/grok-4", &[]).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (200, r#"{"id":"grok-4","object":"model","owned_by":"xai"}"#)
+        );
+        let (status, _) = get("/v1/models/gpt-5", &[]).await;
+        assert_eq!(status, 404);
         let (status, body) = get("/v1beta/models/grok-4", &[]).await;
         assert_eq!(status, 200, "{body}");
         assert_eq!(
