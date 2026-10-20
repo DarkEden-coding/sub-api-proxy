@@ -168,9 +168,9 @@ func (r *runner) start(sc *scenario) {
 		res, err := r.raw(httpArgs{Method: "GET", Path: "/healthz"})
 		if err == nil && res.Status == 200 {
 			// The plugin model sync (executor.identifier calls) runs after the
-			// listener is up; let it settle, then drop startup calls so steps
-			// compare request-time calls only.
-			time.Sleep(500 * time.Millisecond)
+			// listener is up; wait until the recorders go quiet, then drop startup
+			// calls so steps compare request-time calls only.
+			r.settle()
 			r.records(recordsArgs{})
 			return
 		}
@@ -179,6 +179,28 @@ func (r *runner) start(sc *scenario) {
 			panic(fmt.Sprintf("%s: server not ready: %v\n%s", sc.Name, err, log))
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// settle waits until no recorder file has grown for 300ms (at most 5s).
+func (r *runner) settle() {
+	size := func() int64 {
+		var total int64
+		for _, entry := range must(os.ReadDir(r.dirs["RECDIR"])) {
+			if info, err := entry.Info(); err == nil && !entry.IsDir() {
+				total += info.Size()
+			}
+		}
+		return total
+	}
+	last, quiet := size(), time.Now()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		time.Sleep(25 * time.Millisecond)
+		if now := size(); now != last {
+			last, quiet = now, time.Now()
+		} else if time.Since(quiet) >= 300*time.Millisecond {
+			return
+		}
 	}
 }
 
