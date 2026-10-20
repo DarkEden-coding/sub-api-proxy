@@ -46,7 +46,7 @@ Run the install command again to upgrade, or `brew upgrade cliproxy-rs` with Hom
 
 ## What is this?
 
-cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 866 covered, 997 partial and 88 missing. [PARITY.md](docs/PARITY.md) defines those counts.
+cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 868 covered, 996 partial and 87 missing. [PARITY.md](docs/PARITY.md) defines those counts.
 
 The dashboard shows accounts, provider limits, request history and tool settings.
 
@@ -163,7 +163,7 @@ Before switching, read [MIGRATING-FROM-GO.md](docs/MIGRATING-FROM-GO.md), especi
 Not in cliproxy-rs yet:
 
 - An AUR package.
-- Plugin-owned credentials, models and executors without a model router; plugin schedulers, request and response translators, thinking appliers, `host.model.*` callbacks and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks.
+- Plugin-owned credentials, models and executors without a model router; plugin schedulers, request and response translators, thinking appliers, `host.model.*` callbacks and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
 - Google Antigravity sign-in from the dashboard and the Management API. `cliproxy -antigravity-login` signs in from the command line.
 - Vertex service-account import from the dashboard. The command line works.
