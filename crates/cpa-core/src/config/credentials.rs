@@ -1276,7 +1276,8 @@ pub fn oauth_excluded(cfg: &Config) -> HashMap<String, Vec<String>> {
     out
 }
 
-/// Every auth-dir JSON file (case-insensitive extension, top level only), sorted by ID.
+/// Every auth-dir JSON file (case-insensitive extension, top level only) that is or
+/// links to a regular file, sorted by ID.
 /// Like Go's `FileSynthesizer`, an unreadable or missing directory is an empty set:
 /// it must never block publishing the rest of a valid config.
 pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
@@ -1300,12 +1301,10 @@ pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path: PathBuf = entry.path();
-        if entry.file_type().is_ok_and(|t| t.is_dir())
-            || !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json")
-        {
+        if !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json") {
             continue;
         }
-        let Ok(data) = std::fs::read(&path) else { continue };
+        let Some(data) = read_regular(&path) else { continue };
         if serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err() {
             incomplete.insert(path);
             continue;
@@ -1318,6 +1317,24 @@ pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     (out, incomplete)
+}
+
+/// The bytes of `path` when it is, or links to, a regular file: the rule the auth-folder
+/// watcher observes by, so a credential is never kept for an entry the watcher cannot
+/// see go away (a link to `/dev/null`, a FIFO, a folder). The type is checked before
+/// opening (a FIFO would block) and again on the opened file, which is the one read.
+fn read_regular(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 /// All runtime credentials for a config: auth files, then config API keys.

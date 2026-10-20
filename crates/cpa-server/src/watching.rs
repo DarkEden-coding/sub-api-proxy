@@ -573,6 +573,41 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The scan counts the entries the watcher observes: a credential whose file is
+    /// replaced by a link to `/dev/null` is dropped by the reload that replacement
+    /// triggers, so deleting the link (which the watcher cannot see, having never
+    /// observed it) leaves nothing live.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_replaced_by_a_special_file_link_drops_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
+        assert!(loaded(&state));
+        let capture = Capture::default();
+        let _guard = capture.install();
+        let watcher = start(&state);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &file).unwrap();
+        capture.wait_for("auth file changed (REMOVE): a.json").await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while loaded(&state) {
+                tokio::time::sleep(TICK).await;
+            }
+        })
+        .await
+        .expect("the reload the replacement triggered drops the credential");
+        std::fs::remove_file(&file).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!loaded(&state));
+        watcher.abort();
+        let _ = watcher.await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[derive(Clone, Default)]
     struct Capture(Arc<std::sync::Mutex<Vec<u8>>>, Arc<tokio::sync::Notify>);
     impl std::io::Write for Capture {
