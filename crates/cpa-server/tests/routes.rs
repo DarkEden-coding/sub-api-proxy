@@ -353,8 +353,14 @@ async fn wrong_methods_are_gin_no_route() {
             .unwrap();
         assert_eq!(res.status().as_u16(), 404, "{method} {path} without a key");
     }
-    let res = client.get(format!("{}/v1/models", p.url)).send().await.unwrap();
-    assert_eq!(res.status().as_u16(), 401, "matched routes still require the key");
+    for path in ["/v1/models", "/v1/models/gpt-5"] {
+        let res = client.get(format!("{}{path}", p.url)).send().await.unwrap();
+        assert_eq!(
+            res.status().as_u16(),
+            401,
+            "{path}: matched routes still require the key"
+        );
+    }
     for (method, path) in [(wreq::Method::HEAD, "/healthz"), (wreq::Method::GET, "/v1/models")] {
         let res = client
             .request(method.clone(), format!("{}{path}", p.url))
