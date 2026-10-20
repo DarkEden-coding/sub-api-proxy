@@ -91,7 +91,7 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
 async fn sync_models(rt: &Runtime) {
     let host = rt.plugins();
     host.register_models().await;
-    let native = native_executor_providers(rt);
+    let native = native_executor_providers(rt).await;
     // Ownership is decided against the registry, whose credentials carry the published
     // plugin catalog. Republishing changes that registry (a removed built-in catalog
     // frees its models), so repeat until the catalog is stable; Go decides once against
@@ -134,41 +134,70 @@ async fn sync_models(rt: &Runtime) {
 }
 
 /// Go `providerHasNativeExecutor`: providers a built-in executor is actually bound to.
-/// Go binds one per enabled credential's provider (`registerExecutorForAuth`), plus a
-/// fixed baseline in Home mode; a provider the built-in executors could serve but no
-/// credential uses (an unused `openai-compatible-*` name) has none.
-/// ponytail: Go keeps a binding after its last credential goes away and skips the
-/// OpenAI-compatible fallback for an unknown provider that a plugin executor claims;
-/// both are recomputed from the current credentials here.
-fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
-    let mut native: HashSet<String> = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| !c.disabled)
-        .map(|c| cpa_core::registry::dynamic::provider_key(c))
-        .filter(|p| rt.executors.supports(p))
-        .collect();
+/// Go binds one per enabled credential (`registerExecutorForAuth`), plus a fixed
+/// baseline in Home mode. An OpenAI-compatible credential or a built-in provider always
+/// binds; any other provider binds the OpenAI-compatible executor unless a plugin
+/// executor is a candidate for it and no native compatibility config names it.
+/// ponytail: Go keeps a binding after its last credential goes away; here bindings are
+/// recomputed from the current credentials.
+async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
+    // Go `registerExecutorForAuth`'s built-in providers.
+    const BUILTIN: [&str; 14] = [
+        "codex",
+        "claude",
+        "gemini",
+        "gemini-interactions",
+        "vertex",
+        "aistudio",
+        "antigravity",
+        "kimi",
+        "kimi-ai",
+        "kimi.ai",
+        "kimi.com",
+        "xai",
+        "devin",
+        "meta",
+    ];
+    let cfg = rt.config();
+    let compat_names = cpa_core::config::credentials::openai_compat_names(&cfg);
+    let host = rt.plugins();
+    let mut native = HashSet::new();
+    for c in rt.store().snapshot().iter().filter(|c| !c.disabled) {
+        let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
+        let provider = c.provider.trim().to_lowercase();
+        // Go `openAICompatInfoFromAuth`.
+        if !attr("compat_name").is_empty() || provider == "openai-compatibility" {
+            native.insert(cpa_core::registry::dynamic::provider_key(c));
+            continue;
+        }
+        if BUILTIN.contains(&provider.as_str()) {
+            native.insert(provider);
+            continue;
+        }
+        let key = if provider.is_empty() {
+            "openai-compatibility".to_owned()
+        } else {
+            provider.clone()
+        };
+        // Go `hasNativeOpenAICompatExecutorConfig`.
+        let native_config = !attr("base_url").is_empty()
+            || [key.as_str(), &attr("provider_key").to_lowercase(), &provider]
+                .iter()
+                .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate));
+        if !native_config && host.has_executor_candidate_provider(&key).await {
+            continue;
+        }
+        native.insert(key);
+    }
     if rt.remote_dispatch().is_some() {
-        // Go `baselineExecutorAuths`.
+        // Go `baselineExecutorAuths`: the built-in providers but `kimi.com`, plus the
+        // OpenAI-compatible executor.
         native.extend(
-            [
-                "codex",
-                "claude",
-                "gemini",
-                "gemini-interactions",
-                "vertex",
-                "aistudio",
-                "antigravity",
-                "kimi",
-                "kimi-ai",
-                "kimi.ai",
-                "xai",
-                "devin",
-                "meta",
-                "openai-compatibility",
-            ]
-            .map(str::to_owned),
+            BUILTIN
+                .iter()
+                .filter(|p| **p != "kimi.com")
+                .chain(&["openai-compatibility"])
+                .map(|p| (*p).to_owned()),
         );
     }
     native
