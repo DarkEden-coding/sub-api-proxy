@@ -4,11 +4,14 @@
 Usage: python3 docs/parity-audit/verify_reference.py /path/to/CLIProxyAPI
 
 Derived from Go and compared both ways: test-suite files and their declarations,
-literal router registrations, YAML config leaves, CLI flags, plugin RPC methods and
-added plugin API fields. Not checked: Rust behavior, fixture assertion coverage,
-whether each item's prose (handler, type, default, meaning) is accurate, and routes
-served without a literal path registration (the WebUI OAuth forwarder, the AI
-Studio relay route and plugin routes).
+literal router registration call sites (method and path suffix; group and constant
+prefixes are not resolved), YAML config leaves, CLI flags, plugin RPC methods and
+added plugin API fields. Retained non-suite rows keep their text; suite rows are
+checked by filename and declarations, and the listed rewrites are exempt. Not
+checked: Rust behavior, fixture assertion coverage, whether each item's prose
+(handler, type, default, meaning) is accurate, and routes served without a literal
+path registration (the WebUI OAuth forwarder, the AI Studio relay route and plugin
+routes).
 """
 
 from collections import Counter
@@ -254,7 +257,7 @@ def main():
         path, line = fields[name]
         whole = len(source(NEW, path).splitlines())
         # A whole-file citation (a suite's source list) does not inventory a field.
-        check(any(first <= line <= last and (first, last) != (1, whole) for first, last, _ in cited[path]),
+        check(any(first <= line <= last and (first, last) != (1, whole) for first, last, _ in cited.get(path, ())),
               f"added plugin API field not cited: {name}")
     for row in rows:
         if row["text"].startswith("Plugin data contract"):
@@ -263,13 +266,15 @@ def main():
 
     totals = Counter(r["ms"] for r in rows)
     check(totals == {"M1": 151, "M2": 189, "M3": 424, "M4": 589, "M5": 331, "M6": 267}, totals)
-    print(f"OK: {len(rows)} items, {len(old)} retained IDs ({len(changed)} listed rewrites); "
+    print(f"OK: {len(rows)} items, {len(old)} retained IDs (non-suite text compared; {len(changed)} listed "
+          f"rewrites exempt, the {len(MOVED)} moves checked by alias only); "
           f"{len(added) - len(SUPPORT_ONLY)} added / {len(suites)} total suites; {retired} retired declarations; "
-          f"{len(registrations)} literal route registrations; {len(go_leaves)} config leaves "
+          f"{len(registrations)} literal route call sites (method and path suffix); {len(go_leaves)} config leaves "
           f"({len(go_leaves - old_leaves)} added); {len(flags)} CLI flags; {len(methods)} RPC methods; "
           f"{len(added_fields)} added plugin API fields; {len(citations)} current, in-bounds citations")
-    print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), "
-          "plugin capabilities and pre-existing data contracts, and routes without a literal path "
+    print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), suite-row text "
+          "beyond filename and declarations, the remaining text of listed rewrites, route group and constant "
+          "prefixes, plugin capabilities and pre-existing data contracts, and routes without a literal path "
           f"({', '.join(sorted(DYNAMIC_ROUTES))} and plugin routes)")
 
 
