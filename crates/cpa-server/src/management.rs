@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::handler::Handler;
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
@@ -705,11 +705,17 @@ pub(crate) async fn config(
     State(state): State<Arc<Management>>,
     OriginalUri(uri): OriginalUri,
     method: Method,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
-    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &body))
+    let if_match: Vec<_> = headers
+        .get_all(header::IF_MATCH)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
 }
@@ -757,12 +763,27 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
 /// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
-pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: &[u8]) -> Response {
+///
+/// Reads carry an `ETag` with the SHA-256 of the file bytes; a write with `If-Match`
+/// lines that do not name the current version fails with 412 (v8.0.35 `fa68946a`).
+pub(crate) fn config_sync(
+    state: &Management,
+    path: &str,
+    method: Method,
+    if_match: &[String],
+    body: &[u8],
+) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
     };
+    let etag = config_etag(original.as_bytes());
+    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
+        let mut response = error(412, "precondition_failed");
+        response.headers_mut().insert(header::ETAG, etag);
+        return response;
+    }
     let mut doc = match ConfigDocument::parse(&original) {
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -785,8 +806,12 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             return match doc.render_preserving(&basis) {
                 Ok(text) => (
                     [
-                        (header::CONTENT_TYPE, "application/yaml; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-store"),
+                        (
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/yaml; charset=utf-8"),
+                        ),
+                        (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                        (header::ETAG, etag),
                     ],
                     text + &archive_comments(&archived),
                 )
@@ -818,9 +843,9 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             selected = next;
         }
         let mut response = json(StatusCode::OK, selected);
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::ETAG, etag);
         return response;
     }
     let before = doc.clone();
@@ -946,7 +971,40 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         );
     }
     state.publish(cfg, None);
-    json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}))
+    let mut response = json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}));
+    // The version actually on disk; none when it cannot be read back.
+    if let Ok(saved) = std::fs::read(&state.path) {
+        response.headers_mut().insert(header::ETAG, config_etag(&saved));
+    }
+    response
+}
+
+/// Go `configV8ETag(ComputeSourceHash(raw))`: a strong tag of the file's SHA-256.
+fn config_etag(raw: &[u8]) -> HeaderValue {
+    use sha2::{Digest, Sha256};
+    let hex: String = Sha256::digest(raw).iter().map(|b| format!("{b:02x}")).collect();
+    HeaderValue::try_from(format!("\"{hex}\"")).expect("hex is a valid header value")
+}
+
+/// Go `ifMatchSatisfied`: RFC 9110 strong comparison over every `If-Match` line as one
+/// list. Absent passes, blank fails, a whole-field `*` matches any version, and weak
+/// or malformed tags never match. A comma inside a quoted tag is not a separator.
+fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    let field = values.join(",");
+    let field = field.trim_ascii();
+    if field == "*" {
+        return true;
+    }
+    let mut quoted = false;
+    field
+        .split(|c| {
+            quoted ^= c == '"';
+            c == ',' && !quoted
+        })
+        .any(|tag| tag.trim_ascii().as_bytes() == etag.as_bytes())
 }
 
 async fn legacy_yaml(State(state): State<Arc<Management>>) -> Response {

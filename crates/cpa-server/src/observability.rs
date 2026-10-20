@@ -345,7 +345,9 @@ pub(crate) fn mask_query(raw: &str) -> String {
             let decoded = crate::access::unescape(key).unwrap_or_else(|| key.as_bytes().to_owned());
             let lower = cpa_common::gostr::lower_bytes(cpa_core::config::go_trim_space(&decoded));
             let lower = lower.strip_suffix("[]").unwrap_or(&lower);
+            // v8.0.35 adds `value`: deleting a client key passes it as `?value=`.
             if !(lower == "key"
+                || lower == "value"
                 || ["api-key", "apikey", "api_key", "token", "secret"]
                     .iter()
                     .any(|word| lower.contains(word)))
@@ -604,6 +606,11 @@ mod tests {
             let want = case["out"].as_str().unwrap().replacen("key=ab&", "key=...&", 1);
             assert_eq!(mask_query(case["in"].as_str().unwrap()), want);
         }
+        // Go v8.0.35 `TestMaskSensitiveQueryMasksValue`.
+        assert_eq!(
+            mask_query("value=sk-secret-client-key&index=3"),
+            "value=sk-s...-key&index=3"
+        );
         for case in fixture["lines"].as_array().unwrap() {
             assert_eq!(
                 access_line(

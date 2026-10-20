@@ -879,6 +879,130 @@ async fn writes_normalize_only_what_they_touch() {
     server.abort();
 }
 
+/// Go v8.0.35 `TestConfigV8ETagIfMatch`: reads carry the file's SHA-256 as a strong
+/// ETag, and a write whose `If-Match` names another version fails with 412.
+#[tokio::test]
+async fn config_writes_honour_if_match_against_the_file_etag() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new("etag");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let etag = || {
+        let hex: String = Sha256::digest(f.file()).iter().map(|b| format!("{b:02x}")).collect();
+        format!("\"{hex}\"")
+    };
+    let send = |method, at: &str, body: &str, if_match: &[&str]| {
+        let mut req = client
+            .request(method, format!("{base}/v8/management{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body.to_owned());
+        for v in if_match {
+            req = req.header("If-Match", *v);
+        }
+        req.send()
+    };
+    let tag = |r: &wreq::Response| r.headers()["etag"].to_str().unwrap().to_owned();
+    let (put, patch, delete, get) = (
+        wreq::Method::PUT,
+        wreq::Method::PATCH,
+        wreq::Method::DELETE,
+        wreq::Method::GET,
+    );
+
+    let before = f.file();
+    let r = send(
+        patch.clone(),
+        "/config",
+        r#"{"routing":{"retry":{"request-retry":1}}}"#,
+        &[r#""stale""#],
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.status().as_u16(), tag(&r)), (412, etag()));
+    assert_eq!(r.text().await.unwrap(), r#"{"error":"precondition_failed"}"#);
+    assert_eq!(f.file(), before, "a stale PATCH writes nothing");
+    let current = etag();
+    let r = send(
+        patch,
+        "/config",
+        r#"{"routing":{"retry":{"request-retry":1}}}"#,
+        &[&current],
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_ne!(tag(&r), current);
+    assert_eq!(tag(&r), etag(), "the write answers with the new version on disk");
+
+    for at in ["/config.yaml", "/config", "/config/server"] {
+        let r = send(get.clone(), at, "", &[r#""stale""#]).await.unwrap();
+        assert_eq!(
+            (r.status().as_u16(), tag(&r)),
+            (200, etag()),
+            "{at}: reads ignore If-Match"
+        );
+    }
+    let stale = etag();
+    let r = send(put.clone(), "/config/access/api-keys", r#"["other-key"]"#, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        (r.status().as_u16(), tag(&r)),
+        (200, etag()),
+        "absent If-Match stays unconditional"
+    );
+    let before = f.file();
+    let r = send(
+        put.clone(),
+        "/config.yaml",
+        &before.replace("other-key", "revoked-key"),
+        &[&stale],
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.status().as_u16(), tag(&r)), (412, etag()));
+    let r = send(delete.clone(), "/config/access/api-keys", "", &[&stale])
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 412);
+    assert_eq!(f.file(), before);
+
+    // Strong comparison only; a quoted comma is tag content and `*` must be the whole field.
+    let current = etag();
+    let weak = format!("W/{current}");
+    let comma = format!("{},\"", current.trim_end_matches('"'));
+    for bad in [
+        &weak,
+        "not-an-etag",
+        r#""unterminated"#,
+        r#""a"b""#,
+        r#""stale,*,tag""#,
+        r#"W/"stale,*,tag""#,
+        r#""stale", *"#,
+        &comma,
+        "",
+        "  \t  ",
+    ] {
+        let r = send(put.clone(), "/config/server/port", "8318", &[bad]).await.unwrap();
+        assert_eq!(r.status(), 412, "{bad:?}");
+    }
+    assert_eq!(f.file(), before);
+    let r = send(put.clone(), "/config/server/port", "8318", &[r#""stale""#, &current])
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "repeated lines form one list");
+    let list = format!(r#""stale", {} , W/{}"#, etag(), etag());
+    let r = send(delete, "/config/access/api-keys", "", &[&list]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(!f.file().contains("other-key"));
+    let r = send(put.clone(), "/config/server/port", "8320", &["*"]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let next = tag(&r);
+    let r = send(put, "/config/server/port", "8321", &[&next]).await.unwrap();
+    assert_eq!(r.status(), 200, "the response ETag chains into the next write");
+    server.abort();
+}
+
 /// The status toggle edits only the targeted key, located in the file it edits
 /// (here reordered externally and not yet published), and keeps sibling text.
 #[tokio::test]

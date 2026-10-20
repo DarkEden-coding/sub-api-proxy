@@ -613,6 +613,10 @@ mod routes {
                 if want.contains_key("X-CPA-SUPPORT-PLUGIN") {
                     want.insert("X-CPA-SUPPORT-PLUGIN".into(), cpa_plugin::SUPPORT_PLUGIN.into());
                 }
+                // The goldens predate v8.0.35, which exposes `ETag` for config writes (`fa68946a`).
+                if let Some(Value::String(exposed)) = want.get_mut("Access-Control-Expose-Headers") {
+                    *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
+                }
                 assert_eq!(Value::Object(headers), Value::Object(want), "{name}[{i}] headers");
                 compared += 1;
             }
