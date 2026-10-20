@@ -167,7 +167,6 @@ Not in cliproxy-rs yet:
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
 - Google Antigravity sign-in from the dashboard and the Management API. `cliproxy -antigravity-login` signs in from the command line.
 - Vertex service-account import from the dashboard. The command line works.
-- The `pprof` debug listener.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 
 ## Performance

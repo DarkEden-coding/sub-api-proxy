@@ -19,6 +19,7 @@ One part follows a later release: the Claude executor's prompt-cache and prompt-
 - Home mode (`-home-jwt`): bootstrap, config updates, request dispatch, usage, process and request logs, in-flight reporting and shared KV state. Home-managed plugin sync, tasks and status reporting remain unavailable.
 - The `PGSTORE_*`, `OBJECTSTORE_*` and `GITSTORE_*` storage backends, and the Redis-protocol usage subscriber on the main port.
 - Config and credential files are watched and reloaded without a restart. A plaintext management key is hashed on first start, as Go does.
+- The separate, optional `observability.pprof` listener follows Go v8.0.35 for startup, reload and shutdown. Its index, command line and symbol routes are always available when enabled. CPU profiles require the non-default `cpa-server/pprof` build feature on Unix; release binaries exclude it. Go runtime profiles return plain-text `501` answers, as approved in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 The dashboard says when the server lacks an endpoint instead of failing: actions it cannot do are disabled and named, and pages it cannot load say which route is missing. What is still missing is listed under [Upcoming features](../README.md#upcoming-features), and the deliberate differences from Go are in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
