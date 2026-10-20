@@ -908,15 +908,18 @@ pub struct PluginCatalog {
 static PLUGIN_CATALOG: std::sync::LazyLock<std::sync::RwLock<Arc<PluginCatalog>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Replaces the plugin catalog; a change bumps [`capabilities_generation`].
-pub fn set_plugin_catalog(catalog: PluginCatalog) {
+/// Replaces the plugin catalog; a change bumps [`capabilities_generation`] and returns
+/// true.
+pub fn set_plugin_catalog(catalog: PluginCatalog) -> bool {
     let mut current = PLUGIN_CATALOG
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if **current != catalog {
-        *current = Arc::new(catalog);
-        HINTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    if **current == catalog {
+        return false;
     }
+    *current = Arc::new(catalog);
+    HINTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    true
 }
 
 fn plugin_catalog() -> Arc<PluginCatalog> {
@@ -974,7 +977,9 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
     let provider = c.provider.trim().to_lowercase();
     if openai_compat(c) {
         let owned_by = c.attributes.get("compat_name").cloned().unwrap_or_default();
-        let models = compat_models(&configured, &owned_by, now);
+        // Go appends the provider's plugin models here too, without exclusions, and
+        // even when no models are configured.
+        let models = append_plugin_models(&provider_key(c), compat_models(&configured, &owned_by, now), &[]);
         return apply_prefix(models, credential_prefix(c), cfg.routing.force_model_prefix);
     }
     let with_config = |channel_models: Vec<Spec>, owned_by: &str, kind: &str, metadata: &str| {

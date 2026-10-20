@@ -35,10 +35,12 @@ pub struct ClientChanges {
 }
 
 /// Executor table changes from [`Host::register_executors`].
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecutorChanges {
-    /// Provider to the plugin that executes it, in registration order.
-    pub register: Vec<(String, String)>,
+    /// The registered executors, in registration order. Each keeps the plugin instance
+    /// it was registered from (Go `executorAdapter`), so a replaced plugin's successor
+    /// never serves a registration made for its predecessor.
+    pub register: Vec<crate::executor::Adapter>,
     /// Providers whose plugin executor went away. The caller removes each only if the
     /// executor registered for it is still a plugin executor (Go `ownsExecutor`).
     pub unregister: Vec<String>,
@@ -387,7 +389,9 @@ impl Host {
                 continue;
             }
             next_providers.insert(provider.clone());
-            changes.register.push((provider.clone(), record.id.clone()));
+            changes
+                .register
+                .push(self.adapter_for(record.clone(), provider.clone()));
             append_models(&mut provider_models, &provider, &mine);
             if !mine.is_empty() {
                 let client = executor_client_id(&record.id, &provider);

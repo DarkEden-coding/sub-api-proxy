@@ -795,7 +795,7 @@ pub fn admission<'a>(
     move |c| {
         let provider = crate::registry::provider_key(c);
         if !selection.provider_keys().contains(&provider)
-            || !(executors.supports(&c.provider) || plugins.executor(&c.provider).is_some())
+            || !(executors.supports(&c.provider) || plugins.has_executor(&c.provider))
         {
             return None;
         }

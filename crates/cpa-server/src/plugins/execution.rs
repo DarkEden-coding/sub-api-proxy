@@ -317,32 +317,26 @@ async fn run_executor(
 
 /// Go `executorAdapter.Execute`, `ExecuteStream` and `CountTokens` with an auth: a
 /// credential whose provider a plugin executor registered, chosen by the ordinary
-/// selection loop. The answer is in the client's format, as built-in executors give it.
+/// selection loop. `adapter` is the registered executor; a plugin replaced since then
+/// does not serve it (Go `pluginIdentityCurrent`). The answer is in the client's
+/// format, as built-in executors give it.
 /// ponytail: plugin executors publish no usage record here yet (Go's executor usage
 /// reporter); the server's response parsing still counts client-format usage.
 pub(crate) async fn execute_credential(
     rt: &Runtime,
     call: &Call,
-    plugin_id: &str,
+    adapter: &cpa_plugin::executor::Adapter,
     credential: &cpa_core::credential::Credential,
     req: cpa_core::exec::ExecRequest,
 ) -> Result<cpa_core::exec::ExecResponse, ExecError> {
-    let exec_error = |failure: Failure| match failure {
-        Failure::Exec(error) => error,
-        other => ExecError::local(other.status(), FailureScope::Request, other.text()),
-    };
     let host = rt.plugins();
     let count = req.operation == Operation::CountTokens;
     let stream = req.stream && !count;
     let source = handler_type(call);
     let response = if count { source } else { response_type(call) };
-    let adapter = host
-        .executor_adapter(plugin_id)
-        .await
-        .map_err(|e| exec_error(local(0, e)))?;
     let negotiated = adapter
         .negotiate(source, response, host.has_response_translator())
-        .map_err(|e| exec_error(local(0, e)))?;
+        .map_err(|e| attempt_error(0, e))?;
     let payload = if negotiated.input_requested == negotiated.input {
         req.body.clone()
     } else {
@@ -356,6 +350,12 @@ pub(crate) async fn execute_credential(
     };
     // Go `storageJSONFromAuth` without a plugin token storage: the metadata as JSON.
     let auth_metadata: Metadata = credential.metadata.clone().into_iter().collect();
+    // Go `applyRequestAfterAuthInterceptor` rewrites only the path in the metadata; the
+    // handler's reasoning effort, service tier and generate facts stay.
+    let mut metadata = execution_metadata(call, &req.model);
+    if !req.request_path.trim().is_empty() {
+        metadata.insert("request_path".into(), Value::String(req.request_path.trim().to_owned()));
+    }
     let request = ExecutorRequest {
         auth_id: credential.id.clone(),
         auth_provider: credential.provider.clone(),
@@ -368,23 +368,31 @@ pub(crate) async fn execute_credential(
         original_request: req.original_body.clone(),
         source_format: negotiated.input.clone(),
         payload,
-        metadata: execution_metadata(call, &req.model),
+        metadata,
         storage_json: Bytes::from(cpa_plugin::gojson::to_vec(&auth_metadata)),
         auth_metadata,
         auth_attributes: crate::management::quota::go_attributes(credential),
     };
+    // The router path's scope (`Scope::new`) with the post-auth headers and path, so
+    // nested `host.model.*` calls keep the pin, session and request context.
+    let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
     let scope = Scope(RequestScope {
         request_id: crate::observability::current_request_id().unwrap_or_default(),
         capture: req.capture().clone(),
-        ..Default::default()
+        cancel: inherited.cancel.child_token(),
+        headers: super::go_request_header(&req.headers),
+        query: super::go_values(&query()),
+        pinned_auth_id: call.pinned(),
+        execution_session: call.execution_session.clone(),
+        request_path: req.request_path.clone(),
     });
     if !stream {
         let resp = if count {
-            host.executor_count_tokens(&adapter, &request, &scope.0).await
+            host.executor_count_tokens(adapter, &request, &scope.0).await
         } else {
-            host.executor_execute(&adapter, &request, &scope.0).await
+            host.executor_execute(adapter, &request, &scope.0).await
         }
-        .map_err(|e| exec_error(call_failure(e)))?;
+        .map_err(|e| attempt_error(e.status(), e.to_string()))?;
         return Ok(cpa_core::exec::ExecResponse {
             status: 200,
             headers: header_map(&resp.headers),
@@ -392,15 +400,31 @@ pub(crate) async fn execute_credential(
         });
     }
     let opened = host
-        .executor_execute_stream(&adapter, &request, &scope.0)
+        .executor_execute_stream(adapter, &request, &scope.0)
         .await
-        .map_err(|e| exec_error(call_failure(e)))?;
+        .map_err(|e| attempt_error(e.status(), e.to_string()))?;
     let headers = header_map(&opened.headers);
     Ok(cpa_core::exec::ExecResponse {
         status: 200,
         headers,
         body: cpa_core::exec::ResponseBody::Stream(translate_stream(negotiated, request, opened.chunks, scope)),
     })
+}
+
+/// A credential-bound plugin executor's failure as an attempt on that credential.
+/// Go's `rpcError` has a status but no `IsCredentialScoped`, so the auth manager treats
+/// it like a plain status error: a 429 cools the model, auth, quota and server
+/// statuses the credential, other statuses fail the request. An error without a status
+/// (an unavailable or stale executor, a failed negotiation) neither cools nor stops the
+/// loop; the client gets 500 with its text.
+fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
+    let scope = match status {
+        0 => FailureScope::Transport,
+        429 => FailureScope::Model,
+        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
+        _ => FailureScope::Request,
+    };
+    ExecError::local(if status == 0 { 500 } else { status }, scope, message)
 }
 
 /// request context plus the request's model facts; `model` is the resolved model.

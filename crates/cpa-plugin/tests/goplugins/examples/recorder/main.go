@@ -15,6 +15,7 @@
 // Any other method is answered from <record>/respond/<label>/<method>.json when that
 // file exists: the file is the complete response envelope, written by the test before
 // the call.
+// <method>.once.json, when present, answers the next call instead and is then removed.
 //
 // A management.handle request whose body is {"calls":[{"method":...,"request":{...}}]}
 // makes those host callbacks (with host_callback_id filled in when absent) and returns
@@ -224,8 +225,12 @@ func canned(label, method string) ([]byte, int, bool) {
 	if base == "" {
 		return nil, 0, false
 	}
-	raw, err := os.ReadFile(filepath.Join(base, "respond", label, method+".json"))
-	if err != nil {
+	// <method>.once.json answers one call, then is removed.
+	once := filepath.Join(base, "respond", label, method+".once.json")
+	raw, err := os.ReadFile(once)
+	if err == nil {
+		_ = os.Remove(once)
+	} else if raw, err = os.ReadFile(filepath.Join(base, "respond", label, method+".json")); err != nil {
 		return nil, 0, false
 	}
 	var env envelope

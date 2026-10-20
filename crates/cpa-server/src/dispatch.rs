@@ -2115,8 +2115,8 @@ async fn attempt(
                 None => credential,
             };
             let credential = rt.for_executor(&credential);
-            if let Some(plugin) = rt.plugin_runtime().executor(&credential.provider) {
-                return crate::plugins::execution::execute_credential(rt, call, &plugin, &credential, req).await;
+            if let Some(adapter) = rt.plugin_runtime().executor(&credential.provider) {
+                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, req).await;
             }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,

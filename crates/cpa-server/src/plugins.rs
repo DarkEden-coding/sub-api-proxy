@@ -23,8 +23,8 @@ pub struct PluginRuntime {
     host: cpa_plugin::Host,
     latest: watch::Sender<Option<Arc<Config>>>,
     access: RwLock<Arc<AccessRegistry>>,
-    /// Go's executor table entries owned by plugins: provider to the executing plugin.
-    executors: RwLock<HashMap<String, String>>,
+    /// Go's executor table entries owned by plugins: provider to the registered executor.
+    executors: RwLock<HashMap<String, cpa_plugin::executor::Adapter>>,
 }
 
 impl Default for PluginRuntime {
@@ -49,10 +49,16 @@ impl PluginRuntime {
         &self.host
     }
 
-    /// The plugin whose executor serves credentials of `provider` (lowercased), if any.
-    pub(crate) fn executor(&self, provider: &str) -> Option<String> {
+    /// The registered plugin executor serving credentials of `provider`, if any.
+    pub(crate) fn executor(&self, provider: &str) -> Option<cpa_plugin::executor::Adapter> {
         let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         executors.get(&provider.trim().to_lowercase()).cloned()
+    }
+
+    /// Whether a plugin executor is registered for `provider`.
+    pub(crate) fn has_executor(&self, provider: &str) -> bool {
+        let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        executors.contains_key(&provider.trim().to_lowercase())
     }
 
     /// Records a published config; the worker started by [`start`] applies it.
@@ -85,32 +91,87 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
 async fn sync_models(rt: &Runtime) {
     let host = rt.plugins();
     host.register_models().await;
-    let registry = rt.registry();
-    let Some(changes) = host
-        .register_executors(&|p| rt.executors.supports(p), &|m| registry.model_providers(m))
-        .await
-    else {
-        // The plugin set changed meanwhile; its own sync follows.
-        return;
-    };
-    *rt.plugin_runtime()
-        .executors
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = changes.register.into_iter().collect();
-    let specs = |models: &[cpa_plugin::api::ModelInfo]| models.iter().map(model_spec).collect::<Vec<_>>();
-    cpa_core::registry::dynamic::set_plugin_catalog(cpa_core::registry::dynamic::PluginCatalog {
-        providers: host
-            .provider_models()
-            .iter()
-            .map(|(provider, models)| (provider.clone(), specs(models)))
-            .collect(),
-        clients: changes
-            .clients
+    let native = native_executor_providers(rt);
+    // Ownership is decided against the registry, whose credentials carry the published
+    // plugin catalog. Republishing changes that registry (a removed built-in catalog
+    // frees its models), so repeat until the catalog is stable; Go decides once against
+    // the previous catalog and catches up on the next sync.
+    for _ in 0..3 {
+        let registry = rt.registry();
+        let Some(changes) = host
+            .register_executors(&|p| native.contains(p), &|m| registry.model_providers(m))
+            .await
+        else {
+            // The plugin set changed meanwhile; its own sync follows.
+            return;
+        };
+        *rt.plugin_runtime()
+            .executors
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = changes
             .register
-            .iter()
-            .map(|(client, provider, models)| (client.clone(), provider.clone(), specs(models)))
-            .collect(),
-    });
+            .into_iter()
+            .map(|adapter| (adapter.provider.clone(), adapter))
+            .collect();
+        let specs = |models: &[cpa_plugin::api::ModelInfo]| models.iter().map(model_spec).collect::<Vec<_>>();
+        let changed = cpa_core::registry::dynamic::set_plugin_catalog(cpa_core::registry::dynamic::PluginCatalog {
+            providers: host
+                .provider_models()
+                .iter()
+                .map(|(provider, models)| (provider.clone(), specs(models)))
+                .collect(),
+            clients: changes
+                .clients
+                .register
+                .iter()
+                .map(|(client, provider, models)| (client.clone(), provider.clone(), specs(models)))
+                .collect(),
+        });
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// Go `providerHasNativeExecutor`: providers a built-in executor is actually bound to.
+/// Go binds one per enabled credential's provider (`registerExecutorForAuth`), plus a
+/// fixed baseline in Home mode; a provider the built-in executors could serve but no
+/// credential uses (an unused `openai-compatible-*` name) has none.
+/// ponytail: Go keeps a binding after its last credential goes away and skips the
+/// OpenAI-compatible fallback for an unknown provider that a plugin executor claims;
+/// both are recomputed from the current credentials here.
+fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
+    let mut native: HashSet<String> = rt
+        .store()
+        .snapshot()
+        .iter()
+        .filter(|c| !c.disabled)
+        .map(|c| cpa_core::registry::dynamic::provider_key(c))
+        .filter(|p| rt.executors.supports(p))
+        .collect();
+    if rt.remote_dispatch().is_some() {
+        // Go `baselineExecutorAuths`.
+        native.extend(
+            [
+                "codex",
+                "claude",
+                "gemini",
+                "gemini-interactions",
+                "vertex",
+                "aistudio",
+                "antigravity",
+                "kimi",
+                "kimi-ai",
+                "kimi.ai",
+                "xai",
+                "devin",
+                "meta",
+                "openai-compatibility",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    native
 }
 
 /// Go `pluginModelInfoToRegistryModelInfo`.
