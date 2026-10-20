@@ -30,6 +30,9 @@ pub struct RequestScope {
     /// The request's cancellation (Go's request context): `host.http.*` operations
     /// opened under the context end when it fires.
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Inbound values inherited by host.model callbacks that omit overrides.
+    pub headers: gojson::Header,
+    pub query: gojson::Header,
 }
 
 impl std::fmt::Debug for RequestScope {
@@ -80,6 +83,8 @@ pub(crate) struct Callbacks {
     pub http: crate::hosthttp::HttpBridge,
     /// The server's credential manager (Go `SetAuthManager`).
     pub auth: std::sync::RwLock<Option<Arc<dyn crate::hostauth::AuthManager>>>,
+    pub model_executor: std::sync::RwLock<Option<Arc<dyn crate::hostmodel::ModelExecutor>>>,
+    pub model: crate::hostmodel::ModelBridge,
     runtime: OnceLock<tokio::runtime::Handle>,
 }
 
@@ -93,6 +98,8 @@ impl Callbacks {
             streams: Arc::default(),
             http: Default::default(),
             auth: Default::default(),
+            model_executor: Default::default(),
+            model: Default::default(),
             runtime: OnceLock::new(),
         }
     }
@@ -327,6 +334,10 @@ impl Host {
             method::HOST_HTTP_CANCEL => self.host_http_cancel(caller, request),
             method::HOST_HTTP_STREAM_READ => self.host_http_stream_read(caller, request),
             method::HOST_HTTP_STREAM_CLOSE => self.host_http_stream_close(caller, request),
+            method::HOST_MODEL_EXECUTE => self.host_model_execute(caller, request, false),
+            method::HOST_MODEL_EXECUTE_STREAM => self.host_model_execute(caller, request, true),
+            method::HOST_MODEL_STREAM_READ => self.host_model_stream_read(request),
+            method::HOST_MODEL_STREAM_CLOSE => self.host_model_stream_close(request),
             method::HOST_AUTH_LIST => self.host_auth_list(request),
             method::HOST_AUTH_GET => self.host_auth_get(request),
             method::HOST_AUTH_GET_RUNTIME => self.host_auth_get_runtime(request),

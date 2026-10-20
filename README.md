@@ -163,7 +163,7 @@ Before switching, read [MIGRATING-FROM-GO.md](docs/MIGRATING-FROM-GO.md), especi
 Not in cliproxy-rs yet:
 
 - An AUR package.
-- Plugin-owned credentials, models and executors without a model router; plugin schedulers, request and response translators, thinking appliers, `host.model.*` callbacks and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks.
+- Plugin-owned credentials, models and executors without a model router; plugin schedulers, request and response translators, thinking appliers and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks. The `host.http.*`, `host.auth.*`, `host.affinity.lookup` and `host.model.*` callbacks work; model callbacks use the built-in protocols until plugin translators are wired in.
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
 - Google Antigravity sign-in from the dashboard and the Management API. `cliproxy -antigravity-login` signs in from the command line.
 - Vertex service-account import from the dashboard. The command line works.

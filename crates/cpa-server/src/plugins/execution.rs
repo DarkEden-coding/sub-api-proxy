@@ -55,11 +55,14 @@ pub(crate) fn query() -> String {
 struct Scope(RequestScope);
 
 impl Scope {
-    fn new(trace: &Trace) -> Self {
+    fn new(trace: &Trace, call: &Call) -> Self {
+        let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
         Self(RequestScope {
             request_id: trace.request_id(),
             capture: trace.capture(),
-            ..Default::default()
+            cancel: inherited.cancel.child_token(),
+            headers: super::go_request_header(&call.headers),
+            query: super::go_values(&query()),
         })
     }
 }
@@ -140,7 +143,8 @@ fn available_providers(rt: &Runtime) -> Vec<String> {
 /// target decides where it goes.
 pub(crate) async fn route(rt: &Runtime, call: &Call, query: &str, trace: &Trace) -> Option<Route> {
     let host = rt.plugins();
-    if !host.has_model_routers("") {
+    let skip = super::model_callbacks::skip_plugin();
+    if !host.has_model_routers(&skip) {
         return None;
     }
     let mut metadata = request_metadata(call);
@@ -155,9 +159,9 @@ pub(crate) async fn route(rt: &Runtime, call: &Call, query: &str, trace: &Trace)
         metadata,
         ..Default::default()
     };
-    let scope = Scope::new(trace);
+    let scope = Scope::new(trace, call);
     let resp = host
-        .route_model(request, "", &available_providers(rt), &scope.0)
+        .route_model(request, &skip, &available_providers(rt), &scope.0)
         .await?;
     Some(match resp.target_kind.as_str() {
         "provider" => Route::Provider {
@@ -206,7 +210,11 @@ pub(crate) async fn execute(
     };
     // The OpenAI handler frames each chunk after the stream interceptors saw it.
     match result {
-        Ok(Done::Stream { headers, first, rest }) if call.response == Format::OpenAI && call.media.is_none() => {
+        Ok(Done::Stream { headers, first, rest })
+            if call.response == Format::OpenAI
+                && call.media.is_none()
+                && super::model_callbacks::context().is_none() =>
+        {
             Ok(Done::Stream {
                 headers,
                 first: first.and_then(|f| openai_frame(&f)),
@@ -274,7 +282,7 @@ async fn run_executor(
         metadata: execution_metadata(call, &call.model),
         ..Default::default()
     };
-    let scope = Scope::new(trace);
+    let scope = Scope::new(trace, call);
     if !stream {
         let resp = if count {
             host.executor_count_tokens(&adapter, &request, &scope.0).await
@@ -308,6 +316,9 @@ async fn run_executor(
 /// request context plus the request's model facts; `model` is the resolved model.
 pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     let mut meta = request_metadata(call);
+    if super::model_callbacks::context().is_some() {
+        meta.insert("source".into(), Value::String("plugin_host_model_callback".into()));
+    }
     meta.insert("requested_model".into(), Value::String(call.model.clone()));
     if let Some(model) = call.selection_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         meta.insert("auth_selection_model".into(), Value::String(model.to_owned()));

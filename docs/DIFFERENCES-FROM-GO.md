@@ -2,6 +2,10 @@
 
 Where cliproxy-rs has a feature, it aims to behave exactly as CLIProxyAPI does at commit `6fecc6e`, except for the Claude prompt-cache and prompt-shaping fixes that follow v8.0.27 ([PARITY.md](PARITY.md)). This page lists the places where it behaves differently on purpose, and the one routing strategy it adds. Features that are not ported yet are listed under [Upcoming features](../README.md#upcoming-features) instead.
 
+Plugin model callbacks follow v8.0.35, including detached stream cancellation and
+caller-plugin skipping. These are parity changes, not new deliberate differences.
+Windows plugin loading remains unsupported.
+
 ## Additions in cliproxy-rs
 
 - Routing strategy `soonest-reset` (alias `reset-first`), experimental and opt-in: select the account whose weekly window resets soonest, until it cools down or reaches a limit, then move to the next. An account whose reset time is not known yet gets one probe request. Conversations bound to an account stay on it. Go has only `round-robin`, `weighted-round-robin` and `fill-first`, and reads `soonest-reset` as `round-robin`. The dashboard offers it only when it is connected to cliproxy-rs. See [MULTI-ACCOUNT.md](MULTI-ACCOUNT.md#routing-strategies).
