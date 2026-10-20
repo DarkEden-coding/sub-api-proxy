@@ -1341,25 +1341,27 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) ->
                 ),
             };
         }
-        let patch = MetadataPatch {
-            set: Map::from_iter([("disabled".into(), disabled.into())]),
-            remove: vec![],
-        };
         // Go v8.0.35 `Manager.Modify`: the flag lands on the record as it is now, so a
         // token refresh between the lookup and the write does not fail the toggle.
-        let mut revision = target.revision;
+        let mut current = target;
         for _ in 0..16 {
-            match state.rt.store().apply_patch(&target.id, revision, &patch) {
-                Ok(_) => {
-                    note_disabled(&state, &target.id, Some(disabled));
-                    resync(&state);
+            let mut metadata = current.metadata.clone();
+            metadata.insert("disabled".into(), disabled.into());
+            match save_file_backed(&state, &current, &metadata, false) {
+                Ok(()) => {
+                    note_disabled(&state, &current.id, Some(disabled));
                     return reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())]);
                 }
-                Err(PatchError::Stale { current }) => revision = current,
+                Err(PatchError::Stale { .. }) => match state.rt.store().get(&current.id) {
+                    Some(c) => current = c,
+                    None => return patch_error(Some(PatchError::NotFound)),
+                },
                 Err(e) => return patch_error(Some(e)),
             }
         }
-        patch_error(Some(PatchError::Stale { current: revision }))
+        patch_error(Some(PatchError::Stale {
+            current: current.revision,
+        }))
     })
     .await
     .unwrap_or_else(|_| patch_error(None))
@@ -1561,38 +1563,64 @@ fn apply_fields(
         }
     }
     let retyped = patch.set.contains_key("type") || patch.remove.iter().any(|k| k == "type");
-    if retyped {
-        // `type` picks the executor, so the store refuses it in place; Go allows it
-        // and the file's next synthesis picks the new provider. Write the file the
-        // way Go's store does and re-synthesize.
-        // ponytail: no revision check against a concurrent token refresh here.
-        let Some(path) = path_of(&target).map(Path::to_path_buf) else {
-            return Some(patch_error(None));
-        };
-        let mut next = target.metadata.clone();
-        patch.apply(&mut next);
-        let sorted: BTreeMap<&String, &Value> = next.iter().collect();
-        let written = serde_json::to_vec(&sorted)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| write_file(&path, &bytes).map_err(|e| e.to_string()));
-        return Some(match written {
-            Ok(()) => {
-                note_disabled(state, &target.id, disabled_note);
-                resync(state);
-                reply(StatusCode::OK, [("status", "ok".into())])
-            }
-            Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update auth: {e}")),
-        });
-    }
-    match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
-        Ok(_) => {
+    let mut next = target.metadata.clone();
+    patch.apply(&mut next);
+    match save_file_backed(state, &target, &next, retyped) {
+        Ok(()) => {
             note_disabled(state, &target.id, disabled_note);
-            resync(state);
             Some(reply(StatusCode::OK, [("status", "ok".into())]))
         }
         Err(PatchError::Stale { .. }) => None,
         Err(e) => Some(patch_error(Some(e))),
     }
+}
+
+/// Go `Manager.Modify` for an auth file: writes `metadata` and registers the file's
+/// re-synthesis in place of `target`, only while `target` is still the current record
+/// (`Stale` otherwise, and the caller retries on the record as it is now). Only this
+/// credential is re-read; a whole-folder rescan could publish a token a concurrent
+/// refresh had already replaced. A changed `type` is written the way Go's store writes
+/// the file (sorted keys); other edits keep the stored key order.
+fn save_file_backed(
+    state: &Management,
+    target: &Credential,
+    metadata: &Map<String, Value>,
+    retyped: bool,
+) -> Result<(), PatchError> {
+    let Some(path) = path_of(target).map(Path::to_path_buf) else {
+        return Err(PatchError::ConfigBacked);
+    };
+    let bytes = if retyped {
+        serde_json::to_vec(&metadata.iter().collect::<BTreeMap<_, _>>())
+    } else {
+        serde_json::to_vec(metadata).map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        })
+    }
+    .map_err(|e| PatchError::Io(e.to_string()))?;
+    // Synthesized as the auth-folder scan sees the file.
+    let cfg = state.rt.config();
+    let scanned = path
+        .file_name()
+        .map_or_else(|| path.clone(), |name| cfg.auth_dir.join(name));
+    let (next, fallback) = match credentials::from_file(&cfg, &cfg.auth_dir, &scanned, &bytes) {
+        Ok(Some(c)) => (Some(c), false),
+        Ok(None) => (credentials::upload_fallback(&cfg.auth_dir, &scanned, &bytes), true),
+        Err(e) => return Err(PatchError::Io(e)),
+    };
+    let kept = next.is_some();
+    state
+        .rt
+        .store()
+        .replace_file_backed(&target.id, target.revision, &bytes, next)?;
+    let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
+    fallbacks.remove(&path);
+    fallbacks.remove(&scanned);
+    if fallback && kept {
+        fallbacks.insert(scanned);
+    }
+    Ok(())
 }
 
 fn set_path(meta: &mut Map<String, Value>, parts: &[&str], value: Value) {
@@ -1990,5 +2018,113 @@ mod tests {
             serde_json::to_string(&plugin_model_json(&model)).unwrap(),
             r#"{"id":"work-pro","object":"","created":0,"owned_by":"","type":"","display_name":"Work Pro","inputTokenLimit":1000,"supportedGenerationMethods":["generateContent"],"max_completion_tokens":64,"supportedInputModalities":["TEXT"],"thinking":{"max":2048,"dynamic_allowed":true}}"#
         );
+    }
+
+    fn management(name: &str, files: &[(&str, &str)]) -> (Arc<Management>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cpa-modify-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, body) in files {
+            std::fs::write(dir.join(file), body).unwrap();
+        }
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            credentials::from_auth_dir(&cfg),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        (Management::new(rt, path), dir)
+    }
+
+    /// What a token refresh commits: the store's compare-and-swap patch.
+    fn refresh(state: &Management, id: &str, token: &str) {
+        let current = state.rt.store().get(id).unwrap();
+        let patch = MetadataPatch {
+            set: Map::from_iter([("access_token".into(), token.into())]),
+            remove: vec![],
+        };
+        state.rt.store().apply_patch(id, current.revision, &patch).unwrap();
+    }
+
+    fn on_disk(dir: &std::path::Path, file: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap()
+    }
+
+    /// Go `Manager.Modify` (`d69962e4`): a refresh that commits after a patch read the
+    /// record makes the patch stale instead of being overwritten, for an in-place edit
+    /// and for a changed `type` alike; the retry on the current record keeps both.
+    #[tokio::test]
+    async fn a_refresh_after_a_patch_read_the_record_is_never_overwritten() {
+        let (state, dir) = management("stale", &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)]);
+        for (round, retyped) in [(1, false), (2, true)] {
+            let read = state.rt.store().get("a.json").unwrap();
+            let token = format!("fake-{round}");
+            refresh(&state, "a.json", &token);
+            let edit = |c: &Credential| {
+                let mut meta = c.metadata.clone();
+                meta.insert(format!("note_{round}"), round.into());
+                if retyped {
+                    meta.insert("type".into(), "codex".into());
+                }
+                meta
+            };
+            let stale = save_file_backed(&state, &read, &edit(&read), retyped);
+            assert!(matches!(stale, Err(PatchError::Stale { .. })), "{stale:?}");
+            assert_eq!(on_disk(&dir, "a.json")["access_token"], token.as_str());
+            assert_eq!(
+                state.rt.store().get("a.json").unwrap().metadata["access_token"],
+                token.as_str()
+            );
+            let current = state.rt.store().get("a.json").unwrap();
+            save_file_backed(&state, &current, &edit(&current), retyped).unwrap();
+            let saved = on_disk(&dir, "a.json");
+            assert_eq!(
+                (saved["access_token"].as_str(), &saved[format!("note_{round}")]),
+                (Some(token.as_str()), &json!(round))
+            );
+        }
+        assert_eq!(state.rt.store().get("a.json").unwrap().provider, "codex");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A patch re-reads only its own credential. A whole-folder rescan could publish
+    /// another credential's file as a scan read it before that credential's refresh
+    /// committed; here that older file sits on disk while the store holds the refresh.
+    #[tokio::test]
+    async fn a_patch_publishes_only_the_credential_it_changed() {
+        let (state, dir) = management(
+            "only",
+            &[
+                ("a.json", r#"{"type":"claude","access_token":"fake-a"}"#),
+                ("c.json", r#"{"type":"claude","access_token":"fake-old"}"#),
+            ],
+        );
+        refresh(&state, "c.json", "fake-new");
+        std::fs::write(dir.join("c.json"), r#"{"type":"claude","access_token":"fake-old"}"#).unwrap();
+        let token = |state: &Management| state.rt.store().get("c.json").unwrap().metadata["access_token"].clone();
+        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","note":1}"#)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","type":"codex"}"#)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = status(
+            State(state.clone()),
+            Bytes::from(r#"{"name":"a.json","disabled":true}"#),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(token(&state), "fake-new");
+        let a = state.rt.store().get("a.json").unwrap();
+        assert_eq!(
+            (a.provider.as_str(), a.disabled, &a.metadata["note"]),
+            ("codex", true, &json!(1))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
