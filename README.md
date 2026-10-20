@@ -46,7 +46,7 @@ Run the install command again to upgrade, or `brew upgrade cliproxy-rs` with Hom
 
 ## What is this?
 
-cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 856 covered, 996 partial and 99 missing. [PARITY.md](docs/PARITY.md) defines those counts.
+cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 868 covered, 996 partial and 87 missing. [PARITY.md](docs/PARITY.md) defines those counts.
 
 The dashboard shows accounts, provider limits, request history and tool settings.
 
@@ -167,7 +167,6 @@ Not in cliproxy-rs yet:
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
 - Google Antigravity sign-in from the dashboard and the Management API. `cliproxy -antigravity-login` signs in from the command line.
 - Vertex service-account import from the dashboard. The command line works.
-- The `pprof` debug listener.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 
 ## Performance
