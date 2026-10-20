@@ -284,15 +284,20 @@ All Go inspection uses `git show`, `git diff`, and `git ls-tree` against a read-
 clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
 
 - the exact tag commit;
-- stable IDs: all 1,687 retained IDs keep their milestone and section, and their
-  contract text is unchanged apart from Go line numbers and LOC counts, except for
-  28 listed rewrites (the 18 `upstream.*` moves, each matched against Go's
-  `config_v8.go` alias table, and the 10 changed contracts above);
+- stable IDs: all 1,687 retained IDs keep their milestone and section. Retained
+  non-suite rows keep their contract text apart from Go line numbers and LOC
+  counts. Suite rows are checked by filename and declarations only. The 28 listed
+  rewrites are exempt from the text comparison: for the 18 `upstream.*` moves only
+  the canonical path and previous alias are checked against Go's `config_v8.go`
+  alias table, and the 10 changed contracts above are not compared at all;
 - test suites: the 228 added Go files, 989 suite entries with their declarations
   and lines, the excluded support-only file, and 43 retired declarations;
-- routes: each of Go's 257 literal router and `ServeMux` registrations under
-  `internal/` and `sdk/` is cited by a route item with the same method and path,
-  and every route item cites one;
+- routes: each of Go's 257 literal router and `ServeMux` registration call sites
+  under `internal/` and `sdk/` is cited by a route item whose method matches and
+  whose path ends with the registered literal, and every route item cites one.
+  Group and constant prefixes (such as `Group("/v1")`) are not resolved, so a
+  wrong prefix would pass, and a registration in a method loop counts as one
+  any-method call site;
 - config leaves: the 434 YAML leaves walked from Go's `Config` struct equal the
   checklist's legacy paths, and the 28 added since `6fecc6e` equal the additions
   section;
