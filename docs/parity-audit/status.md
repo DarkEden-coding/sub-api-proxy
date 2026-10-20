@@ -19,8 +19,8 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M1 | 151 | 54 | 83 | 14 |
 | M2 | 189 | 71 | 114 | 4 |
 | M3 | 424 | 187 | 215 | 22 |
-| M4 | 589 | 232 | 330 | 27 |
-| M5 | 331 | 197 | 124 | 10 |
+| M4 | 589 | 244 | 330 | 15 |
+| M5 | 331 | 196 | 125 | 10 |
 | M6 | 267 | 114 | 130 | 23 |
 
 ### Gaps by area
@@ -30,16 +30,16 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | plugins | 22 | 99 | M6-0143, M6-0144, M6-0145, M6-0146, M6-0169, M6-0170, M6-0171, M6-0174, M6-0183, M6-0187, M6-0192, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242, M6-0249, M6-0250, M6-0251, M6-0252 |
 | server | 19 | 286 | M1-0119, M1-0128, M4-0371, M4-0372, M4-0511, M4-0512, M4-0513, M4-0514, M4-0515, M4-0543, M4-0578, M4-0579, M4-0580, M4-0585, M5-0316, M5-0318, M5-0320, M5-0329, M5-0330 |
 | claude | 13 | 75 | M1-0120, M1-0121, M1-0122, M1-0123, M1-0124, M1-0125, M1-0126, M1-0127, M1-0133, M1-0136, M1-0137, M1-0147, M5-0314 |
-| observe | 12 | 1 | M4-0001, M4-0002, M4-0003, M4-0004, M4-0005, M4-0006, M4-0007, M4-0008, M4-0009, M4-0010, M4-0011, M4-0485 |
 | codex | 11 | 82 | M3-0351, M3-0355, M3-0358, M3-0362, M3-0363, M3-0364, M3-0367, M3-0369, M3-0380, M3-0422, M5-0323 |
 | openai-xai | 6 | 31 | M3-0356, M3-0359, M3-0365, M3-0366, M3-0399, M6-0217 |
 | manage | 5 | 148 | M4-0526, M4-0528, M5-0304, M5-0312, M5-0313 |
 | translate | 5 | 123 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
-| google | 4 | 79 | M3-0353, M3-0354, M3-0360, M3-0361 |
+| google | 4 | 80 | M3-0353, M3-0354, M3-0360, M3-0361 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
 | tui | 1 | 9 | M4-0521 |
 | home | 0 | 27 | — |
 | realtime | 0 | 8 | — |
+| observe | 0 | 1 | — |
 
 ## M1
 
@@ -962,17 +962,17 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 
 | ID | Item | Status | Evidence | Area | Note |
 |---|---|---|---|---|---|
-| M4-0001 | Optional separate pprof listener `ANY /debug/pprof/` (ServeMux imposes no method constrain… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0002 | Optional separate pprof listener `ANY /debug/pprof/cmdline` (ServeMux imposes no method co… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0003 | Optional separate pprof listener `ANY /debug/pprof/profile` (ServeMux imposes no method co… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: the CPU profile sits behind a non-default cargo feature. |
-| M4-0004 | Optional separate pprof listener `ANY /debug/pprof/symbol` (ServeMux imposes no method con… | missing | no pprof listener yet | observe | To be implemented for real (listener, index, cmdline, symbol). |
-| M4-0005 | Optional separate pprof listener `ANY /debug/pprof/trace` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0006 | Optional separate pprof listener `ANY /debug/pprof/allocs` (ServeMux imposes no method con… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0007 | Optional separate pprof listener `ANY /debug/pprof/block` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0008 | Optional separate pprof listener `ANY /debug/pprof/goroutine` (ServeMux imposes no method … | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0009 | Optional separate pprof listener `ANY /debug/pprof/heap` (ServeMux imposes no method const… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0010 | Optional separate pprof listener `ANY /debug/pprof/mutex` (ServeMux imposes no method cons… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
-| M4-0011 | Optional separate pprof listener `ANY /debug/pprof/threadcreate` (ServeMux imposes no meth… | missing | no pprof listener yet | observe | Planned deliberate difference once the pprof listener ships: Go-runtime profiles answer 501. |
+| M4-0001 | Optional separate pprof listener `ANY /debug/pprof/` (ServeMux imposes no method constrain… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols, pprof_listener_reload_failure_and_shutdown |  | Separate optional listener; index, query-preserving 307 redirect (Go 1.26 ServeMux) and config lifecycle checked against v8.0.35. |
+| M4-0002 | Optional separate pprof listener `ANY /debug/pprof/cmdline` (ServeMux imposes no method co… | covered | crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown |  | NUL-separated command line checked through the actual listener. |
+| M4-0003 | Optional separate pprof listener `ANY /debug/pprof/profile` (ServeMux imposes no method co… | covered | crates/cpa-server/src/pprof.rs pprof_cpu_profile_is_decodable_and_exclusive, pprof_routes_and_symbols; .github/workflows/ci.yml, release.yml |  | Deliberate difference: CPU sampling requires cpa-server/pprof on Unix; default builds and published release binaries exclude it and return 501 naming the feature. POST, PUT and PATCH form durations override the query. |
+| M4-0004 | Optional separate pprof listener `ANY /debug/pprof/symbol` (ServeMux imposes no method con… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: GET raw query and POST body resolve program counters only with cpa-server/pprof; default builds consume POST bodies but return num_symbols: 1 with no names, including shared-library names. |
+| M4-0005 | Optional separate pprof listener `ANY /debug/pprof/trace` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime trace returns plain-text 501. |
+| M4-0006 | Optional separate pprof listener `ANY /debug/pprof/allocs` (ServeMux imposes no method con… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime allocs profile returns plain-text 501. |
+| M4-0007 | Optional separate pprof listener `ANY /debug/pprof/block` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime block profile returns plain-text 501. |
+| M4-0008 | Optional separate pprof listener `ANY /debug/pprof/goroutine` (ServeMux imposes no method … | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime goroutine profile returns plain-text 501. |
+| M4-0009 | Optional separate pprof listener `ANY /debug/pprof/heap` (ServeMux imposes no method const… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime heap profile returns plain-text 501. |
+| M4-0010 | Optional separate pprof listener `ANY /debug/pprof/mutex` (ServeMux imposes no method cons… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime mutex profile returns plain-text 501. |
+| M4-0011 | Optional separate pprof listener `ANY /debug/pprof/threadcreate` (ServeMux imposes no meth… | covered | crates/cpa-server/src/pprof.rs pprof_routes_and_symbols; docs/DIFFERENCES-FROM-GO.md |  | Deliberate difference: Go runtime threadcreate profile returns plain-text 501. |
 
 ### M4: 3a. Exact provider storage fields and open metadata contract
 
@@ -1022,13 +1022,13 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0038 | server.host | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/discovery/tests.rs (+17); set in crates/cliproxy/src/discovery/mdns.rs, crates/cliproxy/src/home.rs (+43) |  | heuristic: key name match |
 | M4-0039 | server.port | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/discovery/tests.rs (+6); set in crates/cliproxy/src/discovery/mdns.rs, crates/cliproxy/src/home.rs (+33) |  | heuristic: key name match |
 | M4-0040 | server.trusted-proxies | covered | read in crates/cpa-core/src/config.rs; set in crates/cpa-server/src/observability.rs, crates/cpa-server/tests/fixtures/legacy_go.json (+2) |  | heuristic: key name match |
-| M4-0041 | server.tls.enable | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/listener.rs (+2); set in crates/cliproxy/src/home.rs, crates/cpa-home/src/cert_tests.rs (+4) |  | heuristic: key name match |
+| M4-0041 | server.tls.enable | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/listener.rs (+2); set in crates/cliproxy/src/home.rs, crates/cpa-home/src/cert_tests.rs (+5) |  | heuristic: key name match |
 | M4-0042 | server.tls.cert | covered | read in crates/cpa-server/src/listener.rs; set in crates/cpa-home/src/cert_tests.rs, crates/cpa-home/src/client_tests.rs (+2) |  | heuristic: key name match |
 | M4-0043 | server.tls.key | covered | read in crates/cpa-exec/src/meta_auth.rs, crates/cpa-plugin/src/api.rs (+6); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/tui/app.rs (+69) |  | heuristic: key name match |
-| M4-0044 | oauth.auth-dir | covered | read in crates/cpa-core/src/config.rs, crates/cpa-server/src/config_diff.rs; set in crates/cpa-core/src/config.rs, crates/cpa-exec/src/claude/testdata/go_executor.json (+24) |  | heuristic: key name match |
-| M4-0045 | observability.logs.debug | covered | read in crates/cliproxy/src/tui/config.rs, crates/cliproxy/src/tui/dashboard.rs (+5); set in crates/cliproxy/src/tui/client.rs, crates/cliproxy/tests/fixtures/tui_go.json (+10) |  | heuristic: key name match |
-| M4-0046 | observability.pprof.enable | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/listener.rs (+2); set in crates/cliproxy/src/home.rs, crates/cpa-home/src/cert_tests.rs (+4) |  | heuristic: key name match |
-| M4-0047 | observability.pprof.addr | covered | read in crates/cpa-home/src/client.rs, crates/cpa-server/src/config_diff.rs (+1); set in crates/cliproxy/src/main.rs, crates/cpa-exec/src/antigravity_auth_tests.rs (+18) |  | heuristic: key name match |
+| M4-0044 | oauth.auth-dir | covered | read in crates/cpa-core/src/config.rs, crates/cpa-server/src/config_diff.rs; set in crates/cpa-core/src/config.rs, crates/cpa-exec/src/claude/testdata/go_executor.json (+25) |  | heuristic: key name match |
+| M4-0045 | observability.logs.debug | covered | read in crates/cliproxy/src/tui/config.rs, crates/cliproxy/src/tui/dashboard.rs (+5); set in crates/cliproxy/src/tui/client.rs, crates/cliproxy/tests/fixtures/tui_go.json (+11) |  | heuristic: key name match |
+| M4-0046 | observability.pprof.enable | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/listener.rs (+2); set in crates/cliproxy/src/home.rs, crates/cpa-home/src/cert_tests.rs (+5) |  | heuristic: key name match |
+| M4-0047 | observability.pprof.addr | covered | read in crates/cpa-home/src/client.rs, crates/cpa-server/src/config_diff.rs (+1); set in crates/cliproxy/src/main.rs, crates/cpa-exec/src/antigravity_auth_tests.rs (+19) |  | heuristic: key name match |
 | M4-0048 | server.commercial-mode | covered | read in crates/cpa-server/src/request_logging.rs; set in crates/cpa-server/src/request_logging.rs |  | It only disables request logging; it ships with request-log capture (M4-0250). |
 | M4-0049 | observability.logs.logging-to-file | covered | read in crates/cliproxy/src/tui/app.rs, crates/cliproxy/src/tui/config.rs (+7); set in crates/cliproxy/src/tui/app.rs, crates/cliproxy/tests/fixtures/tui_go.json (+5) |  | heuristic: key name match |
 | M4-0050 | observability.logs.logs-max-total-size-mb | covered | read in crates/cliproxy/src/tui/config.rs, crates/cpa-server/src/config_diff.rs (+4); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-server/tests/fixtures/config_diff_go.json (+1) |  | heuristic: key name match |
@@ -1084,7 +1084,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0100 | api-keys.codex[].keys[].excluded-models | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs; set in crates/cpa-server/tests/fixtures/config_diff_go.json, crates/cpa-server/tests/fixtures/legacy_go.json (+2) |  | heuristic: key name match |
 | M4-0101 | api-keys.codex[].keys[].disable-cooling | covered | read in crates/cliproxy/src/home.rs, crates/cpa-core/src/config.rs (+9); set in crates/cpa-server/src/scheduler.rs, crates/cpa-server/tests/fixtures/config_diff_go.json (+3) |  | heuristic: key name match |
 | M4-0102 | api-keys.codex[].keys[].request-retry | covered | read in crates/cliproxy/src/tui/config.rs, crates/cliproxy/src/tui/dashboard.rs (+11); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/tui_go.json (+8) |  | heuristic: key name match |
-| M4-0103 | api-keys.codex[].keys[].request-scoped-errors[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/tui_go.json (+64) |  | heuristic: key name match |
+| M4-0103 | api-keys.codex[].keys[].request-scoped-errors[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/tui_go.json (+65) |  | heuristic: key name match |
 | M4-0104 | api-keys.codex[].keys[].request-scoped-errors[].match | covered | read in crates/cpa-common/src/payload.rs, crates/cpa-core/src/config/credentials.rs (+8); set in crates/cpa-common/tests/fixtures/payload_go.json, crates/cpa-server/src/scheduler.rs (+7) |  | heuristic: key name match |
 | M4-0105 | api-keys.codex[].keys[].request-scoped-errors[].match-regexr | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+3); set in crates/cpa-server/src/scheduler.rs, crates/cpa-server/tests/fixtures/config_diff_go.json |  | heuristic: key name match |
 | M4-0106 | api-keys.codex[].keys[].request-scoped-errors[].action | covered | read in crates/cliproxy/src/tui/golden.rs, crates/cpa-common/src/signature/tests.rs (+11); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-common/tests/fixtures/go_calls.jsonl.gz (+7) |  | heuristic: key name match |
@@ -1125,7 +1125,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0141 | api-keys.claude[].keys[].excluded-models | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs; set in crates/cpa-server/tests/fixtures/config_diff_go.json, crates/cpa-server/tests/fixtures/legacy_go.json (+2) |  | heuristic: key name match |
 | M4-0142 | api-keys.claude[].keys[].disable-cooling | covered | read in crates/cliproxy/src/home.rs, crates/cpa-core/src/config.rs (+9); set in crates/cpa-core/src/config.rs, crates/cpa-server/src/scheduler.rs (+4) |  | heuristic: key name match |
 | M4-0143 | api-keys.claude[].keys[].request-retry | covered | read in crates/cliproxy/src/tui/config.rs, crates/cliproxy/src/tui/dashboard.rs (+11); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/tui_go.json (+9) |  | heuristic: key name match |
-| M4-0144 | api-keys.claude[].keys[].request-scoped-errors[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/plugin_wiring_go.json (+68) |  | heuristic: key name match |
+| M4-0144 | api-keys.claude[].keys[].request-scoped-errors[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/tests/fixtures/plugin_wiring_go.json (+69) |  | heuristic: key name match |
 | M4-0145 | api-keys.claude[].keys[].request-scoped-errors[].match | covered | read in crates/cpa-common/src/payload.rs, crates/cpa-core/src/config/credentials.rs (+8); set in crates/cpa-common/tests/fixtures/payload_go.json, crates/cpa-server/src/scheduler.rs (+7) |  | heuristic: key name match |
 | M4-0146 | api-keys.claude[].keys[].request-scoped-errors[].match-regexr | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+3); set in crates/cpa-server/src/scheduler.rs, crates/cpa-server/tests/fixtures/config_diff_go.json |  | heuristic: key name match |
 | M4-0147 | api-keys.claude[].keys[].request-scoped-errors[].action | covered | read in crates/cliproxy/src/tui/golden.rs, crates/cpa-common/src/signature/tests.rs (+11); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-common/tests/fixtures/go_calls.jsonl.gz (+7) |  | heuristic: key name match |
@@ -1156,7 +1156,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0172 | oauth.model-alias.{key}[].fork | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+3); set in crates/cpa-core/src/registry/dynamic.rs, crates/cpa-exec/src/antigravity_models_tests.rs (+8) |  | heuristic: key name match |
 | M4-0173 | oauth.model-alias.{key}[].display-name | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+4); set in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/registry/dynamic.rs (+3) |  | heuristic: key name match |
 | M4-0174 | oauth.model-alias.{key}[].force-mapping | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+3); set in crates/cpa-core/src/registry/dynamic.rs, crates/cpa-server/tests/routes.rs |  | heuristic: key name match |
-| M4-0175 | oauth.request-scoped-errors.{key}[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/tui/client.rs (+213) |  | heuristic: key name match |
+| M4-0175 | oauth.request-scoped-errors.{key}[].status | covered | read in crates/cliproxy/src/tui/auth.rs, crates/cliproxy/src/tui/client.rs (+44); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/tui/client.rs (+214) |  | heuristic: key name match |
 | M4-0176 | oauth.request-scoped-errors.{key}[].match | covered | read in crates/cpa-common/src/payload.rs, crates/cpa-core/src/config/credentials.rs (+8); set in crates/cpa-common/tests/fixtures/payload_go.json, crates/cpa-plugin/tests/fixtures/pluginstore_go.json (+10) |  | heuristic: key name match |
 | M4-0177 | oauth.request-scoped-errors.{key}[].match-regexr | covered | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs (+3); set in crates/cpa-server/src/scheduler.rs, crates/cpa-server/tests/fixtures/config_diff_go.json |  | heuristic: key name match |
 | M4-0178 | oauth.request-scoped-errors.{key}[].action | covered | read in crates/cliproxy/src/tui/golden.rs, crates/cpa-common/src/signature/tests.rs (+11); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-common/tests/fixtures/go_calls.jsonl.gz (+7) |  | heuristic: key name match |
@@ -1491,7 +1491,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0482 | sdk/cliproxy/executionregistry/registry_test.go | covered | 10/10 cases: crates/cpa-home/src/registry.rs |  |  |
 | M4-0483 | sdk/cliproxy/executor/lifecycle_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
 | M4-0484 | sdk/cliproxy/executor/types_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
-| M4-0485 | sdk/cliproxy/pprof_server_test.go | missing | no pprof listener yet | observe |  |
+| M4-0485 | sdk/cliproxy/pprof_server_test.go | covered | crates/cpa-server/src/pprof.rs pprof_listener_reload_failure_and_shutdown |  | Serialized listener ownership replaces Go pointer/owner guards; real TCP checks cover completion after the five-second drain deadline without a replacement until another publication, same-address keepalive, failed-bind retry, injected accept errors with interruptible backoff, terminal failure and shutdown. |
 | M4-0486 | sdk/cliproxy/rtprovider_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
 | M4-0487 | sdk/cliproxy/service_auth_sync_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
 | M4-0488 | sdk/cliproxy/service_config_weight_test.go | partial | crates/cpa-server/src/runtime.rs, registry.rs | server | Not ported by name. |
@@ -1868,7 +1868,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 |---|---|---|---|---|---|
 | M5-0233 | --password | covered | crates/cliproxy/src/main.rs --password (loopback-only management password) -> serve; every_go_flag_parses_in_single_and_double_dash_form |  |  |
 | M5-0234 | --management-base-url | covered | crates/cliproxy/src/main.rs passes management_base_url to tui::run; tui/client.rs Go client cases; tui/e2e.rs tui_drives_the_management_api |  |  |
-| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | covered | crates/cpa-exec/src/wsrelay.rs Session::close and Responses::recv; wsrelay_tests.rs closing_with_a_full_buffer_still_fails_the_request; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects |  | A full pending-response buffer loses its oldest message to the disconnect error, as Go session.go cancelWithError evicts it. internal/wsrelay is unchanged from 6fecc6e to v8.0.35. |
+| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | partial | crates/cpa-exec/src/wsrelay.rs Session::close and Manager::non_stream; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects | google | Saturated pending-response buffers drop the disconnect error in Session::close, unlike Go session.go:183-198, which evicts a buffered message to deliver it. non_stream can then return the accumulated response as success. No saturated-buffer cleanup test; runtime fix deferred. |
 | M5-0236 | Realtime/Live includes SDP negotiation, short-lived client secrets, legacy sessions, worki… | partial | crates/cpa-server/src/realtime/* (media.rs, relay.rs), crates/cpa-exec/src/codex_live.rs; tests/realtime.rs (Go fixtures), realtime/media_tests.rs | realtime | webrtc-rs lacks some pion behaviours (ponytails in realtime/media.rs). |
 
 ### M5: Complete compatibility test-suite inventory
