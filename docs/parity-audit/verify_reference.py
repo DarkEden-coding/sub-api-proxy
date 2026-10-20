@@ -17,6 +17,7 @@ type, default, meaning) is accurate, and routes without a statically resolved re
 from collections import Counter
 from functools import cache
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -44,6 +45,8 @@ REWRITTEN = MOVED | PINNED.keys()
 # Route items Go serves without a statically resolved path registration: the WebUI
 # OAuth forwarder (a bare http.Server handler) and the AI Studio relay route.
 DYNAMIC_ROUTES = {"M5-0020", "M5-0021"}
+GIT_REPO_VARS = {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE"}
 CONFIG_DIRS = ("internal/config/", "internal/registry/", "internal/pluginstore/", "sdk/pluginstore/", "sdk/config/")
 ROUTE_SECTIONS = ("1. Public", "Temporary OAuth", "/v8/management", "/v0/management")
 # Router call sites of the forms in the frozen tree (`receiver.METHOD(path, ...)`, with
@@ -189,9 +192,12 @@ def main():
     check(len(sys.argv) == 2, "usage: verify_reference.py /path/to/CLIProxyAPI")
     clone = sys.argv[1]
 
+    # A hook's GIT_DIR and friends would override -C and read another repository.
+    env = {k: v for k, v in os.environ.items() if k not in GIT_REPO_VARS}
+
     def git(*args, repo=clone):
         try:
-            return subprocess.check_output(["git", "-C", repo, *args], text=True, stderr=subprocess.PIPE)
+            return subprocess.check_output(["git", "-C", repo, *args], text=True, stderr=subprocess.PIPE, env=env)
         except (OSError, subprocess.CalledProcessError) as e:
             sys.exit(f"FAIL: git {' '.join(args)} in {repo}: {getattr(e, 'stderr', '') or e}")
 
