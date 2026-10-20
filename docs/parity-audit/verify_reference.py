@@ -10,7 +10,7 @@ RPC methods and added plugin API fields. Retained rows keep their text: suite ro
 outside the fragments regenerated from Go, the upstream.* moves after rewriting
 their approved prefix, and the other rewrites pinned to approved text. Not checked:
 Rust behavior, fixture assertion coverage, whether each item's prose (handler,
-type, default, meaning) is accurate, and routes served without a path registration
+type, default, meaning) is accurate, and routes without a statically resolved registration
 (the WebUI OAuth forwarder, the AI Studio relay route and plugin routes).
 """
 
@@ -41,12 +41,15 @@ PINNED = {"M1-0042": "b9a953a09aa5ebc0", "M1-0062": "830d521c48ab6c71", "M1-0063
           "M5-0042": "e26df97a522de247", "M5-0043": "4ee93575f834c205", "M5-0065": "34eac9c87a5e46b5",
           "M5-0066": "5557351c6d883bde"}
 REWRITTEN = MOVED | PINNED.keys()
-# Route items Go serves without a literal path registration: the WebUI OAuth
-# forwarder (a bare http.Server handler) and the AI Studio relay route.
+# Route items Go serves without a statically resolved path registration: the WebUI
+# OAuth forwarder (a bare http.Server handler) and the AI Studio relay route.
 DYNAMIC_ROUTES = {"M5-0020", "M5-0021"}
 CONFIG_DIRS = ("internal/config/", "internal/registry/", "internal/pluginstore/", "sdk/pluginstore/", "sdk/config/")
 ROUTE_SECTIONS = ("1. Public", "Temporary OAuth", "/v8/management", "/v0/management")
-# Router call sites. Every candidate must resolve to methods and a full path, or be listed here.
+# Router call sites of the forms in the frozen tree (`receiver.METHOD(path, ...)`, with
+# receivers that are the engine, a ServeMux or a Group variable). Every such call must
+# resolve to methods and a full path, or be listed below. Other forms (Match, chained
+# Group(...).GET) do not occur at v8.0.35 and are not recognized.
 CALL = re.compile(r"\b([A-Za-z_][\w.]*)\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|HandleFunc|Handle)\((.*)")
 GROUP = re.compile(r"^\s*(\w+)\s*:?=\s*([\w.]+)\.Group\(([^,)]*)")
 CONST = re.compile(r'^\s*const\s+(\w+)\s*=\s*"([^"]*)"\s*$')
@@ -54,7 +57,8 @@ MUX = re.compile(r"^\s*(\w+)\s*:?=\s*http\.NewServeMux\(\)")
 LOOP = re.compile(r"^\s*for\s+_,\s*(\w+)\s*:=\s*range\s+\[\]string\{([^}]*)\}")
 GIN_ROOTS = ("s.engine",)
 NOT_ROUTERS = {"windows"}  # windows.Handle(ptr) is a type conversion.
-# Plugin-declared routes: Go registers them from a runtime path.
+# AttachWebsocketRoute registers the wsrelay gateway path (M5-0021) passed in at runtime
+# by sdk/cliproxy/service_lifecycle.go.
 UNRESOLVED = {("internal/api/server_routes.go", "s.engine.GET(trimmed,")}
 CITATION = re.compile(r"\b((?:cmd|internal|sdk)/[\w./\-]+\.go):(\d+)(?:-(\d+))?")
 STRUCT = re.compile(r"^type (\w+) struct \{\n(.*?)^\}", re.M | re.S)
@@ -135,11 +139,18 @@ def moved_back(text):
     return re.sub(r"^`([^`]+)` \(previous v8 alias `([^`]+)`, ", r"`\2` (", text, count=1)
 
 
+# History fragments, matched entry by entry so prose around or inside them stays compared.
+DECL = r"`(?:Test|Fuzz|Benchmark|Example)\w*`"
+REMOVED_NOTE = re.compile(rf" Removed upstream declarations: {DECL}(?:, {DECL})* \(historical, not active requirements\)\.")
+MOVED_ENTRY = rf"{DECL} to [\w./\-]+_test\.go"
+MOVED_NOTE = re.compile(rf" Moved upstream declarations: {MOVED_ENTRY}(?:; {MOVED_ENTRY})*\.")
+
+
 def suite_skeleton(text):
     """Suite text without the fragments regenerated from Go: line ranges, declarations, history."""
     text = normalized(text)
-    text = re.sub(r" ?(?:Removed|Moved) upstream declarations: .*? \(historical, not active requirements\)\.", "", text)
-    text = re.sub(r" ?Moved upstream declarations: .*?\.$", "", text)
+    text = REMOVED_NOTE.sub("", text)
+    text = MOVED_NOTE.sub("", text)
     return re.sub(r"`(?:Test|Fuzz|Benchmark|Example)\w*` \(L\d+\)(?:; )?", "", text)
 
 
@@ -237,16 +248,21 @@ def main():
         declarations = [(m[1], text.count("\n", 0, m.start()) + 1) for m in TEST.finditer(text)]
         listed = [(name, int(line)) for name, line in re.findall(r"`((?:Test|Fuzz|Benchmark|Example)\w*)` \(L(\d+)\)", row["text"])]
         check(listed == declarations, f"stale declarations or line numbers: {row['id']} {path}")
-        note = re.search(r"Removed upstream declarations: (.*?) \(historical, not active requirements\)", row["text"])
+        span = re.match(rf"\*\*{re.escape(path)}:1-(\d+)\*\*", row["text"])
+        check(span and int(span[1]) == len(text.splitlines()), f"suite range is not the whole file: {row['id']}")
+        current = {name for name, _ in declarations}
+        before = set(TEST.findall(source(OLD, path))) if path in test_files(OLD) else set()
+        note = REMOVED_NOTE.search(row["text"])
         if note:
-            names = re.findall(r"`([^`]+)`", note[1])
+            names = re.findall(r"`([^`]+)`", note[0])
             retired += len(names)
-            check(not set(names) & set(audit.test_cases(row["text"])), f"retired cases still active: {path}")
-        for name, target, line in re.findall(r"`(\w+)` to ([\w./\-]+\.go):(\d+)", row["text"]):
+            check(set(names) <= before - current, f"retired declarations not removed from this file since {OLD[:7]}: {path}")
+        for name, target, line in re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", row["text"]):
             moved += 1
             lines = source(NEW, target).splitlines()
-            check(0 < int(line) <= len(lines) and lines[int(line) - 1].startswith(f"func {name}("),
-                  f"moved declaration not at its target: {row['id']} {name}")
+            check(name in before - current and 0 < int(line) <= len(lines)
+                  and lines[int(line) - 1].startswith(f"func {name}("),
+                  f"moved declaration not from this file or not at its target: {row['id']} {name}")
     check(retired == 43, f"expected 43 retired declarations, got {retired}")
     check(moved == 5, f"expected 5 moved declarations, got {moved}")
 
@@ -378,7 +394,7 @@ def main():
           f"({len(go_leaves - old_leaves)} added); {len(flags)} CLI flags; {len(methods)} RPC methods; "
           f"{len(added_fields)} added plugin API fields; {len(citations)} current, in-bounds citations")
     print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), plugin capabilities "
-          "and pre-existing data contracts, and routes without a path registration "
+          "and pre-existing data contracts, and routes without a statically resolved path registration "
           f"({', '.join(sorted(DYNAMIC_ROUTES))} and plugin routes)")
 
 

@@ -161,5 +161,24 @@ func (s *Server) routes() {
                 verify.registrations_in("x.go", line)
 
 
+class SuiteSkeletonTests(unittest.TestCase):
+    ROW = ("**a/x_test.go:1-90** — golden/behavior cases: `TestA` (L3). Removed upstream declarations: "
+           "`TestB`, `TestC` (historical, not active requirements). Moved upstream declarations: "
+           "`TestD` to a/y_test.go:4; `TestE` to a/y_test.go:9.")
+
+    def test_regenerated_fragments_are_ignored(self):
+        regenerated = (self.ROW.replace("1-90", "1-95").replace("(L3)", "(L5)").replace("`TestC`", "`TestF`")
+                       .replace("y_test.go:9", "z_test.go:12"))
+        self.assertEqual(verify.suite_skeleton(regenerated), verify.suite_skeleton(self.ROW))
+
+    def test_prose_around_or_inside_history_stays_compared(self):
+        for changed in (self.ROW + " All cases are optional.",
+                        self.ROW.replace("(L3).", "(L3). Optional."),
+                        self.ROW.replace("`TestB`, `TestC`", "`TestB`, optional, `TestC`"),
+                        self.ROW.replace("y_test.go:4; ", "y_test.go:4; optional; ")):
+            with self.subTest(changed=changed):
+                self.assertNotEqual(verify.suite_skeleton(changed), verify.suite_skeleton(self.ROW))
+
+
 if __name__ == "__main__":
     unittest.main()
