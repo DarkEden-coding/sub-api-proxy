@@ -123,8 +123,8 @@ fn request_output(result: Result<Vec<u8>, cpa_translate::Error>) -> Vec<u8> {
     result.unwrap_or_else(|e| format!("REFUSED:{}", e.0).into_bytes())
 }
 
-/// Fixtures regenerated at v8.0.35 whose port is still open: pair, fixture name prefix and
-/// the work that closes them. Every fixture an entry matches must still fail, so the list
+/// Fixtures regenerated at v8.0.35 whose port is still open: pair, exact fixture name (unique
+/// within a pair) and the work that closes them. Every fixture an entry matches must still fail, so the list
 /// shrinks as ports land and a listed fixture cannot hide a passing neighbour's regression.
 const PENDING: &[(&str, &str, &str)] = &[
     (
@@ -160,7 +160,7 @@ const PENDING: &[(&str, &str, &str)] = &[
     (
         "claude->gemini",
         "tools/schema/11",
-        "shared Claude tool schema cleaner (202b8b8c)",
+        "Gemini schema cleaners: dependent keywords and multi-branch unions (9126772d, a0fd8448)",
     ),
 ];
 
@@ -236,7 +236,7 @@ fn pending(pair: &str, fixture: &Value) -> Option<usize> {
     let name = fixture["name"].as_str().unwrap_or_default();
     PENDING
         .iter()
-        .position(|(p, key, _)| *p == pair && name.starts_with(key))
+        .position(|(p, key, _)| *p == pair && name == *key)
         .or_else(|| {
             (pair == "claude->gemini")
                 .then(|| PENDING_GEMINI_CLAUDE_RESPONSES.iter().position(|n| *n == name))
@@ -362,8 +362,13 @@ fn reference_goldens() {
             "fixture generation lost cases for {}",
             file.display()
         );
+        // PENDING keys are exact names, so names must be unique within a pair.
+        let mut names = std::collections::HashSet::new();
         for f in fixtures {
             total += 1;
+            if !names.insert(f["name"].as_str().unwrap()) {
+                failures.push(format!("{}: duplicate fixture name {}", file.display(), f["name"]));
+            }
             let bytes = f["bytes"].as_bool().unwrap_or(false);
             let name = format!(
                 "{}->{} {}",

@@ -1356,6 +1356,7 @@ mod tests {
             ("https://a:b:c/", false),
             ("https://exa mple.com", false),
             ("https://[1.2.3.4]/", false),
+            ("https://[::1%25]/", false),
             ("https://example.com/%zz", false),
             ("https://example.com/a#%zz", false),
             ("https://us er@example.com/", false),
@@ -1391,10 +1392,9 @@ mod tests {
                 body.as_bytes(),
             )
         };
-        assert_eq!(
-            codex("https://[broken").unwrap_err().0,
-            "unsupported content part: image"
-        );
+        for url in ["https://[broken", "https://[::1%25]/a.png"] {
+            assert_eq!(codex(url).unwrap_err().0, "unsupported content part: image", "{url}");
+        }
         assert!(codex("https://[::1]:8443/a.png").is_ok());
     }
 

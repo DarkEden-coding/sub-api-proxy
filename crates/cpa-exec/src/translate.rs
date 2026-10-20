@@ -55,9 +55,12 @@ pub(crate) fn original(
     } else {
         // Only the working payload is sent, so a baseline refusal alone is ignored
         // (TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent).
-        // ponytail: Go keeps the refused baseline's partial translation, which only
-        // payload-rule `original` conditions read; the working translation stands in.
-        // Return the partial body with translator errors if a rule needs the difference.
+        // ponytail: Go keeps the refused baseline's partial translation; the working
+        // translation stands in. Payload rules read the baseline for `original`
+        // conditions and to gate `default`/`default-raw` on field existence, so a field
+        // only the working body sets (such as `max_tokens`) suppresses a default Go would
+        // apply. No server path sends distinct bodies that refuse only the baseline today.
+        // Return the partial body with translator errors if one does.
         match translate_body(req, &req.original_body, codex, model, is_compat) {
             Ok(original) => (&req.original_body, original),
             Err(_) => (&req.body, translated.clone()),
