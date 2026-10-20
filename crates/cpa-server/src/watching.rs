@@ -14,7 +14,7 @@
 //! applied. While nothing changes it does no work and sets no timer. As in Go, changes
 //! made by another machine on a network or FUSE file system raise no event and are seen
 //! with the next local change.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
@@ -434,24 +434,29 @@ fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>
         },
     };
     state.lock_auth_dir(&mut config);
-    let mut files = credentials::from_auth_dir(&config);
-    // An empty or incomplete in-place auth write is not a deletion (Go 7484a521 keeps
-    // files that are not valid JSON). Removal, an unreadable file and valid JSON that
-    // holds no credential are reconciled normally.
-    for existing in state.rt.store().snapshot() {
-        if let Source::File(path) = &existing.source
-            && path.parent() == Some(config.auth_dir.as_path())
-            && !files.iter().any(|c| c.id == existing.id)
-            && std::fs::read(path).is_ok_and(|data| serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err())
-        {
-            files.push(Credential::clone(&existing));
-        }
-    }
+    let (mut files, incomplete) = credentials::scan_auth_dir(&config);
+    keep_incomplete(state, &mut files, &incomplete);
     let result = accepted.then(|| config.clone());
     state.publish(config, Some(files));
     match config_error {
         Some(error) => Err(error),
         None => Ok(result),
+    }
+}
+
+/// An empty, half-written or unreadable file is not a deletion (Go 7484a521): keep the
+/// last good credentials of the files the scan found incomplete. Deciding from the scan's
+/// own read, never a second one, means a file completed after the scan is picked up by
+/// the reload its write triggers instead of being dropped now. Removal and valid JSON
+/// without a credential are reconciled normally.
+fn keep_incomplete(state: &Management, files: &mut Vec<Credential>, incomplete: &HashSet<PathBuf>) {
+    for existing in state.rt.store().snapshot() {
+        if let Source::File(path) = &existing.source
+            && incomplete.contains(path)
+            && !files.iter().any(|c| c.id == existing.id)
+        {
+            files.push(Credential::clone(&existing));
+        }
     }
 }
 
@@ -499,7 +504,8 @@ mod tests {
     }
 
     /// Go 7484a521: an empty or partial in-place write keeps the credential; valid
-    /// JSON without one, or a removed file, deletes it.
+    /// JSON without one, or a removed file, deletes it (also the empty, partial and
+    /// valid-but-empty files of Go `TestFileSynthesizerRecordsIncompleteFiles`).
     #[tokio::test]
     async fn incomplete_auth_writes_keep_the_credential_until_the_file_is_valid_json() {
         let (state, dir) = state();
@@ -526,6 +532,42 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         reload(&state).unwrap();
         assert!(!loaded(&state));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The editor finishes the file after the scan read it half-written and before the
+    /// reload publishes: the old credential is kept (a second read would see valid JSON,
+    /// keep nothing and drop the credential until the next reload).
+    #[tokio::test]
+    async fn a_file_completed_after_the_scan_keeps_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let good = r#"{"type":"codex","email":"a@example.com"}"#;
+        std::fs::write(&file, good).unwrap();
+        reload(&state).unwrap();
+        std::fs::write(&file, r#"{"type":"codex""#).unwrap();
+        let (mut files, incomplete) = credentials::scan_auth_dir(&state.rt.config());
+        assert!(incomplete.contains(&file) && files.is_empty());
+        std::fs::write(&file, good).unwrap();
+        keep_incomplete(&state, &mut files, &incomplete);
+        assert_eq!(files.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["a.json"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go's incremental update keeps a credential whose file cannot be read (here a
+    /// symlink loop, which fails to read for every user).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_file_keeps_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&file, &file).unwrap();
+        assert!(std::fs::read(&file).is_err());
+        reload(&state).unwrap();
+        assert!(state.rt.store().snapshot().iter().any(|c| c.id == "a.json"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

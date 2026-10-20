@@ -1268,13 +1268,22 @@ pub fn oauth_excluded(cfg: &Config) -> HashMap<String, Vec<String>> {
 /// Like Go's `FileSynthesizer`, an unreadable or missing directory is an empty set:
 /// it must never block publishing the rest of a valid config.
 pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
+    scan_auth_dir(cfg).0
+}
+
+/// [`from_auth_dir`], plus the files this same read found present but not complete:
+/// empty or not valid JSON (Go v8.0.35 `SynthesisContext.IncompleteFiles`), or unreadable
+/// for a reason other than being gone (Go's incremental `addOrUpdateClientLocked` keeps
+/// the credential on a read failure). A caller keeps their last good credentials.
+pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
+    let mut incomplete = HashSet::new();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(dir = %cfg.auth_dir.display(), error = %e, "cannot read auth dir");
             }
-            return Vec::new();
+            return (Vec::new(), incomplete);
         }
     };
     let mut out = Vec::new();
@@ -1285,7 +1294,19 @@ pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
         {
             continue;
         }
-        let Ok(data) = std::fs::read(&path) else { continue };
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    incomplete.insert(path);
+                }
+                continue;
+            }
+        };
+        if serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err() {
+            incomplete.insert(path);
+            continue;
+        }
         match from_file(cfg, &cfg.auth_dir, &path, &data) {
             Ok(Some(c)) => out.push(c),
             Ok(None) => {}
@@ -1293,7 +1314,7 @@ pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
         }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    (out, incomplete)
 }
 
 /// All runtime credentials for a config: auth files, then config API keys.
