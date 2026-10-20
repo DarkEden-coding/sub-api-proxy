@@ -6,7 +6,7 @@ A Rust rewrite of CLIProxyAPI (https://github.com/router-for-me/CLIProxyAPI) tar
 
 ## Reference
 
-- The reference is CLIProxyAPI at commit `6fecc6e`: clone https://github.com/router-for-me/CLIProxyAPI, check out that commit and treat the clone as read-only. Cite Go file paths in comments only where behaviour is non-obvious. The Claude prompt-cache and prompt-shaping fixes named in `docs/PARITY.md` follow v8.0.27 instead; `docs/parity-audit/upstream-v8.0.27.md` lists the Go commits since `6fecc6e`.
+- The reference is CLIProxyAPI at commit `6fecc6e`: clone https://github.com/router-for-me/CLIProxyAPI, check out that commit and treat the clone as read-only. Cite Go file paths in comments only where behaviour is non-obvious. The Claude prompt-cache and prompt-shaping fixes named in `docs/PARITY.md` follow v8.0.27 instead; `docs/parity-audit/upstream-v8.0.35.md` lists the Go commits since `6fecc6e`.
 - When Go behaviour and documentation disagree, the Go code wins. Port behaviour, not structure: idiomatic Rust over transliterated Go.
 - A deliberate difference from Go is listed in `docs/DIFFERENCES-FROM-GO.md`, and tests that compare against Go goldens encode it explicitly.
 
