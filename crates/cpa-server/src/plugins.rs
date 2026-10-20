@@ -168,9 +168,10 @@ const BUILTIN: [&str; 14] = [
 /// (`openAICompatInfoFromAuth`; `registerOpenAICompatProviderExecutor` keeps only a bare
 /// compat executor), a built-in provider, or any other provider with a native
 /// compatibility config (`hasNativeOpenAICompatExecutorConfig`: a `base_url` attribute
-/// or an enabled `openai-compatibility` entry named after it; with
-/// `respectNonOwned` Go still replaces a plugin-owned executor). Otherwise a plugin
-/// executor candidate keeps the provider.
+/// or an enabled `openai-compatibility` entry named after it; `OwnsExecutor` is true
+/// for this host's plugin adapter, so `shouldKeepExistingOpenAICompatExecutor` returns
+/// false and Go replaces it even with `respectNonOwned`). Otherwise a plugin executor
+/// candidate keeps the provider.
 fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -> bool {
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
     let provider = c.provider.trim().to_lowercase();

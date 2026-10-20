@@ -424,72 +424,10 @@ pub(crate) async fn execute_credential(
 /// and a plain error (an unavailable executor, a failed negotiation, an undecodable
 /// answer) carries neither; the auth manager classifies both by status and body. So
 /// the error is model-scoped with the plugin's status (0 when it gave none) and the
-/// shared classifier (`classify.rs`) decides failover and cooldown.
-///
-/// The exception is Go `resultErrorFromError` on a statusless error that is neither a
-/// model-not-found nor a request fault: lifecycle or transport text gives it the
-/// connection-lifecycle or transient-transport code, which fails over without a
-/// cooldown (sdk/cliproxy/auth/conductor_cooldown.go:1883-1933). That is transport
-/// scope here. Go matches the error itself at that point, so a bare "tls handshake
-/// timeout" counts; the Result-level exclusion of that phrase never sees it.
+/// shared classifier (`classify.rs`) decides failover, cooldown and retry rounds,
+/// including Go's message fallbacks for statusless errors.
 fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
-    let mut e = ExecError::local(status, FailureScope::Model, message);
-    if status == 0 {
-        let text = crate::classify::error_text(&e);
-        let lower = text.trim().to_lowercase();
-        if (lifecycle_message(&lower) || transient_message(&lower))
-            && !crate::classify::explicit_model_not_found(&text, "")
-            && !crate::classify::is_request_invalid(&e)
-        {
-            e.scope = FailureScope::Transport;
-        }
-    }
-    e
-}
-
-/// Go `isHTTP2ClosedConnectionMessage`.
-fn http2_closed(lower: &str) -> bool {
-    lower.contains("http2: client connection force closed via clientconn.close")
-        || lower.contains("http2: client conn is closed")
-}
-
-/// Go `isConnectionLifecycleMessage` on a trimmed, lowercased message.
-fn lifecycle_message(lower: &str) -> bool {
-    matches!(
-        lower,
-        "context canceled" | "context deadline exceeded" | "eof" | "unexpected eof"
-    ) || [
-        "websocket: close 1000",
-        "websocket: close 1001",
-        "websocket: close 1006",
-        "unexpected eof",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-        || http2_closed(lower)
-}
-
-/// Go `isTransientTransportMessage` on a trimmed, lowercased message.
-fn transient_message(lower: &str) -> bool {
-    const NEEDLES: [&str; 16] = [
-        "tls: tls handshake",
-        "tls handshake timeout",
-        "wsarecv",
-        "wsasend",
-        "a connection attempt failed",
-        "connection refused",
-        "connection reset",
-        "i/o timeout",
-        "no such host",
-        "server misbehaving",
-        "network is unreachable",
-        "no route to host",
-        "broken pipe",
-        "connection aborted",
-        "use of closed network connection",
-        "unexpected eof",
-    ];
-    NEEDLES.iter().any(|needle| lower.contains(needle)) || http2_closed(lower)
+    ExecError::local(status, FailureScope::Model, message)
 }
 
 /// request context plus the request's model facts; `model` is the resolved model.

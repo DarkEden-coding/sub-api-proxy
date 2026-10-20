@@ -354,6 +354,23 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         (None, "read tcp 10.0.0.1:443: connection reset by peer", None),
         // With a status the text is not consulted.
         (Some(500), "broken pipe", Some(60)),
+        // A statusless model-not-found still skips the cooldown on lifecycle or transport
+        // text, but the result's transient check ignores a TLS handshake timeout.
+        (
+            None,
+            r#"{"error":{"code":"model_not_found","message":"broken pipe"}}"#,
+            None,
+        ),
+        (
+            None,
+            r#"{"error":{"code":"model_not_found","message":"unexpected EOF"}}"#,
+            None,
+        ),
+        (
+            None,
+            r#"{"error":{"code":"model_not_found","message":"tls handshake timeout"}}"#,
+            Some(12 * HOUR),
+        ),
     ];
     for (status, message, cool) in cases {
         let case = format!("{status:?} {message}");
@@ -415,6 +432,55 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         "transport faults do not cool"
     );
     env.finish().await;
+}
+
+/// Go keeps the cooldown skip and the retry round apart: a statusless lifecycle text
+/// (`context deadline exceeded`) skips the cooldown but earns no request-retry round,
+/// while transient transport text (`broken pipe`) earns one (`isRequestRetryRoundError`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn statusless_plugin_errors_earn_retry_rounds_only_for_transport_text() {
+    for retry in [0, 1] {
+        let Some(env) = env(
+            &format!("plugin-owned-retry-{retry}"),
+            &[("catalog", "model_provider"), ("acme", "executor")],
+            &format!("request-retry: {retry}\n"),
+            &[
+                ("acme-a.json", r#"{"type":"acme"}"#),
+                ("acme-b.json", r#"{"type":"acme"}"#),
+            ],
+            |records| {
+                canned(
+                    records,
+                    "catalog",
+                    "model.static",
+                    json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+                )
+            },
+        )
+        .await
+        else {
+            return;
+        };
+        for (message, rounds) in [("context deadline exceeded", 1), ("broken pipe", 1 + retry)] {
+            let case = format!("request-retry {retry}, {message}");
+            let dir = env.records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("executor.execute.json"),
+                json!({"ok":false,"error":{"code":"x","message":message}}).to_string(),
+            )
+            .unwrap();
+            let _ = std::fs::remove_file(env.records.join("acme.jsonl"));
+            let (got, body) = env.chat("acme-1").await;
+            assert_ne!(got, 200, "{case}: {body}");
+            let attempts = calls(&env.records, "acme", "executor.execute").len();
+            assert_eq!(attempts, 2 * rounds, "{case}: both credentials once per round");
+            for id in ["acme-a.json", "acme-b.json"] {
+                assert!(env.rt.store().cooldowns(id).is_empty(), "{case}: {id} does not cool");
+            }
+        }
+        env.finish().await;
+    }
 }
 
 /// Go hands a plugin stream's chunk error to the auth manager's stream bootstrap, which
