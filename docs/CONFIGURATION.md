@@ -130,6 +130,24 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `logs.logs-max-total-size-mb` | The most disk space the log files may use. |
 | `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
 | `usage.claude-cache-telemetry` | A cliproxy-rs addition, `false` by default. With `usage.usage-statistics-enabled: true` and management enabled, adds content-free final-wire Claude cache observations to the existing usage queue and RESP channel. No tokenizer or maintenance requests run. Hashes rotate on restart; additional records without returned usage have `usage_observed: false`. Large payloads add parsing and hashing work before upstream send. See [Claude cache telemetry](CLAUDE-CACHE-TELEMETRY.md). Go ignores the setting at startup, preserves it on v0 saves, and archives it on v8 edits. |
+| `pprof.enable` | `false` by default. `true` starts a separate plain-HTTP debug listener, without API keys, management authentication or TLS. Keep it on loopback: its command-line route can expose arguments, and profiling consumes CPU. Changes apply without a restart. |
+| `pprof.addr` | The debug listener address, `"127.0.0.1:8316"` by default, also used for an empty or whitespace-only value. Changes move the listener without a restart. A bind failure is logged without stopping the main server; another config publication retries it. |
+
+The legacy top-level `pprof` mapping works too. `/debug/pprof/` lists the routes;
+`cmdline` returns NUL-separated arguments and `symbol` accepts program counters in
+the raw query or a POST body, separated by `+`. Go runtime profiles return plain-text
+`501` answers. CPU `profile?seconds=30` requires a Unix build with
+`cargo build --release -p cliproxy --features cpa-server/pprof` and returns a pprof
+protobuf. Default builds, published release binaries and Docker images exclude the
+profiler and symbol resolver. Their `symbol` route consumes POST bodies but returns
+only `num_symbols: 1`, without resolving any names, including shared-library names.
+With the feature, an unstripped build gives more symbol names. Do not use another
+SIGPROF profiler in the same process. Listener changes allow five seconds for active
+requests to finish. On timeout, the error is logged, active requests continue, and
+no replacement starts until another config publication. Temporary accept errors
+keep the listener open and back off from 5 ms to one second; config changes and
+shutdown interrupt the wait. Addresses require numeric ports; unlike Go, `:` and
+service-name ports such as `:http` are not accepted.
 
 ## worker-threads
 

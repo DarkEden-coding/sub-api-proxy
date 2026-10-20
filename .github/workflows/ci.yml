@@ -152,11 +152,18 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Profiler excluded from default normal dependencies
+        run: |
+          cargo tree --locked -p cliproxy --edges normal --prefix none > default-dependencies.txt
+          if grep -qE '^(pprof|backtrace) v' default-dependencies.txt; then
+            echo '::error::CPU profiler and symbol resolver must remain opt-in'
+            exit 1
+          fi
       - name: Harness
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo check --locked --manifest-path harness/rust/Cargo.toml --target-dir target
-      - name: Media relay tests, with external network denied
+      - name: Media relay and CPU profiler tests, with external network denied
         # The same loopback-only namespace as the tests above. All of cpa-server's unit
         # tests run with the feature on, the 25 behind it included.
         run: |
@@ -165,7 +172,7 @@ jobs:
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             CPA_TEST_NO_SKIP=1 CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 \
             "CARGO_PROFILE_TEST_DEBUG=$CARGO_PROFILE_TEST_DEBUG" \
-            unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- cargo nextest run -p cpa-server --features media-relay --lib --locked --profile ci' \
+            unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- cargo nextest run -p cpa-server --features media-relay,pprof --lib --locked --profile ci' \
             sh "$(id -u)" "$(id -g)"
 
   perf:
@@ -193,7 +200,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' && matrix.auth-files == 1 }}
       - name: Build
-        run: cargo build --release --locked -p cliproxy
+        run: |
+          cargo tree --locked -p cliproxy --edges normal --prefix none > size-dependencies.txt
+          if grep -qE '^(pprof|backtrace) v' size-dependencies.txt; then
+            echo '::error::Size-gate binaries must exclude CPU profiling and symbol resolution'
+            exit 1
+          fi
+          cargo build --release --locked -p cliproxy
       # Bytes and counts against bench/budgets.txt, never elapsed time.
       - name: Size
         if: matrix.auth-files == 1
