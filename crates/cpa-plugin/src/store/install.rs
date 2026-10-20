@@ -551,7 +551,7 @@ fn write_file_atomic(target: &Path, data: &[u8], mode: u32) -> Result<(), String
 }
 
 /// `os.CreateTemp(dir, "."+base+".tmp-*")`.
-fn create_temp(dir: &Path, base: &str) -> Result<(std::fs::File, PathBuf), String> {
+pub(crate) fn create_temp(dir: &Path, base: &str) -> Result<(std::fs::File, PathBuf), String> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
