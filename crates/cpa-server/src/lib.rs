@@ -29,6 +29,7 @@ pub mod observability;
 mod openai;
 pub mod persist;
 pub mod plugins;
+pub mod pprof;
 mod realtime;
 mod refresh;
 pub mod registry;

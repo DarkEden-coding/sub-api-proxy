@@ -19,6 +19,7 @@ Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.
 - Home mode (`-home-jwt`): bootstrap, config updates, request dispatch, usage, process and request logs, in-flight reporting and shared KV state. Home-managed plugin sync, tasks and status reporting remain unavailable.
 - The `PGSTORE_*`, `OBJECTSTORE_*` and `GITSTORE_*` storage backends, and the Redis-protocol usage subscriber on the main port.
 - Config and credential files are watched and reloaded without a restart. A plaintext management key is hashed on first start, as Go does.
+- The separate, optional `observability.pprof` listener follows Go v8.0.35 for startup, reload and shutdown, including active requests continuing after a drain timeout without starting a replacement until another config publication. Temporary accept errors retain the listener and back off. Its index, command line and symbol routes are always available when enabled. CPU profiles require the non-default `cpa-server/pprof` build feature on Unix; published release binaries exclude it and return no resolved symbol names. Go runtime profiles return plain-text `501` answers, as approved in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 The dashboard says when the server lacks an endpoint instead of failing: actions it cannot do are disabled and named, and pages it cannot load say which route is missing. What is still missing is listed under [Upcoming features](../README.md#upcoming-features), and the deliberate differences from Go are in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
@@ -31,11 +32,11 @@ Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 |---|---:|---:|---:|---:|
 | M1 | 151 | 54 | 83 | 14 |
 | M2 | 189 | 71 | 114 | 4 |
-| M3 | 424 | 188 | 214 | 22 |
-| M4 | 589 | 232 | 330 | 27 |
-| M5 | 331 | 197 | 124 | 10 |
+| M3 | 424 | 187 | 215 | 22 |
+| M4 | 589 | 244 | 330 | 15 |
+| M5 | 331 | 196 | 125 | 10 |
 | M6 | 267 | 114 | 130 | 23 |
-| All | 1951 | 856 | 995 | 100 |
+| All | 1951 | 866 | 997 | 88 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
