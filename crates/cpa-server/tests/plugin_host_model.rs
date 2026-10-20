@@ -510,10 +510,10 @@ async fn callback_streams_preserve_executor_bytes_across_interceptor_unload() {
                 let chunk = tokio::task::spawn_blocking(move || callback(&h, &i, "host.model.stream_read", read))
                     .await
                     .unwrap();
+                assert_eq!(chunk["error"], "", "{protocol}/{mode}: {chunk}");
                 if chunk["done"] == true {
                     break;
                 }
-                assert_eq!(chunk["error"], "", "{protocol}/{mode}: {chunk}");
                 assert!(chunk["payload"].is_string(), "{protocol}/{mode}: {chunk}; {got:?}");
                 got.push(String::from_utf8(decode(&chunk["payload"])).unwrap());
                 if mode == "unloaded" && got.len() == 1 {
@@ -738,4 +738,117 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
     host.shutdown_all(None).await;
     drop(guard);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Go openai_responses_handlers.go (bootstrap EOF and error branches): a data frame still
+/// pending in the Responses framer is flushed and delivered before the bootstrap decides
+/// between SSE and an initial JSON error, whether or not a plugin hook made the executor
+/// hand over unframed payloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_bootstrap_flushes_a_pending_payload() {
+    use axum::response::IntoResponse;
+    use futures_util::StreamExt as _;
+    const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}"#;
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"r","status":"in_progress","output":[]}}"#;
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_bootstrap") else {
+        return;
+    };
+    for broken in [false, true] {
+        let upstream = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let app = axum::Router::new().fallback(move || async move {
+                let tail = broken.then(|| Err::<String, _>(std::io::Error::other("reset")));
+                // One whole event, then a reset; or one data line, then EOF.
+                let event = if broken {
+                    format!("data: {CREATED}\n\n")
+                } else {
+                    format!("data: {COMPLETED}")
+                };
+                let body = futures_util::stream::iter(std::iter::once(Ok(event)).chain(tail)).then(|item| async move {
+                    if item.is_err() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    item
+                });
+                (
+                    [("content-type", "text/event-stream")],
+                    axum::body::Body::from_stream(body),
+                )
+                    .into_response()
+            });
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            url
+        };
+        for hooked in [false, true] {
+            let dir = cpa_plugin::testing::scratch(tmp, &format!("bootstrap-{broken}-{hooked}"));
+            let (auths, records, plugins) = (dir.join("auths"), dir.join("records"), dir.join("plugins"));
+            for d in [&auths, &records, &plugins] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let mut yaml = format!(
+                "auth-dir: {}\napi-keys:\n  codex:\n    - base-url: {upstream}\n      models: [{{name: gpt-fixture}}]\n      keys: [{{api-key: sk-fake}}]\n",
+                auths.display()
+            );
+            if hooked {
+                std::fs::copy(built.join("recorder.so"), plugins.join("noop.so")).unwrap();
+                yaml.push_str(&format!(
+                    "plugins:\n  enabled: true\n  dir: {}\n  configs:\n    noop:\n      enabled: true\n      label: noop\n      record: {}\n      caps: request_interceptor,request_lifecycle_plugin\n",
+                    plugins.display(),
+                    records.display()
+                ));
+                for method in ["request.intercept_before", "request.intercept_after"] {
+                    canned(&records, "noop", method, json!({}));
+                }
+            }
+            let cfg = Config::parse(&yaml).unwrap();
+            let credentials = cpa_core::config::credentials::load(&cfg);
+            let rt = Arc::new(cpa_server::testing::runtime(
+                cfg,
+                credentials,
+                Executors {
+                    claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                    codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+                    devices: Default::default(),
+                    openai: Default::default(),
+                    google: Default::default(),
+                },
+            ));
+            cpa_server::plugins::start(&rt).await;
+            assert_eq!(rt.plugins().has_request_interceptors(), hooked);
+            let proxy = {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let app = cpa_server::router(rt.clone());
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                addr
+            };
+            let response = wreq::Client::new()
+                .post(format!("http://{proxy}/v1/responses"))
+                .header("content-type", "application/json")
+                .body(r#"{"model":"gpt-fixture","stream":true,"input":"hi"}"#)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap();
+            let case = format!("broken={broken} hooked={hooked}");
+            let expected = if broken {
+                // The pending event is delivered, then the error ends the stream.
+                concat!(
+                    r#"data: {"type":"response.created","response":{"id":"r","status":"in_progress","output":[],"model":"gpt-fixture"}}"#,
+                    "\n\n\nevent: error\n",
+                    r#"data: {"type":"error","error":{"code":"internal_server_error","message":"upstream request failed","param":null,"type":"server_error"},"sequence_number":1}"#,
+                    "\n\n"
+                )
+                .to_owned()
+            } else {
+                format!("data: {COMPLETED}\n\n\n")
+            };
+            assert_eq!((status, body.as_str()), (200, expected.as_str()), "{case}");
+            rt.plugins().shutdown_all(None).await;
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

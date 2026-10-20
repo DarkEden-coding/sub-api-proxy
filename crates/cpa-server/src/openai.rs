@@ -472,8 +472,21 @@ pub async fn responses(
                     let mut framer = ResponsesSse::new(codex_client);
                     let mut ready = first.map(|f| framer.chunk(f)).unwrap_or_default();
                     while framer.data_frames == 0 && framer.terminal_error.is_none() {
-                        match futures_util::StreamExt::next(&mut rest).await {
-                            Some(Ok(event)) => ready.extend(framer.chunk(event)),
+                        let next = futures_util::StreamExt::next(&mut rest).await;
+                        if let Some(Ok(event)) = next {
+                            ready.extend(framer.chunk(event));
+                            continue;
+                        }
+                        // Go flushes the framer before deciding: a pending data frame
+                        // commits the stream, which then ends with the error or the end.
+                        ready.extend(framer.flush());
+                        if framer.data_frames > 0 {
+                            let tail = futures_util::StreamExt::boxed(futures_util::stream::iter(next));
+                            let finished = framer.stopped();
+                            return respond::sse(respond::resume(ready, finished, tail, framer, keepalive));
+                        }
+                        match next {
+                            Some(Ok(_)) => unreachable!("handled above"),
                             Some(Err(error)) => {
                                 let status = crate::classify::response_status(&error);
                                 let text = sanitize_error_text(status, &crate::classify::error_text(&error));
@@ -908,6 +921,17 @@ fn frame_with_data(frame: &[u8], payload: &[u8]) -> Bytes {
     Bytes::from(out)
 }
 
+impl ResponsesSse {
+    /// Go `responsesSSEFramer.Flush`: the pending frame, repaired, if any.
+    fn flush(&mut self) -> Vec<Bytes> {
+        self.framer
+            .flush()
+            .into_iter()
+            .filter_map(|frame| self.repair(frame))
+            .collect()
+    }
+}
+
 impl Writer for ResponsesSse {
     fn chunk(&mut self, event: Bytes) -> Vec<Bytes> {
         if !self.terminal_event.is_empty() {
@@ -930,12 +954,7 @@ impl Writer for ResponsesSse {
     }
 
     fn error(&mut self, error: &ExecError) -> Vec<Bytes> {
-        let mut out: Vec<_> = self
-            .framer
-            .flush()
-            .into_iter()
-            .filter_map(|frame| self.repair(frame))
-            .collect();
+        let mut out = self.flush();
         if !self.terminal_event.is_empty() {
             return out;
         }
@@ -946,12 +965,7 @@ impl Writer for ResponsesSse {
     }
 
     fn end(&mut self) -> Vec<Bytes> {
-        let mut out: Vec<_> = self
-            .framer
-            .flush()
-            .into_iter()
-            .filter_map(|frame| self.repair(frame))
-            .collect();
+        let mut out = self.flush();
         if self.terminal_error.is_some() || !self.terminal_event.is_empty() {
             out.push(Bytes::from_static(b"\n"));
             return out;
