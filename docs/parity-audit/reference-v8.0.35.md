@@ -11,18 +11,18 @@ and counts as a historical report.
 
 All 1,687 existing IDs remain. New IDs append to each milestone's range, with
 additions grouped separately so concurrent porting branches can retain their IDs.
-The checklist now has 1,952 items:
+The checklist now has 1,951 items:
 
 | Kind | Added | Current total |
 |---|---:|---:|
-| Go test-suite files | 228 | 990 |
+| Go test-suite files | 227 | 989 |
 | Configuration leaves | 28 | 436 |
 | Public routes | 3 | 77 |
 | Management routes | 1 | 186 |
 | Plugin RPC methods | 1 | 62 |
 | Plugin data contracts | 3 | 31 |
 | CLI flags | 1 | 34 |
-| **All additions** | **265** | |
+| **All additions** | **264** | |
 
 The new routes are `GET /v1/models/*model`, `POST /v1/audio/speech`,
 `POST /v1/tts`, and `POST /v8/management/oauth/siwc/bind`. The probe gets an empty
@@ -49,23 +49,27 @@ functions. Their existing IDs record the replacement rather than adding duplicat
 
 The original inventory excluded 30 files: examples, catalog-fetch tools,
 benchmark-only files, and support helpers. Those exclusions remain.
-All 228 added files are included, even the new support-only
-file `internal/cache/issue6332_export_test.go`. Current suite entries list their
+Go added 228 test files. The support-only `internal/cache/issue6332_export_test.go`
+has no test declaration and is excluded like the other helpers, so 227 are
+suites; its draft ID `M4-0520` stays unassigned. Current suite entries list their
 actual Test, Fuzz, Example, and Benchmark declarations with current line numbers.
 The translator implementation and test LOC counts also follow the frozen tree.
 
 ## Judgment changes
 
-None of the additions is covered: 199 are partial and 66 missing. Partial means
-the corresponding subsystem exists, but the current Go assertions have not been
-verified. A source filename, a matching leaf name, or a test's old name does not
+None of the additions is covered: 197 are partial and 67 missing. `M1-0133`,
+the Claude `/responses/compact` suite, is missing: Rust answers 501 there, as
+Go `6fecc6e` did. Partial means the corresponding subsystem exists, but the
+current Go assertions have not been verified. A source filename, a matching leaf name, or a test's old name does not
 prove the added behavior.
 
-Of the existing items, 97 change from covered to partial:
+Of the existing items, 96 change from covered to partial:
 
-- Seventy suites have changed Go source. All 208 changed existing suites receive
-  explicit notes preserving their previous-reference evidence. The other 138
-  were already partial or missing. Current declarations replace old case lists;
+- Sixty-nine suites have changed Go source. All 208 changed existing suites receive
+  explicit notes preserving their previous-reference evidence. Of the other 139,
+  138 were already partial or missing, and `M5-0283` stays covered: its Go diff
+  (+17/-2) only changes GitHub-token assertions in the panel downloader that
+  cliproxy-rs deliberately lacks (owner-approved embedded dashboard). Current declarations replace old case lists;
   historical evidence can still contain its original case counts.
 - Sixteen previously covered settings move to `upstream.*`. Two other moved
   settings were already partial. Existing alias tests do not prove canonical
@@ -89,7 +93,7 @@ in the rebaseline review. No runtime fix is included here.
 
 ### Covered-to-partial items by area
 
-These are all 97 downgraded IDs. The suite rows refer to changed Go test files
+These are all 96 downgraded IDs. The suite rows refer to changed Go test files
 whose new assertions are not established by the existing Rust fixtures.
 [checklist.md](checklist.md) lists each file's current declarations and source
 citations. [manual.tsv](manual.tsv) retains the Rust evidence and the remaining
@@ -103,9 +107,8 @@ gap for each ID.
 | codex | M3-0223, M3-0245, M5-0290 | Changed client-model, compact-executor, and WebSocket-duplex suites. |
 | google (11) | M3-0230, M3-0231; M2-0040, M2-0041; M4-0357, M4-0358, M4-0359; M1-0109; M2-0133; M3-0334 | Ten changed suites: Antigravity finish reasons, Interactions, and model deduplication; Gemini Interactions, content turns, and schemas; signature validation and provider compatibility; Claude thinking effort. |
 | google | M3-0283 | Vertex payload helpers include a previously omitted Benchmark declaration. The two functional cases still match. |
-| manage (6) | M4-0230 | Historical Codex multi-agent aliases need precedence coverage. |
+| manage (5) | M4-0230 | Historical Codex multi-agent aliases need precedence coverage. |
 | manage | M5-0042, M5-0043, M5-0065, M5-0066 | OAuth callback and credential handlers now include SIWC behavior. |
-| manage | M5-0283 | Changed management-asset updater suite. |
 | openai-xai (1) | M3-0137 | Canonical `upstream.xai.inject-x-search` needs shared-setting and presence-precedence tests. |
 | server (3) | M4-0324, M2-0146, M4-0504 | Changed apply-patch integration, Responses steering error-recovery, and session longest-common-prefix suites. |
 | translate (55) | M2-0014, M3-0031 | Claude and Antigravity Responses request registrations now use envelopes. |
@@ -243,30 +246,30 @@ rebaseline against `6fecc6e`, not the stale audit preceding that review.
 
 | Milestone | Before | Frozen v8.0.35 target |
 |---|---|---|
-| M1 | 66 / 52 / 0 | 54 / 84 / 13 |
+| M1 | 66 / 52 / 0 | 54 / 83 / 14 |
 | M2 | 113 / 45 / 0 | 71 / 114 / 4 |
 | M3 | 216 / 134 / 0 | 187 / 215 / 22 |
-| M4 | 240 / 256 / 14 | 232 / 331 / 27 |
-| M5 | 201 / 102 / 0 | 195 / 126 / 10 |
+| M4 | 240 / 256 / 14 | 232 / 330 / 27 |
+| M5 | 201 / 102 / 0 | 196 / 125 / 10 |
 | M6 | 114 / 115 / 19 | 114 / 130 / 23 |
-| **All** | **950 / 704 / 33** | **853 / 1000 / 99** |
+| **All** | **950 / 704 / 33** | **854 / 997 / 100** |
 
 Only gaps have area assignments, so area counts are partial / missing.
 Shared config gaps follow their provider rather than the Go config file's owner.
 
 | Area | Before | Frozen v8.0.35 target |
 |---|---|---|
-| claude | 48 / 0 | 76 / 12 |
+| claude | 48 / 0 | 75 / 13 |
 | codex | 64 / 0 | 82 / 11 |
 | device-providers | 20 / 0 | 28 / 2 |
 | google | 36 / 0 | 80 / 4 |
 | home | 25 / 0 | 27 / 0 |
-| manage | 130 / 0 | 149 / 5 |
+| manage | 130 / 0 | 148 / 5 |
 | observe | 1 / 12 | 1 / 12 |
 | openai-xai | 27 / 1 | 31 / 6 |
 | plugins | 86 / 18 | 99 / 22 |
 | realtime | 8 / 0 | 8 / 0 |
-| server | 222 / 2 | 287 / 19 |
+| server | 222 / 2 | 286 / 19 |
 | translate | 30 / 0 | 123 / 5 |
 | tui | 7 / 0 | 9 / 1 |
 
@@ -278,9 +281,31 @@ The checklist counts contracts and files, so its totals do not equal commit tota
 ## Verification
 
 All Go inspection uses `git show`, `git diff`, and `git ls-tree` against a read-only
-clone. The verifier checks the exact tag commit, stable IDs, all 228 added files,
-990 suite entries and their declaration lines, 43 retired declarations, all 62 RPC
-methods, and 2,376 current, in-bounds source citations:
+clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
+
+- the exact tag commit;
+- stable IDs: all 1,687 retained IDs keep their milestone and section, and their
+  contract text is unchanged apart from Go line numbers and LOC counts, except for
+  28 listed rewrites (the 18 `upstream.*` moves, each matched against Go's
+  `config_v8.go` alias table, and the 10 changed contracts above);
+- test suites: the 228 added Go files, 989 suite entries with their declarations
+  and lines, the excluded support-only file, and 43 retired declarations;
+- routes: each of Go's 257 literal router and `ServeMux` registrations under
+  `internal/` and `sdk/` is cited by a route item with the same method and path,
+  and every route item cites one;
+- config leaves: the 434 YAML leaves walked from Go's `Config` struct equal the
+  checklist's legacy paths, and the 28 added since `6fecc6e` equal the additions
+  section;
+- the 34 CLI flags in `cmd/server/main.go`, including the `discover` flag set;
+- the 62 RPC method constants, and that each of the 7 exported plugin API fields
+  added since `6fecc6e` is cited by an item narrower than a whole-file citation;
+- 2,375 current, in-bounds source citations.
+
+It does not check Rust behavior, whether item prose (handlers, types, defaults,
+meanings) is accurate, plugin capabilities and data contracts that predate
+`6fecc6e`, or the two routes Go serves without a literal path registration
+(`M5-0020`, the WebUI OAuth forwarder, and `M5-0021`, the AI Studio relay route)
+and plugin-defined routes.
 
 ```sh
 python3 docs/parity-audit/verify_reference.py /path/to/CLIProxyAPI
