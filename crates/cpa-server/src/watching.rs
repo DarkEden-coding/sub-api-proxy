@@ -435,16 +435,15 @@ fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>
     };
     state.lock_auth_dir(&mut config);
     let mut files = credentials::from_auth_dir(&config);
-    // A malformed in-place auth write is not a deletion. Keep the last good value;
-    // actual removal and a valid disabled update are reconciled normally.
+    // An empty or incomplete in-place auth write is not a deletion (Go 7484a521 keeps
+    // files that are not valid JSON). Removal, an unreadable file and valid JSON that
+    // holds no credential are reconciled normally.
     for existing in state.rt.store().snapshot() {
         if let Source::File(path) = &existing.source
             && path.parent() == Some(config.auth_dir.as_path())
-            && path.exists()
             && !files.iter().any(|c| c.id == existing.id)
-            && std::fs::read(path).ok().is_some_and(|data| {
-                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&data).is_err()
-            })
+            && std::fs::read(path)
+                .is_ok_and(|data| serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err())
         {
             files.push(Credential::clone(&existing));
         }
@@ -494,6 +493,31 @@ mod tests {
         std::fs::write(&state.path, config(9003)).unwrap();
         assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go 7484a521: an empty or partial in-place write keeps the credential; valid
+    /// JSON without one, or a removed file, deletes it.
+    #[tokio::test]
+    async fn incomplete_auth_writes_keep_the_credential_until_the_file_is_valid_json() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        assert!(loaded(&state));
+        for (contents, kept) in [("", true), (r#"{"type":"codex""#, true), (" \n", true), ("null", false)] {
+            std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+            reload(&state).unwrap();
+            std::fs::write(&file, contents).unwrap();
+            reload(&state).unwrap();
+            assert_eq!(loaded(&state), kept, "{contents:?}");
+        }
+        std::fs::write(&file, r#"{"type":"codex"}"#).unwrap();
+        reload(&state).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        reload(&state).unwrap();
+        assert!(!loaded(&state));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
