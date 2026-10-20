@@ -1351,6 +1351,47 @@ async fn credential_patches_survive_concurrent_refreshes() {
     server.abort();
 }
 
+/// Go v8.0.35 stale-reload guard (`1631875b`): a watcher reload that read the file
+/// before a management save never publishes the older value after it. Here reloads
+/// read and publish under the same lock as saves, so every save stays visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reloads_never_publish_a_value_older_than_a_save() {
+    let f = Fixture::new("reloadfence");
+    let (base, server) = f.server().await;
+    let state = f.state.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reloader = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let mut reloads = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                watching::reload(&state).unwrap();
+                reloads += 1;
+            }
+            reloads
+        }
+    });
+    let client = wreq::Client::new();
+    let retry = || f.rt.config().document["routing"]["retry"]["request-retry"].clone();
+    for i in 0..30 {
+        let r = client
+            .put(format!("{base}/v8/management/config/routing/retry/request-retry"))
+            .bearer_auth("fake-management-only")
+            .body(i.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        for _ in 0..5 {
+            assert_eq!(retry().as_i64(), Some(i), "save {i} was replaced by an older reload");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(reloader.join().unwrap() > 30, "the reloads raced the saves");
+    server.abort();
+}
+
 /// A config-backed field patch invalidates the cached registry: a new prefix is
 /// routable at once.
 #[tokio::test]
