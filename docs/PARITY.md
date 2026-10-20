@@ -1,8 +1,8 @@
 # Compatibility and parity with CLIProxyAPI
 
-cliproxy-rs aims to behave like CLIProxyAPI at commit [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/tree/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10): the same `config.yaml`, the same credential files, the same routes and the same answers. To track how close it is, every route, translation, config setting, plugin method and Go test file in that commit is listed as one item, 1,687 in all, and each item is audited against this repository.
+The compatibility target is frozen at CLIProxyAPI [v8.0.35](https://github.com/router-for-me/CLIProxyAPI/tree/ae3ee3be303fb07fb8173279923413005bf32177), commit `ae3ee3be`: the same `config.yaml`, credential files, routes and answers. The source-derived checklist tracks 1,951 contracts and test suites. Moving the reference does not implement those contracts or rerecord existing fixtures.
 
-One part follows a later release: the Claude executor's prompt-cache and prompt-shaping fixes, thread continuation, and Claude rate-limit and missing-thread answers follow [v8.0.27](https://github.com/router-for-me/CLIProxyAPI/tree/bf9341629ef2300ac9d846a2e80fe2756f63a671) (session-pinned `currentDate` reminder, explicit `prompt_cache_options`, effort directives next to the caller system prompt, thread breakpoints and tool aliases, invalid `cache_control` markers, overage billing resets). Goldens recorded from v8.0.27 check them; [`parity-audit/upstream-v8.0.35.md`](parity-audit/upstream-v8.0.35.md) lists every Go commit through v8.0.35 and which of them are ported. Where a cloaked API key's caller system prompt goes stays as at `6fecc6e`, which keeps the cache prefix the same from one turn to the next ([DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md)).
+Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.0.10). The Claude prompt-cache, prompt-shaping, continuation and error fixtures include selected [v8.0.27](https://github.com/router-for-me/CLIProxyAPI/tree/bf9341629ef2300ac9d846a2e80fe2756f63a671) changes. Those tests retain their provenance; changed Go suites are partial until their current assertions are verified. The [reference update](parity-audit/reference-v8.0.35.md) records additions, retired declarations and count changes. The [upstream inventory](parity-audit/upstream-v8.0.35.md) lists every intervening commit and its porting status. Deliberate differences, including stable caller-system placement, remain in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 ## What works today
 
@@ -26,17 +26,17 @@ The dashboard says when the server lacks an endpoint instead of failing: actions
 ## Where it stands
 
 <!-- parity-summary:start -->
-Audit of 2026-10-20 (v0.2.6, d1261f2).
+Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 
 | Milestone | Items | Covered | Partial | Missing |
 |---|---:|---:|---:|---:|
-| M1 | 118 | 66 | 52 | 0 |
-| M2 | 158 | 113 | 45 | 0 |
-| M3 | 350 | 216 | 134 | 0 |
-| M4 | 510 | 252 | 256 | 2 |
-| M5 | 303 | 201 | 102 | 0 |
-| M6 | 248 | 114 | 115 | 19 |
-| All | 1687 | 962 | 704 | 21 |
+| M1 | 151 | 54 | 83 | 14 |
+| M2 | 189 | 71 | 114 | 4 |
+| M3 | 424 | 187 | 215 | 22 |
+| M4 | 589 | 232 | 330 | 27 |
+| M5 | 331 | 196 | 125 | 10 |
+| M6 | 267 | 114 | 130 | 23 |
+| All | 1951 | 854 | 997 | 100 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
@@ -52,9 +52,9 @@ An item is covered when it is implemented and a Rust test or a fixture recorded 
 | M5 | The Management API, WebSockets, realtime and live voice, and access control |
 | M6 | Plugins, the terminal UI, LAN discovery and Home (cluster) mode |
 
-Most missing items are in M6 (plugin runtime integration and parts of Home mode). The plugin store and terminal UI exist, though some Go cases remain unported.
+Missing items now also include v8.0.35 speech routes, SIWC, tool search, model catalog sources, new configuration and plugin contracts. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
 
-Antigravity (M3) is in: sign-in from the command line, the executor, AI credits, the connection pool settings, reasoning replay and the web-search capability probe, checked against scenarios recorded from Go's `AntigravityExecutor` with local mock upstreams. It also follows CLIProxyAPI v8.0.27 for the Claude 5.5 models, Claude 5.5's CAQS thinking signatures and backend errors inside streams; [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) lists what is left out. No live Antigravity account has been used in these tests. The remaining Antigravity items are Go test files not ported case by case (compaction, keep-alive, refresh, disable-cooling) and the conductor's Antigravity cases. The README's [Upcoming features](../README.md#upcoming-features) list summarises the feature gaps.
+Antigravity (M3) is implemented: command-line sign-in, the executor, AI credits, connection pool settings, reasoning replay and the web-search capability probe have Go-recorded tests with local mock upstreams. Selected v8.0.27 changes add Claude 5.5 models, CAQS thinking signatures and backend errors inside streams. This is not full v8.0.35 parity: model entitlements, session continuation, newer schema and usage fixes, and several suites remain unported. [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) and the upstream inventory list them. No live Antigravity account has been used in these tests.
 
 The audit combines a source scan with saved route probes and manual judgments. Rerunning it reuses those saved probes and judgments. Live-provider compatibility needs separate testing. Counts can lag runtime wiring; a method implemented in a host library may still be unused by the server. The feature descriptions above follow the server's actual call paths.
 
@@ -66,5 +66,6 @@ Everything behind the numbers is in [`docs/parity-audit/`](parity-audit):
 - [`status.md`](parity-audit/status.md) gives each item its status, the evidence (the Rust code and tests that cover it) and a note.
 - [`manual.tsv`](parity-audit/manual.tsv) holds the judgments made by reading code, with their evidence.
 - [`audit.py`](parity-audit/audit.py) rebuilds `status.md`, the table above, and the README parity sentence from the same totals. [`probe.py`](parity-audit/probe.py) starts the binary and requests every route in the checklist with a private test configuration, to see which ones are routed; its results are in `routes.json`.
+- [`verify_reference.py`](parity-audit/verify_reference.py) checks the frozen checklist's IDs, test declarations, RPC methods and citation bounds against a read-only Go clone. It does not establish Rust behavior coverage.
 
-Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh all three. The [v0.2.6 rebaseline](parity-audit/rebaseline.md) records the review decisions and before-and-after counts.
+Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh all three. The [v0.2.6 rebaseline](parity-audit/rebaseline.md) records the review against `6fecc6e`; the [v8.0.35 reference update](parity-audit/reference-v8.0.35.md) records the new target's inventory and count changes.
