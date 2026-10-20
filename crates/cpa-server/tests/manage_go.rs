@@ -795,12 +795,13 @@ mod config_writes {
                     assert!(body.is_empty(), "{at}: {body}");
                 } else {
                     let mut got: Value = serde_json::from_str(&body).unwrap();
-                    // The goldens predate v8.0.35, whose v8 api-keys reads carry each
-                    // key's `auth_index` (`0fb50a18`; tests/management.rs pins them).
-                    let indexed = step["method"] == "GET" && strip_auth_indexes(&mut got);
+                    let mut body = body;
+                    if step["method"] == "GET" {
+                        strip_auth_indexes(&mut got, &mut body);
+                    }
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
-                        if got == *want && !indexed {
+                        if got == *want {
                             bytes_compared += 1;
                             if body != raw {
                                 failures.push(format!("{at}: bytes differ\n go: {raw}\n rs: {body}"));
@@ -863,18 +864,36 @@ mod config_writes {
     }
 }
 
-/// Removes every `auth_index` key; whether there was one.
-fn strip_auth_indexes(value: &mut Value) -> bool {
-    match value {
-        Value::Object(map) => {
-            let mut found = map.shift_remove("auth_index").is_some();
-            for v in map.values_mut() {
-                found |= strip_auth_indexes(v);
+/// The goldens predate v8.0.35, whose v8 api-keys reads give each group or key entry
+/// its `auth_index`, 16 hex digits (`0fb50a18`; tests/management.rs pins them). Removes
+/// exactly those, from the value and from gin's compact bytes, so both comparisons run.
+fn strip_auth_indexes(value: &mut Value, body: &mut String) {
+    fn walk(value: &mut Value, entry: bool, removed: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                let index = map.get("auth_index").and_then(Value::as_str).map(str::to_owned);
+                if let Some(index) =
+                    index.filter(|i| entry && i.len() == 16 && i.bytes().all(|b| b.is_ascii_hexdigit()))
+                {
+                    map.shift_remove("auth_index");
+                    removed.push(index);
+                }
+                map.values_mut().for_each(|v| walk(v, false, removed));
             }
-            found
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(v, true, removed)),
+            _ => {}
         }
-        Value::Array(items) => items.iter_mut().fold(false, |found, v| strip_auth_indexes(v) | found),
-        _ => false,
+    }
+    let mut removed = Vec::new();
+    walk(value, false, &mut removed);
+    for index in removed {
+        let field = format!(r#""auth_index":"{index}""#);
+        let (before, after) = (format!(",{field}"), format!("{field},"));
+        *body = if body.contains(&before) {
+            body.replacen(&before, "", 1)
+        } else {
+            body.replacen(&after, "", 1)
+        };
     }
 }
 
