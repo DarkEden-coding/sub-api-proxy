@@ -152,11 +152,11 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Profiler excluded from default and release builds
+      - name: Profiler excluded from default normal dependencies
         run: |
           cargo tree --locked -p cliproxy --edges normal --prefix none > default-dependencies.txt
-          if grep -q '^pprof v' default-dependencies.txt; then
-            echo '::error::CPU profiler must remain opt-in and out of release and size-gate binaries'
+          if grep -qE '^(pprof|backtrace) v' default-dependencies.txt; then
+            echo '::error::CPU profiler and symbol resolver must remain opt-in'
             exit 1
           fi
       - name: Harness
@@ -200,7 +200,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' && matrix.auth-files == 1 }}
       - name: Build
-        run: cargo build --release --locked -p cliproxy
+        run: |
+          cargo tree --locked -p cliproxy --edges normal --prefix none > size-dependencies.txt
+          if grep -qE '^(pprof|backtrace) v' size-dependencies.txt; then
+            echo '::error::Size-gate binaries must exclude CPU profiling and symbol resolution'
+            exit 1
+          fi
+          cargo build --release --locked -p cliproxy
       # Bytes and counts against bench/budgets.txt, never elapsed time.
       - name: Size
         if: matrix.auth-files == 1

@@ -1383,27 +1383,41 @@ async fn serve(
         }
     };
     let mut home_failed = false;
+    let mut server_done = false;
     let served = tokio::select! {
-        r = &mut server => r.map_err(anyhow::Error::from),
+        r = &mut server => {
+            server_done = true;
+            r.map_err(anyhow::Error::from)
+        },
         _ = shutdown => Ok(()),
         _ = home_stopped => {
             home_failed = true;
             Err(anyhow::anyhow!("home subscriber stopped; shutting down"))
         }
     };
-    // Go's Service.Shutdown sends the mDNS goodbye (shutdownDiscovery) before
-    // Server.Stop, which closes the HTTP server without draining (`http.Server.Close`);
-    // dropping the server future afterwards does the same.
-    advertiser.shutdown().await;
-    drop(server);
-    pprof.shutdown().await;
-    // Go drains the Home registry and flushes releases before exiting.
-    if let Some((shutdown, task)) = home
-        && !home_failed
-    {
-        shutdown.cancel();
-        let _ = task.await;
+    // Go v8.0.35 stops Home, pprof, discovery, then the API server. Keep serving
+    // API requests while Home drains and flushes releases and pprof drains.
+    let cleanup = async {
+        if let Some((shutdown, task)) = home
+            && !home_failed
+        {
+            shutdown.cancel();
+            let _ = task.await;
+        }
+        pprof.shutdown().await;
+        advertiser.shutdown().await;
+    };
+    tokio::pin!(cleanup);
+    if server_done {
+        cleanup.await;
+    } else {
+        tokio::select! {
+            _ = &mut cleanup => {},
+            _ = &mut server => cleanup.await,
+        }
     }
+    // Server.Stop closes the HTTP server without draining (http.Server.Close).
+    drop(server);
     served
 }
 

@@ -2,7 +2,7 @@
 
 cliproxy-rs aims to behave like CLIProxyAPI at commit [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/tree/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10): the same `config.yaml`, the same credential files, the same routes and the same answers. To track how close it is, every route, translation, config setting, plugin method and Go test file in that commit is listed as one item, 1,687 in all, and each item is audited against this repository.
 
-One part follows a later release: the Claude executor's prompt-cache and prompt-shaping fixes, thread continuation, and Claude rate-limit and missing-thread answers follow [v8.0.27](https://github.com/router-for-me/CLIProxyAPI/tree/bf9341629ef2300ac9d846a2e80fe2756f63a671) (session-pinned `currentDate` reminder, explicit `prompt_cache_options`, effort directives next to the caller system prompt, thread breakpoints and tool aliases, invalid `cache_control` markers, overage billing resets). Goldens recorded from v8.0.27 check them; [`parity-audit/upstream-v8.0.27.md`](parity-audit/upstream-v8.0.27.md) lists every Go commit between the two and which of them are ported. Where a cloaked API key's caller system prompt goes stays as at `6fecc6e`, which keeps the cache prefix the same from one turn to the next ([DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md)).
+One part follows a later release: the Claude executor's prompt-cache and prompt-shaping fixes, thread continuation, and Claude rate-limit and missing-thread answers follow [v8.0.27](https://github.com/router-for-me/CLIProxyAPI/tree/bf9341629ef2300ac9d846a2e80fe2756f63a671) (session-pinned `currentDate` reminder, explicit `prompt_cache_options`, effort directives next to the caller system prompt, thread breakpoints and tool aliases, invalid `cache_control` markers, overage billing resets). Goldens recorded from v8.0.27 check them; [`parity-audit/upstream-v8.0.35.md`](parity-audit/upstream-v8.0.35.md) lists every Go commit through v8.0.35 and which of them are ported. Where a cloaked API key's caller system prompt goes stays as at `6fecc6e`, which keeps the cache prefix the same from one turn to the next ([DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md)).
 
 ## What works today
 
@@ -19,24 +19,24 @@ One part follows a later release: the Claude executor's prompt-cache and prompt-
 - Home mode (`-home-jwt`): bootstrap, config updates, request dispatch, usage, process and request logs, in-flight reporting and shared KV state. Home-managed plugin sync, tasks and status reporting remain unavailable.
 - The `PGSTORE_*`, `OBJECTSTORE_*` and `GITSTORE_*` storage backends, and the Redis-protocol usage subscriber on the main port.
 - Config and credential files are watched and reloaded without a restart. A plaintext management key is hashed on first start, as Go does.
-- The separate, optional `observability.pprof` listener follows Go v8.0.35 for startup, reload and shutdown. Its index, command line and symbol routes are always available when enabled. CPU profiles require the non-default `cpa-server/pprof` build feature on Unix; release binaries exclude it. Go runtime profiles return plain-text `501` answers, as approved in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
+- The separate, optional `observability.pprof` listener follows Go v8.0.35 for startup, reload and shutdown, including active requests continuing after a drain timeout without starting a replacement until another config publication. Temporary accept errors retain the listener and back off. Its index, command line and symbol routes are always available when enabled. CPU profiles require the non-default `cpa-server/pprof` build feature on Unix; published release binaries exclude it and return no resolved symbol names. Go runtime profiles return plain-text `501` answers, as approved in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 The dashboard says when the server lacks an endpoint instead of failing: actions it cannot do are disabled and named, and pages it cannot load say which route is missing. What is still missing is listed under [Upcoming features](../README.md#upcoming-features), and the deliberate differences from Go are in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 ## Where it stands
 
 <!-- parity-summary:start -->
-Audit of 2026-10-13.
+Audit of 2026-10-20 (v0.2.6, d1261f2).
 
 | Milestone | Items | Covered | Partial | Missing |
 |---|---:|---:|---:|---:|
-| M1 | 118 | 53 | 65 | 0 |
-| M2 | 158 | 111 | 40 | 7 |
-| M3 | 350 | 208 | 125 | 17 |
-| M4 | 510 | 245 | 259 | 6 |
-| M5 | 303 | 180 | 102 | 21 |
-| M6 | 248 | 69 | 131 | 48 |
-| All | 1687 | 866 | 722 | 99 |
+| M1 | 118 | 66 | 52 | 0 |
+| M2 | 158 | 113 | 45 | 0 |
+| M3 | 350 | 216 | 134 | 0 |
+| M4 | 510 | 252 | 256 | 2 |
+| M5 | 303 | 201 | 102 | 0 |
+| M6 | 248 | 114 | 115 | 19 |
+| All | 1687 | 962 | 704 | 21 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
@@ -65,6 +65,6 @@ Everything behind the numbers is in [`docs/parity-audit/`](parity-audit):
 - [`checklist.md`](parity-audit/checklist.md) lists every item with a link to the Go source it comes from.
 - [`status.md`](parity-audit/status.md) gives each item its status, the evidence (the Rust code and tests that cover it) and a note.
 - [`manual.tsv`](parity-audit/manual.tsv) holds the judgments made by reading code, with their evidence.
-- [`audit.py`](parity-audit/audit.py) rebuilds `status.md` and the table above. [`probe.py`](parity-audit/probe.py) starts the binary and requests every route in the checklist without credentials, to see which ones are routed; its results are in `routes.json`.
+- [`audit.py`](parity-audit/audit.py) rebuilds `status.md`, the table above, and the README parity sentence from the same totals. [`probe.py`](parity-audit/probe.py) starts the binary and requests every route in the checklist with a private test configuration, to see which ones are routed; its results are in `routes.json`.
 
-Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh both.
+Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh all three. The [v0.2.6 rebaseline](parity-audit/rebaseline.md) records the review decisions and before-and-after counts.

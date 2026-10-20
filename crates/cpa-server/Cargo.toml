@@ -10,7 +10,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "deflate", "brotli", "zstd"] }
 axum = { workspace = true, features = ["ws"] }
-backtrace = "0.3"
+backtrace = { version = "0.3", optional = true }
 bytes.workspace = true
 btls = "0.5.6"
 cpa-common.workspace = true
@@ -55,7 +55,7 @@ async-trait = { version = "0.1", optional = true }
 # ReadDirectoryChangesW on Windows. Both crates are already in the dependency tree.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-# CPU sampling is never linked into default or release builds.
+# CPU sampling is never linked into default builds or published release binaries.
 pprof = { version = "0.15", default-features = false, features = ["protobuf-codec"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -63,7 +63,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 media-relay = ["dep:webrtc", "dep:rtc", "dep:async-trait"]
-pprof = ["dep:pprof"]
+pprof = ["dep:pprof", "dep:backtrace"]
 
 [dev-dependencies]
 cpa-plugin = { workspace = true, features = ["test-support"] }
