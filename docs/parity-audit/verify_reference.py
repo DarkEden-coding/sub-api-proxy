@@ -254,7 +254,7 @@ def main():
         path, line = fields[name]
         whole = len(source(NEW, path).splitlines())
         # A whole-file citation (a suite's source list) does not inventory a field.
-        check(any(first <= line <= last and (first, last) != (1, whole) for first, last, _ in cited[path]),
+        check(any(first <= line <= last and (first, last) != (1, whole) for first, last, _ in cited.get(path, ())),
               f"added plugin API field not cited: {name}")
     for row in rows:
         if row["text"].startswith("Plugin data contract"):
