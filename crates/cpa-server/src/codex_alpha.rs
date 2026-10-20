@@ -203,6 +203,18 @@ async fn alpha_search(
         Err(AcquireError::Prepare { error: e, .. }) => {
             return error(e.status, &String::from_utf8_lossy(&e.body));
         }
+        // A plugin scheduler's answer, as the selector's error text.
+        Err(AcquireError::Rejected { code, message }) => {
+            let status = if matches!(code.as_str(), "auth_not_found" | "auth_unavailable") {
+                503
+            } else {
+                500
+            };
+            return error(status, &format!("{code}: {message}"));
+        }
+        Err(AcquireError::Scheduler(e)) => {
+            return error(crate::classify::response_status(&e), &crate::classify::error_text(&e));
+        }
     };
     search(&rt, lease, &body, &headers, &model, &cfg, &capture, None).await
 }

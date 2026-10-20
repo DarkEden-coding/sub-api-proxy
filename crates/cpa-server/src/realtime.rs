@@ -378,6 +378,21 @@ async fn select_oauth(
                 text: String::from_utf8_lossy(&error.body).into_owned(),
                 retry_after: None,
             },
+            // A plugin scheduler's answer, as the selector's error text.
+            AcquireError::Rejected { code, message } => Rejection {
+                status: if matches!(code.as_str(), "auth_not_found" | "auth_unavailable") {
+                    503
+                } else {
+                    500
+                },
+                text: format!("{code}: {message}"),
+                retry_after: None,
+            },
+            AcquireError::Scheduler(error) => Rejection {
+                status: crate::classify::response_status(&error),
+                text: crate::classify::error_text(&error),
+                retry_after: None,
+            },
         })
 }
 

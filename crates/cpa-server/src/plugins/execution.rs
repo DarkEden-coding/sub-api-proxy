@@ -431,6 +431,29 @@ fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
     ExecError::local(status, FailureScope::Model, message)
 }
 
+/// What a plugin scheduler learns about a handler request (Go `schedulerOptions` at
+/// `pickNextMixedLegacy`): the client headers, and the execution metadata with the
+/// session-affinity namespace `mixed` and, under session affinity, the route model.
+/// ponytail: Go's conductor also adds the canonical and parent session IDs before the
+/// pick; add them here if a scheduler needs session identity.
+pub(crate) fn scheduler_context(call: &Call, model: &str, session_affinity: bool) -> super::SchedulerContext {
+    let mut metadata = execution_metadata(call, model);
+    metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
+    let affinity_model = if session_affinity {
+        model.to_owned()
+    } else {
+        String::new()
+    };
+    metadata.insert("session_affinity_model".into(), Value::String(affinity_model));
+    super::SchedulerContext {
+        stream: call.stream,
+        options: cpa_plugin::api::SchedulerOptions {
+            headers: super::go_request_header(&call.headers),
+            metadata,
+        },
+    }
+}
+
 /// request context plus the request's model facts; `model` is the resolved model.
 pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     let mut meta = request_metadata(call);

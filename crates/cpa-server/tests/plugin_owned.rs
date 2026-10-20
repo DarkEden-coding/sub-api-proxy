@@ -1,7 +1,8 @@
 //! Go v8.0.35 plugin-owned providers without a model router: a catalog-only plugin's
 //! models bind to the credentials of their provider (with the credential's excluded
 //! models applied), and a plugin executor serves those credentials through the
-//! ordinary selection loop. Private auth-dir, native test plugins, no upstream.
+//! ordinary selection loop. Plugin schedulers choose among built-in credentials.
+//! Private auth-dir, native test plugins, loopback-only upstreams.
 #![cfg(unix)]
 
 use std::net::SocketAddr;
@@ -537,6 +538,257 @@ async fn a_refused_translation_answers_400_without_calling_the_routed_executor()
         );
     }
     env.finish().await;
+}
+
+/// A loopback OpenAI-compatible upstream that records each request's bearer key and
+/// fails with 500 for the key in `fail`.
+async fn keyed_upstream(seen: Arc<std::sync::Mutex<Vec<String>>>, fail: Arc<std::sync::Mutex<String>>) -> String {
+    let handler = move |headers: axum::http::HeaderMap| {
+        let (seen, fail) = (seen.clone(), fail.clone());
+        async move {
+            let key = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .trim_start_matches("Bearer ")
+                .to_owned();
+            seen.lock().unwrap().push(key.clone());
+            if *fail.lock().unwrap() == key {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down".to_owned());
+            }
+            (
+                axum::http::StatusCode::OK,
+                r#"{"id":"r","object":"chat.completion","created":1,"model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_owned(),
+            )
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handler))
+            .await
+            .unwrap()
+    });
+    url
+}
+
+/// Go `pickViaPluginScheduler` in `pickNextMixedLegacy`: the plugin scheduler sees the
+/// ready candidates of the highest priority tier (all tiers when it asks), without
+/// secret attributes, and picks one, rejects, or delegates to a built-in strategy;
+/// an unusable answer leaves the choice to the configured selector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_scheduler_picks_rejects_or_delegates() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::Mutex::new(String::new()));
+    let upstream = keyed_upstream(seen.clone(), fail.clone()).await;
+    let yaml = format!(
+        "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    priority: 5\n    api-key-entries: [{{api-key: k-a}}, {{api-key: k-b}}]\n    models: [{{name: up-model}}]\n  - name: low\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-low}}]\n    models: [{{name: up-model}}]\n"
+    );
+    for across in [false, true] {
+        // The second run also turns session affinity on.
+        let (caps, yaml) = if across {
+            (
+                "scheduler,scheduler_across_priorities",
+                format!("{yaml}routing:\n  session-affinity: true\n"),
+            )
+        } else {
+            ("scheduler", yaml.clone())
+        };
+        let Some(env) = env(
+            &format!("plugin-scheduler-{across}"),
+            &[("sched", caps)],
+            &yaml,
+            &[],
+            |_| {},
+        )
+        .await
+        else {
+            return;
+        };
+        let key_of = |id: &str| env.rt.store().get(id).unwrap().attributes["api_key"].clone();
+        let respond = |method: &str, once: bool, envelope: Value| {
+            let dir = env.records.join("respond").join("sched");
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = if once {
+                format!("{method}.once.json")
+            } else {
+                format!("{method}.json")
+            };
+            std::fs::write(dir.join(file), envelope.to_string()).unwrap();
+        };
+        let picks = || calls(&env.records, "sched", "scheduler.pick");
+        let send = || async {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            seen.lock().unwrap().clear();
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .header("x-custom", "v")
+                .body(r#"{"model":"up-model","messages":[{"role":"user","content":"hi"}]}"#)
+                .send()
+                .await
+                .unwrap();
+            (response.status().as_u16(), response.text().await.unwrap())
+        };
+
+        // The recorder picks the last candidate.
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let pick = picks().pop().expect("the scheduler was asked");
+        let candidates = pick["Candidates"].as_array().unwrap();
+        let keys: Vec<String> = candidates.iter().map(|c| key_of(c["ID"].as_str().unwrap())).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        let want: &[&str] = if across {
+            &["k-a", "k-b", "k-low"]
+        } else {
+            &["k-a", "k-b"]
+        };
+        assert_eq!(sorted, want, "across={across}: the candidates");
+        for c in candidates {
+            let priority = if key_of(c["ID"].as_str().unwrap()) == "k-low" {
+                0
+            } else {
+                5
+            };
+            assert_eq!(c["Priority"], priority);
+            assert_eq!(c["Status"], "active");
+            assert!(
+                c["Attributes"].get("api_key").is_none(),
+                "secret attributes stay out: {c}"
+            );
+            assert!(c["Attributes"].get("base_url").is_some(), "{c}");
+        }
+        assert_eq!(pick["Provider"], "");
+        assert_eq!(pick["Model"], "up-model");
+        assert_eq!(pick["Stream"], false);
+        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+        let meta = &pick["Options"]["Metadata"];
+        assert_eq!(meta["session_affinity_provider"], "mixed");
+        assert_eq!(meta["session_affinity_model"], if across { "up-model" } else { "" });
+        assert_eq!(meta["request_path"], "/v1/chat/completions");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [keys.last().unwrap().clone()],
+            "the picked credential serves"
+        );
+        if across {
+            // Go's affinity lookup cannot observe bindings a plugin scheduler made.
+            let host = env.rt.plugins().clone();
+            let instance = Arc::new(cpa_plugin::client::CallbackInstance::default());
+            let guard = cpa_plugin::testing::callback_context(
+                &host,
+                "sched",
+                instance.clone(),
+                cpa_plugin::callbacks::RequestScope::default(),
+            );
+            let lookup = tokio::task::spawn_blocking(move || {
+                cpa_plugin::testing::call_from_plugin(
+                    &host,
+                    "sched",
+                    &instance,
+                    "host.affinity.lookup",
+                    br#"{"provider":"up","model":"up-model","session_id":"s1"}"#,
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            drop(guard);
+            let lookup: Value = serde_json::from_slice(&lookup).unwrap();
+            assert_eq!(lookup["result"]["status"], "unsupported", "{lookup}");
+            env.finish().await;
+            continue;
+        }
+
+        // An unknown ID leaves the choice to the configured selector.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":"nope"}}),
+        );
+        assert_eq!(send().await.0, 200);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // Rejects: Go's auth codes are enriched, another code keeps its text.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 503, "{body}");
+        assert!(
+            body.contains("auth_unavailable: scheduler rejected candidate selection (providers="),
+            "{body}"
+        );
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains("quota_hold: wait"), "{body}");
+        assert!(seen.lock().unwrap().is_empty(), "a reject sends nothing");
+
+        // The scheduler's own failure answers with its status.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":false,"error":{"code":"busy","message":"scheduler busy","http_status":429}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 429, "{body}");
+
+        // Delegation to the built-in strategies, within the top tier.
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"fill-first"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        // Fill-first takes the top tier's first credential by ID.
+        let first_by_id = candidates
+            .iter()
+            .map(|c| c["ID"].as_str().unwrap())
+            .min()
+            .map(key_of)
+            .unwrap();
+        assert_eq!(served, [first_by_id.as_str(); 3], "fill-first stays on one credential");
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"round-robin"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..4 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        served.sort();
+        assert_eq!(served, ["k-a", "k-a", "k-b", "k-b"], "round-robin alternates");
+
+        // A failed attempt is not offered again: the retry's candidates exclude it.
+        std::fs::remove_file(env.records.join("respond").join("sched").join("scheduler.pick.json")).unwrap();
+        let first = keys.last().unwrap().clone();
+        *fail.lock().unwrap() = first.clone();
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let picks = picks();
+        assert_eq!(picks.len(), 2, "one pick per attempt");
+        let retry: Vec<String> = picks[1]["Candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| key_of(c["ID"].as_str().unwrap()))
+            .collect();
+        assert!(!retry.contains(&first), "{retry:?}");
+        env.finish().await;
+    }
 }
 
 /// Go keeps the cooldown skip and the retry round apart: a statusless lifecycle text

@@ -120,15 +120,15 @@ impl AuthManager for PluginAuthManager {
         Ok(())
     }
 
-    /// Go `LookupSessionAffinity` with `SessionAffinitySelector.LookupAffinity`.
-    // ponytail: Go also answers `unsupported` while a plugin scheduler is active and
-    // consults the LCP session matcher; neither exists here yet.
+    /// Go `LookupSessionAffinity` with `SessionAffinitySelector.LookupAffinity`:
+    /// `unsupported` while a plugin scheduler chooses credentials.
+    // ponytail: Go also consults the LCP session matcher, which this lookup does not.
     fn lookup_session_affinity(&self, provider: &str, model: &str, session_id: &str) -> (String, Option<HostAuth>) {
         let status = |s: &str| (s.to_owned(), None);
         let Some(state) = self.0.upgrade() else {
             return status("unsupported");
         };
-        if !state.rt.policy().session_affinity {
+        if !state.rt.policy().session_affinity || state.rt.plugins().has_scheduler() {
             return status("unsupported");
         }
         let model_key = crate::scheduler::canonical_model(model).to_owned();
