@@ -1729,13 +1729,16 @@ async fn oauth_get(base: &str, path: &str) -> Value {
         .unwrap()
 }
 
-/// A remote store that is down: every auth push fails, and its messages are recorded.
-struct DownStore {
+/// A remote store that records every push and explicit delete; with `down`, every auth
+/// push fails. An explicit delete removes the file, as the real stores do.
+#[derive(Default)]
+struct FakeStore {
     dir: PathBuf,
+    down: bool,
     pushed: std::sync::Mutex<Vec<String>>,
 }
 
-impl cpa_server::persist::StorePersister for DownStore {
+impl cpa_server::persist::StorePersister for FakeStore {
     fn persist_config(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -1745,9 +1748,16 @@ impl cpa_server::persist::StorePersister for DownStore {
         _: Vec<PathBuf>,
     ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
         self.pushed.lock().unwrap().push(message);
-        Box::pin(async { Err(anyhow::anyhow!("fake store unavailable")) })
+        let down = self.down;
+        Box::pin(async move {
+            anyhow::ensure!(!down, "fake store unavailable");
+            Ok(())
+        })
     }
-    fn delete_auth(&self, _: PathBuf) -> anyhow::Result<()> {
+    fn delete_auth(&self, path: PathBuf) -> anyhow::Result<()> {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        self.pushed.lock().unwrap().push(format!("Delete auth {name}"));
+        std::fs::remove_file(path)?;
         Ok(())
     }
     fn auth_dir(&self) -> PathBuf {
@@ -2120,9 +2130,10 @@ async fn antigravity_management_login_flows() {
     server.abort();
     // Go `saveTokenRecord`: with a remote store that is down, the login fails.
     let down = Fixture::new("antigravitystore");
-    let store = Arc::new(DownStore {
+    let store = Arc::new(FakeStore {
         dir: down.dir.join("auth"),
-        pushed: Default::default(),
+        down: true,
+        ..Default::default()
     });
     let options = management::Options {
         login_base: Some(fake.clone()),
@@ -2277,15 +2288,24 @@ async fn vertex_service_account_import() {
         (&json!("team"), &json!(true), None, &json!("europe-west4"))
     );
 
-    // Non-string project IDs name the file as Go's fmt.Sprint prints them.
+    // Non-string project IDs name the file as Go's fmt.Sprint prints the float64 and
+    // composite values json.Unmarshal decodes (names from Go v8.0.35 with these literals).
     for (project, file) in [
-        (json!(1000000), "vertex-1e+06.json"),
-        (json!(["a", "b"]), "vertex-[a-b].json"),
-        (json!({"b": 1, "a": "x"}), "vertex-map[a_x-b_1].json"),
+        ("1000000", "vertex-1e+06.json"),
+        ("51.248178375505404", "vertex-51.248178375505404.json"),
+        ("12345678901234567890", "vertex-1.2345678901234567e+19.json"),
+        ("9007199254740993", "vertex-9.007199254740992e+15.json"),
+        ("0.000001", "vertex-1e-06.json"),
+        (r#"["a", "b"]"#, "vertex-[a-b].json"),
+        (
+            r#"{"b":[1.5,2e-7,true,null],"a":{"c":100000}}"#,
+            "vertex-map[a_map[c_100000]-b_[1.5-2e-07-true-<nil>]].json",
+        ),
     ] {
         let mut sa: Value = serde_json::from_str(key).unwrap();
-        sa["project_id"] = project;
-        let (status, body) = upload(v8, form(&sa.to_string(), None), FORM).await;
+        sa["project_id"] = json!("@project@");
+        let sa = sa.to_string().replace(r#""@project@""#, project);
+        let (status, body) = upload(v8, form(&sa, None), FORM).await;
         assert_eq!(status, 200, "{body}");
         assert!(auth.join(file).exists(), "{file}: {body}");
     }
@@ -2293,9 +2313,10 @@ async fn vertex_service_account_import() {
 
     // Go `saveTokenRecord`: with a remote store that is down, the import fails.
     let down = Fixture::new("vertexstore");
-    let store = Arc::new(DownStore {
+    let store = Arc::new(FakeStore {
         dir: down.dir.join("auth"),
-        pushed: Default::default(),
+        down: true,
+        ..Default::default()
     });
     let options = management::Options {
         store: Some(store.clone()),
@@ -2347,6 +2368,62 @@ async fn claude_login_completes_from_a_posted_redirect_url() {
         .expect("saved and published");
     assert_eq!(claude.str("access_token"), Some("sk-ant-oat-fake"));
     server.abort();
+    fake_server.abort();
+}
+
+/// Go `saveTokenRecord` for Claude: the legacy file a new login replaces is deleted
+/// through the store only after the canonical credential is stored.
+#[tokio::test]
+async fn claude_login_removes_the_legacy_file_only_after_the_store_has_the_new_one() {
+    let (fake, _seen, fake_server) = fake_logins().await;
+    for down in [true, false] {
+        let f = Fixture::new(&format!("claudelegacy-{down}"));
+        let legacy = f.dir.join("auth/claude-a@example.invalid.json");
+        std::fs::write(
+            &legacy,
+            r#"{"type":"claude","email":"a@example.invalid","organization_uuid":"org-1"}"#,
+        )
+        .unwrap();
+        let store = Arc::new(FakeStore {
+            dir: f.dir.join("auth"),
+            down,
+            ..Default::default()
+        });
+        let options = management::Options {
+            login_base: Some(fake.clone()),
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let (base, _state, server) = serve_with(&f, options).await;
+        let started = oauth_get(&base, "/oauth/auth-url?provider=claude").await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        wreq::Client::new()
+            .post(format!("{base}/v8/management/oauth/callback"))
+            .json(&json!({"provider": "claude",
+                "redirect_url": format!("http://localhost:54545/callback?code=fake-code&state={state}")}))
+            .send()
+            .await
+            .unwrap();
+        let status = final_status(&base, &state, 10).await;
+        let pushed = store.pushed.lock().unwrap().clone();
+        assert!(
+            pushed[0].starts_with("Update auth claude-") && pushed[0].ends_with("-a@example.invalid.json"),
+            "{pushed:?}"
+        );
+        if down {
+            assert_eq!(
+                status,
+                json!({"status": "error", "error": "Failed to save authentication tokens"})
+            );
+            assert_eq!(pushed.len(), 1, "{pushed:?}");
+            assert!(legacy.exists(), "kept while the canonical credential is not stored");
+        } else {
+            assert_eq!(status, json!({"status": "ok"}));
+            assert_eq!(pushed[1..], ["Delete auth claude-a@example.invalid.json"]);
+            assert!(!legacy.exists());
+        }
+        server.abort();
+    }
     fake_server.abort();
 }
 

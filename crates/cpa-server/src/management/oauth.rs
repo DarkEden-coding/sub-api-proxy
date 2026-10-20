@@ -402,24 +402,22 @@ async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMa
         location = query.first("location").trim().to_owned();
     }
     let auth_dir = state.rt.config().auth_dir.clone();
-    let worker = state.clone();
     let saved = tokio::task::spawn_blocking(move || {
-        let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        import_upload(&auth_dir, &file.data, &location)
+        let upload = import_upload(&auth_dir, &file.data, &location)?;
+        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // Go `saveTokenRecord`: success only once the token store has the file.
+        let mut written = Ok(());
+        let stored = state.store_write(Box::new(|| {
+            written = upload.write();
+            written.as_ref().map_err(|_| anyhow::anyhow!("write failed"))?;
+            Ok(Some(upload.path.clone()))
+        }));
+        written?;
+        stored.map_err(UploadError::Save)?;
+        state.publish((*state.rt.config()).clone(), None);
+        Ok(upload)
     })
     .await;
-    // Go `saveTokenRecord`: success only once a remote store has the file too.
-    let saved = match saved {
-        Ok(Ok(upload)) => match state.store_save(&upload.path).await {
-            Ok(()) => {
-                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-                state.publish((*state.rt.config()).clone(), None);
-                Ok(Ok(upload))
-            }
-            Err(e) => Ok(Err(UploadError::Save(e))),
-        },
-        other => other,
-    };
     let message = |error: &str, message: String| {
         reply(
             StatusCode::BAD_REQUEST,
@@ -467,26 +465,27 @@ async fn save_if_pending<T: Send + 'static>(
     save_error: &str,
 ) -> Outcome {
     let auth_dir = state.rt.config().auth_dir.clone();
-    let (guard, sid, owner) = (state.clone(), sid.to_owned(), provider.to_owned());
+    let (worker, sid, owner) = (state.clone(), sid.to_owned(), provider.to_owned());
     let saved = tokio::task::spawn_blocking(move || {
-        // Checked on the blocking thread itself, right before the write.
-        if !guard.oauth.is_pending(&sid, &owner) {
-            return Ok(None);
-        }
-        write(auth_dir, value).map(Some)
+        let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // Go `saveTokenRecord`: saved only once the token store has the file. The
+        // session is checked right before the write, after any store sync.
+        worker.store_write(Box::new(|| {
+            if !worker.oauth.is_pending(&sid, &owner) {
+                return Ok(None);
+            }
+            write(auth_dir, value).map(Some).map_err(anyhow::Error::msg)
+        }))
     })
     .await;
     match saved {
-        // Go `saveTokenRecord`: a remote store must accept the file as well.
-        Ok(Ok(Some(path))) => match state.store_save(&path).await {
-            Ok(()) => Outcome::Saved,
-            Err(e) => {
-                tracing::error!("failed to save {provider} token to the store: {e}");
-                Outcome::Failed(save_error.to_owned())
-            }
-        },
+        Ok(Ok(Some(_))) => Outcome::Saved,
         Ok(Ok(None)) => Outcome::Cancelled,
-        _ => Outcome::Failed(save_error.to_owned()),
+        Ok(Err(e)) => {
+            tracing::error!("failed to save {provider} token: {e}");
+            Outcome::Failed(save_error.to_owned())
+        }
+        Err(_) => Outcome::Failed(save_error.to_owned()),
     }
 }
 
@@ -548,8 +547,14 @@ async fn start_claude(state: Arc<Management>, webui: bool) -> Response {
             };
             let outcome = match exchanged {
                 Ok(patch) => {
-                    let write = |dir: PathBuf, patch| ManagedLogin::save(&dir, patch).map_err(|e| exec_text(&e));
-                    save_if_pending(
+                    let legacy = Arc::new(Mutex::new(None));
+                    let slot = legacy.clone();
+                    let write = move |dir: PathBuf, patch| {
+                        let (path, old) = ManagedLogin::save(&dir, patch).map_err(|e| exec_text(&e))?;
+                        *slot.lock().unwrap_or_else(PoisonError::into_inner) = old;
+                        Ok(path)
+                    };
+                    let saved = save_if_pending(
                         &worker,
                         &login.state,
                         "anthropic",
@@ -557,7 +562,12 @@ async fn start_claude(state: Arc<Management>, webui: bool) -> Response {
                         write,
                         "Failed to save authentication tokens",
                     )
-                    .await
+                    .await;
+                    let old = legacy.lock().unwrap_or_else(PoisonError::into_inner).take();
+                    match (saved, old) {
+                        (Outcome::Saved, Some(old)) => remove_legacy_claude(&worker, old).await,
+                        (saved, _) => saved,
+                    }
                 }
                 Err(_) => Outcome::Failed("Failed to exchange authorization code for tokens".into()),
             };
@@ -566,6 +576,32 @@ async fn start_claude(state: Arc<Management>, webui: bool) -> Response {
         stop_forwarder(&worker, ANTHROPIC_CALLBACK_PORT, forwarder);
     });
     started(url, sid)
+}
+
+/// Go `saveTokenRecord` after the canonical Claude credential is stored: the matching
+/// legacy file is deleted through the token store (`store.Delete`), so a git store
+/// commits the removal its watcher guard would refuse.
+async fn remove_legacy_claude(state: &Arc<Management>, legacy: PathBuf) -> Outcome {
+    let worker = state.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        if worker.store.is_some() {
+            return worker.store_delete(&legacy);
+        }
+        match std::fs::remove_file(&legacy) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    })
+    .await;
+    match removed {
+        Ok(Ok(())) => Outcome::Saved,
+        Ok(Err(e)) => {
+            tracing::error!("canonical Claude credential saved but legacy credential cleanup failed: {e}");
+            Outcome::Failed("Failed to save authentication tokens".into())
+        }
+        Err(_) => Outcome::Failed("Failed to save authentication tokens".into()),
+    }
 }
 
 /// Go `RequestCodexToken`.

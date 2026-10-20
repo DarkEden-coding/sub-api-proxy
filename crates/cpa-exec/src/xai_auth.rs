@@ -833,7 +833,7 @@ pub(crate) fn metadata_string(credential: &Credential, key: &str) -> String {
 }
 
 /// `fmt.Sprint` of a value decoded by `encoding/json` into `any`.
-pub(crate) fn go_sprint(value: &Value) -> String {
+fn go_sprint(value: &Value) -> String {
     match value {
         Value::Null => "<nil>".into(),
         Value::Bool(b) => b.to_string(),
@@ -851,7 +851,7 @@ pub(crate) fn go_sprint(value: &Value) -> String {
 
 /// `%v` of a float64: `strconv.FormatFloat(f, 'g', -1, 64)`, the shortest digits in
 /// exponent form when the decimal exponent is below -4 or at least 6.
-fn go_float_v(f: f64) -> String {
+pub(crate) fn go_float_v(f: f64) -> String {
     if f.is_nan() {
         return "NaN".into();
     }

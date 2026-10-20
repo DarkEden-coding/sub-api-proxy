@@ -217,22 +217,15 @@ impl Management {
         store.delete_auth(path).map_err(|e| format!("{e:#}"))
     }
 
-    /// Go `saveTokenRecord` on a remote store (`Store.Save`): a credential just written
-    /// to the mirror counts as saved only once the store has it, so a store failure
-    /// reaches the caller instead of only the watcher's log.
-    pub(crate) async fn store_save(&self, path: &std::path::Path) -> Result<(), String> {
-        let Some(store) = self.store.clone() else {
-            return Ok(());
-        };
-        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        store
-            .persist_auth_files(format!("Update auth {name}"), vec![path])
-            .await
-            .map_err(|e| format!("{e:#}"))
+    /// Go `Store.Save`: `write` through the configured store, which has the file when
+    /// this returns (git syncs first and holds its lock across the write); without a
+    /// store, just `write`. Blocking: call from a blocking thread holding `disk`.
+    pub(crate) fn store_write(&self, write: crate::persist::SaveFn<'_>) -> Result<Option<PathBuf>, String> {
+        match &self.store {
+            Some(store) => store.save_auth(write),
+            None => write(),
+        }
+        .map_err(|e| format!("{e:#}"))
     }
 
     /// Publishes a config and everything Go derives from it on reload: scheduler

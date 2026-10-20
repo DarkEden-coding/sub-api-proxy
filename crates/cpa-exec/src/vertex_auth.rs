@@ -798,13 +798,29 @@ fn normalize_decoded(sa: Option<BTreeMap<String, GoValue>>) -> Result<BTreeMap<S
     Ok(sa)
 }
 
-/// A service account imported through the Management API.
+/// A service account imported through the Management API, checked and merged with an
+/// existing file but not yet written ([`Upload::write`]).
 #[derive(Debug)]
 pub struct Upload {
     pub path: PathBuf,
     pub project: String,
     pub email: String,
     pub location: String,
+    contents: Vec<u8>,
+}
+
+impl Upload {
+    /// Go `VertexCredentialStorage.SaveTokenToFile`, called by the token store's `Save`.
+    pub fn write(&self) -> Result<(), UploadError> {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        go_mkdir_all(dir).map_err(|e| UploadError::Save(format!("auth filestore: create dir failed: {e}")))?;
+        crate::kimi_auth::write_private(&self.path, &self.contents).map_err(|e| {
+            UploadError::Save(format!(
+                "vertex credential: create file failed: {}",
+                path_error("open", &self.path, &e)
+            ))
+        })
+    }
 }
 
 /// Why a Management API import failed, with Go's message for each answer.
@@ -819,7 +835,8 @@ pub enum UploadError {
 /// Management `ImportVertexCredential`: like `-vertex-import`, but without a prefix,
 /// with the given location (`us-central1` when empty), and saved as the management
 /// token store saves: settings and `disabled` of an existing file are kept
-/// (`mergeExistingAuthFileMetadata`).
+/// (`mergeExistingAuthFileMetadata`). Nothing is written yet: the caller saves the
+/// result through its token store.
 pub fn import_upload(auth_dir: &Path, data: &[u8], location: &str) -> Result<Upload, UploadError> {
     let sa = decode_service_account(data).map_err(UploadError::InvalidJson)?;
     let sa = normalize_decoded(sa).map_err(UploadError::InvalidServiceAccount)?;
@@ -827,10 +844,7 @@ pub fn import_upload(auth_dir: &Path, data: &[u8], location: &str) -> Result<Upl
     // project ID 1000000 names `vertex-1e+06.json`, as in Go.
     let text = |key: &str| match sa.get(key) {
         None | Some(GoValue::Null) => String::new(),
-        Some(value) => {
-            let value = serde_json::from_slice(&value.marshal()).unwrap_or(Value::Null);
-            crate::xai_auth::go_sprint(&value).trim().to_owned()
-        }
+        Some(value) => go_sprint(value).trim().to_owned(),
     };
     let (project, email) = (text("project_id"), text("client_email"));
     if project.is_empty() {
@@ -860,20 +874,29 @@ pub fn import_upload(auth_dir: &Path, data: &[u8], location: &str) -> Result<Upl
             .map_err(|e| UploadError::Save(format!("auth filestore: invalid metadata weight: {e}")))?;
     }
     doc.insert("disabled".to_owned(), GoValue::Bool(disabled));
-    let dir = path.parent().unwrap_or(Path::new("."));
-    go_mkdir_all(dir).map_err(|e| UploadError::Save(format!("auth filestore: create dir failed: {e}")))?;
-    crate::kimi_auth::write_private(&path, &GoValue::Object(doc).encode_indented()).map_err(|e| {
-        UploadError::Save(format!(
-            "vertex credential: create file failed: {}",
-            path_error("open", &path, &e)
-        ))
-    })?;
     Ok(Upload {
         path,
         project,
         email,
         location,
+        contents: GoValue::Object(doc).encode_indented(),
     })
+}
+
+/// `fmt.Sprint` of a value `json.Unmarshal` decoded into `any`: numbers are float64
+/// printed as `%v`, maps print their keys sorted.
+fn go_sprint(value: &GoValue) -> String {
+    match value {
+        GoValue::Null => "<nil>".into(),
+        GoValue::Bool(b) => b.to_string(),
+        GoValue::String(s) => s.clone(),
+        GoValue::Number(n) => crate::xai_auth::go_float_v(cpa_common::json::parse_float(n.as_bytes())),
+        GoValue::Array(items) => format!("[{}]", items.iter().map(go_sprint).collect::<Vec<_>>().join(" ")),
+        GoValue::Object(map) => {
+            let items: Vec<String> = map.iter().map(|(k, v)| format!("{k}:{}", go_sprint(v))).collect();
+            format!("map[{}]", items.join(" "))
+        }
+    }
 }
 
 /// The first number, in document order, that does not fit a float64.
