@@ -202,7 +202,7 @@ M3-0008	covered	probe POST /v1/alpha/search -> 401; same handler as /backend-api
 M3-0009			openai-xai	Video handlers exist in videos.rs; tests/media_go.rs.
 M3-0010			openai-xai	Video handlers exist in videos.rs; tests/media_go.rs.
 M3-0011			openai-xai	Video handlers exist in videos.rs; tests/media_go.rs.
-M3-0014	partial	probe GET /antigravity/callback -> 200 (shared callback page)	google	The Management API does not start an Antigravity login yet; -antigravity-login runs its own listener.
+M3-0014	covered	probe GET /antigravity/callback -> 200; crates/cpa-server/src/lib.rs callback hands the code to the pending management login (the codex path, tests/management.rs codex_login_completes_through_the_main_listener_callback); antigravity_management_login_flows starts the login		
 M3-0017	covered	crates/cpa-exec/src/codex_oauth_tests.rs callback_routes_match_go_listener, pasted_callbacks_parse_like_go
 M3-0018	covered	crates/cpa-exec/src/codex_oauth_tests.rs callback_routes_match_go_listener
 M3-0019	partial	crates/cpa-exec/src/antigravity_auth.rs (callback listener accepting any method, pasted callback URL with -no-browser)	google	Implemented; no test drives the listener itself. The code exchange, user info and project steps are checked against Go (antigravity_go.json auth cases).
@@ -653,7 +653,7 @@ M5-0025	covered	codex_go.json executor oauth_bootstrap_overload_failover, oauth_
 M5-0227	covered	probe: 237/237 method/path pairs routed; crates/cpa-server/tests/plugin_routes.rs and manage_go.rs; management.rs registers v8 plugin quota DELETE		
 M5-0228	covered	crates/cpa-server/src/management/legacy.rs, management/plugins.rs; tests/legacy_go.rs replays deprecated setters; tests/plugin_routes.rs exercises v0 quota and plugin config surfaces		
 M5-0229	partial	crates/cpa-server/tests/management.rs (writes_normalize_only_what_they_touch, config_key_* tests); manage_go.json config_writes	manage	TURN credential and Home revision redaction are not tested.
-M5-0230	partial	crates/cpa-server/src/management/oauth.rs and plugin_oauth.rs; tests/management.rs *_login_* tests and tests/plugin_routes.rs plugin auth scenarios	manage	Plugin provider IDs work; Antigravity login through the Management API remains absent.
+M5-0230	covered	crates/cpa-server/src/management/oauth.rs and plugin_oauth.rs; tests/management.rs *_login_* tests, antigravity_management_login_flows, vertex_service_account_import, and tests/plugin_routes.rs plugin auth scenarios		
 M5-0231	partial	crates/cpa-server/src/management/auth_files.rs, multipart.rs (hostile_bodies_never_panic); manage_go.json credentials; tests/manage_go.rs go_credential_management_replay	manage	Not ported by name.
 M5-0232	covered	crates/cpa-server/src/management/access.rs (fifth failure bans for 30 minutes); tests/manage_go.rs every_go_access_scenario_replays_through_the_router (manage_go.json access)		
 M5-0233	covered	crates/cliproxy/src/main.rs --password (loopback-only management password) -> serve; every_go_flag_parses_in_single_and_double_dash_form		
