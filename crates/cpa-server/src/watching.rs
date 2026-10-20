@@ -478,6 +478,9 @@ mod tests {
         (Management::new(rt, path), dir)
     }
 
+    /// Also Go `TestSetConfigAppliesCurrentFileAndNonFileConfigs_Issue6631`: an external
+    /// edit is published by the reload that read it, and a config that did not come from
+    /// the file (a management or Home publication) still applies.
     #[tokio::test]
     async fn accepted_config_is_captured_and_skipped_reloads_do_not_advance_it() {
         let (state, dir) = state();

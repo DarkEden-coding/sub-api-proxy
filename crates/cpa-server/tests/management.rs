@@ -901,7 +901,12 @@ async fn config_writes_honour_if_match_against_the_file_etag() {
         }
         req.send()
     };
-    let tag = |r: &wreq::Response| r.headers()["etag"].to_str().unwrap().to_owned();
+    // `TestConfigV8ETagExposedForCORS`: every answer lets a cross-origin page read it.
+    let tag = |r: &wreq::Response| {
+        let exposed = r.headers()["access-control-expose-headers"].to_str().unwrap();
+        assert!(exposed.split(',').any(|h| h.trim() == "ETag"), "{exposed}");
+        r.headers()["etag"].to_str().unwrap().to_owned()
+    };
     let (put, patch, delete, get) = (
         wreq::Method::PUT,
         wreq::Method::PATCH,
@@ -1137,7 +1142,10 @@ async fn credential_models_come_from_registrations() {
 
 /// Go v8.0.35 `GetStaticModelDefinitions` (`50cfd238`): a channel without a built-in
 /// catalog lists the models its credentials registered, sorted by ID, as Go's
-/// `registry.ModelInfo` encodes them; a channel with neither is still unknown.
+/// `registry.ModelInfo` encodes them; a channel with neither is still unknown
+/// (`TestGetStaticModelDefinitions_FallsBackToRegistryModelsForPerAuthPlugin`,
+/// `TestGetStaticModelDefinitions_BuiltInChannel`,
+/// `TestGetStaticModelDefinitions_RejectsUnknownChannel`).
 #[tokio::test]
 async fn model_definitions_fall_back_to_registered_models_by_channel() {
     let f = Fixture::from_yaml("definitions", |auth, hash| {
@@ -1171,6 +1179,16 @@ async fn model_definitions_fall_back_to_registered_models_by_channel() {
             "{internal}: {models:?}"
         );
     }
+    let v0: Value = wreq::Client::new()
+        .get(format!("{base}/v0/management/model-definitions/openai-compatible-acme"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v0, v, "v0 serves the same handler");
     let r = get("claude").await.unwrap();
     assert_eq!(r.status(), 200, "the built-in catalog still wins");
     let r = get("nobody").await.unwrap();
@@ -1179,6 +1197,65 @@ async fn model_definitions_fall_back_to_registered_models_by_channel() {
         r.json::<Value>().await.unwrap(),
         json!({"channel": "nobody", "error": "unknown channel"})
     );
+    server.abort();
+}
+
+/// Go v8.0.35 `TestGetStaticModelDefinitions_FallsBackToPluginStaticModels`: a plugin
+/// channel lists the plugin's static models in plugin order. The plugin is the Go
+/// recorder test plugin.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_definitions_fall_back_to_plugin_static_models() {
+    let tmp = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "model_definitions_plugin") else {
+        return;
+    };
+    let dir = cpa_plugin::testing::scratch(tmp, "definitions-plugin");
+    let (plugins, records) = (dir.join("plugins"), dir.join("records"));
+    let respond = records.join("respond/workbuddy");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&respond).unwrap();
+    std::fs::copy(built.join("recorder.so"), plugins.join("workbuddy.so")).unwrap();
+    // pluginapi.ModelInfo has no JSON tags: the wire names are Go's field names.
+    let models = json!({"provider": "workbuddy", "models": [
+        {"ID": "workbuddy-pro", "DisplayName": "WorkBuddy Pro"},
+        {"ID": "workbuddy-lite", "DisplayName": "WorkBuddy Lite"}]});
+    std::fs::write(
+        respond.join("model.static.json"),
+        json!({"ok": true, "result": models}).to_string(),
+    )
+    .unwrap();
+    let f = Fixture::from_yaml("definitions-plugin", |auth, hash| {
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    workbuddy:\n      enabled: true\n      label: workbuddy\n      record: {}\n      caps: model_provider\n",
+            auth.display(),
+            plugins.display(),
+            records.display()
+        )
+    });
+    cpa_server::plugins::start(&f.rt).await;
+    // As Go's test does: the server does not run plugin model registration yet.
+    let host = f.rt.plugins();
+    host.register_models().await;
+    host.register_executors(&|_| false, &|_| Vec::new()).await;
+    let (base, server) = f.server().await;
+    let r = wreq::Client::new()
+        .get(format!("{base}/v8/management/routing/model-definitions/WorkBuddy"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["channel"], "workbuddy");
+    let ids: Vec<_> = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("workbuddy-pro"), json!("workbuddy-lite")]);
+    assert_eq!(v["models"][0]["display_name"], "WorkBuddy Pro");
     server.abort();
 }
 
@@ -1209,6 +1286,32 @@ async fn v8_api_keys_carry_auth_indexes_and_writes_drop_them() {
     let read = send(wreq::Method::GET, "/api-keys", String::new()).await.unwrap();
     let read: Value = read.json().await.unwrap();
     assert_eq!(read, fixture["response"]);
+    // `TestConfigV8APIKeysExposeAuthIndex_Issue6287`: a provider sub-path and the root
+    // carry the same indexes; the YAML document carries none.
+    let codex: Value = send(wreq::Method::GET, "/api-keys/codex", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(codex, fixture["response"]["codex"]);
+    let root: Value = send(wreq::Method::GET, "", String::new())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(root["api-keys"], fixture["response"]);
+    let yaml = client
+        .get(format!("{base}/v8/management/config.yaml"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(yaml.contains("fake-o2") && !yaml.contains("896fb130477af684"), "{yaml}");
 
     // Echo the read back, at the provider list and at the root.
     let acme = read["openai-compatibility"].clone();
@@ -1353,7 +1456,12 @@ async fn credential_patches_survive_concurrent_refreshes() {
 
 /// Go v8.0.35 stale-reload guard (`1631875b`): a watcher reload that read the file
 /// before a management save never publishes the older value after it. Here reloads
-/// read and publish under the same lock as saves, so every save stays visible.
+/// read and publish under the same lock as saves, so every save stays visible and Go's
+/// paused-reload interleavings cannot occur
+/// (`TestSetConfigIgnoresConfigLoadedBeforeManagementSave_Issue6631`,
+/// `TestManagementWritesSurviveConcurrentReloadPublications_Issue6631`,
+/// `TestManagementSequentialWritesSurviveStaleReload_Issue6631`,
+/// `TestManagementWriteDuringReloadReachesRuntime_Issue6631`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_reloads_never_publish_a_value_older_than_a_save() {
     let f = Fixture::new("reloadfence");
