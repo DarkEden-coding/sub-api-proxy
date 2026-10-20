@@ -1362,6 +1362,9 @@ mod tests {
     }
 }
 
+/// Writes one SSE event from its fields, for [`claude_messages_json_to_sse`].
+type EmitEvent<'a> = dyn FnMut(&[(&str, &[u8])]) + 'a;
+
 /// `ClaudeMessagesJSONToSSE`: a native Messages response (`type: message` with a
 /// `content` array) as the SSE events its stream would have carried, for the SSE
 /// aggregators, plus its model. Anything else is returned unchanged with no model.
@@ -1428,7 +1431,7 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
             }
             _ => None,
         };
-        let block_delta = |out: &mut dyn FnMut(&[(&str, &[u8])]), (key, value): (&str, &[u8]), kind: &str| {
+        let block_delta = |out: &mut EmitEvent<'_>, (key, value): (&str, &[u8]), kind: &str| {
             let mut delta = b"{".to_vec();
             gj::marshal_str(&mut delta, key.as_bytes(), true);
             delta.push(b':');

@@ -53,7 +53,10 @@ pub(crate) fn original(
     let (payload, original) = if req.original_body.is_empty() || req.original_body == req.body {
         (&req.body, translated.clone())
     } else {
-        (&req.original_body, translate_body(req, &req.original_body, codex, model, is_compat)?)
+        (
+            &req.original_body,
+            translate_body(req, &req.original_body, codex, model, is_compat)?,
+        )
     };
     let limits: &[&str] = match req.source_format {
         Format::OpenAI => &["max_tokens", "max_completion_tokens"],

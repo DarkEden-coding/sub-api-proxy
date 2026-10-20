@@ -343,7 +343,7 @@ fn reference_goldens() {
                     out.extend(chunks);
                 }
                 if s.tool_input_failed() != f["tool_error"].as_bool().unwrap_or(false) {
-                    early.push(format!("tool input error state differs from Go"));
+                    early.push("tool input error state differs from Go".to_owned());
                 }
                 out
             } else {
@@ -352,7 +352,7 @@ fn reference_goldens() {
                     && out[0].is_empty() != f["tool_error"].as_bool().unwrap_or(false)
                     && f["tool_error"].as_bool().unwrap_or(false)
                 {
-                    early.push(format!("Go rejected the apply_patch body, Rust did not"));
+                    early.push("Go rejected the apply_patch body, Rust did not".to_owned());
                 }
                 if f["path"] == "non_stream" && f["tool_error"].as_bool().unwrap_or(false) && out[0].is_empty() {
                     // Go's executors answer 502 and drop whatever body the translator
