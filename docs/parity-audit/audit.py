@@ -235,7 +235,7 @@ def judge_route(item, routes, tests):
     if literal != "/" and literal.endswith("/") and len(literal) > 1:
         literal = literal
     pattern = re.compile(re.escape(literal) + (r'["?/ {]' if not literal.endswith("/") else ""))
-    route_path = "/".join('[^/"]+' if part.startswith(":") else '.+' if part.startswith("*")
+    route_path = "/".join(r'[^/?"\r\n]+' if part.startswith(":") else r'[^?"\r\n]+' if part.startswith("*")
                           else re.escape(part) for part in path.split("/"))
     fixture_request = re.compile(r'^' + method + r' "' + route_path + r'(?:\?[^"\n]*)?"$', re.M)
     users = [rel for rel, text in tests.items()
@@ -261,7 +261,7 @@ GENERIC_LEAVES = {"name", "alias", "api-key", "base-url", "headers", "prefix", "
 
 def config_family(key):
     parts = key.replace("[]", "").split(".")
-    if parts[0] == "api-keys" and len(parts) > 1:
+    if parts[0] in ("api-keys", "upstream") and len(parts) > 1:
         return parts[1]
     if parts[0] == "oauth" and len(parts) > 2 and parts[1] == "providers":
         return parts[2]
@@ -398,6 +398,7 @@ def main():
 AUDITED = ["M1", "M2", "M3", "M4", "M5", "M6"]
 # What the audited tree is called in the rendered pages: a release or a date.
 BASE = "2026-10-20 (v0.2.6, d1261f2)"
+REFERENCE = "v8.0.35 (`ae3ee3be`)"
 
 
 def title(r):
@@ -421,7 +422,7 @@ def render(rows):
     w = out.append
     w("# Parity status, item by item")
     w("")
-    w(f"Audit of {BASE} against CLIProxyAPI `6fecc6e`. Milestones audited: {', '.join(AUDITED)} "
+    w(f"Audit of {BASE} against CLIProxyAPI {REFERENCE}. Milestones audited: {', '.join(AUDITED)} "
       "(every item in [checklist.md](checklist.md)). [docs/PARITY.md](../PARITY.md) explains the milestones and sums them up.")
     w("")
     w("Statuses:")
@@ -435,10 +436,12 @@ def render(rows):
     w("Area names the part of the code base that would close a partial or missing item.")
     w("")
     w("Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `probe.py`, which starts the binary and requests every listed method and path "
-      "without credentials (routed pairs answer from the auth guard or handler, unrouted ones 404/405). A route counts as covered when a test requests it. "
+      "without upstream credentials. Client routes use a wrong client key; management routes use a private valid management key so they reach the router "
+      "(routed pairs answer from the auth guard or handler, unrouted ones 404/405). A route counts as covered when a test requests it. "
       "Go test suites are matched case by case against Go test names cited in Rust code and in Go-generated fixtures (fixture names carry `TestName:line`). "
       "Every other item, and every suite the matcher cannot see, was judged by reading the Rust code and tests; those judgments live in `docs/parity-audit/manual.tsv` with their evidence. "
-      "\"Not ported by name\" means the area is implemented and tested through other cases (usually Go-generated end-to-end scenarios), but the Go suite's own cases are not reproduced one by one.")
+      "\"Not ported by name\" means the area is implemented and tested through other cases (usually Go-generated end-to-end scenarios), but the Go suite's own cases are not reproduced one by one. "
+      "A \"Suite changed\" note preserves previous-reference evidence and case counts; it does not prove the current v8.0.35 assertions.")
     w("")
     w("## Summary")
     w("")
@@ -485,7 +488,7 @@ def render(rows):
 
 def summary(rows):
     """Rewrites the PARITY.md table and README sentence from the same totals."""
-    lines = [f"Audit of {BASE}.", "", "| Milestone | Items | Covered | Partial | Missing |", "|---|---:|---:|---:|---:|"]
+    lines = [f"Audit of {BASE} against CLIProxyAPI {REFERENCE}.", "", "| Milestone | Items | Covered | Partial | Missing |", "|---|---:|---:|---:|---:|"]
     total = defaultdict(int)
     for ms in AUDITED:
         c = defaultdict(int)

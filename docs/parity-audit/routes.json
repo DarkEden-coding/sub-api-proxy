@@ -210,16 +210,16 @@
   "status": 401
  },
  "GET /v0/management/anthropic-auth-url": {
-  "body": "{\"state\":\"2469ca8c694c21a8076de406bf37a3e9\",\"status\":\"ok\",\"url\":\"https://claude.",
+  "body": "{\"state\":\"15c704509f283d57347b336f1b000556\",\"status\":\"ok\",\"url\":\"https://claude.",
   "id": "M5-0217",
   "routed": true,
   "status": 200
  },
  "GET /v0/management/antigravity-auth-url": {
-  "body": "{\"state\":\"8e3f6191ac567508cb16c28f00512f56\",\"status\":\"ok\",\"url\":\"https://account",
+  "body": "{\"error\":\"provider_not_found\"}",
   "id": "M5-0219",
   "routed": true,
-  "status": 200
+  "status": 404
  },
  "GET /v0/management/api-key-usage": {
   "body": "{}",
@@ -234,7 +234,7 @@
   "status": 200
  },
  "GET /v0/management/auth-files": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T18:35:02.390489534Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T17:20:36.746253998Z\"}",
   "id": "M5-0207",
   "routed": true,
   "status": 200
@@ -264,7 +264,7 @@
   "status": 200
  },
  "GET /v0/management/codex-auth-url": {
-  "body": "{\"state\":\"a9a73923ef0bec2d40b2c90b039350f8\",\"status\":\"ok\",\"url\":\"https://auth.op",
+  "body": "{\"state\":\"8e0eea7c67a714b449d24f33aefe9961\",\"status\":\"ok\",\"url\":\"https://auth.op",
   "id": "M5-0218",
   "routed": true,
   "status": 200
@@ -276,7 +276,7 @@
   "status": 200
  },
  "GET /v0/management/config.yaml": {
-  "body": "host: 127.0.0.1\nport: 52357\nauth-dir: /tmp/parity-probe-al_hthar/auth\napi-keys:\n",
+  "body": "host: 127.0.0.1\nport: 52351\nauth-dir: /tmp/parity-probe-w7z4zk9s/auth\napi-keys:\n",
   "id": "M5-0086",
   "routed": true,
   "status": 200
@@ -288,7 +288,7 @@
   "status": 200
  },
  "GET /v0/management/devin-auth-url": {
-  "body": "{\"state\":\"4835351e21339121ef436b84b817375c\",\"status\":\"ok\",\"url\":\"https://app.dev",
+  "body": "{\"state\":\"623e81304b918e8091fb5fee10f75150\",\"status\":\"ok\",\"url\":\"https://app.dev",
   "id": "M5-0223",
   "routed": true,
   "status": 200
@@ -468,7 +468,7 @@
   "status": 200
  },
  "GET /v0/management/request-error-logs": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T183446-759600",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T172026-f751b1",
   "id": "M5-0147",
   "routed": true,
   "status": 200
@@ -551,6 +551,12 @@
   "routed": true,
   "status": 401
  },
+ "GET /v1/models/*model": {
+  "body": "",
+  "id": "M1-0128",
+  "routed": false,
+  "status": 404
+ },
  "GET /v1/realtime": {
   "body": "{\"error\":{\"code\":\"invalid_api_key\",\"message\":\"Invalid API key\",\"param\":null,\"typ",
   "id": "M5-0005",
@@ -612,7 +618,7 @@
   "status": 404
  },
  "GET /v8/management/credentials": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T18:34:49.824747988Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T17:20:28.322992052Z\"}",
   "id": "M5-0064",
   "routed": true,
   "status": 200
@@ -654,7 +660,7 @@
   "status": 400
  },
  "GET /v8/management/observability/logs/errors": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T183446-759600",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T172026-f751b1",
   "id": "M5-0059",
   "routed": true,
   "status": 200
@@ -1014,16 +1020,22 @@
   "status": 400
  },
  "POST /v0/management/vertex/import": {
-  "body": "{\"error\":\"file required\"}",
+  "body": "{\"error\":\"provider_not_found\"}",
   "id": "M5-0216",
   "routed": true,
-  "status": 400
+  "status": 404
  },
  "POST /v1/alpha/search": {
   "body": "{\"error\":\"Invalid API key\"}",
   "id": "M3-0008",
   "routed": true,
   "status": 401
+ },
+ "POST /v1/audio/speech": {
+  "body": "",
+  "id": "M3-0365",
+  "routed": false,
+  "status": 404
  },
  "POST /v1/chat/completions": {
   "body": "{\"error\":\"Invalid API key\"}",
@@ -1145,6 +1157,12 @@
   "routed": true,
   "status": 401
  },
+ "POST /v1/tts": {
+  "body": "",
+  "id": "M3-0366",
+  "routed": false,
+  "status": 404
+ },
  "POST /v1/videos": {
   "body": "{\"error\":\"Invalid API key\"}",
   "id": "M3-0003",
@@ -1204,6 +1222,12 @@
   "id": "M5-0072",
   "routed": true,
   "status": 400
+ },
+ "POST /v8/management/oauth/siwc/bind": {
+  "body": "",
+  "id": "M5-0304",
+  "routed": false,
+  "status": 404
  },
  "POST /v8/management/plugins/:id/quota": {
   "body": "{\"error\":\"auth_index is required\"}",
