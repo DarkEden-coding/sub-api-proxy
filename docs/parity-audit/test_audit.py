@@ -171,6 +171,18 @@ class SuiteSkeletonTests(unittest.TestCase):
                        .replace("y_test.go:9", "z_test.go:12"))
         self.assertEqual(verify.suite_skeleton(regenerated), verify.suite_skeleton(self.ROW))
 
+    def test_every_stripped_fragment_is_returned_for_validation(self):
+        extra = self.ROW + (" Removed upstream declarations: `TestG` (historical, not active requirements)."
+                            " Moved upstream declarations: `TestH` to a/w_test.go:7.")
+        _, retired, moved = verify.history(extra)
+        self.assertEqual(retired, ["TestB", "TestC", "TestG"])
+        self.assertEqual(moved, [("TestD", "a/y_test.go", 4), ("TestE", "a/y_test.go", 9), ("TestH", "a/w_test.go", 7)])
+
+    def test_a_moved_entry_without_a_target_line_stays_compared(self):
+        bogus = self.ROW + " Moved upstream declarations: `TestBogus` to missing_test.go."
+        self.assertNotEqual(verify.suite_skeleton(bogus), verify.suite_skeleton(self.ROW))
+        self.assertNotIn("TestBogus", [name for name, _, _ in verify.history(bogus)[2]])
+
     def test_prose_around_or_inside_history_stays_compared(self):
         for changed in (self.ROW + " All cases are optional.",
                         self.ROW.replace("(L3).", "(L3). Optional."),

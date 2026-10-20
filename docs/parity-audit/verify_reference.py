@@ -142,15 +142,27 @@ def moved_back(text):
 # History fragments, matched entry by entry so prose around or inside them stays compared.
 DECL = r"`(?:Test|Fuzz|Benchmark|Example)\w*`"
 REMOVED_NOTE = re.compile(rf" Removed upstream declarations: {DECL}(?:, {DECL})* \(historical, not active requirements\)\.")
-MOVED_ENTRY = rf"{DECL} to [\w./\-]+_test\.go"
+MOVED_ENTRY = rf"{DECL} to [\w./\-]+_test\.go:\d+"
 MOVED_NOTE = re.compile(rf" Moved upstream declarations: {MOVED_ENTRY}(?:; {MOVED_ENTRY})*\.")
+
+
+def history(text):
+    """(text without history fragments, retired names, [(moved name, target, line)]).
+
+    Stripping and validation share this one parse, so every fragment that is
+    stripped from the comparison is also returned for checking against Go.
+    """
+    retired, moved = [], []
+    for note in REMOVED_NOTE.finditer(text):
+        retired += re.findall(r"`(\w+)`", note[0])
+    for note in MOVED_NOTE.finditer(text):
+        moved += [(n, t, int(line)) for n, t, line in re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", note[0])]
+    return MOVED_NOTE.sub("", REMOVED_NOTE.sub("", text)), retired, moved
 
 
 def suite_skeleton(text):
     """Suite text without the fragments regenerated from Go: line ranges, declarations, history."""
-    text = normalized(text)
-    text = REMOVED_NOTE.sub("", text)
-    text = MOVED_NOTE.sub("", text)
+    text = normalized(history(text)[0])
     return re.sub(r"`(?:Test|Fuzz|Benchmark|Example)\w*` \(L\d+\)(?:; )?", "", text)
 
 
@@ -252,16 +264,14 @@ def main():
         check(span and int(span[1]) == len(text.splitlines()), f"suite range is not the whole file: {row['id']}")
         current = {name for name, _ in declarations}
         before = set(TEST.findall(source(OLD, path))) if path in test_files(OLD) else set()
-        note = REMOVED_NOTE.search(row["text"])
-        if note:
-            names = re.findall(r"`([^`]+)`", note[0])
-            retired += len(names)
-            check(set(names) <= before - current, f"retired declarations not removed from this file since {OLD[:7]}: {path}")
-        for name, target, line in re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", row["text"]):
+        _, names, moves = history(row["text"])
+        retired += len(names)
+        check(set(names) <= before - current, f"retired declarations not removed from this file since {OLD[:7]}: {path}")
+        for name, target, line in moves:
             moved += 1
-            lines = source(NEW, target).splitlines()
-            check(name in before - current and 0 < int(line) <= len(lines)
-                  and lines[int(line) - 1].startswith(f"func {name}("),
+            lines = source(NEW, target).splitlines() if target in test_files(NEW) else []
+            check(name in before - current and 0 < line <= len(lines)
+                  and lines[line - 1].startswith(f"func {name}("),
                   f"moved declaration not from this file or not at its target: {row['id']} {name}")
     check(retired == 43, f"expected 43 retired declarations, got {retired}")
     check(moved == 5, f"expected 5 moved declarations, got {moved}")

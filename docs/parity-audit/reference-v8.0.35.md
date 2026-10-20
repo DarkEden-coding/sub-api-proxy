@@ -335,9 +335,11 @@ python3 docs/parity-audit/audit.py
 sha256sum -c /tmp/parity-summary.sha256
 ```
 
-The nine Python tests pass, including the route resolver's group, constant,
+The eleven Python tests pass, including the route resolver's group, constant,
 loop, `ServeMux` and unresolved-call cases, and suite-text cases where prose
-appended after or inserted inside a history fragment must stay compared. The route matcher accepts ordinary query strings and
+appended after or inserted inside a history fragment must stay compared, every
+stripped history fragment is returned for validation, and a moved entry without a
+target line is not stripped. The route matcher accepts ordinary query strings and
 wildcard paths, but rejects route suffixes hidden in queries, embedded quotes,
 and line breaks. Its regression fails in six cases before the matcher fix.
 The matcher fix does not change any current judgments.
