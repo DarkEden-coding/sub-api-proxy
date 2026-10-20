@@ -210,7 +210,7 @@
   "status": 401
  },
  "GET /v0/management/anthropic-auth-url": {
-  "body": "{\"state\":\"3896225d4abb0d34f364198eb85c8c9b\",\"status\":\"ok\",\"url\":\"https://claude.",
+  "body": "{\"state\":\"15c704509f283d57347b336f1b000556\",\"status\":\"ok\",\"url\":\"https://claude.",
   "id": "M5-0217",
   "routed": true,
   "status": 200
@@ -234,7 +234,7 @@
   "status": 200
  },
  "GET /v0/management/auth-files": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T16:23:44.976664488Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T17:20:36.746253998Z\"}",
   "id": "M5-0207",
   "routed": true,
   "status": 200
@@ -264,7 +264,7 @@
   "status": 200
  },
  "GET /v0/management/codex-auth-url": {
-  "body": "{\"state\":\"9d1a719bfca8502e4babea1a62c746c9\",\"status\":\"ok\",\"url\":\"https://auth.op",
+  "body": "{\"state\":\"8e0eea7c67a714b449d24f33aefe9961\",\"status\":\"ok\",\"url\":\"https://auth.op",
   "id": "M5-0218",
   "routed": true,
   "status": 200
@@ -276,7 +276,7 @@
   "status": 200
  },
  "GET /v0/management/config.yaml": {
-  "body": "host: 127.0.0.1\nport: 40855\nauth-dir: /tmp/parity-probe-6gzp3s1z/auth\napi-keys:\n",
+  "body": "host: 127.0.0.1\nport: 52351\nauth-dir: /tmp/parity-probe-w7z4zk9s/auth\napi-keys:\n",
   "id": "M5-0086",
   "routed": true,
   "status": 200
@@ -288,7 +288,7 @@
   "status": 200
  },
  "GET /v0/management/devin-auth-url": {
-  "body": "{\"state\":\"c627736de53114522514f412f951229a\",\"status\":\"ok\",\"url\":\"https://app.dev",
+  "body": "{\"state\":\"623e81304b918e8091fb5fee10f75150\",\"status\":\"ok\",\"url\":\"https://app.dev",
   "id": "M5-0223",
   "routed": true,
   "status": 200
@@ -468,7 +468,7 @@
   "status": 200
  },
  "GET /v0/management/request-error-logs": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T162334-697d30",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T172026-f751b1",
   "id": "M5-0147",
   "routed": true,
   "status": 200
@@ -551,6 +551,12 @@
   "routed": true,
   "status": 401
  },
+ "GET /v1/models/*model": {
+  "body": "",
+  "id": "M1-0128",
+  "routed": false,
+  "status": 404
+ },
  "GET /v1/realtime": {
   "body": "{\"error\":{\"code\":\"invalid_api_key\",\"message\":\"Invalid API key\",\"param\":null,\"typ",
   "id": "M5-0005",
@@ -600,7 +606,7 @@
   "status": 200
  },
  "GET /v8/management/config.yaml": {
-  "body": "access:\n  api-keys:\n    - probe-client-key\nserver:\n  host: 127.0.0.1\n  port: 408",
+  "body": "access:\n  api-keys:\n    - probe-client-key\nserver:\n  host: 127.0.0.1\n  port: 523",
   "id": "M5-0047",
   "routed": true,
   "status": 200
@@ -612,7 +618,7 @@
   "status": 404
  },
  "GET /v8/management/credentials": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T16:23:36.880662516Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T17:20:28.322992052Z\"}",
   "id": "M5-0064",
   "routed": true,
   "status": 200
@@ -654,7 +660,7 @@
   "status": 400
  },
  "GET /v8/management/observability/logs/errors": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T162334-697d30",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T172026-f751b1",
   "id": "M5-0059",
   "routed": true,
   "status": 200
@@ -1025,6 +1031,12 @@
   "routed": true,
   "status": 401
  },
+ "POST /v1/audio/speech": {
+  "body": "",
+  "id": "M3-0365",
+  "routed": false,
+  "status": 404
+ },
  "POST /v1/chat/completions": {
   "body": "{\"error\":\"Invalid API key\"}",
   "id": "M2-0001",
@@ -1145,6 +1157,12 @@
   "routed": true,
   "status": 401
  },
+ "POST /v1/tts": {
+  "body": "",
+  "id": "M3-0366",
+  "routed": false,
+  "status": 404
+ },
  "POST /v1/videos": {
   "body": "{\"error\":\"Invalid API key\"}",
   "id": "M3-0003",
@@ -1204,6 +1222,12 @@
   "id": "M5-0072",
   "routed": true,
   "status": 400
+ },
+ "POST /v8/management/oauth/siwc/bind": {
+  "body": "",
+  "id": "M5-0304",
+  "routed": false,
+  "status": 404
  },
  "POST /v8/management/plugins/:id/quota": {
   "body": "{\"error\":\"auth_index is required\"}",
