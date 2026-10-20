@@ -58,7 +58,11 @@ pub(crate) fn apply_effort(out: &mut Vec<u8>, v: &Res<'_>, model: &str) {
                 gj::delete(out, "output_config.effort");
             }
             _ => {
-                let effort = thinking::map_to_claude_effort(&effort, supports_max).unwrap_or(&effort);
+                let effort = if thinking::has_level(&levels, &effort) {
+                    &effort
+                } else {
+                    thinking::map_to_claude_effort(&effort, supports_max).unwrap_or(&effort)
+                };
                 gj::set_str(out, "thinking.type", "adaptive");
                 gj::delete(out, "thinking.budget_tokens");
                 gj::set_str(out, "output_config.effort", effort);

@@ -723,13 +723,14 @@ fn query_json(query: &[u8]) -> Vec<u8> {
 
 /// codexWebSearchResultContent: `web_search_result` blocks (`None`: no results array).
 fn web_search_results(root: &Res<'_>, item: &Res<'_>) -> Option<Vec<u8>> {
-    let mut results = item.get("results");
-    if !results.is_array() {
-        results = root.get("results");
-    }
-    if !results.is_array() {
-        return None;
-    }
+    let results = [
+        item.get("results"),
+        root.get("results"),
+        item.get("action.sources"),
+        root.get("action.sources"),
+    ]
+    .into_iter()
+    .find(Res::is_array)?;
     let mut blocks = vec![];
     results.each(|_, result| {
         let url = trim_space(&result.get("url").bytes()).to_vec();

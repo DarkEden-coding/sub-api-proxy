@@ -1522,3 +1522,54 @@ impl UserRun {
         self.drops.result()
     }
 }
+
+/// `IsInteractionsInstructionStep`: a developer or system step (or one inside such a
+/// wrapper, `inherited`) is sent as user content but is not the user's own turn.
+pub fn is_interactions_instruction_step(step: &Res<'_>, inherited: bool) -> bool {
+    let mut name = go_lower(trim_space(&step.get("role").bytes()));
+    if name.is_empty() {
+        name = go_lower(trim_space(&step.get("type").bytes()));
+    }
+    match name.as_slice() {
+        b"developer" | b"system" => true,
+        b"user" | b"assistant" | b"model" | b"model_output" | b"thought" => false,
+        _ => inherited,
+    }
+}
+
+/// `InteractionsAttachmentType`: the type reported when an Interactions attachment
+/// cannot be sent, or empty for text and parts that name nothing.
+pub fn interactions_attachment_type(part: &Res<'_>) -> String {
+    if !part.is_object() {
+        return String::new();
+    }
+    let kind = go_lower(trim_space(&part.get("type").bytes()));
+    if !kind.is_empty() {
+        return if kind == b"text" { String::new() } else { String::from_utf8_lossy(&kind).into_owned() };
+    }
+    if part.get("inlineData").exists() || part.get("inline_data").exists() {
+        return "inlineData".into();
+    }
+    if part.get("fileData").exists() || part.get("file_data").exists() {
+        return "fileData".into();
+    }
+    String::new()
+}
+
+/// `IsHTTPURL`: an http(s) URL with a host.
+/// ponytail: checks scheme and a non-empty host only; Go's url.Parse also rejects
+/// malformed hosts. Use a URL parser if a caller needs that.
+pub fn is_http_url(value: &[u8]) -> bool {
+    let value = trim_space(value);
+    let lower = go_lower(value);
+    let rest = if lower.starts_with(b"https://") {
+        &value[8..]
+    } else if lower.starts_with(b"http://") {
+        &value[7..]
+    } else {
+        return false;
+    };
+    let authority = rest.split(|b| matches!(b, b'/' | b'?' | b'#')).next().unwrap_or_default();
+    let host = authority.rsplit(|&b| b == b'@').next().unwrap_or_default();
+    !host.is_empty()
+}
