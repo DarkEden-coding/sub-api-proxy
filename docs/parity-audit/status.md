@@ -21,13 +21,13 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M3 | 350 | 208 | 125 | 17 |
 | M4 | 510 | 233 | 259 | 18 |
 | M5 | 303 | 180 | 102 | 21 |
-| M6 | 248 | 69 | 131 | 48 |
+| M6 | 248 | 70 | 131 | 47 |
 
 ### Gaps by area
 
 | Area | missing | partial | Missing items |
 |---|---:|---:|---|
-| plugins | 39 | 108 | M5-0078, M5-0079, M5-0080, M5-0081, M5-0082, M6-0137, M6-0138, M6-0139, M6-0140, M6-0141, M6-0142, M6-0143, M6-0144, M6-0145, M6-0146, M6-0150, M6-0151, M6-0152, M6-0153, M6-0154, M6-0169, M6-0170, M6-0171, M6-0174, M6-0183, M6-0187, M6-0188, M6-0192, M6-0194, M6-0195, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242, M6-0247, M6-0248 |
+| plugins | 38 | 108 | M5-0078, M5-0079, M5-0080, M5-0081, M5-0082, M6-0137, M6-0138, M6-0139, M6-0140, M6-0141, M6-0142, M6-0143, M6-0144, M6-0145, M6-0146, M6-0150, M6-0151, M6-0152, M6-0153, M6-0154, M6-0169, M6-0170, M6-0171, M6-0174, M6-0183, M6-0188, M6-0192, M6-0194, M6-0195, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242, M6-0247, M6-0248 |
 | manage | 13 | 125 | M5-0090, M5-0091, M5-0097, M5-0098, M5-0099, M5-0100, M5-0128, M5-0129, M5-0130, M5-0228, M5-0276, M6-0155, M6-0162 |
 | codex | 12 | 63 | M2-0145, M2-0146, M2-0147, M2-0148, M2-0149, M3-0142, M3-0246, M3-0262, M3-0263, M4-0268, M4-0269, M6-0214 |
 | google | 12 | 28 | M3-0036, M3-0227, M3-0229, M3-0232, M3-0240, M3-0241, M3-0342, M3-0344, M5-0021, M5-0032, M5-0235, M5-0300 |
@@ -1902,7 +1902,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0184 | internal/pluginhost/host_test.go | partial | implementation cites host.go (crates/cpa-plugin/src/host.rs); no case matched by name | plugins |  |
 | M6-0185 | internal/pluginhost/http_bridge_test.go | partial | implementation cites http_bridge.go (crates/cpa-plugin/src/hosthttp.rs, crates/cpa-plugin/tests/host_http.rs); no case matched by name | plugins |  |
 | M6-0186 | internal/pluginhost/http_operation_bridge_test.go | partial | implementation cites http_operation_bridge.go (crates/cpa-plugin/src/hosthttp.rs); no case matched by name | plugins |  |
-| M6-0187 | internal/pluginhost/loader_windows_test.go | missing | 0/7 cases matched; loader_windows.go not cited | plugins |  |
+| M6-0187 | internal/pluginhost/loader_windows_test.go | covered | crates/cpa-plugin/src/shadow.rs; crates/cpa-plugin/tests/native_abi.rs |  | Deliberate difference: Windows plugin loading remains unsupported by owner ruling. The shared shadow-copy cases now match v8.0.35 on Unix, including process directories, content reuse, changed builds, corruption repair and stale cleanup. |
 | M6-0188 | internal/pluginhost/logging_test.go | missing | 0/3 cases matched; logging.go not cited | plugins |  |
 | M6-0189 | internal/pluginhost/management_test.go | partial | implementation cites management.go (crates/cpa-plugin/src/management.rs); no case matched by name | plugins |  |
 | M6-0190 | internal/pluginhost/model_router_test.go | partial | implementation cites model_router.go (crates/cpa-plugin/src/routing.rs); no case matched by name | plugins |  |

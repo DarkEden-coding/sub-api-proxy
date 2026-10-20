@@ -846,6 +846,7 @@ M6-0160	partial	crates/cliproxy/src/discovery/cli.rs load_scan_filters (discover
 M6-0161			home	
 M6-0163	partial	crates/cpa-plugin/src/config.rs (items_follow_go, disabled_section_keeps_defaults, dir_resolution_matches_go)	plugins	The store-sources, store-auth and auth-revision cases have no counterpart (no plugin store).
 M6-0164	partial	crates/cliproxy/src/discovery/tests.rs (Go-recorded outputs: instance ID, TXT build/parse, validation, interface filters, merge limits)	tui	Advertiser idempotence/shutdown and the live browse integration are not ported.
+M6-0187	covered	crates/cpa-plugin/src/shadow.rs; crates/cpa-plugin/tests/native_abi.rs	plugins	Deliberate difference: Windows plugin loading remains unsupported by owner ruling. The shared shadow-copy cases now match v8.0.35 on Unix, including process directories, content reuse, changed builds, corruption repair and stale cleanup.
 M6-0189			plugins	
 M6-0200	partial	crates/cpa-plugin/src/interceptors.rs observe_websocket_response_event; crates/cpa-plugin/tests/go_host.rs (pluginhost_go.json ws_event step)	plugins	Not ported by name; no WebSocket path calls the observer.
 M6-0209			server	
