@@ -1235,11 +1235,8 @@ async fn model_definitions_fall_back_to_plugin_static_models() {
             records.display()
         )
     });
+    // The startup sync registers the plugin's static models.
     cpa_server::plugins::start(&f.rt).await;
-    // As Go's test does: the server does not run plugin model registration yet.
-    let host = f.rt.plugins();
-    host.register_models().await;
-    host.register_executors(&|_| false, &|_| Vec::new()).await;
     let (base, server) = f.server().await;
     let r = wreq::Client::new()
         .get(format!("{base}/v8/management/routing/model-definitions/WorkBuddy"))
