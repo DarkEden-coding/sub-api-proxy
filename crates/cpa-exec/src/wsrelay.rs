@@ -525,6 +525,8 @@ struct Responses {
 impl Responses {
     /// The next message. A session error that found the channel full takes the place
     /// of its oldest message, as Go's `cancelWithError` evicts it, and arrives last.
+    /// A read racing the close can take the oldest message itself, and then the next
+    /// one is evicted: Go's close-side `<-pr.ch` races the reader the same way.
     async fn recv(&mut self) -> Option<Message> {
         if !self.evicted && lock(&self.late).is_some() {
             self.evicted = true;
