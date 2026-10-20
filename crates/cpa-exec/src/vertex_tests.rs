@@ -393,6 +393,15 @@ fn vertex_import_matches_go() {
             }
             None => Ok(case["imported"].as_str().unwrap().to_owned()),
         };
+        #[cfg(unix)]
+        if let Ok(path) = &result {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{name}"
+            );
+        }
         let got = result
             .map(|path| normalized(&path.display().to_string()))
             .map_err(|e| normalized(&e));

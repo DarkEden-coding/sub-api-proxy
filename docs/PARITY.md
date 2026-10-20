@@ -10,8 +10,8 @@ Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.
 - Images and video: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, and the `/v1/videos` and `/openai/v1/videos` routes for xAI video.
 - WebSocket: the Responses WebSocket on `GET /v1/responses` and `GET /backend-api/codex/responses`, used by Codex clients, including response steering (`oauth.providers.codex.response-steering`).
 - Realtime and live through a Codex account: `/v1/realtime` (WebSocket and WebRTC calls), `/v1/live`, call sidebands and local ephemeral keys (`/v1/realtime/client_secrets`). The WebRTC media relay is an optional build feature (`cargo build --release -p cliproxy --features cpa-server/media-relay`) and is not in the release binaries.
-- Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Google Antigravity, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import`, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
-- Account sign-in from the command line or the dashboard: Claude, Codex (browser or device code), Kimi, Meta, xAI and Devin. Antigravity sign-in is command-line only (`-antigravity-login`).
+- Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Google Antigravity, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import` or from the dashboard, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
+- Account sign-in from the command line or the dashboard: Claude, Codex (browser or device code), Google Antigravity, Kimi, Meta, xAI and Devin.
 - Routing: round-robin, weighted and fill-first selection, retries, cooldowns, session affinity, model aliases and exclusions, payload rules, per-credential and global proxies.
 - The v8 Management API for configuration, credentials, OAuth sign-in, quota checks (`/requests/api-call`), usage counters, logs and model catalogs, plus the dashboard at `/management.html`.
 - HTTPS on the main port (`server.tls`), logging in Go's format to stdout or a rotating `main.log` with Go's per-request access log lines, request log files with client and upstream sections, LAN discovery (`-discover` and the `server.discovery` advertisement), `.env` loading, and remote model catalog updates as in Go (`--local-model` turns them off).
@@ -32,11 +32,11 @@ Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 |---|---:|---:|---:|---:|
 | M1 | 151 | 54 | 83 | 14 |
 | M2 | 189 | 71 | 114 | 4 |
-| M3 | 424 | 187 | 215 | 22 |
+| M3 | 424 | 188 | 214 | 22 |
 | M4 | 589 | 244 | 330 | 15 |
-| M5 | 331 | 197 | 124 | 10 |
+| M5 | 331 | 198 | 123 | 10 |
 | M6 | 267 | 119 | 131 | 17 |
-| All | 1951 | 872 | 997 | 82 |
+| All | 1951 | 874 | 995 | 82 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
@@ -54,7 +54,7 @@ An item is covered when it is implemented and a Rust test or a fixture recorded 
 
 Missing items now also include v8.0.35 speech routes, SIWC, tool search, model catalog sources, new configuration and plugin contracts. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
 
-Antigravity (M3) is implemented: command-line sign-in, the executor, AI credits, connection pool settings, reasoning replay and the web-search capability probe have Go-recorded tests with local mock upstreams. Selected v8.0.27 changes add Claude 5.5 models, CAQS thinking signatures and backend errors inside streams. This is not full v8.0.35 parity: model entitlements, session continuation, newer schema and usage fixes, and several suites remain unported. [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) and the upstream inventory list them. No live Antigravity account has been used in these tests.
+Antigravity (M3) is implemented: sign-in from the command line, the dashboard and the Management API, the executor, AI credits, connection pool settings, reasoning replay and the web-search capability probe. The executor features have Go-recorded tests with local mock upstreams; sign-in is tested against local mock endpoints. Selected v8.0.27 changes add Claude 5.5 models, CAQS thinking signatures and backend errors inside streams. This is not full v8.0.35 parity: model entitlements, session continuation, newer schema and usage fixes, and several suites remain unported. [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) and the upstream inventory list them. No live Antigravity account has been used in these tests.
 
 The audit combines a source scan with saved route probes and manual judgments. Rerunning it reuses those saved probes and judgments. Live-provider compatibility needs separate testing. Counts can lag runtime wiring; a method implemented in a host library may still be unused by the server. The feature descriptions above follow the server's actual call paths.
 
@@ -66,6 +66,6 @@ Everything behind the numbers is in [`docs/parity-audit/`](parity-audit):
 - [`status.md`](parity-audit/status.md) gives each item its status, the evidence (the Rust code and tests that cover it) and a note.
 - [`manual.tsv`](parity-audit/manual.tsv) holds the judgments made by reading code, with their evidence.
 - [`audit.py`](parity-audit/audit.py) rebuilds `status.md`, the table above, and the README parity sentence from the same totals. [`probe.py`](parity-audit/probe.py) starts the binary and requests every route in the checklist with a private test configuration, to see which ones are routed; its results are in `routes.json`.
-- [`verify_reference.py`](parity-audit/verify_reference.py) checks the frozen checklist's IDs, test declarations, RPC methods and citation bounds against a read-only Go clone. It does not establish Rust behavior coverage.
+- [`verify_reference.py`](parity-audit/verify_reference.py) checks the frozen checklist's IDs and retained text, test declarations, routes (method and full path), config leaves, CLI flags, RPC methods and citation bounds against a read-only Go clone. It does not establish Rust behavior coverage.
 
 Run `python3 docs/parity-audit/audit.py` from the repository root after a change to refresh all three. The [v0.2.6 rebaseline](parity-audit/rebaseline.md) records the review against `6fecc6e`; the [v8.0.35 reference update](parity-audit/reference-v8.0.35.md) records the new target's inventory and count changes.
