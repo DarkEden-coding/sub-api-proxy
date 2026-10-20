@@ -1012,18 +1012,19 @@ fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
     if values.is_empty() {
         return true;
     }
-    let field = values.join(",");
-    let field = field.trim_ascii();
-    if field == "*" {
+    // `strings.TrimSpace`: Unicode white space too.
+    let trim = |s: &[u8]| cpa_common::gostr::trim_space(s).to_vec();
+    let field = trim(values.join(",").as_bytes());
+    if field == b"*" {
         return true;
     }
     let mut quoted = false;
     field
-        .split(|c| {
-            quoted ^= c == '"';
-            c == ',' && !quoted
+        .split(|&c| {
+            quoted ^= c == b'"';
+            c == b',' && !quoted
         })
-        .any(|tag| tag.trim_ascii().as_bytes() == etag.as_bytes())
+        .any(|tag| trim(tag) == etag.as_bytes())
 }
 
 async fn legacy_yaml(State(state): State<Arc<Management>>) -> Response {
