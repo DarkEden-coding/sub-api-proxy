@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	claudechat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
+	clauderesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	geminiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/claude"
 	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/interactions/claude"
@@ -420,6 +421,8 @@ func run(r registration, f fixture) [][]string {
 		switch r.client + ":" + r.upstream {
 		case "openai:claude":
 			return requestResult(claudechat.ConvertOpenAIRequestToClaudeWithCompat(f.Model, []byte(f.Input), f.Stream))
+		case "openai-response:claude":
+			return requestResult(clauderesponses.ConvertOpenAIResponsesRequestToClaudeWithCompat(f.Model, []byte(f.Input), f.Stream))
 		case "claude:openai":
 			return requestResult(openaiclaude.ConvertClaudeRequestToOpenAIWithCompat(f.Model, []byte(f.Input), f.Stream))
 		case "claude:gemini":

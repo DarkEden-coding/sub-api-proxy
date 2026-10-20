@@ -128,6 +128,16 @@ fn request_output(result: Result<Vec<u8>, cpa_translate::Error>) -> Vec<u8> {
 /// fixture, so the list shrinks as ports land.
 const PENDING: &[(&str, &str, &str)] = &[
     (
+        "openai-response->claude",
+        "TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrailingAssistant:2154#14",
+        "registry: dated Claude IDs share their family's limits (ad9e456d)",
+    ),
+    (
+        "openai-response->claude",
+        "TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrailingAssistant:2154#16",
+        "registry: claude-haiku-5-5 (f62d4d28)",
+    ),
+    (
         "claude->codex",
         "TestConvertClaudeRequestToCodex_AssistantMetaSignatureToReasoningItem",
         "signature replay: Meta Muse envelopes (7a0b7563, cc5682c5, 674dbe8f, a68c7d8e)",
@@ -184,6 +194,7 @@ fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>>
         "request" => vec![request_output(translate_request(client, upstream, &ctx, &input))],
         "request_compat" => vec![request_output(match (client, upstream) {
             (Format::OpenAI, Format::Claude) => cpa_translate::openai_to_claude_with_compat(&ctx, &input),
+            (Format::OpenAIResponse, Format::Claude) => cpa_translate::responses_to_claude_with_compat(&ctx, &input),
             (Format::Claude, Format::OpenAI) => cpa_translate::claude_to_openai_with_compat(&ctx, &input),
             (Format::Claude, Format::Gemini) => cpa_translate::claude_to_gemini_with_compat(&ctx, &input),
             (Format::Claude, Format::Codex) => cpa_translate::claude_to_codex_with_compat(&ctx, &input),

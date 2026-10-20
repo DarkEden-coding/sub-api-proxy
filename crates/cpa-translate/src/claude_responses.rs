@@ -24,8 +24,16 @@ fn compatible_claude_signature(raw: &[u8]) -> Option<Vec<u8>> {
         .map(String::into_bytes)
 }
 
-pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking: bool) -> Vec<u8> {
+/// Refuses a request whose user turn is left empty by file or audio parts Claude cannot
+/// receive (f51624aa).
+pub(crate) fn convert(
+    model: &str,
+    input: &[u8],
+    stream: bool,
+    preserve_thinking: bool,
+) -> Result<Vec<u8>, crate::Error> {
     let raw = normalize_codex_agent_messages(input);
+    let mut drops = common::UserTurnDrops::default();
     let user_id = common::derive_claude_user_id(&raw);
     let mut out = br#"{"model":"","max_tokens":32000,"messages":[],"metadata":{}}"#.to_vec();
     gj::set_str(&mut out, "metadata.user_id", &user_id);
@@ -142,7 +150,13 @@ pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking
         }
         match kind.as_slice() {
             b"message" => {
-                let (role, parts) = message_parts(item);
+                let (role, parts, dropped) = message_parts(item);
+                if role == b"user" {
+                    if let Some(dropped) = dropped {
+                        drops.drop_part(dropped);
+                    }
+                    drops.end_turn(parts.len());
+                }
                 if !parts.is_empty() {
                     pending.parts(&role, parts);
                 }
@@ -289,7 +303,8 @@ pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking
         }
         _ => {}
     }
-    thinking::apply_translated_summary_to_claude(out, &raw, "openai-response", model)
+    let out = thinking::apply_translated_summary_to_claude(out, &raw, "openai-response", model);
+    drops.result().map(|()| out)
 }
 
 fn model_info_int(model: &str, key: &str) -> i64 {
@@ -321,7 +336,8 @@ fn is_role(message: &[u8], role: &str) -> bool {
     common::norm(&gj::get(message, "role")) == role
 }
 
-/// claudeModelRejectsAssistantPrefill: Fable, Opus 5+ and Sonnet 4.6+, after any
+/// claudeModelRejectsAssistantPrefill: Fable, Opus, Sonnet and Haiku 5+ (Haiku since
+/// 911f49cb) and Sonnet 4.6+, after any
 /// provider namespace and `claude-` prefix. Eight-digit snapshot dates are not versions.
 fn rejects_assistant_prefill(model: &str) -> bool {
     let model = model.trim().to_lowercase();
@@ -331,7 +347,7 @@ fn rejects_assistant_prefill(model: &str) -> bool {
     if tokens[0] == "fable" {
         return true;
     }
-    if tokens.len() < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet") {
+    if tokens.len() < 2 || !matches!(tokens[0], "opus" | "sonnet" | "haiku") {
         return false;
     }
     let version = |token: &str| -> Option<u32> {
@@ -508,10 +524,12 @@ fn file_part(part: &Res<'_>) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One `message` item: its role and Claude content parts.
-fn message_parts(item: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>) {
+/// One `message` item: its role, Claude content parts and the type of the first part
+/// Claude cannot receive (a file without data, audio).
+fn message_parts(item: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>, Option<&'static str>) {
     let mut role: Vec<u8> = vec![];
     let mut parts = vec![];
+    let mut dropped = None;
     let content = item.get("content");
     if content.is_array() {
         content.each(|_, part| {
@@ -547,7 +565,13 @@ fn message_parts(item: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>) {
                         if role.is_empty() {
                             role = b"user".to_vec();
                         }
+                    } else if kind == b"input_file" {
+                        dropped.get_or_insert("input_file");
                     }
+                }
+                // Claude has no audio block.
+                b"input_audio" => {
+                    dropped.get_or_insert("input_audio");
                 }
                 _ => {}
             }
@@ -567,7 +591,7 @@ fn message_parts(item: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>) {
     {
         *last = common::attach_cache_control(std::mem::take(last), item);
     }
-    (role, parts)
+    (role, parts, dropped)
 }
 
 fn reasoning_to_thinking(item: &Res<'_>, preserve: bool) -> Option<Vec<u8>> {

@@ -127,7 +127,7 @@
      "event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"
     ],
     [
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"total_input_tokens\":3,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":5},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"total_input_tokens\":3,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":5},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.completed\"}\n\n"
     ]
    ],
    "dynamic": [
@@ -154,8 +154,8 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154391927700\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154391927700\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647136406956\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647136406956\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
      "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n",
      "event: step.delta\ndata: {\"index\":0,\"delta\":{\"text\":\"ok\",\"type\":\"text\"},\"event_type\":\"step.delta\"}\n\n"
     ]
@@ -993,7 +993,7 @@
     ],
     [],
     [
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg-x\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":31,\"total_cached_tokens\":31},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"upstream-model\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg-x\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":31,\"total_cached_tokens\":31},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"upstream-model\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     [],
     []
@@ -1062,7 +1062,7 @@
     ],
     [
      "event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg-x\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":0,\"total_output_tokens\":0,\"total_tokens\":13,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"upstream-model\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg-x\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":0,\"total_output_tokens\":0,\"total_tokens\":13,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"upstream-model\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1099,9 +1099,9 @@
     [],
     [],
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154507004580\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154507004580\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154507004580\",\"status\":\"completed\",\"usage\":{},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647250210778\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647250210778\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647250210778\",\"status\":\"completed\",\"usage\":{},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     [],
     [
@@ -1158,12 +1158,12 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154508274086\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154508274086\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647251402677\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647251402677\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n"
     ],
     [],
     [
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154508274086\",\"status\":\"completed\",\"usage\":{},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647251402677\",\"status\":\"completed\",\"usage\":{},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"\"},\"event_type\":\"interaction.completed\"}\n\n"
     ]
    ],
    "dynamic": [
@@ -1209,9 +1209,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154509500234\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154509500234\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154509500234\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647252577474\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647252577474\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647252577474\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1255,7 +1255,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154510785967\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647253806476\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1277,9 +1277,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154511975671\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154511975671\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154511975671\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647254950176\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647254950176\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647254950176\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1323,7 +1323,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154513277204\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647256161048\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1345,9 +1345,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154514474984\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154514474984\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154514474984\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647257296019\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647257296019\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647257296019\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1391,7 +1391,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154515783266\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647258487343\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1413,9 +1413,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154516977847\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154516977847\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154516977847\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647259637760\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647259637760\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647259637760\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1459,7 +1459,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"sensitive\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154518315592\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647260864373\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1481,9 +1481,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154519521976\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154519521976\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154519521976\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647262020108\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647262020108\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647262020108\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1527,7 +1527,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154520868733\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647263235375\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1549,9 +1549,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154522064724\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154522064724\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154522064724\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647264373914\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647264373914\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647264373914\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1595,7 +1595,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154523377306\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647265573245\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1617,9 +1617,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154524580115\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154524580115\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154524580115\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647266709537\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647266709537\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647266709537\",\"status\":\"completed\",\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"m\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -1663,7 +1663,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"unknown\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154525920292\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647267938123\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1705,7 +1705,7 @@
    "input": "event: ping\ndata: {\"type\":\"ping\"}\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy \u003cnow\u003e\"}}\ndata: {\"type\":\"error\"}\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\ndata: not json\n: comment\ndata: [DONE]\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154529729740\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647271483051\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1724,7 +1724,7 @@
    "input": "data: {\"type\":\"message_start\"}\ndata: {\"type\":\"message_start\",\"message\":{}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154530949485\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647272625028\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1743,7 +1743,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154532104134\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647273745587\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1762,7 +1762,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154533319631\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647274912615\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1781,7 +1781,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154534511910\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647276060175\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1800,7 +1800,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"sensitive\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154535677764\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647277220055\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1819,7 +1819,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154536882785\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647278376755\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1838,7 +1838,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154538066343\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647279536771\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1857,7 +1857,7 @@
    "input": "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"unknown\"},\"usage\":{\"input_tokens\":13,\"output_tokens\":4,\"cache_read_input_tokens\":22000,\"cache_creation_input_tokens\":31}}\ndata: {\"type\":\"message_stop\"}\n",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154539399223\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
+     "{\"id\":\"interaction_1792530647280705948\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"m\",\"steps\":[],\"usage\":{\"input_tokens\":13,\"total_input_tokens\":13,\"output_tokens\":4,\"total_output_tokens\":4,\"total_tokens\":17,\"cached_tokens\":22031,\"total_cached_tokens\":22031}}"
     ]
    ],
    "dynamic": [
@@ -1886,7 +1886,7 @@
    "model": "",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154542066325\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647283044507\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -1979,7 +1979,7 @@
     ],
     [
      "event: step.stop\ndata: {\"index\":7,\"event_type\":\"step.stop\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"total_input_tokens\":5,\"output_tokens\":7,\"total_output_tokens\":7,\"total_tokens\":12,\"cached_tokens\":2,\"total_cached_tokens\":2,\"reasoning_tokens\":3,\"total_thought_tokens\":3},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-x\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"total_input_tokens\":5,\"output_tokens\":7,\"total_output_tokens\":7,\"total_tokens\":12,\"cached_tokens\":2,\"total_cached_tokens\":2,\"reasoning_tokens\":3,\"total_thought_tokens\":3},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-x\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     [],
     [
@@ -2012,9 +2012,9 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154544930207\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154544930207\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154544930207\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"total_input_tokens\":1,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":3},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647285592584\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647285592584\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647285592584\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"total_input_tokens\":1,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":3},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
     ],
     []
    ],
@@ -2071,13 +2071,13 @@
     [],
     [],
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154546217044\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154546217044\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647286831677\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647286831677\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
      "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n"
     ],
     [
      "event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n",
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154546217044\",\"status\":\"completed\",\"usage\":{\"cached_tokens\":0,\"total_cached_tokens\":0},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647286831677\",\"status\":\"completed\",\"usage\":{\"cached_tokens\":0,\"total_cached_tokens\":0},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
     ]
    ],
    "dynamic": [
@@ -2123,11 +2123,11 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154547435767\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154547435767\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n"
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647288045727\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647288045727\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n"
     ],
     [
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792527154547435767\",\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"total_input_tokens\":4,\"total_tokens\":4},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1792530647288045727\",\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"total_input_tokens\":4,\"total_tokens\":4},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-opus-4-6\"},\"event_type\":\"interaction.completed\"}\n\n"
     ]
    ],
    "dynamic": [
@@ -2181,7 +2181,7 @@
    "input": "{\"content\":[],\"usage\":{\"output_tokens\":\"5\"}}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154549996862\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[],\"usage\":{\"output_tokens\":5,\"total_output_tokens\":5,\"total_tokens\":5}}"
+     "{\"id\":\"interaction_1792530647290425511\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[],\"usage\":{\"output_tokens\":5,\"total_output_tokens\":5,\"total_tokens\":5}}"
     ]
    ],
    "dynamic": [
@@ -2211,7 +2211,7 @@
    "input": "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"input\":{}}}\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"not json\"}}\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154552478024\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[{\"type\":\"function_call\",\"name\":\"\",\"arguments\":{}}]}"
+     "{\"id\":\"interaction_1792530647292798108\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[{\"type\":\"function_call\",\"name\":\"\",\"arguments\":{}}]}"
     ]
    ],
    "dynamic": [
@@ -2230,7 +2230,7 @@
    "input": "not json",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154553730380\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647293971874\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -2248,7 +2248,7 @@
    "model": "claude-opus-4-6",
    "outputs": [
     [
-     "{\"id\":\"interaction_1792527154554982350\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[]}"
+     "{\"id\":\"interaction_1792530647295099898\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-opus-4-6\",\"steps\":[]}"
     ]
    ],
    "dynamic": [
@@ -2258,6 +2258,328 @@
      "path": "id",
      "prefix": "interaction_"
     }
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"role\":\"developer\",\"parts\":[{\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"developer\",\"parts\":[{\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"role\":\"developer\",\"steps\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"developer\",\"steps\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#5",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#6",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#7",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"user_input\",\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#8",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#9",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#10",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#11",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"role\":\"system\",\"content\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#12",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"system\",\"content\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#13",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"system\",\"text\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepDoesNotHideAnEmptiedUserTurn:21:envelope#14",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"system\",\"text\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"type\":\"user_input\",\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"role\":\"system\",\"content\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"type\":\"system\",\"text\":\"note\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#5",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"role\":\"developer\",\"parts\":[{\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#6",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"role\":\"developer\",\"steps\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeDeveloperOrSystemStepStillSendsItsText:21:envelope#7",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"text\",\"text\":\"note\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"developer\",\"steps\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"role\":\"developer\",\"content\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#5",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"system\",\"content\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#6",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"system\",\"text\":\"note\"},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeRealUserTextBesideAnUnrepresentableAttachmentSurvivesAnInstructionStep:21:envelope#7",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"developer\",\"parts\":[{\"text\":\"note\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"note\"},{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
    ]
   },
   {
@@ -2279,6 +2601,374 @@
    "outputs": [
     [
      "{\"id\":\"msg_1\",\"object\":\"interaction\",\"status\":\"completed\",\"model\":\"claude-test\",\"steps\":[{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":3,\"total_input_tokens\":3,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":5}}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeURIOnlyDocumentBecomesAURLSource:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"uri\":\"https://example.test/a.pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.pdf\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeURIOnlyDocumentBecomesAURLSource:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"file_uri\":\"https://example.test/a.pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.pdf\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeURIOnlyDocumentBecomesAURLSource:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"fileUri\":\"https://example.test/a.pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.pdf\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeURIOnlyDocumentBecomesAURLSource:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"url\":\"https://example.test/a.pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.pdf\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeURIOnlyImageBecomesAURLSource:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"image\",\"mime_type\":\"image/png\",\"uri\":\"https://example.test/a.png\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.png\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineDocumentStaysBase64:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"data\":\"JVBERi0xLjQK\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"base64\",\"media_type\":\"application/pdf\",\"data\":\"JVBERi0xLjQK\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"audio\",\"mime_type\":\"audio/wav\",\"uri\":\"https://example.test/a.wav\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: audio"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"uri\":\"gs://bucket/a.pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: document"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"uri\":\"files/abc123\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: document"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#5",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: document"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#6",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"file\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: document"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaOnlyTurnIsRefused:21:envelope#7",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"image\",\"mime_type\":\"image/png\",\"uri\":\"gs://bucket/a.png\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: image"
+  },
+  {
+   "name": "TestInteractionsToClaudeRefusalIsNotHiddenBySystemInstructionOrHistory:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"system_instruction\":\"be brief\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}],\"system\":\"be brief\"}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeRefusesAnEmptiedTurnBeforeALaterTextTurn:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"next\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"next\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeEmptyTextDoesNotHideAnUnrepresentableMedia:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeUnrepresentableMediaBesideTextStillSucceeds:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeFlatContentInputKeepsTextBesideMedia:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"text\",\"text\":\"Describe this\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeFlatContentInputConvertsAndRefusesBareMedia:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"uri\":\"https://example.test/a.pdf\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://example.test/a.pdf\"}}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeFlatContentInputConvertsAndRefusesBareMedia:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeNeighbouringUserStepsShareOneTurn:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeNeighbouringUserStepsShareOneTurn:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeNeighbouringUserStepsShareOneTurn:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"function_call\",\"name\":\"lookup\",\"call_id\":\"toolu_1\",\"arguments\":{}},{\"type\":\"function_result\",\"name\":\"lookup\",\"call_id\":\"toolu_1\",\"result\":{\"ok\":true}},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"{\\\"ok\\\":true}\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeAssistantStepEndsTheUserTurn:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeAssistantStepEndsTheUserTurn:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"uri\":\"https://example.test/a.mp4\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAudioOrVideoOnlyUserTurnIsRefused:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"audio\",\"mime_type\":\"audio/wav\",\"data\":\"UklGRg==\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: audio"
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAudioOrVideoOnlyUserTurnIsRefused:21:envelope#2",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"data\":\"AAAAIGZ0eXA=\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAudioOrVideoOnlyUserTurnIsRefused:21:envelope#3",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"audio\",\"mime_type\":\"audio/wav\",\"data\":\"UklGRg==\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: audio"
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAudioOrVideoOnlyUserTurnIsRefused:21:envelope#4",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\" \\n\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"data\":\"AAAAIGZ0eXA=\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\" \\n\"}]}]}"
+    ]
+   ],
+   "request_error": "unsupported content part: video"
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAudioBesideTextSendsTheTextWithoutAPlaceholder:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"},{\"type\":\"audio\",\"mime_type\":\"audio/wav\",\"data\":\"UklGRg==\"},{\"type\":\"video\",\"mime_type\":\"video/mp4\",\"data\":\"AAAAIGZ0eXA=\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"keep me\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeAssistantMediaKeepsThePlaceholder:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"audio\",\"mime_type\":\"audio/wav\",\"data\":\"UklGRg==\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"[audio content omitted]\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"c\"}]}]}"
+    ]
+   ]
+  },
+  {
+   "name": "TestInteractionsToClaudeInlineAndURLDocumentsStillConvert:21:envelope",
+   "path": "request",
+   "model": "m",
+   "input": "{\"model\":\"m\",\"input\":[{\"type\":\"user_input\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"type\":\"user_input\",\"content\":[{\"type\":\"document\",\"mime_type\":\"application/pdf\",\"data\":\"JVBERi0xLjQK\"}]}]}",
+   "outputs": [
+    [
+     "{\"model\":\"m\",\"max_tokens\":32000,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"b\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"document\",\"source\":{\"type\":\"base64\",\"media_type\":\"application/pdf\",\"data\":\"JVBERi0xLjQK\"}}]}]}"
     ]
    ]
   },
@@ -2356,7 +3046,7 @@
      "event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"
     ],
     [
-     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"total_input_tokens\":3,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":5},\"created\":\"2026-10-20T20:12:34Z\",\"updated\":\"2026-10-20T20:12:34Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.completed\"}\n\n"
+     "event: interaction.completed\ndata: {\"interaction\":{\"id\":\"msg_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"total_input_tokens\":3,\"output_tokens\":2,\"total_output_tokens\":2,\"total_tokens\":5},\"created\":\"2026-10-20T21:10:47Z\",\"updated\":\"2026-10-20T21:10:47Z\",\"service_tier\":\"standard\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.completed\"}\n\n"
     ]
    ],
    "dynamic": [
@@ -2383,8 +3073,8 @@
    ],
    "outputs": [
     [
-     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792527154567190583\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.created\"}\n\n",
-     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792527154567190583\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
+     "event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1792530647410987851\",\"status\":\"in_progress\",\"object\":\"interaction\",\"model\":\"claude-test\"},\"event_type\":\"interaction.created\"}\n\n",
+     "event: interaction.status_update\ndata: {\"interaction_id\":\"interaction_1792530647410987851\",\"status\":\"in_progress\",\"event_type\":\"interaction.status_update\"}\n\n",
      "event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n",
      "event: step.delta\ndata: {\"index\":0,\"delta\":{\"text\":\"ok\",\"type\":\"text\"},\"event_type\":\"step.delta\"}\n\n"
     ]
