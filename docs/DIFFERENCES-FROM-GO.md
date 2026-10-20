@@ -1,6 +1,6 @@
 # Differences from Go CLIProxyAPI
 
-Where cliproxy-rs has a feature, it aims to behave exactly as CLIProxyAPI does at commit `6fecc6e`, except for the Claude prompt-cache and prompt-shaping fixes that follow v8.0.27 ([PARITY.md](PARITY.md)). This page lists the places where it behaves differently on purpose, and the one routing strategy it adds. Features that are not ported yet are listed under [Upcoming features](../README.md#upcoming-features) instead.
+The compatibility target is frozen at CLIProxyAPI v8.0.35, commit `ae3ee3be303fb07fb8173279923413005bf32177` ([PARITY.md](PARITY.md)). This page records deliberate differences and implementation limits; it does not claim that every newer Go feature is ported. Existing fixtures retain their original Go versions. Missing or unproven v8.0.35 contracts are tracked in the [parity audit](parity-audit/status.md), with the intervening commits in the [upstream inventory](parity-audit/upstream-v8.0.35.md).
 
 ## Additions in cliproxy-rs
 
@@ -104,7 +104,7 @@ Ordinary records and usage plugins keep Go's accounting.
 
 ## Antigravity
 
-Antigravity follows CLIProxyAPI `6fecc6e`, plus these v8.0.27 changes: the Claude 5.5 models (Go e3abd9ae, c575291a, 6b037f61 and 8a945b3f), Claude 5.5's CAQS thinking signatures (9b9c2bdf and 174248ca), and backend errors and split payloads inside streams (4e4dede4). Other differences:
+The Antigravity implementation was recorded from `6fecc6e`, plus these v8.0.27 changes: the Claude 5.5 models (Go e3abd9ae, c575291a, 6b037f61 and 8a945b3f), Claude 5.5's CAQS thinking signatures (9b9c2bdf and 174248ca), and backend errors and split payloads inside streams (4e4dede4). The target is now v8.0.35; the remaining changes are gaps, not approved exclusions. Other differences:
 
 - Reasoning replay restores items one by one, as Go's sequential path does. Go also has a batch path for long histories, an optimization whose output its own tests compare with the sequential path's.
 - The replay and signature caches, AI credits state and short per-model cooldowns stay in the process; Go can keep them in Home's KV store.
@@ -120,3 +120,4 @@ Antigravity follows CLIProxyAPI `6fecc6e`, plus these v8.0.27 changes: the Claud
 - An AI credits attempt, which runs on a credential selection had passed over, never ends a cooldown window or frees another request's probe of it, whatever its outcome: those stay with the window's own probe.
 - Reasoning replay branch IDs come from a counter, not random bytes; they are only compared inside one process.
 - Not ported from v8.0.27 yet: per-account model entitlements and their probe scheduling (Go 7e857c37, 9521fe29, ad381435, 091ff27f), success when the client disconnects after the final chunk (a4acc9f7), thought tokens in OpenAI `completion_tokens` (ab151f5d), no `tool_calls: null` in OpenAI stream deltas (dfe0a0ef), dropping trailing thought-only model turns (a2718314), Interactions session continuation (cbc4cd55), and replay logging and batch retry changes (17dc1b81, 40f4df07, 611ebba4).
+- Further changes through v8.0.35 still need porting or assertion-level verification: cached-token usage in Gemini responses (912a038b), fallback client version 2.23.0 (8fb633c9), multi-branch tool-union flattening (5efe9758), the expanded linear schema-sanitization matrix (b8d4e14a), SDK user-agent helpers (acaab599), and expired AI-credits negative-hint recovery (904ec710).

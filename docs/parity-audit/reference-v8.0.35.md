@@ -1,0 +1,302 @@
+# Frozen v8.0.35 reference update
+
+The target is CLIProxyAPI [v8.0.35](https://github.com/router-for-me/CLIProxyAPI/tree/ae3ee3be303fb07fb8173279923413005bf32177),
+commit `ae3ee3be303fb07fb8173279923413005bf32177`, released on 19 October 2026 UTC.
+The Rust tree under audit is still v0.2.6 (`d1261f2`). This update changes the
+inventory and its judgments, not runtime code, stored fixtures, or their recorded
+Go versions. The preceding [rebaseline](rebaseline.md) keeps its original reference
+and counts as a historical report.
+
+## Inventory changes
+
+All 1,687 existing IDs remain. New IDs append to each milestone's range, with
+additions grouped separately so concurrent porting branches can retain their IDs.
+The checklist now has 1,952 items:
+
+| Kind | Added | Current total |
+|---|---:|---:|
+| Go test-suite files | 228 | 990 |
+| Configuration leaves | 28 | 436 |
+| Public routes | 3 | 77 |
+| Management routes | 1 | 186 |
+| Plugin RPC methods | 1 | 62 |
+| Plugin data contracts | 3 | 31 |
+| CLI flags | 1 | 34 |
+| **All additions** | **265** | |
+
+The new routes are `GET /v1/models/*model`, `POST /v1/audio/speech`,
+`POST /v1/tts`, and `POST /v8/management/oauth/siwc/bind`. The probe gets an empty
+404 for each. Speech returns buffered binary audio in Go, not generation SSE.
+The new CLI flag is `--siwc-bind`, for binding an existing Codex OAuth credential.
+The plugin additions are `host.routing.reset_cooldown`, `ConfigField.Default`,
+`ThinkingSupport.DisableType`, and the paired `UsageRecord.IsNativeKey` and
+`UsageRecord.AccessProvider` fields. Existing Rust plugin schemas lack these fields.
+
+The 28 config leaves include eight provider-specific `thinking.disable-type`
+paths, model catalog sources, Vertex Interactions, the process GitHub token,
+request-body and TLS limits, session rebind policy, Codex web-search caching and
+SIWC identity, Claude tool search and date retention, four Claude header controls,
+and pre-first-token streaming keep-alives. Eighteen existing shared settings move
+to canonical `upstream.*` paths. Their historical OAuth aliases remain accepted
+in Go, with canonical presence taking precedence.
+
+No old route, configuration leaf, or RPC method is deleted from the Go tree.
+The checklist marks 43 removed test declarations in 17 existing files as
+historical, outside the active case lists. Five other declarations move to a new
+shadow-epoch suite and link to their new locations. Two Responses request
+translator registrations now use request envelopes instead of byte-only request
+functions. Their existing IDs record the replacement rather than adding duplicates.
+
+The original inventory excluded 30 files: examples, catalog-fetch tools,
+benchmark-only files, and support helpers. Those exclusions remain.
+All 228 added files are included, even the new support-only
+file `internal/cache/issue6332_export_test.go`. Current suite entries list their
+actual Test, Fuzz, Example, and Benchmark declarations with current line numbers.
+The translator implementation and test LOC counts also follow the frozen tree.
+
+## Judgment changes
+
+None of the additions is covered: 199 are partial and 66 missing. Partial means
+the corresponding subsystem exists, but the current Go assertions have not been
+verified. A source filename, a matching leaf name, or a test's old name does not
+prove the added behavior.
+
+Of the existing items, 97 change from covered to partial:
+
+- Seventy suites have changed Go source. All 208 changed existing suites receive
+  explicit notes preserving their previous-reference evidence. The other 138
+  were already partial or missing. Current declarations replace old case lists;
+  historical evidence can still contain its original case counts.
+- Sixteen previously covered settings move to `upstream.*`. Two other moved
+  settings were already partial. Existing alias tests do not prove canonical
+  reads, cross-auth-kind semantics, and presence precedence.
+- Ten changed contracts need new assertion coverage: cloak `never`/`uncloak`
+  (`M1-0042`), local catalog overrides (`M1-0062`, `M1-0063`), the two request
+  envelopes (`M2-0014`, `M3-0031`), historical config aliases (`M4-0230`), and four
+  SIWC-sensitive v8 handlers (`M5-0042`, `M5-0043`, `M5-0065`, `M5-0066`).
+- `M3-0283` additionally inventories an existing Benchmark declaration omitted
+  from its old case list. Its two functional cases still match Rust tests; the
+  benchmark has no matching replay.
+
+For example, Responses steering still works through the old Rust setting.
+`M3-0142` is partial now because Go's new canonical shared setting is unproven.
+`M2-0146` is partial because its Go error-recovery suite changed; the unchanged
+four-scenario full-duplex suite `M2-0147` stays covered. These judgments do not
+reverse the evidence recorded in the previous-reference rebaseline.
+
+`M5-0235` remains partial for the saturated-buffer disconnect-cleanup gap found
+in the rebaseline review. No runtime fix is included here.
+
+### Covered-to-partial items by area
+
+These are all 97 downgraded IDs. The suite rows refer to changed Go test files
+whose new assertions are not established by the existing Rust fixtures.
+[checklist.md](checklist.md) lists each file's current declarations and source
+citations. [manual.tsv](manual.tsv) retains the Rust evidence and the remaining
+gap for each ID.
+
+| Area | Items | Reason |
+|---|---|---|
+| claude (10) | M4-0134; M1-0048, M1-0049, M1-0050, M1-0051, M1-0052, M1-0053, M1-0055, M1-0056 | Nine canonical `upstream.claude.*` settings need shared-setting and presence-precedence tests. |
+| claude | M1-0042 | Cloak `never` and `uncloak` change the contract. |
+| codex (9) | M3-0138, M3-0139, M3-0140, M3-0141, M3-0142; M4-0133 | Six canonical `upstream.codex.*` settings need shared-setting and presence-precedence tests. |
+| codex | M3-0223, M3-0245, M5-0290 | Changed client-model, compact-executor, and WebSocket-duplex suites. |
+| google (11) | M3-0230, M3-0231; M2-0040, M2-0041; M4-0357, M4-0358, M4-0359; M1-0109; M2-0133; M3-0334 | Ten changed suites: Antigravity finish reasons, Interactions, and model deduplication; Gemini Interactions, content turns, and schemas; signature validation and provider compatibility; Claude thinking effort. |
+| google | M3-0283 | Vertex payload helpers include a previously omitted Benchmark declaration. The two functional cases still match. |
+| manage (6) | M4-0230 | Historical Codex multi-agent aliases need precedence coverage. |
+| manage | M5-0042, M5-0043, M5-0065, M5-0066 | OAuth callback and credential handlers now include SIWC behavior. |
+| manage | M5-0283 | Changed management-asset updater suite. |
+| openai-xai (1) | M3-0137 | Canonical `upstream.xai.inject-x-search` needs shared-setting and presence-precedence tests. |
+| server (3) | M4-0324, M2-0146, M4-0504 | Changed apply-patch integration, Responses steering error-recovery, and session longest-common-prefix suites. |
+| translate (55) | M2-0014, M3-0031 | Claude and Antigravity Responses request registrations now use envelopes. |
+| translate | M3-0301, M3-0302, M3-0304, M3-0305, M3-0306, M3-0309 | Six changed Antigravity translator suites. |
+| translate | M2-0057, M2-0060, M2-0061, M2-0062, M2-0066, M2-0067, M2-0069, M2-0070, M2-0072 | Nine changed Claude translator suites. |
+| translate | M3-0310, M3-0312, M3-0314, M3-0315, M3-0316, M3-0318, M3-0320, M3-0321, M3-0323, M3-0324 | Ten changed Codex translator suites. |
+| translate | M2-0088, M2-0089, M2-0090, M2-0093, M2-0094, M2-0095, M2-0096, M2-0097, M2-0098, M2-0099, M2-0100, M2-0102, M2-0104, M2-0106 | Fourteen changed Gemini translator suites. |
+| translate | M2-0107, M2-0108 | Two changed Interactions translator suites. |
+| translate | M2-0110, M2-0111, M2-0113, M2-0115, M2-0117, M2-0118, M2-0122, M2-0123, M2-0124, M2-0125, M2-0130, M2-0131 | Twelve changed OpenAI translator suites. |
+| tui (2) | M1-0062, M1-0063 | Local model catalogs now override startup catalog sources. |
+
+### Retired declarations by area
+
+These 43 declarations no longer exist in their original Go files. They remain
+historical notes in the checklist, outside active case lists. They are separate
+from the five declarations moved to the new shadow-epoch suite. Area follows
+the current audit owner.
+
+#### claude (16 declarations)
+
+`M1-0086`, `internal/runtime/executor/claude_executor_test.go`:
+
+- `TestClaudeExecutor_ExecuteTransportMatchesResponseFormat`
+- `TestClaudeExecutor_PayloadOverrideFableModelReconciled`
+- `TestClaudeExecutor_PayloadOverrideNonFableToFableReconciled`
+- `TestClaudeExecutor_PayloadOverrideUnrelatedModelRuleDoesNotPreserveFableFallbacks`
+- `TestClaudeExecutor_PayloadOverrideMaxTokensTo1ReclassifiesAsProbe`
+- `TestClaudeExecutor_PayloadOverrideFableToProbeStripsFableAdditions`
+- `TestClaudeExecutor_PayloadOverrideProbeToNormalReinitializes`
+- `TestClaudeExecutor_PayloadSystemTTLOverrideStillRemovesInjectedFableReportingBlock`
+- `TestClaudeExecutor_PayloadSonnetToFableWithSystemTTLEditsAddsReportingBlock`
+- `TestClaudeExecutor_PayloadStringSystemFableAddsReportingBlock`
+- `TestClaudeExecutor_PayloadStringSystemMentioningReportingOutcomesStillInjectsFableReportingBlock`
+- `TestClaudeExecutor_PayloadFableThinkingAdaptiveToDisabledDropsInjectedDisplay`
+- `TestClaudeExecutor_PayloadSonnetToFableWithSensitiveWordsObfuscatesInjectedReportingBlock`
+- `TestClaudeExecutor_PayloadFableToSonnetWithSensitiveWordsRemovesReportingBlock`
+- `TestClaudeExecutor_PayloadReplacesSystemOnOriginalFableReaddsReportingBlock`
+
+`M1-0093`, `internal/runtime/executor/claude_mid_system_model_test.go`:
+
+- `TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt`
+
+#### codex (1 declaration)
+
+`M3-0264`, `internal/runtime/executor/codex_per_credential_cloaking_issue6034_test.go`:
+
+- `TestCodexV8OAuthCloakingDoesNotAffectAPIKeys`
+
+#### google (11 declarations)
+
+`M3-0225`, `internal/runtime/executor/aistudio_executor_test.go`:
+
+- `TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride`
+
+`M2-0039`, `internal/runtime/executor/gemini_executor_test.go`:
+
+- `TestGeminiExecutorAppliesPayloadRulesBeforeLeadingUserNormalization`
+
+`M3-0334`, `sdk/cliproxy/antigravity_models_dedup_test.go`:
+
+- `TestAntigravityCapabilityProbe_CachedWithinTTL`
+- `TestAntigravityCapabilityProbe_CacheExpiresAfterTTL`
+- `TestAntigravityCapabilityProbe_CachesEmptyWebSearchModelIDs`
+- `TestAntigravityCapabilityProbe_CachesFailureWithBackoff`
+- `TestAntigravityCapabilityProbe_InvalidJSONHandledAsFailure`
+- `TestAntigravityCapabilityProbe_AuthErrorDoesNotPoisonCache`
+- `TestAntigravityCapabilityProbe_ConcurrentAuthErrorDoesNotBlockHealthyAccount`
+
+`M3-0335`, `sdk/cliproxy/antigravity_models_timeout_test.go`:
+
+- `TestAntigravityCapabilityProbe_HardTimeout`
+- `TestAntigravityCapabilityProbe_ConcurrentBaseURLs`
+
+#### home (1 declaration)
+
+`M4-0491`, `sdk/cliproxy/service_executionregistry_test.go`:
+
+- `TestHomeConfigWorkerCancelsBlockedAntigravityModelRefreshBeforePublish`
+
+#### manage (3 declarations)
+
+`M4-0380`, `internal/watcher/synthesizer/file_test.go`:
+
+- `TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged`
+- `TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsMerged`
+
+`M4-0381`, `internal/watcher/synthesizer/helpers_test.go`:
+
+- `TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels`
+
+#### plugins (3 declarations)
+
+`M6-0175`, `internal/pluginhost/adapters_test.go`:
+
+- `TestRegisterModelsRegistersProviderModelsAndClientID`
+- `TestRegisterModelsPrunesStaleClientAfterSnapshotChange`
+
+`M6-0184`, `internal/pluginhost/host_test.go`:
+
+- `TestPluginLoadedTracksLoadedPluginAfterDisabled`
+
+#### server (6 declarations)
+
+`M4-0342`, `internal/runtime/executor/helps/response_model_test.go`:
+
+- `TestIsCodexModelSubstituted`
+- `TestUsageReporterThrottlesRepeatedSubstitutionWarnings`
+- `TestUsageReporterThrottlesSubstitutionWarningsAcrossServedModelCase`
+- `TestCodexModelSubstitutionThrottleBoundsStoredEntries`
+
+`M4-0353`, `internal/runtime/executor/oauth_scope_test.go`:
+
+- `TestV8OAuthRequestSettingsDoNotAffectAPIKeys`
+
+`M4-0490`, `sdk/cliproxy/service_excluded_models_test.go`:
+
+- `TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute`
+
+#### translate (1 declaration)
+
+`M3-0306`, `internal/translator/antigravity/openai/chat-completions/antigravity_openai_response_test.go`:
+
+- `TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissing`
+
+#### tui (1 declaration)
+
+`M4-0252`, `cmd/server/main_test.go`:
+
+- `TestModelCatalogUpdaterPlan`
+
+## Counts before and after
+
+Counts are covered / partial / missing. Before means the completed v0.2.6
+rebaseline against `6fecc6e`, not the stale audit preceding that review.
+
+| Milestone | Before | Frozen v8.0.35 target |
+|---|---|---|
+| M1 | 66 / 52 / 0 | 54 / 84 / 13 |
+| M2 | 113 / 45 / 0 | 71 / 114 / 4 |
+| M3 | 216 / 134 / 0 | 187 / 215 / 22 |
+| M4 | 240 / 256 / 14 | 232 / 331 / 27 |
+| M5 | 201 / 102 / 0 | 195 / 126 / 10 |
+| M6 | 114 / 115 / 19 | 114 / 130 / 23 |
+| **All** | **950 / 704 / 33** | **853 / 1000 / 99** |
+
+Only gaps have area assignments, so area counts are partial / missing.
+Shared config gaps follow their provider rather than the Go config file's owner.
+
+| Area | Before | Frozen v8.0.35 target |
+|---|---|---|
+| claude | 48 / 0 | 76 / 12 |
+| codex | 64 / 0 | 82 / 11 |
+| device-providers | 20 / 0 | 28 / 2 |
+| google | 36 / 0 | 80 / 4 |
+| home | 25 / 0 | 27 / 0 |
+| manage | 130 / 0 | 149 / 5 |
+| observe | 1 / 12 | 1 / 12 |
+| openai-xai | 27 / 1 | 31 / 6 |
+| plugins | 86 / 18 | 99 / 22 |
+| realtime | 8 / 0 | 8 / 0 |
+| server | 222 / 2 | 287 / 19 |
+| translate | 30 / 0 | 123 / 5 |
+| tui | 7 / 0 | 9 / 1 |
+
+The [upstream commit inventory](upstream-v8.0.35.md) is unchanged in classification:
+288 unique commits (256 non-merge and 32 merge), with 19 ported, 205 to port,
+zero not applicable, 61 nothing to port, and three deliberate differences.
+The checklist counts contracts and files, so its totals do not equal commit totals.
+
+## Verification
+
+All Go inspection uses `git show`, `git diff`, and `git ls-tree` against a read-only
+clone. The verifier checks the exact tag commit, stable IDs, all 228 added files,
+990 suite entries and their declaration lines, 43 retired declarations, all 62 RPC
+methods, and 2,376 current, in-bounds source citations:
+
+```sh
+python3 docs/parity-audit/verify_reference.py /path/to/CLIProxyAPI
+python3 -m unittest discover -s docs/parity-audit -p 'test_*.py'
+unshare -Urn sh -c 'ip link set lo up; python3 docs/parity-audit/probe.py "$PWD/target/debug/cliproxy"'
+python3 docs/parity-audit/audit.py
+sha256sum README.md docs/PARITY.md docs/parity-audit/status.md > /tmp/parity-summary.sha256
+python3 docs/parity-audit/audit.py
+sha256sum -c /tmp/parity-summary.sha256
+```
+
+The five Python tests pass. The route matcher accepts ordinary query strings and
+wildcard paths, but rejects route suffixes hidden in queries, embedded quotes,
+and line breaks. Its regression fails in six cases before the matcher fix.
+The matcher fix does not change any current judgments.
+The namespace denies external network access and the
+probe uses private config and credential directories. It finds 237 of 241 routed
+method/path pairs. The second audit leaves all three generated pages unchanged.
+No live provider traffic, deployment, or fixture regeneration is part of this update.
