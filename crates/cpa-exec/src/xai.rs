@@ -843,11 +843,15 @@ struct Pipeline {
 impl Pipeline {
     fn new(req: &ExecRequest, p: Prepared, store: Arc<replay::Store>, capture: wire::Capture) -> Self {
         let translator: Box<dyn StreamTranslator> = match cpa_translate::pair(req.response_format, Format::Codex) {
-            Some(pair) => (pair.stream)(&ResponseCtx {
-                model: &req.model,
-                original_request: &p.original_payload,
-                translated_request: &p.body,
-            }),
+            Some(pair) => crate::translate::stream(
+                pair,
+                &ResponseCtx {
+                    model: &req.model,
+                    original_request: &p.original_payload,
+                    translated_request: &p.body,
+                },
+                req,
+            ),
             None => Box::new(Identity),
         };
         let original = Bytes::from(p.original_payload.clone());

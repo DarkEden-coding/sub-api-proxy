@@ -618,6 +618,7 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
             .as_str()
             .and_then(Format::parse)
             .unwrap_or(source),
+        stream_payloads: false,
         requested_model: metadata["requested_model"].as_str().unwrap_or(&model).to_owned(),
         model,
         original_body: if original.is_empty() {

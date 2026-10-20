@@ -36,12 +36,13 @@ pub(crate) struct Lifecycle {
     request_id: String,
     pending: Mutex<Option<RequestCompletion>>,
     scope: RequestScope,
+    skip_plugin: String,
 }
 
 impl Lifecycle {
     pub(crate) fn start(
         rt: &Runtime,
-        trace: &Trace,
+        scope: RequestScope,
         source_format: &str,
         model: &str,
         requested_model: &str,
@@ -49,7 +50,6 @@ impl Lifecycle {
         metadata: Metadata,
     ) -> Arc<Self> {
         let request_id = uuid::Uuid::new_v4().to_string();
-        let scope = scope(trace);
         Arc::new(Self {
             host: rt.plugins().clone(),
             pending: Mutex::new(Some(RequestCompletion {
@@ -65,6 +65,7 @@ impl Lifecycle {
             })),
             request_id,
             scope,
+            skip_plugin: super::model_callbacks::skip_plugin(),
         })
     }
 
@@ -76,7 +77,7 @@ impl Lifecycle {
         completion.status_code = i64::from(status);
         completion.completed_at = now();
         completion.error = error.to_owned();
-        self.host.complete_request(completion, "", &self.scope);
+        self.host.complete_request(completion, &self.skip_plugin, &self.scope);
     }
 
     /// Go `completeError`: a direct (plugin or executor) response is `rejected`;
@@ -94,6 +95,7 @@ impl Lifecycle {
 
 impl Drop for Lifecycle {
     fn drop(&mut self) {
+        self.scope.cancel.cancel();
         self.complete(COMPLETION_CANCELED, 0, "context canceled");
     }
 }
@@ -102,11 +104,18 @@ fn now() -> GoTime {
     GoTime(Some(chrono::Local::now().fixed_offset()))
 }
 
-fn scope(trace: &Trace) -> RequestScope {
+fn scope(trace: &Trace, headers: Header, metadata: &Metadata) -> RequestScope {
+    let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
+    let value = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::to_owned);
     RequestScope {
         request_id: trace.request_id(),
         capture: trace.capture(),
-        ..Default::default()
+        headers,
+        query: super::go_values(&super::execution::query()),
+        cancel: inherited.cancel.child_token(),
+        pinned_auth_id: value("pinned_auth_id"),
+        execution_session: value("execution_session_id"),
+        request_path: value("request_path").unwrap_or_default(),
     }
 }
 
@@ -148,7 +157,7 @@ pub(crate) fn header_map(headers: &Header) -> HeaderMap {
 }
 
 /// Response headers as Go's `http.Header` (canonical names).
-fn go_header(headers: &HeaderMap) -> Header {
+pub(crate) fn go_header(headers: &HeaderMap) -> Header {
     let mut out = Header::new();
     for (name, value) in headers {
         out.entry(cpa_exec::proxy::canonical_header(name.as_str()))
@@ -211,7 +220,9 @@ pub(crate) async fn before_auth(
         metadata: metadata.clone(),
         ..Default::default()
     };
-    let resp = host.intercept_request_before_auth(req, "", &lifecycle.scope).await;
+    let resp = host
+        .intercept_request_before_auth(req, &lifecycle.skip_plugin, &lifecycle.scope)
+        .await;
     let out = BeforeAuth {
         headers: final_headers(&headers, &resp.headers),
         body: Some(resp.body.clone()).filter(|b| !b.is_empty()),
@@ -253,8 +264,6 @@ pub(crate) struct Hooks {
     /// The lifecycle error of a plugin termination: Go's after-auth termination is an
     /// error ("request terminated by plugin"); a plugin-executor-route one has none.
     terminated: Mutex<Option<&'static str>>,
-    /// Built-in executors frame OpenAI-style events; Go's chunks are their payloads.
-    builtin: bool,
 }
 
 /// The facts of one built-in request the hooks need.
@@ -267,7 +276,6 @@ pub(crate) struct Request<'a> {
     pub headers: Header,
     pub body: &'a Bytes,
     pub metadata: Metadata,
-    pub builtin: bool,
 }
 
 impl Hooks {
@@ -281,7 +289,7 @@ impl Hooks {
         let host = rt.plugins().clone();
         let lifecycle = Lifecycle::start(
             rt,
-            trace,
+            scope(trace, req.headers.clone(), &req.metadata),
             req.source_format,
             req.model,
             req.requested_model,
@@ -317,7 +325,6 @@ impl Hooks {
             body: before.body.clone().unwrap_or_else(|| req.body.clone()),
             after: Mutex::new(None),
             terminated: Mutex::new(None),
-            builtin: req.builtin,
         });
         Ok((hooks, before))
     }
@@ -373,7 +380,7 @@ impl Hooks {
         };
         let resp = self
             .host
-            .intercept_request_after_auth(intercept, "", &self.lifecycle.scope)
+            .intercept_request_after_auth(intercept, &self.lifecycle.skip_plugin, &self.lifecycle.scope)
             .await;
         // Go merges the chain's (already merged) headers onto the handler's again, without
         // the clears: a header an after-auth interceptor clears stays.
@@ -440,7 +447,7 @@ impl Hooks {
                             status_code: 200,
                             metadata,
                         },
-                        "",
+                        &self.lifecycle.skip_plugin,
                         &self.lifecycle.scope,
                     )
                     .await;
@@ -538,7 +545,7 @@ impl ChunkInterceptor {
                     metadata,
                     ..Default::default()
                 },
-                "",
+                &self.hooks.lifecycle.skip_plugin,
                 &self.hooks.lifecycle.scope,
             )
             .await;
@@ -553,14 +560,6 @@ impl ChunkInterceptor {
             self.index += 1;
             return Some(payload);
         }
-        // Go's executors hand OpenAI and Gemini handlers bare payloads, which the handler
-        // frames; built-in executors here send them framed.
-        let payload = match self.hooks.response_format.as_str() {
-            "openai" | "gemini" if self.hooks.builtin => crate::respond::data_payload(&payload)
-                .map(Bytes::from)
-                .unwrap_or(payload),
-            _ => payload,
-        };
         let host = &self.hooks.host;
         let mut req = StreamChunkInterceptRequest {
             request_id: self.hooks.lifecycle.request_id.clone(),
@@ -581,7 +580,9 @@ impl ChunkInterceptor {
             req.original_request = self.original_request.clone();
             req.request_body = self.request_body.clone();
         }
-        let resp = host.intercept_stream_chunk(req, "", &self.hooks.lifecycle.scope).await;
+        let resp = host
+            .intercept_stream_chunk(req, &self.hooks.lifecycle.skip_plugin, &self.hooks.lifecycle.scope)
+            .await;
         self.raw = final_headers(&self.raw, &resp.headers);
         let payload = if resp.body.is_empty() { payload } else { resp.body };
         self.index += 1;
@@ -683,7 +684,15 @@ pub(crate) async fn model_list(
         return axum::response::Response::from_parts(parts, axum::body::Body::empty());
     };
     let trace = Trace::with_request_id(crate::observability::current_request_id());
-    let lifecycle = Lifecycle::start(rt, &trace, source_format, "", "", false, Metadata::new());
+    let lifecycle = Lifecycle::start(
+        rt,
+        scope(&trace, super::go_request_header(request_headers), &Metadata::new()),
+        source_format,
+        "",
+        "",
+        false,
+        Metadata::new(),
+    );
     let raw: Header = [(
         "Content-Type".to_owned(),
         vec!["application/json; charset=utf-8".to_owned()],
@@ -736,7 +745,6 @@ pub(crate) async fn start(
     trace: &Trace,
     call: &mut Call,
     model: &str,
-    builtin: bool,
 ) -> Result<Option<Arc<Hooks>>, Failure> {
     let host = rt.plugins();
     let needed = host.has_request_interceptors()
@@ -766,7 +774,6 @@ pub(crate) async fn start(
             headers: headers.clone(),
             body: &call.body,
             metadata: super::execution::execution_metadata(call, model),
-            builtin,
         },
     )
     .await?;
@@ -808,7 +815,7 @@ impl Hooks {
         };
         let resp = self
             .host
-            .intercept_request_after_auth(intercept, "", &self.lifecycle.scope)
+            .intercept_request_after_auth(intercept, &self.lifecycle.skip_plugin, &self.lifecycle.scope)
             .await;
         // As on the built-in path, the chain's clears do not survive the merge.
         let headers = cpa_plugin::interceptors::merge_headers(&self.headers, &resp.headers, &[]);

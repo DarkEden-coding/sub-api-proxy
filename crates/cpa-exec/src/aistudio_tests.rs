@@ -37,6 +37,7 @@ fn request(s: &Value) -> ExecRequest {
         },
         source_format: source,
         response_format: source,
+        stream_payloads: false,
         requested_model: model.clone(),
         model,
         original_body: body.clone(),
