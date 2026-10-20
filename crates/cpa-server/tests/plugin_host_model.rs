@@ -61,6 +61,45 @@ async fn serve(seen: Arc<Seen>) -> String {
     url
 }
 
+/// A Codex upstream for API keys with `websockets: true`: each upgrade or HTTP request
+/// is recorded as `(kind, authorization)`, and every turn completes at once.
+async fn serve_codex(seen: Arc<Mutex<Vec<(&'static str, String)>>>) -> String {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use axum::response::IntoResponse;
+    const DONE: &str = r#"{"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let handler = move |ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+                        headers: axum::http::HeaderMap| {
+        let seen = seen.clone();
+        async move {
+            let auth = headers["authorization"].to_str().unwrap().to_owned();
+            let Ok(ws) = ws else {
+                seen.lock().unwrap().push(("http", auth));
+                return format!("event: response.completed\ndata: {DONE}\n\n").into_response();
+            };
+            seen.lock().unwrap().push(("websocket", auth));
+            ws.on_upgrade(|mut socket| async move {
+                while let Some(Ok(message)) = socket.recv().await {
+                    if matches!(message, Message::Text(_)) {
+                        let created =
+                            r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","output":[]}}"#;
+                        for event in [created, DONE] {
+                            let _ = socket.send(Message::Text(event.into())).await;
+                        }
+                    }
+                }
+            })
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handler))
+            .await
+            .unwrap()
+    });
+    url
+}
+
 fn b64(bytes: impl AsRef<[u8]>) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -521,10 +560,6 @@ fn callback(host: &cpa_plugin::Host, instance: &Arc<CallbackInstance>, method: &
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
-    use cpa_core::exec::{Caller, ExecSession, Operation};
-    use cpa_core::format::Format;
-    use cpa_server::dispatch::{Call, SessionTurn, Trace};
-
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_context") else {
         return;
@@ -540,8 +575,10 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
     let proxy_seen = Arc::new(Seen::default());
     let url = serve(seen.clone()).await;
     let proxy = serve(proxy_seen.clone()).await;
+    let codex_seen = Arc::new(Mutex::new(Vec::new()));
+    let codex = serve_codex(codex_seen.clone()).await;
     let yaml = format!(
-        "auth-dir: {}\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}, {{api-key: second}}]\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n",
+        "auth-dir: {}\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}, {{api-key: second}}]\n  codex:\n    - base-url: {codex}\n      models: [{{name: gpt-fixture}}]\n      keys: [{{api-key: ws-one, websockets: true}}, {{api-key: ws-two, websockets: true}}]\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n",
         auths.display(),
         plugins.display()
     );
@@ -555,14 +592,19 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
     }
     let cfg = Config::parse(&yaml).unwrap();
     let credentials = cpa_core::config::credentials::load(&cfg);
-    let first = credentials[0].id.clone();
-    let pinned = credentials[1].id.clone();
+    let acme: Vec<_> = credentials.iter().filter(|c| c.provider != "codex").collect();
+    let first = acme[0].id.clone();
+    let pinned = acme[1].id.clone();
+    let by_key: std::collections::HashMap<String, String> = credentials
+        .iter()
+        .filter_map(|c| Some((format!("Bearer {}", c.attributes.get("api_key")?), c.id.clone())))
+        .collect();
     let rt = Arc::new(cpa_server::testing::runtime(
         cfg,
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex: Default::default(),
+            codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
             devices: Default::default(),
             openai: Default::default(),
             google: Default::default(),
@@ -600,49 +642,62 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
             }
         );
     }
-    // Use the same transport-owned SessionTurn as the Responses WebSocket. A callback
-    // entered from its interceptor inherits the pin even without host.model context.
-    let call = Call {
-        entry: Format::OpenAI,
-        response: Format::OpenAI,
-        operation: Operation::Generate,
-        model: "fast".into(),
-        body: Bytes::from_static(BODY.as_bytes()),
-        stream: false,
-        alt: None,
-        headers: Default::default(),
-        caller: Caller {
-            principal: String::new(),
-            source: "",
-        },
-        forced_provider: None,
-        selection_model: None,
-        execution_session: Some("pinned-websocket".into()),
-        request_path: "/v1/responses".into(),
-        peer: None,
-        turn: Some(Arc::new(SessionTurn {
-            session: ExecSession {
-                id: "pinned-websocket".into(),
-                continuation: false,
-                lease: None,
-            },
-            pinned: Some(pinned.clone()),
-            on_selected: None,
-            home: None,
-        })),
-        media: None,
+    // A real Responses WebSocket: its first turn pins the connection to the credential
+    // that served it, and a callback entered from the second turn's interceptor must
+    // inherit that pin, the connection's execution session and its request path.
+    let proxy_addr = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = cpa_server::router(rt.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
     };
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy_addr}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    async fn turn(socket: &mut wreq::ws::WebSocket) {
+        use futures_util::StreamExt as _;
+        use wreq::ws::message::Message;
+        socket
+            .send(Message::text(
+                r#"{"type":"response.create","model":"gpt-fixture","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+            ))
+            .await
+            .unwrap();
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+                .await
+                .expect("turn completes")
+                .expect("socket stays open")
+                .unwrap();
+            if let Message::Text(text) = frame {
+                assert!(!text.as_str().contains("\"type\":\"error\""), "{}", text.as_str());
+                if text.as_str().contains("response.completed") {
+                    return;
+                }
+            }
+        }
+    }
+    canned(&records, "nested", "request.intercept_before", json!({}));
+    turn(&mut socket).await;
+    let served = codex_seen.lock().unwrap()[0].clone();
+    assert_eq!(served.0, "websocket");
+    let pinned = &by_key[&served.1];
     std::fs::write(
         records.join("respond/nested/request.intercept_before.json"),
         json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute","request":{
-            "entry_protocol":"openai","model":"fast","body":b64(BODY)}}]})
+            "entry_protocol":"openai-response","model":"gpt-fixture","body":b64(r#"{"model":"gpt-fixture","input":"nested"}"#)}}]})
         .to_string(),
     )
     .unwrap();
     std::fs::remove_file(records.join("origin.jsonl")).unwrap();
-    cpa_server::dispatch::run_with_bootstrap_retries(&rt, call, &Trace::default())
-        .await
-        .unwrap();
+    let before = codex_seen.lock().unwrap().len();
+    turn(&mut socket).await;
     let entries = std::fs::read_to_string(records.join("origin.jsonl")).unwrap();
     let requests: Vec<Value> = entries
         .lines()
@@ -650,31 +705,36 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
         .filter(|r| r["method"] == "request.intercept_before")
         .map(|r| serde_json::from_str::<Value>(r["request"].as_str().unwrap()).unwrap())
         .collect();
-    assert_eq!(requests.len(), 2, "outer WebSocket turn and nested callback");
-    for request in requests {
-        assert_eq!(request["Metadata"]["pinned_auth_id"], pinned);
-        assert_eq!(request["Metadata"]["execution_session_id"], "pinned-websocket");
+    assert_eq!(requests.len(), 2, "pinned WebSocket turn and nested callback");
+    let session = requests[0]["Metadata"]["execution_session_id"].clone();
+    assert!(session.as_str().is_some_and(|s| !s.is_empty()), "{session}");
+    for request in &requests {
+        assert_eq!(request["Metadata"]["pinned_auth_id"], *pinned);
+        assert_eq!(request["Metadata"]["execution_session_id"], session);
         assert_eq!(request["Metadata"]["request_path"], "/v1/responses");
     }
+    // The nested call goes out on the pinned credential; the outer turn reuses its socket.
+    let turn_two = codex_seen.lock().unwrap()[before..].to_vec();
+    assert!(!turn_two.is_empty());
+    assert!(turn_two.iter().all(|(_, auth)| *auth == served.1), "{turn_two:?}");
     let entries = std::fs::read_to_string(records.join("nested.jsonl")).unwrap();
-    for result in entries
+    let results: Vec<Value> = entries
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .filter(|r| r["method"] == "host_callback")
-    {
-        let response: Value = serde_json::from_str(result["request"].as_str().unwrap()).unwrap();
+        .map(|r| serde_json::from_str(r["request"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(results.len(), 3, "two HTTP callbacks and one from the WebSocket turn");
+    for (i, response) in results.iter().enumerate() {
         assert_eq!(response["ok"], true, "{response}");
-        assert_eq!(decode(&response["result"]["body"]), REPLY.as_bytes());
+        let body = decode(&response["result"]["body"]);
+        if i < 2 {
+            assert_eq!(body, REPLY.as_bytes());
+        } else {
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["status"], "completed", "{body}");
+        }
     }
-    assert!(
-        seen.0
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .take(2)
-            .all(|(_, auth, _)| auth == "Bearer second")
-    );
     host.shutdown_all(None).await;
     drop(guard);
     std::fs::remove_dir_all(dir).unwrap();
