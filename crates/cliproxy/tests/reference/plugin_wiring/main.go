@@ -167,6 +167,11 @@ func (r *runner) start(sc *scenario) {
 	for {
 		res, err := r.raw(httpArgs{Method: "GET", Path: "/healthz"})
 		if err == nil && res.Status == 200 {
+			// The plugin model sync (executor.identifier calls) runs after the
+			// listener is up; let it settle, then drop startup calls so steps
+			// compare request-time calls only.
+			time.Sleep(500 * time.Millisecond)
+			r.records(recordsArgs{})
 			return
 		}
 		if time.Now().After(deadline) {

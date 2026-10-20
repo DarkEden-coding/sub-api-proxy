@@ -1170,7 +1170,7 @@ async fn run_routed(
                 .await;
         }
         let wait = {
-            let admit = crate::runtime::admission(&registry, &aliases, &selection, &rt.executors);
+            let admit = crate::runtime::admission(&registry, &aliases, &selection, &rt.executors, rt.plugin_runtime());
             rt.store().retry_wait(&selection, &policy, status, &attempted, &admit)
         };
         let Some(wait) = wait else {
@@ -2100,6 +2100,9 @@ async fn attempt(
         let session = session.as_ref();
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
             let credential = rt.for_executor(&credential);
+            if let Some(plugin) = rt.plugin_runtime().executor(&credential.provider) {
+                return crate::plugins::execution::execute_credential(rt, call, &plugin, &credential, req).await;
+            }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
                 // An after-auth interceptor may rewrite the path (Go's request_path metadata).

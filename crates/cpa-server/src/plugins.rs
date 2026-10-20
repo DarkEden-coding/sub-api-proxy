@@ -22,6 +22,8 @@ pub struct PluginRuntime {
     host: cpa_plugin::Host,
     latest: watch::Sender<Option<Arc<Config>>>,
     access: RwLock<Arc<AccessRegistry>>,
+    /// Go's executor table entries owned by plugins: provider to the executing plugin.
+    executors: RwLock<HashMap<String, String>>,
 }
 
 impl Default for PluginRuntime {
@@ -38,11 +40,18 @@ impl PluginRuntime {
             host,
             latest: watch::Sender::new(None),
             access: RwLock::default(),
+            executors: RwLock::default(),
         }
     }
 
     pub fn host(&self) -> &cpa_plugin::Host {
         &self.host
+    }
+
+    /// The plugin whose executor serves credentials of `provider` (lowercased), if any.
+    pub(crate) fn executor(&self, provider: &str) -> Option<String> {
+        let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        executors.get(&provider.trim().to_lowercase()).cloned()
     }
 
     /// Records a published config; the worker started by [`start`] applies it.
@@ -54,9 +63,9 @@ impl PluginRuntime {
 /// Go's startup and reload sequence (`syncPluginRuntimeConfigForConfig` and
 /// `RefreshPluginManagementRoutes`): apply the config, register the client-key and
 /// plugin frontend auth providers, then rebuild the plugin management routes around the
-/// built-in ones.
-/// ponytail: usage, model and executor registration join the sync with the dispatch
-/// wiring.
+/// built-in ones, then register plugin models and executors (`syncPluginModelRuntime`).
+/// Go runs that last step only once its listener is up; here it completes before
+/// serving.
 pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     let host = rt.plugins();
     host.apply_config(cfg.clone()).await;
@@ -66,6 +75,73 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     rt.plugin_runtime()
         .register_access(!cfg.api_keys.is_empty(), providers, exclusive);
     host.register_management_routes(&reserved_management_routes()).await;
+    sync_models(rt).await;
+}
+
+/// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim
+/// the providers and models no built-in executor serves, then publishes the catalogs
+/// for credential-bound registration and the claimed executor models.
+async fn sync_models(rt: &Runtime) {
+    let host = rt.plugins();
+    host.register_models().await;
+    let registry = rt.registry();
+    let Some(changes) = host
+        .register_executors(&|p| rt.executors.supports(p), &|m| registry.model_providers(m))
+        .await
+    else {
+        // The plugin set changed meanwhile; its own sync follows.
+        return;
+    };
+    *rt.plugin_runtime()
+        .executors
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = changes.register.into_iter().collect();
+    let specs = |models: &[cpa_plugin::api::ModelInfo]| models.iter().map(model_spec).collect::<Vec<_>>();
+    cpa_core::registry::dynamic::set_plugin_catalog(cpa_core::registry::dynamic::PluginCatalog {
+        providers: host
+            .provider_models()
+            .iter()
+            .map(|(provider, models)| (provider.clone(), specs(models)))
+            .collect(),
+        clients: changes
+            .clients
+            .register
+            .iter()
+            .map(|(client, provider, models)| (client.clone(), provider.clone(), specs(models)))
+            .collect(),
+    });
+}
+
+/// Go `pluginModelInfoToRegistryModelInfo`.
+fn model_spec(m: &cpa_plugin::api::ModelInfo) -> cpa_core::registry::dynamic::Spec {
+    cpa_core::registry::dynamic::Spec {
+        id: m.id.trim().to_owned(),
+        object: m.object.clone(),
+        created: m.created,
+        owned_by: m.owned_by.clone(),
+        kind: m.model_type.clone(),
+        display_name: m.display_name.clone(),
+        name: m.name.clone(),
+        version: m.version.clone(),
+        description: m.description.clone(),
+        input_token_limit: m.input_token_limit,
+        output_token_limit: m.output_token_limit,
+        supported_generation_methods: m.supported_generation_methods.clone(),
+        context_length: m.context_length,
+        max_completion_tokens: m.max_completion_tokens,
+        supported_parameters: m.supported_parameters.clone(),
+        supported_input_modalities: m.supported_input_modalities.clone(),
+        supported_output_modalities: m.supported_output_modalities.clone(),
+        thinking: m.thinking.as_ref().map(|t| cpa_core::registry::ThinkingSupport {
+            min: t.min,
+            max: t.max,
+            zero_allowed: t.zero_allowed,
+            dynamic_allowed: t.dynamic_allowed,
+            levels: t.levels.clone(),
+        }),
+        user_defined: m.user_defined,
+        ..Default::default()
+    }
 }
 
 // ---- Frontend auth (Go `sdk/access`) -------------------------------------------------

@@ -892,8 +892,58 @@ pub fn set_web_search_hints(credential: &str, ids: std::collections::HashSet<Str
     changed
 }
 
-/// Bumped whenever [`set_web_search_hints`] changes a credential's hints; registries
-/// derived from credentials key on it.
+/// Plugin-owned models (Go v8.0.35 `pluginHost.ModelsForProvider` and the executor model
+/// clients `plugin:<id>:<provider>:executor`), published by the server's plugin host.
+/// Catalog models reach the registry only through credentials of their provider.
+/// ponytail: one process-wide catalog, as the server runs one plugin host; a second host
+/// in the same process would need the catalog on the runtime instead.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginCatalog {
+    /// Lowercased provider to its plugin models, first registration of an ID first.
+    pub providers: HashMap<String, Vec<Spec>>,
+    /// `(client, provider, models)` of the plugin executors that claimed models.
+    pub clients: Vec<(String, String, Vec<Spec>)>,
+}
+
+static PLUGIN_CATALOG: std::sync::LazyLock<std::sync::RwLock<Arc<PluginCatalog>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Replaces the plugin catalog; a change bumps [`capabilities_generation`].
+pub fn set_plugin_catalog(catalog: PluginCatalog) {
+    let mut current = PLUGIN_CATALOG
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if **current != catalog {
+        *current = Arc::new(catalog);
+        HINTS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn plugin_catalog() -> Arc<PluginCatalog> {
+    PLUGIN_CATALOG
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Go `appendPluginModels`: the provider's plugin models not excluded by their own IDs,
+/// after the models the credential already has.
+fn append_plugin_models(provider: &str, mut models: Vec<Spec>, excluded: &[String]) -> Vec<Spec> {
+    let catalog = plugin_catalog();
+    let Some(plugin) = catalog.providers.get(provider) else {
+        return models;
+    };
+    let mut seen: std::collections::HashSet<String> = models.iter().map(|m| m.id.trim().to_owned()).collect();
+    for model in apply_excluded(plugin.clone(), excluded) {
+        if seen.insert(model.id.trim().to_owned()) {
+            models.push(model);
+        }
+    }
+    models
+}
+
+/// Bumped whenever [`set_web_search_hints`] changes a credential's hints or
+/// [`set_plugin_catalog`] the plugin catalog; registries derived from credentials key on it.
 pub fn capabilities_generation() -> u64 {
     HINTS_GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -974,6 +1024,7 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
     };
     let models = apply_excluded(models, &excluded);
     let models = apply_aliases(&oauth_aliases_for(aliases, c), models);
+    let models = append_plugin_models(&provider, models, &excluded);
     // ponytail: oauth.settings max-context-length overrides are not applied yet.
     apply_prefix(models, credential_prefix(c), cfg.routing.force_model_prefix)
 }
@@ -1053,6 +1104,11 @@ impl Registry {
             let models = models_for(cfg, &aliases, c, now);
             if !models.is_empty() {
                 registry.register(&c.id, &provider_key(c), models);
+            }
+        }
+        for (client, provider, models) in &plugin_catalog().clients {
+            if !registry.has_client(client) {
+                registry.register(client, provider, models.clone());
             }
         }
         registry

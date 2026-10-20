@@ -212,6 +212,9 @@ impl Runner {
             if let Ok(res) = runner.http(&json!({"method": "GET", "path": "/healthz"}))
                 && res["status"] == 200
             {
+                // Startup calls are not compared: Go registers plugin executors only
+                // after its listener is up, so the generator settles and drops them too.
+                runner.records(&json!({"methods": []}));
                 return runner;
             }
             if Instant::now() > deadline || runner.child.try_wait().unwrap().is_some() {

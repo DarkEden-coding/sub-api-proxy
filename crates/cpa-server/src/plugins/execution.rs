@@ -304,7 +304,94 @@ async fn run_executor(
     })
 }
 
-/// Go's execution metadata (`pluginExecutorRequest`, `executeWithAuthManager`): the
+/// Go `executorAdapter.Execute`, `ExecuteStream` and `CountTokens` with an auth: a
+/// credential whose provider a plugin executor registered, chosen by the ordinary
+/// selection loop. The answer is in the client's format, as built-in executors give it.
+/// ponytail: plugin executors publish no usage record here yet (Go's executor usage
+/// reporter); the server's response parsing still counts client-format usage.
+pub(crate) async fn execute_credential(
+    rt: &Runtime,
+    call: &Call,
+    plugin_id: &str,
+    credential: &cpa_core::credential::Credential,
+    req: cpa_core::exec::ExecRequest,
+) -> Result<cpa_core::exec::ExecResponse, ExecError> {
+    let exec_error = |failure: Failure| match failure {
+        Failure::Exec(error) => error,
+        other => ExecError::local(other.status(), FailureScope::Request, other.text()),
+    };
+    let host = rt.plugins();
+    let count = req.operation == Operation::CountTokens;
+    let stream = req.stream && !count;
+    let source = handler_type(call);
+    let response = if count { source } else { response_type(call) };
+    let adapter = host
+        .executor_adapter(plugin_id)
+        .await
+        .map_err(|e| exec_error(local(0, e)))?;
+    let negotiated = adapter
+        .negotiate(source, response, host.has_response_translator())
+        .map_err(|e| exec_error(local(0, e)))?;
+    let payload = if negotiated.input_requested == negotiated.input {
+        req.body.clone()
+    } else {
+        translate_request(
+            &negotiated.input_requested,
+            &negotiated.input,
+            &req.model,
+            &req.body,
+            stream,
+        )
+    };
+    // Go `storageJSONFromAuth` without a plugin token storage: the metadata as JSON.
+    let auth_metadata: Metadata = credential.metadata.clone().into_iter().collect();
+    let request = ExecutorRequest {
+        auth_id: credential.id.clone(),
+        auth_provider: credential.provider.clone(),
+        model: req.model.clone(),
+        format: negotiated.output.clone(),
+        stream,
+        alt: req.alt.clone().unwrap_or_default(),
+        headers: super::go_request_header(&req.headers),
+        query: super::go_values(&query()),
+        original_request: req.original_body.clone(),
+        source_format: negotiated.input.clone(),
+        payload,
+        metadata: execution_metadata(call, &req.model),
+        storage_json: Bytes::from(cpa_plugin::gojson::to_vec(&auth_metadata)),
+        auth_metadata,
+        auth_attributes: crate::management::quota::go_attributes(credential),
+    };
+    let scope = Scope(RequestScope {
+        request_id: crate::observability::current_request_id().unwrap_or_default(),
+        capture: req.capture().clone(),
+        ..Default::default()
+    });
+    if !stream {
+        let resp = if count {
+            host.executor_count_tokens(&adapter, &request, &scope.0).await
+        } else {
+            host.executor_execute(&adapter, &request, &scope.0).await
+        }
+        .map_err(|e| exec_error(call_failure(e)))?;
+        return Ok(cpa_core::exec::ExecResponse {
+            status: 200,
+            headers: header_map(&resp.headers),
+            body: cpa_core::exec::ResponseBody::Buffered(translate_response(&negotiated, &request, resp.payload)),
+        });
+    }
+    let opened = host
+        .executor_execute_stream(&adapter, &request, &scope.0)
+        .await
+        .map_err(|e| exec_error(call_failure(e)))?;
+    let headers = header_map(&opened.headers);
+    Ok(cpa_core::exec::ExecResponse {
+        status: 200,
+        headers,
+        body: cpa_core::exec::ResponseBody::Stream(translate_stream(negotiated, request, opened.chunks, scope)),
+    })
+}
+
 /// request context plus the request's model facts; `model` is the resolved model.
 pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     let mut meta = request_metadata(call);
