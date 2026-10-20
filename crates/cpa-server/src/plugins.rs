@@ -16,6 +16,7 @@ use crate::Runtime;
 
 pub(crate) mod execution;
 pub(crate) mod interceptors;
+pub(crate) mod model_callbacks;
 
 /// The host plus the config it should converge on.
 pub struct PluginRuntime {
@@ -383,6 +384,7 @@ pub(crate) fn go_values(raw_query: &str) -> cpa_plugin::gojson::Header {
 /// Syncs the current config now, then follows every later publish. Call once at
 /// startup, before serving (Go applies plugins before the server starts).
 pub async fn start(rt: &Arc<Runtime>) {
+    model_callbacks::attach(rt);
     let mut rx = rt.plugin_runtime().latest.subscribe();
     rx.mark_unchanged();
     sync(rt, rt.config()).await;

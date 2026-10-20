@@ -47,6 +47,7 @@ priority = 90
 filter = '''
     binary_id(cpa-server::plugin_routes) | binary_id(cpa-server::plugin_quota_cooldown)
     | binary_id(cpa-server::plugin_owned)
+    | binary_id(cpa-server::plugin_host_model)
     | binary_id(cliproxy::plugin_cli) | binary_id(cliproxy::plugin_wiring)
     | binary_id(cpa-plugin::go_host) | binary_id(cpa-plugin::native_abi)
 '''

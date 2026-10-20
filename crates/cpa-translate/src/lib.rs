@@ -203,6 +203,9 @@ pub struct ResponseCtx<'a> {
 }
 
 pub trait StreamTranslator: Send {
+    /// Select executor chunks before the HTTP handler's framing. Native translators
+    /// already emit executor chunks; the shared framing adapter overrides this.
+    fn executor_chunks(&mut self) {}
     /// One complete upstream event in, zero or more complete client events out.
     fn event(&mut self, event: &[u8]) -> Result<Vec<Bytes>, Error>;
     /// Upstream ended cleanly; emit any closing events.
