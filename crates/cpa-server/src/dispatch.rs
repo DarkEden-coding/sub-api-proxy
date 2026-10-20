@@ -670,28 +670,11 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
         trace.prompt_prefix(call.entry, &call.body);
     }
     let mut call = call;
-    let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1, true).await?;
-    let raw_chunks = crate::plugins::model_callbacks::context().is_some()
-        && matches!(call.response, Format::OpenAI | Format::Gemini)
-        && call.media.is_none()
-        && !rt.plugins().has_stream_interceptors();
+    let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1).await?;
     let result = retry_bootstrap(rt, call, trace, &resolved, hooks.as_ref()).await;
-    let result = match hooks {
+    match hooks {
         Some(hooks) => hooks.finish(result, trace).await,
         None => result,
-    };
-    // Internal execution returns executor payloads, not the HTTP handler's SSE
-    // frames. Active stream interceptors already perform this conversion.
-    match result {
-        Ok(Done::Stream { headers, first, rest }) if raw_chunks => {
-            let payload = |chunk: Bytes| respond::data_payload(&chunk).map(Bytes::from).unwrap_or(chunk);
-            Ok(Done::Stream {
-                headers,
-                first: first.map(payload),
-                rest: rest.map(move |chunk| chunk.map(payload)).boxed(),
-            })
-        }
-        other => other,
     }
 }
 
@@ -1015,6 +998,7 @@ async fn run_routed(
         original_body: call.body.clone(),
         body: call.body.clone(),
         stream: call.stream,
+        stream_payloads: hooks.is_some() || crate::plugins::model_callbacks::context().is_some(),
         alt: call.alt.clone(),
         session: session.id,
         execution_session: call.execution_session.clone(),
@@ -2752,6 +2736,7 @@ mod tests {
             operation: Operation::Generate,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,
+            stream_payloads: false,
             requested_model: "sol".into(),
             model: "sol".into(),
             original_body: Bytes::new(),

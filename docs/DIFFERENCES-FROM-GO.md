@@ -3,7 +3,9 @@
 Where cliproxy-rs has a feature, it aims to behave exactly as CLIProxyAPI does at commit `6fecc6e`, except for the Claude prompt-cache and prompt-shaping fixes that follow v8.0.27 ([PARITY.md](PARITY.md)). This page lists the places where it behaves differently on purpose, and the one routing strategy it adds. Features that are not ported yet are listed under [Upcoming features](../README.md#upcoming-features) instead.
 
 Plugin model callbacks follow v8.0.35, including detached stream cancellation and
-caller-plugin skipping. These are parity changes, not new deliberate differences.
+caller-plugin skipping, pre-HTTP stream chunks and inherited credential pins,
+execution sessions and request paths. An omitted nested proxy override clears the
+outer callback's override. These are parity changes, not new deliberate differences.
 Windows plugin loading remains unsupported.
 
 ## Additions in cliproxy-rs

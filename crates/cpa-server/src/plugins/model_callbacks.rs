@@ -97,9 +97,19 @@ impl ModelExecutor for Executor {
             let query = cpa_common::gostr::values_encode(&pairs);
             let trace = Trace::with_request_id(Some(scope.request_id.clone())).with_capture(scope.capture.clone());
             let cancel = scope.cancel.clone();
+            let execution_session = scope.execution_session.clone();
+            let request_path = if req.path.trim().is_empty() {
+                scope.request_path.clone()
+            } else {
+                req.path
+            };
             let context = Context {
                 skip_plugin,
-                auth_id: req.auth_id,
+                auth_id: if req.auth_id.is_empty() {
+                    scope.pinned_auth_id.clone().unwrap_or_default()
+                } else {
+                    req.auth_id
+                },
                 proxy_url: req.proxy_url,
                 scope,
             };
@@ -118,8 +128,8 @@ impl ModelExecutor for Executor {
                 },
                 forced_provider: Some(req.forced_provider).filter(|s| !s.is_empty()),
                 selection_model: None,
-                execution_session: None,
-                request_path: req.path,
+                execution_session,
+                request_path,
                 peer: None,
                 turn: None,
                 media,

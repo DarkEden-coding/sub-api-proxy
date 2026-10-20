@@ -359,3 +359,323 @@ async fn callbacks_execute_pin_and_stream_without_recursing_into_the_caller() {
     drop(guard);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn callback_streams_preserve_executor_bytes_across_interceptor_unload() {
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_bytes") else {
+        return;
+    };
+    let dir = cpa_plugin::testing::scratch(tmp, "host-model-bytes");
+    let records = dir.join("records");
+    let plugins = dir.join("plugins");
+    let auths = dir.join("auths");
+    for d in [&records, &plugins, &auths] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::copy(built.join("recorder.so"), plugins.join("observer.so")).unwrap();
+    canned(&records, "observer", "response.intercept_stream_chunk", json!({}));
+    // Expected chunks are Go v8.0.35 executor output, not HTTP handler output.
+    let fixtures: [(&str, &str, &str, &str, Vec<&str>); 4] = [
+        (
+            "openai",
+            "openai-compatibility",
+            "fast",
+            "data: {\ndata: \"choices\":[]\ndata: }\n\ndata: {\ndata: \"choices\":[1]\ndata: }\n\ndata: [DONE]\n\n",
+            vec!["{\n\"choices\":[]\n}", "{\n\"choices\":[1]\n}"],
+        ),
+        (
+            "gemini",
+            "gemini",
+            "gemini-2.5-flash",
+            "data: {\"candidates\":[]}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+            vec![r#"{"candidates":[]}"#, r#"{"candidates":[{"finishReason":"STOP"}]}"#],
+        ),
+        (
+            "claude",
+            "claude",
+            "claude-sonnet-4-6",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"claude-sonnet-4-6\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            vec![
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"claude-sonnet-4-6\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+        (
+            "openai-response",
+            "codex",
+            "gpt-5.4",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[]}}\n\n",
+            vec![
+                "event: response.output_text.delta",
+                r#"data: {"type":"response.output_text.delta","delta":"hi"}"#,
+                "event: response.completed",
+                r#"data: {"type":"response.completed","response":{"id":"r","output":[]}}"#,
+            ],
+        ),
+    ];
+    for (protocol, family, model, wire, expected) in fixtures {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().fallback(move || async move { ([("content-type", "text/event-stream")], wire) }),
+            )
+            .await
+            .unwrap();
+        });
+        let config = if family == "openai-compatibility" {
+            format!(
+                "    - name: Fixture\n      base-url: {url}\n      models: [{{name: fast}}]\n      keys: [{{api-key: fixture}}]\n"
+            )
+        } else {
+            format!("    - base-url: {url}\n      models: [{{name: {model}}}]\n      keys: [{{api-key: fixture}}]\n")
+        };
+        let yaml = format!("auth-dir: {}\napi-keys:\n  {family}:\n{config}", auths.display());
+        let cfg = Config::parse(&yaml).unwrap();
+        let credentials = cpa_core::config::credentials::load(&cfg);
+        assert_eq!(credentials.len(), 1, "{family}");
+        let rt = Arc::new(cpa_server::testing::runtime(
+            cfg,
+            credentials,
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new(&url).unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        cpa_server::plugins::start(&rt).await;
+        let host = rt.plugins().clone();
+        for mode in ["absent", "present", "unloaded"] {
+            if mode != "absent" {
+                let cfg = Config::parse(&format!("{yaml}plugins:\n  enabled: true\n  dir: {}\n  configs:\n    observer:\n      enabled: true\n      label: observer\n      record: {}\n      caps: response_stream_interceptor\n", plugins.display(), records.display())).unwrap();
+                cpa_server::plugins::sync(&rt, Arc::new(cfg)).await;
+                assert!(host.has_stream_interceptors());
+            }
+            let instance = Arc::new(CallbackInstance::default());
+            let guard = callback_context(&host, "origin", instance.clone(), RequestScope::default());
+            let request = json!({"host_callback_id":guard.id(), "entry_protocol":protocol, "model":model, "stream":true,
+                "body":b64(json!({"model":model,"stream":true,"messages":[{"role":"user","content":"hi"}],"contents":[{"role":"user","parts":[{"text":"hi"}]}],"input":"hi","max_tokens":16}).to_string())});
+            let h = host.clone();
+            let i = instance.clone();
+            let opened = tokio::task::spawn_blocking(move || callback(&h, &i, "host.model.execute_stream", request))
+                .await
+                .unwrap();
+            let read = json!({"stream_id":opened["stream_id"]});
+            let mut got = vec![];
+            loop {
+                let (h, i, read) = (host.clone(), instance.clone(), read.clone());
+                let chunk = tokio::task::spawn_blocking(move || callback(&h, &i, "host.model.stream_read", read))
+                    .await
+                    .unwrap();
+                if chunk["done"] == true {
+                    break;
+                }
+                assert_eq!(chunk["error"], "", "{protocol}/{mode}: {chunk}");
+                assert!(chunk["payload"].is_string(), "{protocol}/{mode}: {chunk}; {got:?}");
+                got.push(String::from_utf8(decode(&chunk["payload"])).unwrap());
+                if mode == "unloaded" && got.len() == 1 {
+                    assert!(host.unload_plugin("observer", None).await);
+                    assert!(!host.has_stream_interceptors());
+                }
+            }
+            assert_eq!(got, expected, "{protocol}/{mode}");
+            if mode != "absent" {
+                let observed = std::fs::read_to_string(records.join("observer.jsonl")).unwrap();
+                let bodies: Vec<_> = observed
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .filter(|r| r["method"] == "response.intercept_stream_chunk")
+                    .map(|r| serde_json::from_str::<Value>(r["request"].as_str().unwrap()).unwrap())
+                    .filter(|r| r["ChunkIndex"].as_i64().unwrap() >= 0)
+                    .map(|r| String::from_utf8(decode(&r["Body"])).unwrap())
+                    .collect();
+                assert_eq!(
+                    bodies,
+                    if mode == "present" {
+                        expected.clone()
+                    } else {
+                        vec![expected[0]]
+                    },
+                    "interceptor {protocol}/{mode}"
+                );
+                std::fs::remove_file(records.join("observer.jsonl")).unwrap();
+            }
+            drop(guard);
+        }
+        host.shutdown_all(None).await;
+        server.abort();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn callback(host: &cpa_plugin::Host, instance: &Arc<CallbackInstance>, method: &str, request: Value) -> Value {
+    let bytes = call_from_plugin(host, "origin", instance, method, &serde_json::to_vec(&request).unwrap()).unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(envelope["ok"], true, "{method}: {envelope}");
+    envelope["result"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
+    use cpa_core::exec::{Caller, ExecSession, Operation};
+    use cpa_core::format::Format;
+    use cpa_server::dispatch::{Call, SessionTurn, Trace};
+
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_context") else {
+        return;
+    };
+    let dir = cpa_plugin::testing::scratch(tmp, "host-model-context");
+    let auths = dir.join("auths");
+    let records = dir.join("records");
+    let plugins = dir.join("plugins");
+    for d in [&auths, &records, &plugins] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let seen = Arc::new(Seen::default());
+    let proxy_seen = Arc::new(Seen::default());
+    let url = serve(seen.clone()).await;
+    let proxy = serve(proxy_seen.clone()).await;
+    let yaml = format!(
+        "auth-dir: {}\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}, {{api-key: second}}]\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n",
+        auths.display(),
+        plugins.display()
+    );
+    let mut yaml = yaml;
+    for label in ["origin", "nested"] {
+        std::fs::copy(built.join("recorder.so"), plugins.join(format!("{label}.so"))).unwrap();
+        yaml.push_str(&format!("    {label}:\n      enabled: true\n      label: {label}\n      record: {}\n      caps: request_interceptor\n", records.display()));
+        for method in ["request.intercept_before", "request.intercept_after"] {
+            canned(&records, label, method, json!({}));
+        }
+    }
+    let cfg = Config::parse(&yaml).unwrap();
+    let credentials = cpa_core::config::credentials::load(&cfg);
+    let first = credentials[0].id.clone();
+    let pinned = credentials[1].id.clone();
+    let rt = Arc::new(cpa_server::testing::runtime(
+        cfg,
+        credentials,
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    cpa_server::plugins::start(&rt).await;
+    let host = rt.plugins().clone();
+    let instance = Arc::new(CallbackInstance::default());
+    let guard = callback_context(&host, "origin", instance.clone(), RequestScope::default());
+    for override_pin in [None, Some(first.as_str())] {
+        let mut nested = json!({"entry_protocol":"openai","model":"fast","body":b64(BODY)});
+        if let Some(id) = override_pin {
+            nested["auth_id"] = json!(id);
+        }
+        std::fs::write(
+            records.join("respond/nested/request.intercept_before.json"),
+            json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute","request":nested}]}).to_string(),
+        )
+        .unwrap();
+        let (h, i) = (host.clone(), instance.clone());
+        let request = json!({"host_callback_id":guard.id(),"entry_protocol":"openai","model":"fast","body":b64(BODY),
+            "auth_id":pinned,"proxy_url":proxy,"path":"/inherited/path"});
+        let response = tokio::task::spawn_blocking(move || callback(&h, &i, "host.model.execute", request))
+            .await
+            .unwrap();
+        assert_eq!(decode(&response["body"]), REPLY.as_bytes());
+        // Outer callback uses its proxy; the nested callback must clear that override.
+        assert_eq!(proxy_seen.0.lock().unwrap().last().unwrap().1, "Bearer second");
+        assert_eq!(
+            seen.0.lock().unwrap().last().unwrap().1,
+            if override_pin.is_some() {
+                "Bearer first"
+            } else {
+                "Bearer second"
+            }
+        );
+    }
+    // Use the same transport-owned SessionTurn as the Responses WebSocket. A callback
+    // entered from its interceptor inherits the pin even without host.model context.
+    let call = Call {
+        entry: Format::OpenAI,
+        response: Format::OpenAI,
+        operation: Operation::Generate,
+        model: "fast".into(),
+        body: Bytes::from_static(BODY.as_bytes()),
+        stream: false,
+        alt: None,
+        headers: Default::default(),
+        caller: Caller {
+            principal: String::new(),
+            source: "",
+        },
+        forced_provider: None,
+        selection_model: None,
+        execution_session: Some("pinned-websocket".into()),
+        request_path: "/v1/responses".into(),
+        peer: None,
+        turn: Some(Arc::new(SessionTurn {
+            session: ExecSession {
+                id: "pinned-websocket".into(),
+                continuation: false,
+                lease: None,
+            },
+            pinned: Some(pinned.clone()),
+            on_selected: None,
+            home: None,
+        })),
+        media: None,
+    };
+    std::fs::write(
+        records.join("respond/nested/request.intercept_before.json"),
+        json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute","request":{
+            "entry_protocol":"openai","model":"fast","body":b64(BODY)}}]})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::remove_file(records.join("origin.jsonl")).unwrap();
+    cpa_server::dispatch::run_with_bootstrap_retries(&rt, call, &Trace::default())
+        .await
+        .unwrap();
+    let entries = std::fs::read_to_string(records.join("origin.jsonl")).unwrap();
+    let requests: Vec<Value> = entries
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|r| r["method"] == "request.intercept_before")
+        .map(|r| serde_json::from_str::<Value>(r["request"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(requests.len(), 2, "outer WebSocket turn and nested callback");
+    for request in requests {
+        assert_eq!(request["Metadata"]["pinned_auth_id"], pinned);
+        assert_eq!(request["Metadata"]["execution_session_id"], "pinned-websocket");
+        assert_eq!(request["Metadata"]["request_path"], "/v1/responses");
+    }
+    let entries = std::fs::read_to_string(records.join("nested.jsonl")).unwrap();
+    for result in entries
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|r| r["method"] == "host_callback")
+    {
+        let response: Value = serde_json::from_str(result["request"].as_str().unwrap()).unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(decode(&response["result"]["body"]), REPLY.as_bytes());
+    }
+    assert!(
+        seen.0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(2)
+            .all(|(_, auth, _)| auth == "Bearer second")
+    );
+    host.shutdown_all(None).await;
+    drop(guard);
+    std::fs::remove_dir_all(dir).unwrap();
+}

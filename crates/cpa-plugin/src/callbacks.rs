@@ -33,6 +33,10 @@ pub struct RequestScope {
     /// Inbound values inherited by host.model callbacks that omit overrides.
     pub headers: gojson::Header,
     pub query: gojson::Header,
+    /// Internal execution context; never serialized to plugin RPC requests.
+    pub pinned_auth_id: Option<String>,
+    pub execution_session: Option<String>,
+    pub request_path: String,
 }
 
 impl std::fmt::Debug for RequestScope {

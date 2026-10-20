@@ -753,6 +753,7 @@ pub(crate) struct Output {
     client: Format,
     /// A Gemini client asked for `alt`: chunks are written bare.
     raw: bool,
+    executor_chunks: bool,
     claude: ClaudeInputTokens,
     /// The attempt's usage reporter; stream loops feed it what Go's reporter sees.
     pub(crate) usage: UsageSink,
@@ -783,12 +784,16 @@ impl Output {
             original_request: original_request(req),
             translated_request: translated,
         };
-        let translator = cpa_translate::stream_with(client, upstream, &ctx, options)
+        let mut translator = cpa_translate::stream_with(client, upstream, &ctx, options)
             .unwrap_or_else(|| Box::new(Unregistered(options)));
+        if req.stream_payloads {
+            translator.executor_chunks();
+        }
         Self {
             translator,
             client,
             raw: alt(req).is_some(),
+            executor_chunks: req.stream_payloads,
             claude: ClaudeInputTokens::new(req.source_format, upstream, client, original_request(req).clone()),
             usage: req.usage.clone(),
             capture: req.capture().clone(),
@@ -883,7 +888,7 @@ impl Output {
     /// Gemini clients: translators frame chunks as SSE `data:` events; with `alt` the Go
     /// handler writes the chunk itself.
     fn frame(&self, out: &mut Vec<Bytes>) {
-        if self.client == Format::Gemini {
+        if self.client == Format::Gemini && !self.executor_chunks {
             for chunk in out.iter_mut() {
                 let bare = chunk
                     .strip_prefix(b"data: ")

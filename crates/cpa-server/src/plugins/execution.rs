@@ -63,6 +63,9 @@ impl Scope {
             cancel: inherited.cancel.child_token(),
             headers: super::go_request_header(&call.headers),
             query: super::go_values(&query()),
+            pinned_auth_id: call.pinned(),
+            execution_session: call.execution_session.clone(),
+            request_path: call.request_path.clone(),
         })
     }
 }
@@ -199,7 +202,7 @@ pub(crate) async fn execute(
     }
     let mut call = call.clone();
     let model = call.model.clone();
-    let hooks = super::interceptors::start(rt, trace, &mut call, &model, false).await?;
+    let hooks = super::interceptors::start(rt, trace, &mut call, &model).await?;
     let result = run_executor(rt, &mut call, plugin_id, query, trace, hooks.as_deref()).await;
     let result = match hooks {
         Some(hooks) => {

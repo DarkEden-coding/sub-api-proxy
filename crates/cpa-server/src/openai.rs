@@ -719,8 +719,9 @@ fn stream_error_frame(codex: bool, status: u16, text: &str, seq: i64, lead: bool
     }
 }
 
-/// Go `responsesSSEFramer` over complete frames.
+/// Go `responsesSSEFramer`: join executor chunks at the HTTP boundary, after interceptors.
 struct ResponsesSse {
+    framer: cpa_translate::stream::ResponsesFramer,
     codex: bool,
     data_frames: i64,
     last_event: String,
@@ -733,6 +734,7 @@ struct ResponsesSse {
 impl ResponsesSse {
     fn new(codex: bool) -> Self {
         Self {
+            framer: Default::default(),
             codex,
             data_frames: 0,
             last_event: String::new(),
@@ -911,7 +913,16 @@ impl Writer for ResponsesSse {
         if !self.terminal_event.is_empty() {
             return Vec::new();
         }
-        self.repair(respond::ensure_frame(event)).into_iter().collect()
+        let event = if event.trim_ascii_start().starts_with(b"{") {
+            respond::ensure_frame(event)
+        } else {
+            event
+        };
+        self.framer
+            .write(&event)
+            .into_iter()
+            .filter_map(|frame| self.repair(frame))
+            .collect()
     }
 
     fn stopped(&self) -> bool {
@@ -919,17 +930,31 @@ impl Writer for ResponsesSse {
     }
 
     fn error(&mut self, error: &ExecError) -> Vec<Bytes> {
+        let mut out: Vec<_> = self
+            .framer
+            .flush()
+            .into_iter()
+            .filter_map(|frame| self.repair(frame))
+            .collect();
         if !self.terminal_event.is_empty() {
-            return Vec::new();
+            return out;
         }
         let status = crate::classify::response_status(error);
         let text = sanitize_error_text(status, &crate::classify::error_text(error));
-        vec![stream_error_frame(self.codex, status, &text, self.data_frames, true)]
+        out.push(stream_error_frame(self.codex, status, &text, self.data_frames, true));
+        out
     }
 
     fn end(&mut self) -> Vec<Bytes> {
+        let mut out: Vec<_> = self
+            .framer
+            .flush()
+            .into_iter()
+            .filter_map(|frame| self.repair(frame))
+            .collect();
         if self.terminal_error.is_some() || !self.terminal_event.is_empty() {
-            return vec![Bytes::from_static(b"\n")];
+            out.push(Bytes::from_static(b"\n"));
+            return out;
         }
         let last = if self.last_event.is_empty() {
             "none"
@@ -937,7 +962,8 @@ impl Writer for ResponsesSse {
             &self.last_event
         };
         let text = format!("upstream stream closed before a terminal event (last event: {last})");
-        vec![stream_error_frame(self.codex, 502, &text, self.data_frames, true)]
+        out.push(stream_error_frame(self.codex, 502, &text, self.data_frames, true));
+        out
     }
 }
 

@@ -104,14 +104,18 @@ fn now() -> GoTime {
     GoTime(Some(chrono::Local::now().fixed_offset()))
 }
 
-fn scope(trace: &Trace, headers: Header) -> RequestScope {
+fn scope(trace: &Trace, headers: Header, metadata: &Metadata) -> RequestScope {
     let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
+    let value = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::to_owned);
     RequestScope {
         request_id: trace.request_id(),
         capture: trace.capture(),
         headers,
         query: super::go_values(&super::execution::query()),
         cancel: inherited.cancel.child_token(),
+        pinned_auth_id: value("pinned_auth_id"),
+        execution_session: value("execution_session_id"),
+        request_path: value("request_path").unwrap_or_default(),
     }
 }
 
@@ -260,8 +264,6 @@ pub(crate) struct Hooks {
     /// The lifecycle error of a plugin termination: Go's after-auth termination is an
     /// error ("request terminated by plugin"); a plugin-executor-route one has none.
     terminated: Mutex<Option<&'static str>>,
-    /// Built-in executors frame OpenAI-style events; Go's chunks are their payloads.
-    builtin: bool,
 }
 
 /// The facts of one built-in request the hooks need.
@@ -274,7 +276,6 @@ pub(crate) struct Request<'a> {
     pub headers: Header,
     pub body: &'a Bytes,
     pub metadata: Metadata,
-    pub builtin: bool,
 }
 
 impl Hooks {
@@ -288,7 +289,7 @@ impl Hooks {
         let host = rt.plugins().clone();
         let lifecycle = Lifecycle::start(
             rt,
-            scope(trace, req.headers.clone()),
+            scope(trace, req.headers.clone(), &req.metadata),
             req.source_format,
             req.model,
             req.requested_model,
@@ -324,7 +325,6 @@ impl Hooks {
             body: before.body.clone().unwrap_or_else(|| req.body.clone()),
             after: Mutex::new(None),
             terminated: Mutex::new(None),
-            builtin: req.builtin,
         });
         Ok((hooks, before))
     }
@@ -560,14 +560,6 @@ impl ChunkInterceptor {
             self.index += 1;
             return Some(payload);
         }
-        // Go's executors hand OpenAI and Gemini handlers bare payloads, which the handler
-        // frames; built-in executors here send them framed.
-        let payload = match self.hooks.response_format.as_str() {
-            "openai" | "gemini" if self.hooks.builtin => crate::respond::data_payload(&payload)
-                .map(Bytes::from)
-                .unwrap_or(payload),
-            _ => payload,
-        };
         let host = &self.hooks.host;
         let mut req = StreamChunkInterceptRequest {
             request_id: self.hooks.lifecycle.request_id.clone(),
@@ -694,7 +686,7 @@ pub(crate) async fn model_list(
     let trace = Trace::with_request_id(crate::observability::current_request_id());
     let lifecycle = Lifecycle::start(
         rt,
-        scope(&trace, super::go_request_header(request_headers)),
+        scope(&trace, super::go_request_header(request_headers), &Metadata::new()),
         source_format,
         "",
         "",
@@ -753,7 +745,6 @@ pub(crate) async fn start(
     trace: &Trace,
     call: &mut Call,
     model: &str,
-    builtin: bool,
 ) -> Result<Option<Arc<Hooks>>, Failure> {
     let host = rt.plugins();
     let needed = host.has_request_interceptors()
@@ -783,7 +774,6 @@ pub(crate) async fn start(
             headers: headers.clone(),
             body: &call.body,
             metadata: super::execution::execution_metadata(call, model),
-            builtin,
         },
     )
     .await?;

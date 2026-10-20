@@ -331,11 +331,15 @@ impl OpenAICompatExecutor {
         };
         if req.stream {
             let translator: Box<dyn StreamTranslator> = match response_pair {
-                Some(pair) => (pair.stream)(&ResponseCtx {
-                    model: &req.model,
-                    original_request: &original,
-                    translated_request: &body,
-                }),
+                Some(pair) => crate::translate::stream(
+                    pair,
+                    &ResponseCtx {
+                        model: &req.model,
+                        original_request: &original,
+                        translated_request: &body,
+                    },
+                    &req,
+                ),
                 None => Box::new(Identity),
             };
             let mut lines = wire::lines(upstream, MAX_LINE);
