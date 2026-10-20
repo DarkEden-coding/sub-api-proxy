@@ -132,11 +132,12 @@ pub fn executor_client_id(plugin_id: &str, provider: &str) -> String {
 }
 
 impl Host {
-    /// Go `RegisterModels`: static models from every model provider/registrar whose
-    /// executor scope allows static models. Plugins without an executor register their
-    /// models under client `plugin:<id>:<provider>`; executor plugins' models wait for
+    /// Go v8.0.35 `RegisterModels`: collects the static models of every model provider or
+    /// registrar whose executor scope allows static models. Nothing is published here:
+    /// catalog-only models reach the registry only through credentials of their provider
+    /// ([`Self::models_for_provider`]), executor plugins' through
     /// [`Self::register_executors`].
-    pub async fn register_models(&self) -> ClientChanges {
+    pub async fn register_models(&self) {
         let snapshot = self.snapshot();
         let records: Vec<_> = snapshot
             .records
@@ -144,8 +145,6 @@ impl Host {
             .filter(|r| self.record_current(r))
             .cloned()
             .collect();
-        let mut changes = ClientChanges::default();
-        let mut next_clients = HashSet::new();
         let mut next_providers = HashMap::new();
         let mut next_registrations = HashMap::new();
         for record in records {
@@ -191,28 +190,18 @@ impl Host {
                     plugin_id: record.id.clone(),
                     provider: provider.clone(),
                     priority: record.priority,
-                    models: models.clone(),
+                    models,
                     has_executor: caps.executor,
                 },
             );
-            next_providers.insert(record.id.clone(), provider.clone());
-            if !caps.executor {
-                let client = format!("plugin:{}:{provider}", record.id);
-                next_clients.insert(client.clone());
-                changes.register.push((client, provider, models));
-            }
+            next_providers.insert(record.id.clone(), provider);
         }
         let mut state = self.state();
         if !Arc::ptr_eq(&self.snapshot(), &snapshot) {
-            return ClientChanges::default();
+            return;
         }
-        let mut stale: Vec<String> = state.model_client_ids.difference(&next_clients).cloned().collect();
-        stale.sort();
-        changes.unregister = stale;
-        state.model_client_ids = next_clients;
         state.model_providers = next_providers;
         state.model_registrations = next_registrations;
-        changes
     }
 
     /// Go `ModelsForAuth`: the first model provider for the credential's provider (its
@@ -310,12 +299,13 @@ impl Host {
     /// a provider; `model_providers` lists the providers registered for a model ID. A
     /// plugin executor claims its provider only when no built-in executor does, and only
     /// models no built-in provider serves; the first plugin (by priority) wins a model
-    /// and a provider.
+    /// and a provider. `None` when the plugin set changed meanwhile (Go
+    /// `commitExecutorState` then keeps the previous state).
     pub async fn register_executors(
         &self,
-        native_provider: &dyn Fn(&str) -> bool,
-        model_providers: &dyn Fn(&str) -> Vec<String>,
-    ) -> ExecutorChanges {
+        native_provider: &(dyn Fn(&str) -> bool + Sync),
+        model_providers: &(dyn Fn(&str) -> Vec<String> + Sync),
+    ) -> Option<ExecutorChanges> {
         let snapshot = self.snapshot();
         let records: Vec<_> = snapshot
             .records
@@ -324,15 +314,27 @@ impl Host {
             .cloned()
             .collect();
         let mut provider_models: BTreeMap<String, Vec<ModelInfo>> = BTreeMap::new();
+        let mut claimed_models: HashSet<String> = HashSet::new();
         for registration in self.sorted_registrations() {
-            if !registration.has_executor {
-                append_models(&mut provider_models, &registration.provider, &registration.models);
+            if registration.has_executor {
+                continue;
+            }
+            append_models(&mut provider_models, &registration.provider, &registration.models);
+            // A catalog for a built-in provider reserves its models before plugin
+            // executors compete, whether or not a credential has published them yet.
+            if native_provider(&registration.provider) {
+                claimed_models.extend(
+                    registration
+                        .models
+                        .iter()
+                        .map(|m| m.id.trim().to_owned())
+                        .filter(|id| !id.is_empty()),
+                );
             }
         }
         let registration_of = |id: &str| self.state().model_registrations.get(id).cloned().unwrap_or_default();
         let model_native = |model: &str| model_providers(model).iter().any(|p| native_provider(p));
         let mut selected: HashMap<String, Vec<ModelInfo>> = HashMap::new();
-        let mut claimed_models: HashSet<String> = HashSet::new();
         let mut claimed_providers: HashMap<String, String> = HashMap::new();
         for record in &records {
             if !record.plugin.caps.executor || self.is_fused(&record.id) {
@@ -395,7 +397,7 @@ impl Host {
         }
         let mut state = self.state();
         if !Arc::ptr_eq(&self.snapshot(), &snapshot) {
-            return ExecutorChanges::default();
+            return None;
         }
         state.provider_models = provider_models;
         let mut stale: Vec<String> = state.executor_providers.difference(&next_providers).cloned().collect();
@@ -414,7 +416,7 @@ impl Host {
         // adapter; a built-in executor that replaced it stays.
         stale.retain(|provider| !native_provider(provider));
         changes.unregister = stale;
-        changes
+        Some(changes)
     }
 
     /// Go `ModelsForProvider`.
@@ -424,6 +426,11 @@ impl Host {
             .get(&normalize_provider(provider))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Every provider's plugin models after the last [`Self::register_executors`].
+    pub fn provider_models(&self) -> BTreeMap<String, Vec<ModelInfo>> {
+        self.state().provider_models.clone()
     }
 
     /// The plugin executing `provider` after the last [`Self::register_executors`].

@@ -151,7 +151,6 @@ pub(crate) struct State {
     /// Go `modelProviders`: plugin ID to the provider its models registered under.
     pub model_providers: HashMap<String, String>,
     pub model_registrations: HashMap<String, crate::models::ModelRegistration>,
-    pub model_client_ids: HashSet<String>,
     pub executor_providers: HashSet<String>,
     pub executor_model_client_ids: HashSet<String>,
     pub provider_models: BTreeMap<String, Vec<api::ModelInfo>>,
@@ -817,7 +816,6 @@ impl Host {
             targets.extend(state.retired.drain().flat_map(|(_, lps)| lps));
             state.management_routes.clear();
             state.resource_routes.clear();
-            state.model_client_ids.clear();
             state.executor_model_client_ids.clear();
             state.model_providers.clear();
             state.model_registrations.clear();
