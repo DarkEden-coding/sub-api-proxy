@@ -163,6 +163,31 @@ async fn bounded<T>(f: impl std::future::Future<Output = T>) -> T {
         .expect("timed out")
 }
 
+/// Spawns `fut` and returns once it has been polled and is waiting (`Pending`).
+async fn spawn_waiting<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send,
+{
+    let (waiting, polled) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut fut = std::pin::pin!(fut);
+        let mut waiting = Some(waiting);
+        std::future::poll_fn(|cx| {
+            let poll = fut.as_mut().poll(cx);
+            if poll.is_pending()
+                && let Some(waiting) = waiting.take()
+            {
+                let _ = waiting.send(());
+            }
+            poll
+        })
+        .await
+    });
+    bounded(polled).await.expect("the future finished instead of waiting");
+    task
+}
+
 fn chunk(id: &str, data: &str) -> Vec<u8> {
     format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"{data}"}}}}"#).into_bytes()
 }
@@ -196,7 +221,7 @@ async fn closing_with_a_full_buffer_still_fails_the_request() {
     // The forwarding task holds chunk 1 and the outer channel chunk 0, so the
     // request's queue holds 2..=65 and loses 2.
     for n in 0..PENDING_BUFFER + 2 {
-        session.receive(&chunk(&id, &format!("{n} "))).await.unwrap();
+        bounded(session.receive(&chunk(&id, &format!("{n} ")))).await.unwrap();
     }
     session.close("browser went away");
     let mut got = vec![];
@@ -237,9 +262,8 @@ async fn a_terminal_message_blocked_at_close_never_follows_the_eviction() {
         }
         let end = format!(r#"{{"id":"{id}","type":"stream_end"}}"#);
         let blocked = session.clone();
-        let delivery = tokio::spawn(async move { blocked.receive(end.as_bytes()).await });
-        tokio::task::yield_now().await;
-        assert!(!delivery.is_finished(), "stream_end waits for a free slot");
+        // stream_end waits for a free slot.
+        let delivery = spawn_waiting(async move { blocked.receive(end.as_bytes()).await }).await;
         session.close("browser went away");
         assert_eq!(bounded(call).await.unwrap_err(), "browser went away (status=0)");
         bounded(delivery).await.unwrap().unwrap();
@@ -260,4 +284,29 @@ async fn a_terminal_message_blocked_at_close_never_follows_the_eviction() {
         .unwrap();
     session.close("browser went away");
     assert_eq!(bounded(call).await.unwrap().body, b"ab");
+}
+
+/// Ending a request wakes every delivery waiting for a slot, as dropping an mpsc
+/// receiver released every blocked sender.
+#[tokio::test]
+async fn dropping_the_reader_releases_every_waiting_delivery() {
+    let relay = Arc::new(Relay::default());
+    let (session, mut frames) = relay.connect_as("aistudio-drop".into());
+    let responses = relay
+        .send("aistudio-drop", Relay::http_message(&HttpRequest::default()))
+        .unwrap();
+    let id = next(&mut frames).await.id;
+    for _ in 0..PENDING_BUFFER {
+        bounded(session.receive(&chunk(&id, "x"))).await.unwrap();
+    }
+    let mut deliveries = vec![];
+    for _ in 0..2 {
+        let (session, frame) = (session.clone(), chunk(&id, "y"));
+        deliveries.push(spawn_waiting(async move { session.receive(&frame).await }).await);
+    }
+    drop(responses);
+    for delivery in deliveries {
+        bounded(delivery).await.unwrap().unwrap();
+    }
+    assert!(!lock(&session.pending).contains_key(&id));
 }

@@ -514,7 +514,9 @@ struct Pending {
     state: Mutex<PendingState>,
     /// Signalled when a message is queued or the request ends.
     readable: Notify,
-    /// Signalled when a slot frees or the request ends.
+    /// Signalled to every waiting delivery when a slot frees or the request ends.
+    /// Each delivery creates its `Notified` before checking the state, so
+    /// `notify_waiters` cannot miss it.
     writable: Notify,
 }
 
@@ -543,7 +545,12 @@ impl Pending {
                 if state.queue.len() < PENDING_BUFFER {
                     state.queue.extend(msg.take());
                     state.terminal = last;
+                    drop(state);
                     self.readable.notify_one();
+                    if last {
+                        // Other deliveries waiting for a slot now give up.
+                        self.writable.notify_waiters();
+                    }
                     return;
                 }
             }
@@ -576,7 +583,7 @@ impl Pending {
         }
         drop(state);
         self.readable.notify_one();
-        self.writable.notify_one();
+        self.writable.notify_waiters();
     }
 }
 
@@ -597,7 +604,7 @@ impl Responses {
                 let mut state = lock(&self.pending.state);
                 if let Some(msg) = state.queue.pop_front() {
                     drop(state);
-                    self.pending.writable.notify_one();
+                    self.pending.writable.notify_waiters();
                     return Some(msg);
                 }
                 if state.closed || state.terminal {
