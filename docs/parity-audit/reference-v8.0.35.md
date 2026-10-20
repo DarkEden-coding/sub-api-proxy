@@ -286,20 +286,23 @@ All Go inspection uses `git show`, `git diff`, and `git ls-tree` against a read-
 clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
 
 - the exact tag commit;
-- stable IDs: all 1,687 retained IDs keep their milestone and section. Retained
-  non-suite rows keep their contract text apart from Go line numbers and LOC
-  counts. Suite rows are checked by filename and declarations only. The 28 listed
-  rewrites are exempt from the text comparison: for the 18 `upstream.*` moves only
-  the canonical path and previous alias are checked against Go's `config_v8.go`
-  alias table, and the 10 changed contracts above are not compared at all;
+- stable IDs: all 1,687 retained IDs keep their milestone, section and contract
+  text, compared without Go line numbers, LOC counts and link targets. Suite rows
+  compare their text outside the fragments regenerated from Go (line range,
+  declaration list, removed and moved declarations). Each of the 18 `upstream.*`
+  moves must name a canonical path and previous alias from Go's `config_v8.go`
+  alias table and must equal its old text once that prefix is rewritten back. The
+  other 10 rewrites are pinned to the approved text by a SHA-256 prefix;
 - test suites: the 228 added Go files, 989 suite entries with their declarations
-  and lines, the excluded support-only file, and 43 retired declarations;
-- routes: each of Go's 257 literal router and `ServeMux` registration call sites
-  under `internal/` and `sdk/` is cited by a route item whose method matches and
-  whose path ends with the registered literal, and every route item cites one.
-  Group and constant prefixes (such as `Group("/v1")`) are not resolved, so a
-  wrong prefix would pass, and a registration in a method loop counts as one
-  any-method call site;
+  and lines, the excluded support-only file, 43 retired declarations, and 5 moved
+  declarations found at their cited target lines;
+- routes: each of Go's 260 router and `ServeMux` registrations under `internal/`
+  and `sdk/` is cited by a route item with the same method and full path, and every
+  route item cites one. Full paths resolve gin `Group` prefixes, nested groups and
+  string constants; a `Handle(method, ...)` inside a method-list loop counts once
+  per listed method; `ServeMux` registrations accept any method. A router call the
+  resolver cannot reduce to methods and a full path fails unless it is listed as
+  unresolved (only the plugin route registration is);
 - config leaves: the 434 YAML leaves walked from Go's `Config` struct equal the
   checklist's legacy paths, and the 28 added since `6fecc6e` equal the additions
   section;
@@ -310,7 +313,7 @@ clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
 
 It does not check Rust behavior, whether item prose (handlers, types, defaults,
 meanings) is accurate, plugin capabilities and data contracts that predate
-`6fecc6e`, or the two routes Go serves without a literal path registration
+`6fecc6e`, or the two routes Go serves without a path registration
 (`M5-0020`, the WebUI OAuth forwarder, and `M5-0021`, the AI Studio relay route)
 and plugin-defined routes.
 
@@ -324,7 +327,8 @@ python3 docs/parity-audit/audit.py
 sha256sum -c /tmp/parity-summary.sha256
 ```
 
-The five Python tests pass. The route matcher accepts ordinary query strings and
+The seven Python tests pass, including the route resolver's group, constant,
+loop, `ServeMux` and unresolved-call cases. The route matcher accepts ordinary query strings and
 wildcard paths, but rejects route suffixes hidden in queries, embedded quotes,
 and line breaks. Its regression fails in six cases before the matcher fix.
 The matcher fix does not change any current judgments.

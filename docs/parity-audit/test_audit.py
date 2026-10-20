@@ -12,6 +12,9 @@ spec.loader.exec_module(audit)
 spec = importlib.util.spec_from_file_location("probe", Path(__file__).with_name("probe.py"))
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
+spec = importlib.util.spec_from_file_location("verify_reference", Path(__file__).with_name("verify_reference.py"))
+verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify)
 
 
 class SummaryTests(unittest.TestCase):
@@ -120,6 +123,42 @@ class SummaryTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "exactly one parity summary"):
                             audit.render([])
                     self.assertEqual(before, [p.read_text() for p in paths])
+
+
+class RouteRegistrationTests(unittest.TestCase):
+    def test_full_paths_resolve_groups_constants_loops_and_muxes(self):
+        source = """
+func (s *Server) routes() {
+	const prefix = "/v8/management"
+	s.engine.GET(prefix+"/oauth/callback", h)
+	v1 := s.engine.Group("/v1")
+	v1.POST("/audio/speech", h)
+	nested := v1.Group("/models")
+	nested.Any("/*model", h)
+	v8 := s.engine.Group(prefix)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		v8.Handle(method, "/config/*path", h)
+	}
+	v8.Handle("PUT", "/config.yaml", h)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback", h)
+	_, _ = windows.LocalFree(windows.Handle(ptr))
+}
+"""
+        self.assertEqual(verify.registrations_in("x.go", source), [
+            (4, "GET", "/v8/management/oauth/callback"),
+            (6, "POST", "/v1/audio/speech"),
+            (8, "ANY", "/v1/models/*model"),
+            (11, "GET", "/v8/management/config/*path"),
+            (11, "DELETE", "/v8/management/config/*path"),
+            (13, "PUT", "/v8/management/config.yaml"),
+            (15, "ANY", "/auth/callback"),
+        ])
+
+    def test_unresolved_registrations_fail(self):
+        for line in ('router.GET("/v1/x", h)', "s.engine.POST(path, h)", 'g := s.engine.Group(base)'):
+            with self.subTest(line=line), self.assertRaises(SystemExit):
+                verify.registrations_in("x.go", line)
 
 
 if __name__ == "__main__":

@@ -4,23 +4,24 @@
 Usage: python3 docs/parity-audit/verify_reference.py /path/to/CLIProxyAPI
 
 Derived from Go and compared both ways: test-suite files and their declarations,
-literal router registration call sites (method and path suffix; a registration
-inside a method loop accepts any method, and group and constant prefixes are not
-resolved), YAML config leaves, CLI flags, plugin RPC methods and
-added plugin API fields. Retained non-suite rows keep their text; suite rows are
-checked by filename and declarations, and the listed rewrites are exempt. Not
-checked: Rust behavior, fixture assertion coverage, whether each item's prose
-(handler, type, default, meaning) is accurate, and routes served without a literal
-path registration (the WebUI OAuth forwarder, the AI Studio relay route and plugin
-routes).
+router registrations (method and full path, resolving gin Group prefixes and string
+constants and expanding method-list loops), YAML config leaves, CLI flags, plugin
+RPC methods and added plugin API fields. Retained rows keep their text: suite rows
+outside the fragments regenerated from Go, the upstream.* moves after rewriting
+their approved prefix, and the other rewrites pinned to approved text. Not checked:
+Rust behavior, fixture assertion coverage, whether each item's prose (handler,
+type, default, meaning) is accurate, and routes served without a path registration
+(the WebUI OAuth forwarder, the AI Studio relay route and plugin routes).
 """
 
 from collections import Counter
 from functools import cache
+import hashlib
 from pathlib import Path
 import re
 import subprocess
 import sys
+import traceback
 
 import audit
 
@@ -34,15 +35,27 @@ SUPPORT_ONLY = {"internal/cache/issue6332_export_test.go"}
 # Retained IDs whose contract text deliberately changed (reference-v8.0.35.md).
 MOVED = {"M1-0027", "M1-0048", "M1-0049", "M1-0050", "M1-0051", "M1-0052", "M1-0053", "M1-0054", "M1-0055",
          "M1-0056", "M3-0137", "M3-0138", "M3-0139", "M3-0140", "M3-0141", "M3-0142", "M4-0133", "M4-0134"}
-REWRITTEN = MOVED | {"M1-0042", "M1-0062", "M1-0063", "M2-0014", "M3-0031", "M4-0230",
-                     "M5-0042", "M5-0043", "M5-0065", "M5-0066"}
+# The other rewrites, pinned to the approved text: the SHA-256 prefix of normalized(text).
+PINNED = {"M1-0042": "b9a953a09aa5ebc0", "M1-0062": "830d521c48ab6c71", "M1-0063": "18647c89d4c9b36e",
+          "M2-0014": "6b7ae606b4171005", "M3-0031": "f590c967b012cafd", "M4-0230": "637ee4b1a0c6f7e8",
+          "M5-0042": "e26df97a522de247", "M5-0043": "4ee93575f834c205", "M5-0065": "34eac9c87a5e46b5",
+          "M5-0066": "5557351c6d883bde"}
+REWRITTEN = MOVED | PINNED.keys()
 # Route items Go serves without a literal path registration: the WebUI OAuth
 # forwarder (a bare http.Server handler) and the AI Studio relay route.
 DYNAMIC_ROUTES = {"M5-0020", "M5-0021"}
 CONFIG_DIRS = ("internal/config/", "internal/registry/", "internal/pluginstore/", "sdk/pluginstore/", "sdk/config/")
 ROUTE_SECTIONS = ("1. Public", "Temporary OAuth", "/v8/management", "/v0/management")
-REGISTRATION = re.compile(r'\b\w+\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|HandleFunc|Handle)\('
-                          r'\s*(?:(\w+),\s*)?(?:\w+\s*\+\s*)?"(/[^"]*)"')
+# Router call sites. Every candidate must resolve to methods and a full path, or be listed here.
+CALL = re.compile(r"\b([A-Za-z_][\w.]*)\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|HandleFunc|Handle)\((.*)")
+GROUP = re.compile(r"^\s*(\w+)\s*:?=\s*([\w.]+)\.Group\(([^,)]*)")
+CONST = re.compile(r'^\s*const\s+(\w+)\s*=\s*"([^"]*)"\s*$')
+MUX = re.compile(r"^\s*(\w+)\s*:?=\s*http\.NewServeMux\(\)")
+LOOP = re.compile(r"^\s*for\s+_,\s*(\w+)\s*:=\s*range\s+\[\]string\{([^}]*)\}")
+GIN_ROOTS = ("s.engine",)
+NOT_ROUTERS = {"windows"}  # windows.Handle(ptr) is a type conversion.
+# Plugin-declared routes: Go registers them from a runtime path.
+UNRESOLVED = {("internal/api/server_routes.go", "s.engine.GET(trimmed,")}
 CITATION = re.compile(r"\b((?:cmd|internal|sdk)/[\w./\-]+\.go):(\d+)(?:-(\d+))?")
 STRUCT = re.compile(r"^type (\w+) struct \{\n(.*?)^\}", re.M | re.S)
 
@@ -53,6 +66,83 @@ def check(ok, message):
         sys.exit(f"FAIL: {message}")
 
 
+def path_expr(expr, consts):
+    """A Go path expression built from string literals and known constants, or None."""
+    out = ""
+    for part in expr.split("+"):
+        part = part.strip()
+        if m := re.fullmatch(r'"([^"]*)"', part):
+            out += m[1]
+        elif part in consts:
+            out += consts[part]
+        else:
+            return None
+    return out
+
+
+def method_names(expr, loops):
+    expr = expr.strip()
+    if m := re.fullmatch(r'"([A-Z]+)"', expr):
+        return [m[1]]
+    if m := re.fullmatch(r"http\.Method(\w+)", expr):
+        return [m[1].upper()]
+    return loops.get(expr)
+
+
+def registrations_in(path, text):
+    """[(line, method, full path)] for every router registration in one Go file.
+
+    Resolves gin Group prefixes (including nested groups) and string constants, and
+    expands a Handle(method, ...) inside `for _, method := range []string{...}` into
+    one registration per method. net/http ServeMux registrations match any method.
+    """
+    consts, prefixes, loops, out = {}, dict.fromkeys(GIN_ROOTS, ""), {}, []
+    muxes = set()
+    for number, line in enumerate(text.splitlines(), 1):
+        if m := CONST.match(line):
+            consts[m[1]] = m[2]
+        if m := MUX.match(line):
+            muxes.add(m[1])
+        if m := LOOP.match(line):
+            names = [method_names(x, {}) for x in m[2].split(",") if x.strip()]
+            if all(names):
+                loops[m[1]] = [n for x in names for n in x]
+        if (m := GROUP.match(line)) and m[2] in prefixes:
+            prefix = path_expr(m[3], consts)
+            check(prefix is not None, f"unresolved group prefix: {path}:{number}")
+            prefixes[m[1]] = prefixes[m[2]] + prefix
+        m = CALL.search(line)
+        if not m or m[1] in NOT_ROUTERS:
+            continue
+        receiver, verb, args = m[1], m[2], [a.strip() for a in m[3].split(",")]
+        methods, route = None, None
+        if receiver in muxes and verb in ("Handle", "HandleFunc"):
+            methods, route = ["ANY"], path_expr(args[0], consts)
+        elif receiver in prefixes and verb == "Handle" and len(args) > 1:
+            methods, route = method_names(args[0], loops), path_expr(args[1], consts)
+        elif receiver in prefixes and verb not in ("Handle", "HandleFunc"):
+            methods, route = ["ANY" if verb == "Any" else verb], path_expr(args[0], consts)
+        if methods and route is not None:
+            out.extend((number, method, prefixes.get(receiver, "") + route) for method in methods)
+        else:
+            check(any(path == p and line.strip().startswith(s) for p, s in UNRESOLVED),
+                  f"unrecognized router registration: {path}:{number}: {line.strip()}")
+    return out
+
+
+def moved_back(text):
+    """A move's text with its approved prefix rewritten to the previous v8 path."""
+    return re.sub(r"^`([^`]+)` \(previous v8 alias `([^`]+)`, ", r"`\2` (", text, count=1)
+
+
+def suite_skeleton(text):
+    """Suite text without the fragments regenerated from Go: line ranges, declarations, history."""
+    text = normalized(text)
+    text = re.sub(r" ?(?:Removed|Moved) upstream declarations: .*? \(historical, not active requirements\)\.", "", text)
+    text = re.sub(r" ?Moved upstream declarations: .*?\.$", "", text)
+    return re.sub(r"`(?:Test|Fuzz|Benchmark|Example)\w*` \(L\d+\)(?:; )?", "", text)
+
+
 def normalized(text):
     """Contract text without Go line numbers or LOC counts, which follow the tree."""
     text = audit.LINK.sub(r"\1", text)
@@ -61,10 +151,14 @@ def normalized(text):
 
 
 def main():
+    check(len(sys.argv) == 2, "usage: verify_reference.py /path/to/CLIProxyAPI")
     clone = sys.argv[1]
 
-    def git(*args):
-        return subprocess.check_output(["git", "-C", clone, *args], text=True)
+    def git(*args, repo=clone):
+        try:
+            return subprocess.check_output(["git", "-C", repo, *args], text=True, stderr=subprocess.PIPE)
+        except (OSError, subprocess.CalledProcessError) as e:
+            sys.exit(f"FAIL: git {' '.join(args)} in {repo}: {getattr(e, 'stderr', '') or e}")
 
     @cache
     def source(ref, path):
@@ -85,10 +179,10 @@ def main():
     by_id = {r["id"]: r for r in rows}
     check(len(by_id) == len(rows), "duplicate checklist IDs")
 
-    # Stable IDs: retained IDs keep their milestone and section. The text checks below
-    # have explicit exceptions: suite rows and the listed rewrites.
-    original = subprocess.check_output(
-        ["git", "-C", audit.ROOT, "show", f"{BASE}:docs/parity-audit/checklist.md"], text=True)
+    # Stable IDs: retained IDs keep their milestone, section and text. Suite rows compare
+    # their text outside the fragments regenerated from Go, the 18 moves compare after
+    # rewriting the approved prefix, and the other rewrites are pinned to approved text.
+    original = git("show", f"{BASE}:docs/parity-audit/checklist.md", repo=audit.ROOT)
     old, section = {}, None
     for line in original.splitlines():
         if m := re.match(r"^(#{2,3}) (.*)", line):
@@ -102,17 +196,22 @@ def main():
         check((now["ms"], now["section"]) == (before["ms"], before["section"]), f"{i} moved milestone or section")
         suite = audit.test_file(before["text"])
         if suite:
-            # Declaration lists follow Go and are checked against it below.
+            # Declaration lists and history follow Go and are checked against it below.
             check(audit.test_file(now["text"]) == suite, f"suite ID changed its file: {i}")
+            check(suite_skeleton(now["text"]) == suite_skeleton(before["text"]), f"suite text changed: {i}")
         elif normalized(now["text"]) != normalized(before["text"]):
             changed.add(i)
     check(changed == REWRITTEN, f"retained contracts rewritten without a listed reason: {sorted(changed ^ REWRITTEN)}")
     aliases = set(re.findall(r'\{"(oauth\.providers\.[^"]+)", "(upstream\.[^"]+)"\}',
                              source(NEW, "internal/config/config_v8.go")))
-    for i in MOVED:
+    for i in sorted(MOVED):
         canonical = re.match(r"`([^`]+)` \(previous v8 alias `([^`]+)`", by_id[i]["text"])
-        check(canonical and old[i]["text"].startswith(f"`{canonical[2]}`")
-              and (canonical[2], canonical[1]) in aliases, f"{i} is not a Go upstream.* move")
+        check(canonical and (canonical[2], canonical[1]) in aliases, f"{i} is not a Go upstream.* move")
+        check(normalized(moved_back(by_id[i]["text"])) == normalized(old[i]["text"]),
+              f"{i} changed more than its approved prefix")
+    for i, digest in sorted(PINNED.items()):
+        check(hashlib.sha256(normalized(by_id[i]["text"]).encode()).hexdigest()[:16] == digest,
+              f"{i} differs from its approved rewrite")
     new_ids = by_id.keys() - old.keys()
     check(len(new_ids) == 264, f"expected 264 additions, got {len(new_ids)}")
     # The freeze recorded every addition as partial or missing; porting work may since
@@ -132,7 +231,7 @@ def main():
     check(not SUPPORT_ONLY & suites.keys(), "support-only files are not suites")
     check(not any(TEST.search(source(NEW, p)) for p in SUPPORT_ONLY), "a support-only file declares tests")
     check(not test_files(OLD) - test_files(NEW), "removed Go test files need explicit retirement")
-    retired = 0
+    retired = moved = 0
     for path, row in suites.items():
         text = source(NEW, path)
         declarations = [(m[1], text.count("\n", 0, m.start()) + 1) for m in TEST.finditer(text)]
@@ -143,7 +242,13 @@ def main():
             names = re.findall(r"`([^`]+)`", note[1])
             retired += len(names)
             check(not set(names) & set(audit.test_cases(row["text"])), f"retired cases still active: {path}")
+        for name, target, line in re.findall(r"`(\w+)` to ([\w./\-]+\.go):(\d+)", row["text"]):
+            moved += 1
+            lines = source(NEW, target).splitlines()
+            check(0 < int(line) <= len(lines) and lines[int(line) - 1].startswith(f"func {name}("),
+                  f"moved declaration not at its target: {row['id']} {name}")
     check(retired == 43, f"expected 43 retired declarations, got {retired}")
+    check(moved == 5, f"expected 5 moved declarations, got {moved}")
 
     page = Path(audit.HERE, "checklist.md").read_text()
     citations = LINK.findall(page)
@@ -159,25 +264,17 @@ def main():
     def citing(path, line):
         return {i for first, last, i in cited.get(path, ()) if first <= line <= last}
 
-    # Routes: every literal registration is an item citing it, and every route item cites one.
-    registrations = []
-    for path in go_files(NEW, ("internal/", "sdk/")):
-        text = source(NEW, path)
-        if "Handle" not in text and ".GET(" not in text and ".POST(" not in text:
-            continue
-        for number, line in enumerate(text.splitlines(), 1):
-            if m := REGISTRATION.search(line):
-                method = "ANY" if m[1] in ("Any", "HandleFunc") or (m[1] == "Handle" and not m[2]) else \
-                    "*" if m[1] == "Handle" else m[1]
-                registrations.append((path, number, method, m[3]))
+    # Routes: every registration (method and full path) is an item citing it, and every
+    # route item cites a registration with its method and full path.
+    registrations = [(path, *r) for path in go_files(NEW, ("internal/", "sdk/"))
+                     for r in registrations_in(path, source(NEW, path))]
     route_items = {}
     for row in rows:
         if row["section"].startswith(ROUTE_SECTIONS) and (m := re.search(r"`([A-Z]+) (/[^`\s]*)`", row["text"])):
             route_items[row["id"]] = (m[1], m[2])
 
     def matches(item, registration):
-        method, path = route_items[item]
-        return registration[2] in (method, "*") and path.endswith(registration[3])
+        return route_items[item] == registration[2:]
 
     for registration in registrations:
         check(any(matches(i, registration) for i in citing(*registration[:2]) if i in route_items),
@@ -194,6 +291,7 @@ def main():
             structs.update((m[1], m[2]) for m in STRUCT.finditer(text))
             alias.update((m[1], m[2]) for m in re.finditer(r"^type (\w+) = (?:\w+\.)?(\w+)\s*$", text, re.M)
                          if m[1] != m[2])
+        check("Config" in structs, f"no Config struct at {ref}")
         out = set()
 
         def walk(name, prefix, seen):
@@ -228,10 +326,12 @@ def main():
         if m := re.search(r"legacy `([^`]+)`\)", row["text"]):
             listed[re.sub(r"\{[^}]*\}", "{}", m[1])] += 1
     go_leaves, old_leaves = leaves(NEW), leaves(OLD)
-    check(max(listed.values()) == 1, "duplicate config leaves")
+    check(listed and max(listed.values()) == 1, "missing or duplicate config leaves")
     check(set(listed) == go_leaves, f"config leaves differ from Go: {sorted(set(listed) ^ go_leaves)}")
-    added_leaves = {re.sub(r"\{[^}]*\}", "{}", re.search(r"legacy `([^`]+)`\)", r["text"])[1])
-                    for r in config_rows if r["section"] == "5. Config: v8.0.35 additions"}
+    additions = [r for r in config_rows if r["section"] == "5. Config: v8.0.35 additions"]
+    legacy = [re.search(r"legacy `([^`]+)`\)", r["text"]) for r in additions]
+    check(all(legacy), "a config addition names no legacy path")
+    added_leaves = {re.sub(r"\{[^}]*\}", "{}", m[1]) for m in legacy}
     check(added_leaves == go_leaves - old_leaves and old_leaves <= go_leaves, "config additions differ from Go")
 
     # CLI flags, including the discover subcommand's flag set.
@@ -271,17 +371,20 @@ def main():
 
     totals = Counter(r["ms"] for r in rows)
     check(totals == {"M1": 151, "M2": 189, "M3": 424, "M4": 589, "M5": 331, "M6": 267}, totals)
-    print(f"OK: {len(rows)} items, {len(old)} retained IDs (non-suite text compared; {len(changed)} listed "
-          f"rewrites exempt, the {len(MOVED)} moves checked by alias only); "
-          f"{len(added) - len(SUPPORT_ONLY)} added / {len(suites)} total suites; {retired} retired declarations; "
-          f"{len(registrations)} literal route call sites (method and path suffix; method-loop registrations accept any method); {len(go_leaves)} config leaves "
+    print(f"OK: {len(rows)} items, {len(old)} retained IDs (text compared; suite rows outside regenerated "
+          f"fragments, {len(MOVED)} moves after their approved prefix, {len(PINNED)} rewrites pinned); "
+          f"{len(added) - len(SUPPORT_ONLY)} added / {len(suites)} total suites; {retired} retired and {moved} moved "
+          f"declarations; {len(registrations)} route registrations (method and full path); {len(go_leaves)} config leaves "
           f"({len(go_leaves - old_leaves)} added); {len(flags)} CLI flags; {len(methods)} RPC methods; "
           f"{len(added_fields)} added plugin API fields; {len(citations)} current, in-bounds citations")
-    print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), suite-row text "
-          "beyond filename and declarations, the remaining text of listed rewrites, route group and constant "
-          "prefixes, plugin capabilities and pre-existing data contracts, and routes without a literal path "
+    print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), plugin capabilities "
+          "and pre-existing data contracts, and routes without a path registration "
           f"({', '.join(sorted(DYNAMIC_ROUTES))} and plugin routes)")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # Report anything unforeseen as a failure, not a crash.
+        traceback.print_exc()
+        sys.exit("FAIL: unexpected error (traceback above)")
