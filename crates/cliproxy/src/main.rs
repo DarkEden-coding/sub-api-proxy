@@ -16,7 +16,7 @@ use cpa_core::config::Config;
 use cpa_exec::Executors;
 use cpa_exec::claude::{ClaudeExecutor, DEFAULT_BASE_URL};
 use cpa_server::Runtime;
-use socket2::{Domain, Socket, Type};
+use cpa_server::listener::bind;
 
 /// Same strings as the management `X-CPA-*` headers.
 const VERSION: &str = concat!("cliproxy-rs-", env!("CARGO_PKG_VERSION"));
@@ -567,46 +567,6 @@ async fn wait_for_cloud_deploy() {
     );
     shutdown_signal().await;
     tracing::info!("Cloud deploy mode: Shutdown signal received; exiting");
-}
-
-/// Binds like Go's `net.Listen("tcp", host:port)`. An empty host is one dual-stack socket
-/// on `[::]` with `IPV6_V6ONLY` cleared, falling back to `0.0.0.0` only when the host has
-/// no usable IPv6. Other errors, such as the port being in use, are returned.
-fn bind(host: &str, port: u16) -> io::Result<std::net::TcpListener> {
-    if !host.is_empty() {
-        let listener = std::net::TcpListener::bind((host, port))?;
-        listener.set_nonblocking(true)?;
-        return Ok(listener);
-    }
-    match listen(Domain::IPV6, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)), true) {
-        Err(e) if no_ipv6(&e) => listen(Domain::IPV4, SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)), false),
-        other => other,
-    }
-}
-
-/// The host has no usable IPv6: the address family is unsupported or `::` cannot be
-/// assigned. Windows reports Winsock codes, not the C runtime's errno values.
-fn no_ipv6(e: &io::Error) -> bool {
-    #[cfg(not(windows))]
-    const EAFNOSUPPORT: i32 = libc::EAFNOSUPPORT;
-    #[cfg(windows)]
-    const EAFNOSUPPORT: i32 = 10047; // WSAEAFNOSUPPORT
-    e.kind() == io::ErrorKind::AddrNotAvailable || e.raw_os_error() == Some(EAFNOSUPPORT)
-}
-
-fn listen(domain: Domain, addr: SocketAddr, dual_stack: bool) -> io::Result<std::net::TcpListener> {
-    let socket = Socket::new(domain, Type::STREAM, None)?;
-    if dual_stack {
-        socket.set_only_v6(false)?;
-    }
-    // Go sets SO_REUSEADDR except on Windows, where it would let another socket bind a
-    // port already in use (net/sockopt_windows.go).
-    #[cfg(not(windows))]
-    socket.set_reuse_address(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(1024)?;
-    socket.set_nonblocking(true)?;
-    Ok(socket.into())
 }
 
 /// Go `flag.ExitOnError` after a parse error: the message, the usage, exit 2.
@@ -1374,6 +1334,7 @@ async fn serve(
     }
     // Go applies the plugin config before serving; later publishes resync the host.
     cpa_server::plugins::start(&rt).await;
+    let pprof = cpa_server::pprof::Server::start(&rt);
     // Home mode: the config comes from Home, and management answers 404 (Go
     // `managementAvailable`).
     let _watcher = home.is_none().then(|| cpa_server::watching::start(&management));
@@ -1422,26 +1383,41 @@ async fn serve(
         }
     };
     let mut home_failed = false;
+    let mut server_done = false;
     let served = tokio::select! {
-        r = &mut server => r.map_err(anyhow::Error::from),
+        r = &mut server => {
+            server_done = true;
+            r.map_err(anyhow::Error::from)
+        },
         _ = shutdown => Ok(()),
         _ = home_stopped => {
             home_failed = true;
             Err(anyhow::anyhow!("home subscriber stopped; shutting down"))
         }
     };
-    // Go's Service.Shutdown sends the mDNS goodbye (shutdownDiscovery) before
-    // Server.Stop, which closes the HTTP server without draining (`http.Server.Close`);
-    // dropping the server future afterwards does the same.
-    advertiser.shutdown().await;
-    drop(server);
-    // Go drains the Home registry and flushes releases before exiting.
-    if let Some((shutdown, task)) = home
-        && !home_failed
-    {
-        shutdown.cancel();
-        let _ = task.await;
+    // Go v8.0.35 stops Home, pprof, discovery, then the API server. Keep serving
+    // API requests while Home drains and flushes releases and pprof drains.
+    let cleanup = async {
+        if let Some((shutdown, task)) = home
+            && !home_failed
+        {
+            shutdown.cancel();
+            let _ = task.await;
+        }
+        pprof.shutdown().await;
+        advertiser.shutdown().await;
+    };
+    tokio::pin!(cleanup);
+    if server_done {
+        cleanup.await;
+    } else {
+        tokio::select! {
+            _ = &mut cleanup => {},
+            _ = &mut server => cleanup.await,
+        }
     }
+    // Server.Stop closes the HTTP server without draining (http.Server.Close).
+    drop(server);
     served
 }
 
@@ -1830,14 +1806,5 @@ mod tests {
             io::ErrorKind::AddrInUse,
             "must not silently fall back to IPv4"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_missing_ipv6_falls_back_to_ipv4() {
-        assert!(no_ipv6(&io::Error::from_raw_os_error(libc::EAFNOSUPPORT)));
-        assert!(no_ipv6(&io::Error::from_raw_os_error(libc::EADDRNOTAVAIL)));
-        assert!(!no_ipv6(&io::Error::from_raw_os_error(libc::EADDRINUSE)));
-        assert!(!no_ipv6(&io::Error::from_raw_os_error(libc::EACCES)));
     }
 }
