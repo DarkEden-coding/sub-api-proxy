@@ -4,8 +4,9 @@
 Usage: python3 docs/parity-audit/verify_reference.py /path/to/CLIProxyAPI
 
 Derived from Go and compared both ways: test-suite files and their declarations,
-literal router registration call sites (method and path suffix; group and constant
-prefixes are not resolved), YAML config leaves, CLI flags, plugin RPC methods and
+literal router registration call sites (method and path suffix; a registration
+inside a method loop accepts any method, and group and constant prefixes are not
+resolved), YAML config leaves, CLI flags, plugin RPC methods and
 added plugin API fields. Retained non-suite rows keep their text; suite rows are
 checked by filename and declarations, and the listed rewrites are exempt. Not
 checked: Rust behavior, fixture assertion coverage, whether each item's prose
@@ -84,7 +85,8 @@ def main():
     by_id = {r["id"]: r for r in rows}
     check(len(by_id) == len(rows), "duplicate checklist IDs")
 
-    # Stable IDs: every retained item keeps its milestone, section and contract.
+    # Stable IDs: retained IDs keep their milestone and section. The text checks below
+    # have explicit exceptions: suite rows and the listed rewrites.
     original = subprocess.check_output(
         ["git", "-C", audit.ROOT, "show", f"{BASE}:docs/parity-audit/checklist.md"], text=True)
     old, section = {}, None
@@ -269,7 +271,7 @@ def main():
     print(f"OK: {len(rows)} items, {len(old)} retained IDs (non-suite text compared; {len(changed)} listed "
           f"rewrites exempt, the {len(MOVED)} moves checked by alias only); "
           f"{len(added) - len(SUPPORT_ONLY)} added / {len(suites)} total suites; {retired} retired declarations; "
-          f"{len(registrations)} literal route call sites (method and path suffix); {len(go_leaves)} config leaves "
+          f"{len(registrations)} literal route call sites (method and path suffix; method-loop registrations accept any method); {len(go_leaves)} config leaves "
           f"({len(go_leaves - old_leaves)} added); {len(flags)} CLI flags; {len(methods)} RPC methods; "
           f"{len(added_fields)} added plugin API fields; {len(citations)} current, in-bounds citations")
     print("Not checked: Rust behavior, item prose (handlers, types, defaults, meanings), suite-row text "
