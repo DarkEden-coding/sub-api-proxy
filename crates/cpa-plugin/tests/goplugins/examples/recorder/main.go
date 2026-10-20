@@ -15,6 +15,9 @@
 // Any other method is answered from <record>/respond/<label>/<method>.json when that
 // file exists: the file is the complete response envelope, written by the test before
 // the call.
+// <method>.once.json, when present, answers the next call instead and is then removed.
+// executor.execute_stream.script.once.json, {"chunks":["..."],"error":"..."}, makes the
+// next asynchronous stream emit those chunks and close with that error, then is removed.
 //
 // A management.handle request whose body is {"calls":[{"method":...,"request":{...}}]}
 // makes those host callbacks (with host_callback_id filled in when absent) and returns
@@ -224,8 +227,12 @@ func canned(label, method string) ([]byte, int, bool) {
 	if base == "" {
 		return nil, 0, false
 	}
-	raw, err := os.ReadFile(filepath.Join(base, "respond", label, method+".json"))
-	if err != nil {
+	// <method>.once.json answers one call, then is removed.
+	once := filepath.Join(base, "respond", label, method+".once.json")
+	raw, err := os.ReadFile(once)
+	if err == nil {
+		_ = os.Remove(once)
+	} else if raw, err = os.ReadFile(filepath.Join(base, "respond", label, method+".json")); err != nil {
 		return nil, 0, false
 	}
 	var env envelope
@@ -405,6 +412,17 @@ func executeStream(request []byte) ([]byte, int) {
 			"chunks":  []pluginapi.ExecutorStreamChunk{{Payload: []byte("a")}, {Payload: []byte("b")}},
 		})
 	}
+	if script, found := streamScript(); found {
+		go func() {
+			for _, chunk := range script.Chunks {
+				raw, _ := json.Marshal(map[string]any{"stream_id": req.StreamID, "payload": []byte(chunk)})
+				callHost(pluginabi.MethodHostStreamEmit, raw)
+			}
+			raw, _ := json.Marshal(map[string]any{"stream_id": req.StreamID, "error": script.Error})
+			callHost(pluginabi.MethodHostStreamClose, raw)
+		}()
+		return ok(map[string]any{"headers": map[string][]string{"X-Stream": {"script"}}})
+	}
 	go func() {
 		for _, chunk := range []string{"one", "two", "three"} {
 			raw, _ := json.Marshal(map[string]any{"stream_id": req.StreamID, "payload": []byte(chunk)})
@@ -418,6 +436,29 @@ func executeStream(request []byte) ([]byte, int) {
 		callHost(pluginabi.MethodHostStreamClose, raw)
 	}()
 	return ok(map[string]any{"headers": map[string][]string{"X-Stream": {"async"}}})
+}
+
+type streamScriptFile struct {
+	Chunks []string `json:"chunks"`
+	Error  string   `json:"error"`
+}
+
+// streamScript reads and removes executor.execute_stream.script.once.json.
+func streamScript() (streamScriptFile, bool) {
+	mu.Lock()
+	base, name := dir, label
+	mu.Unlock()
+	var script streamScriptFile
+	if base == "" {
+		return script, false
+	}
+	path := filepath.Join(base, "respond", name, pluginabi.MethodExecutorExecuteStream+".script.once.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return script, false
+	}
+	_ = os.Remove(path)
+	return script, json.Unmarshal(raw, &script) == nil
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

@@ -33,7 +33,7 @@ mod plugin_auth;
 mod plugin_oauth;
 mod plugin_store;
 mod plugins;
-mod quota;
+pub(crate) mod quota;
 mod quota_probe;
 pub use access::cors;
 pub(crate) use access::{Cors, cors_headers};

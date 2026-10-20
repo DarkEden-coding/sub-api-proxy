@@ -1177,7 +1177,7 @@ async fn run_routed(
                 .await;
         }
         let wait = {
-            let admit = crate::runtime::admission(&registry, &aliases, &selection, &rt.executors);
+            let admit = crate::runtime::admission(&registry, &aliases, &selection, &rt.executors, rt.plugin_runtime());
             rt.store().retry_wait(&selection, &policy, status, &attempted, &admit)
         };
         let Some(wait) = wait else {
@@ -2115,6 +2115,9 @@ async fn attempt(
                 None => credential,
             };
             let credential = rt.for_executor(&credential);
+            if let Some(adapter) = rt.plugin_runtime().executor(&credential, cfg) {
+                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, req).await;
+            }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
                 // An after-auth interceptor may rewrite the path (Go's request_path metadata).

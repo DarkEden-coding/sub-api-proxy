@@ -647,6 +647,18 @@ fn synthesize(cfg: &Config) -> Vec<(Credential, Option<KeyLocation>)> {
     out
 }
 
+/// Lowercased names of the enabled `openai-compatibility` entries that
+/// `SanitizeOpenAICompatibility` keeps (a base URL is required).
+pub fn openai_compat_names(cfg: &Config) -> Vec<String> {
+    groups(cfg, "openai-compatibility")
+        .iter()
+        .filter_map(Value::as_mapping)
+        .filter(|g| !text(g.get("base-url")).trim().is_empty() && !boolean(g.get("disabled")).unwrap_or(false))
+        .map(|g| text(g.get("name")).trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 fn openai_compat(cfg: &Config, ids: &mut Ids) -> Vec<Credential> {
     let mut out = Vec::new();
     let mut index = 0;

@@ -212,6 +212,24 @@ impl Runner {
             if let Ok(res) = runner.http(&json!({"method": "GET", "path": "/healthz"}))
                 && res["status"] == 200
             {
+                // Steps compare request-time calls: Go registers plugin executors only
+                // after its listener is up, so the generator waits for that and drops
+                // startup calls. Here the sync finished before serving; check that it
+                // resolved every executor plugin's provider, then drop the calls.
+                let startup = runner.records(&json!({"methods": ["executor.identifier"]}));
+                let mut asked: Vec<&str> = startup
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["label"].as_str().unwrap())
+                    .collect();
+                asked.dedup();
+                assert_eq!(
+                    asked,
+                    executor_labels(scenario),
+                    "{}: startup executor.identifier",
+                    scenario["name"]
+                );
                 return runner;
             }
             if Instant::now() > deadline || runner.child.try_wait().unwrap().is_some() {
@@ -514,6 +532,25 @@ fn callback_ids(s: &str) -> String {
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Labels of the scenario's plugins that declare an executor, in label order.
+fn executor_labels(scenario: &Value) -> Vec<&str> {
+    let mut label = None;
+    let mut out = Vec::new();
+    for line in scenario["config"].as_str().unwrap_or_default().lines() {
+        let line = line.trim();
+        if let Some(l) = line.strip_prefix("label: ") {
+            label = Some(l.trim());
+        } else if let Some(caps) = line.strip_prefix("caps: ")
+            && caps.split(',').any(|c| c.trim() == "executor")
+            && let Some(l) = label.take()
+        {
+            out.push(l);
+        }
+    }
+    out.sort_unstable();
     out
 }
 

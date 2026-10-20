@@ -302,7 +302,9 @@ async fn run_executor(
         .executor_execute_stream(&adapter, &request, &scope.0)
         .await
         .map_err(call_failure)?;
-    let mut rest = translate_stream(negotiated, request, opened.chunks, scope);
+    let mut rest = translate_stream(negotiated, request, opened.chunks, scope, |error| {
+        ExecError::local(0, FailureScope::Request, error)
+    });
     let first = match rest.next().await {
         Some(Ok(event)) => Some(event),
         Some(Err(error)) => return Err(Failure::Exec(error)),
@@ -315,7 +317,119 @@ async fn run_executor(
     })
 }
 
-/// Go's execution metadata (`pluginExecutorRequest`, `executeWithAuthManager`): the
+/// Go `executorAdapter.Execute`, `ExecuteStream` and `CountTokens` with an auth: a
+/// credential whose provider a plugin executor registered, chosen by the ordinary
+/// selection loop. `adapter` is the registered executor; a plugin replaced since then
+/// does not serve it (Go `pluginIdentityCurrent`). The answer is in the client's
+/// format, as built-in executors give it.
+/// ponytail: plugin executors publish no usage record here yet (Go's executor usage
+/// reporter); the server's response parsing still counts client-format usage.
+pub(crate) async fn execute_credential(
+    rt: &Runtime,
+    call: &Call,
+    adapter: &cpa_plugin::executor::Adapter,
+    credential: &cpa_core::credential::Credential,
+    req: cpa_core::exec::ExecRequest,
+) -> Result<cpa_core::exec::ExecResponse, ExecError> {
+    let host = rt.plugins();
+    let count = req.operation == Operation::CountTokens;
+    let stream = req.stream && !count;
+    let source = handler_type(call);
+    let response = if count { source } else { response_type(call) };
+    let negotiated = adapter
+        .negotiate(source, response, host.has_response_translator())
+        .map_err(|e| attempt_error(0, e))?;
+    let payload = if negotiated.input_requested == negotiated.input {
+        req.body.clone()
+    } else {
+        translate_request(
+            &negotiated.input_requested,
+            &negotiated.input,
+            &req.model,
+            &req.body,
+            stream,
+        )
+    };
+    // Go `storageJSONFromAuth` without a plugin token storage: the metadata as JSON.
+    let auth_metadata: Metadata = credential.metadata.clone().into_iter().collect();
+    // Go `applyRequestAfterAuthInterceptor` rewrites only the path in the metadata; the
+    // handler's reasoning effort, service tier and generate facts stay.
+    let mut metadata = execution_metadata(call, &req.model);
+    if !req.request_path.trim().is_empty() {
+        metadata.insert("request_path".into(), Value::String(req.request_path.trim().to_owned()));
+    }
+    let request = ExecutorRequest {
+        auth_id: credential.id.clone(),
+        auth_provider: credential.provider.clone(),
+        model: req.model.clone(),
+        format: negotiated.output.clone(),
+        stream,
+        alt: req.alt.clone().unwrap_or_default(),
+        headers: super::go_request_header(&req.headers),
+        query: super::go_values(&query()),
+        original_request: req.original_body.clone(),
+        source_format: negotiated.input.clone(),
+        payload,
+        metadata,
+        storage_json: Bytes::from(cpa_plugin::gojson::to_vec(&auth_metadata)),
+        auth_metadata,
+        auth_attributes: crate::management::quota::go_attributes(credential),
+    };
+    // The router path's scope (`Scope::new`) with the post-auth headers and path, so
+    // nested `host.model.*` calls keep the pin, session and request context.
+    let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
+    let scope = Scope(RequestScope {
+        request_id: crate::observability::current_request_id().unwrap_or_default(),
+        capture: req.capture().clone(),
+        cancel: inherited.cancel.child_token(),
+        headers: super::go_request_header(&req.headers),
+        query: super::go_values(&query()),
+        pinned_auth_id: call.pinned(),
+        execution_session: call.execution_session.clone(),
+        request_path: req.request_path.clone(),
+    });
+    if !stream {
+        let resp = if count {
+            host.executor_count_tokens(adapter, &request, &scope.0).await
+        } else {
+            host.executor_execute(adapter, &request, &scope.0).await
+        }
+        .map_err(|e| attempt_error(e.status(), e.to_string()))?;
+        return Ok(cpa_core::exec::ExecResponse {
+            status: 200,
+            headers: header_map(&resp.headers),
+            body: cpa_core::exec::ResponseBody::Buffered(translate_response(&negotiated, &request, resp.payload)),
+        });
+    }
+    let opened = host
+        .executor_execute_stream(adapter, &request, &scope.0)
+        .await
+        .map_err(|e| attempt_error(e.status(), e.to_string()))?;
+    let headers = header_map(&opened.headers);
+    Ok(cpa_core::exec::ExecResponse {
+        status: 200,
+        headers,
+        body: cpa_core::exec::ResponseBody::Stream(translate_stream(
+            negotiated,
+            request,
+            opened.chunks,
+            scope,
+            |error| attempt_error(0, error),
+        )),
+    })
+}
+
+/// A credential-bound plugin executor's failure as an attempt on that credential. Go's
+/// `rpcError` carries a status but neither `IsRequestScoped` nor `IsCredentialScoped`,
+/// and a plain error (an unavailable executor, a failed negotiation, an undecodable
+/// answer) carries neither; the auth manager classifies both by status and body. So
+/// the error is model-scoped with the plugin's status (0 when it gave none) and the
+/// shared classifier (`classify.rs`) decides failover, cooldown and retry rounds,
+/// including Go's message fallbacks for statusless errors.
+fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
+    ExecError::local(status, FailureScope::Model, message)
+}
+
 /// request context plus the request's model facts; `model` is the resolved model.
 pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     let mut meta = request_metadata(call);
@@ -416,6 +530,7 @@ fn translate_stream(
     req: ExecutorRequest,
     chunks: BoxStream<'static, Chunk>,
     scope: Scope,
+    chunk_error: fn(String) -> ExecError,
 ) -> ExecStream {
     let translating = !n.requested.is_empty() && n.output != n.requested;
     let formats = Format::parse(&n.requested).zip(Format::parse(&n.output));
@@ -442,6 +557,7 @@ fn translate_stream(
         chunks,
         ready: VecDeque::new(),
         done: false,
+        chunk_error,
         _scope: scope,
     };
     Box::pin(futures_util::stream::unfold(state, |mut s| async move {
@@ -460,8 +576,7 @@ fn translate_stream(
                         }
                     }
                     if let Some(error) = chunk.error {
-                        s.ready
-                            .push_back(Err(ExecError::local(0, FailureScope::Request, error)));
+                        s.ready.push_back(Err((s.chunk_error)(error)));
                         s.done = true;
                     }
                 }
@@ -490,6 +605,10 @@ struct StreamState {
     chunks: BoxStream<'static, Chunk>,
     ready: VecDeque<Result<Bytes, ExecError>>,
     done: bool,
+    /// A chunk error: request-scoped on the model router path; on the credential-bound
+    /// path an attempt (Go hands the plugin's statusless chunk error to the auth
+    /// manager's stream bootstrap, which classifies it like an execution error).
+    chunk_error: fn(String) -> ExecError,
     _scope: Scope,
 }
 

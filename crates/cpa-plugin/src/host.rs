@@ -151,7 +151,6 @@ pub(crate) struct State {
     /// Go `modelProviders`: plugin ID to the provider its models registered under.
     pub model_providers: HashMap<String, String>,
     pub model_registrations: HashMap<String, crate::models::ModelRegistration>,
-    pub model_client_ids: HashSet<String>,
     pub executor_providers: HashSet<String>,
     pub executor_model_client_ids: HashSet<String>,
     pub provider_models: BTreeMap<String, Vec<api::ModelInfo>>,
@@ -229,7 +228,10 @@ impl Host {
             .clone()
     }
 
-    fn store_snapshot(&self, snapshot: Snapshot) {
+    /// Publishes a snapshot. Takes the state guard so that publication and the active
+    /// maps change in one critical section (Go `h.mu`): a registration that compares
+    /// snapshots under the state lock then never commits against a half-applied change.
+    fn store_snapshot(&self, _state: &mut State, snapshot: Snapshot) {
         *self
             .inner
             .snapshot
@@ -520,13 +522,16 @@ impl Host {
                 state.cleanup_files_pending = false;
             }
             rebuild_active_maps(&mut state, &records);
+            self.store_snapshot(
+                &mut state,
+                Snapshot {
+                    enabled: true,
+                    records,
+                    ..Default::default()
+                },
+            );
             cleanup
         };
-        self.store_snapshot(Snapshot {
-            enabled: true,
-            records,
-            ..Default::default()
-        });
         self.refresh_thinking_providers().await;
         for (id, version, path, old_version, old_path) in hot_reloads {
             tracing::info!(plugin_id = %id, active_version = %version, active_path = %path.display(), retired_version = %old_version, retired_path = %old_path.display(), "pluginhost: plugin hot reloaded");
@@ -541,8 +546,7 @@ impl Host {
         state.management_routes.clear();
         state.resource_routes.clear();
         rebuild_active_maps(&mut state, &[]);
-        drop(state);
-        self.store_snapshot(Snapshot::default());
+        self.store_snapshot(&mut state, Snapshot::default());
     }
 
     fn client_of(&self, id: &str) -> Option<Arc<GuardedClient>> {
@@ -783,15 +787,20 @@ impl Host {
                 state.file_versions.remove(&clean_path(&target.path));
             }
             remove_runtime_state(&mut state, id);
+            #[cfg(test)]
+            tests::unload_hook();
+            let snapshot = self.snapshot();
+            let records = snapshot.records.iter().filter(|r| r.id != id).cloned().collect();
+            self.store_snapshot(
+                &mut state,
+                Snapshot {
+                    enabled: snapshot.enabled,
+                    records,
+                    ..Default::default()
+                },
+            );
             targets
         };
-        let snapshot = self.snapshot();
-        let records = snapshot.records.iter().filter(|r| r.id != id).cloned().collect();
-        self.store_snapshot(Snapshot {
-            enabled: snapshot.enabled,
-            records,
-            ..Default::default()
-        });
         self.inner.callbacks.close_plugin(id);
         self.refresh_thinking_providers().await;
         for target in targets {
@@ -817,7 +826,6 @@ impl Host {
             targets.extend(state.retired.drain().flat_map(|(_, lps)| lps));
             state.management_routes.clear();
             state.resource_routes.clear();
-            state.model_client_ids.clear();
             state.executor_model_client_ids.clear();
             state.model_providers.clear();
             state.model_registrations.clear();
@@ -828,9 +836,9 @@ impl Host {
             state.file_versions.clear();
             state.active_versions.clear();
             state.active_paths.clear();
+            self.store_snapshot(&mut state, Snapshot::default());
             targets
         };
-        self.store_snapshot(Snapshot::default());
         self.state().thinking_providers.clear();
         self.inner.callbacks.close_all();
         for target in targets {
@@ -964,6 +972,67 @@ pub fn bytes_of(v: &[u8]) -> Bytes {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type Hook = Box<dyn Fn() + Send + Sync>;
+    static UNLOAD_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    /// Runs inside `unload_plugin` after its state change, before the snapshot is
+    /// published.
+    pub(super) fn unload_hook() {
+        if let Some(hook) = lock(&UNLOAD_HOOK).as_ref() {
+            hook();
+        }
+    }
+
+    struct OneLoader(Arc<dyn PluginClient>);
+
+    impl Loader for OneLoader {
+        fn open(
+            &self,
+            _: &PluginFile,
+            _: Arc<dyn CallbackHandler>,
+            _: Arc<CallbackInstance>,
+        ) -> Result<Arc<dyn PluginClient>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Go publishes the active maps and the snapshot under one lock. Registrations
+    /// compare snapshots and commit under the state lock, so while an unload has
+    /// changed the state but not yet published its snapshot, that lock must be held:
+    /// otherwise a registration that took the old snapshot commits stale results.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unload_publishes_its_snapshot_inside_the_state_lock() {
+        let dir = std::env::temp_dir().join(format!("cpa-plugin-fence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("fence{}", platform::extension(platform::goos()))), b"").unwrap();
+        let host = Host::with_loader(Arc::new(OneLoader(Arc::new(FakeClient))));
+        let yaml = format!(
+            "plugins:\n  enabled: true\n  dir: {}\n  configs:\n    fence:\n      enabled: true\n",
+            dir.display()
+        );
+        host.apply_config(Arc::new(Config::parse(&yaml).unwrap())).await;
+        assert!(host.plugin_registered("fence"));
+        // (snapshot still lists the plugin, state lock free) observed inside the window.
+        let seen = Arc::new(Mutex::new(None));
+        *lock(&UNLOAD_HOOK) = Some({
+            let (host, seen) = (host.clone(), seen.clone());
+            Box::new(move || {
+                let stale = host.snapshot().records.iter().any(|r| r.id == "fence");
+                let lock_free = host.inner.state.try_lock().is_ok();
+                *lock(&seen) = Some((stale, lock_free));
+            })
+        });
+        assert!(host.unload_plugin("fence", None).await);
+        *lock(&UNLOAD_HOOK) = None;
+        assert_eq!(
+            *lock(&seen),
+            Some((true, false)),
+            "the old snapshot is visible only while the state lock is held"
+        );
+        assert!(host.snapshot().records.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A plugin that registers with one capability.
     struct FakeClient;

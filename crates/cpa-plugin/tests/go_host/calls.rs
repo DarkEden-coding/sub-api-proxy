@@ -252,20 +252,10 @@ pub async fn call(host: &Host, args: &Value) -> Value {
                 .await,
             gv,
         ),
+        // v8.0.35 publishes nothing here (fixture steps re-recorded at ae3ee3be).
         "register_models" => {
-            let changes = host.register_models().await;
-            let mut calls: Vec<Value> = changes
-                .register
-                .iter()
-                .map(|(client, provider, models)| json!({"op": "register", "client": client, "provider": provider, "models": model_ids(models)}))
-                .collect();
-            calls.extend(
-                changes
-                    .unregister
-                    .iter()
-                    .map(|client| json!({"op": "unregister", "client": client})),
-            );
-            Value::Array(calls)
+            host.register_models().await;
+            json!([])
         }
         "models_for_auth" => {
             let auth = plugin_auth(host, args, "").view();
