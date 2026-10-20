@@ -1057,6 +1057,38 @@ fn clean_translated_array(
     cleaned
 }
 
+/// The open streamed tool_use block (CurrentToolName, CurrentToolIsParameterless,
+/// CurrentToolInputEmitted in Go's Gemini and Antigravity Claude response params).
+#[derive(Default)]
+pub(crate) struct OpenTool {
+    pub name: Vec<u8>,
+    parameterless: bool,
+    emitted: bool,
+}
+
+impl OpenTool {
+    pub fn open(&mut self, name: &[u8], original: &[u8]) {
+        self.name = name.to_vec();
+        self.parameterless = claude_tool_is_parameterless(name, original);
+        self.emitted = false;
+    }
+
+    /// The cleaned `partial_json` for streamed arguments: a parameterless tool emits its
+    /// input once, and later chunks emit an empty string.
+    pub fn input(&mut self, args: &[u8], original: &[u8], translated: &[u8]) -> Vec<u8> {
+        let mut partial = clean_claude_tool_arguments_with_translated(args, &self.name, original, translated);
+        if self.parameterless {
+            if self.emitted {
+                partial.clear();
+            }
+            self.emitted = true;
+        } else if !partial.is_empty() {
+            self.emitted = true;
+        }
+        partial
+    }
+}
+
 /// util.CleanClaudeToolArgumentsWithTranslated: placeholders are removed only where
 /// the translated (sent) schema shows they were injected; without a translated schema,
 /// [`clean_claude_tool_arguments`]. Parameterless tools always get `{}`.

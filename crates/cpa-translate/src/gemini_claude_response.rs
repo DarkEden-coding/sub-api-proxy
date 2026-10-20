@@ -8,9 +8,7 @@
 
 use crate::{
     Error, ResponseCtx,
-    claude_tool_args::{
-        claude_tool_is_parameterless, clean_claude_tool_arguments_with_translated, map_claude_tool_name,
-    },
+    claude_tool_args::{OpenTool, clean_claude_tool_arguments_with_translated, map_claude_tool_name},
     common::{self, restore_sanitized_tool_name, sanitize_claude_tool_id},
     stream::GoStream,
 };
@@ -98,9 +96,7 @@ struct State {
     input_tokens: i64,
     output_tokens: i64,
     cached_tokens: i64,
-    tool_name: Vec<u8>,
-    tool_parameterless: bool,
-    tool_input_emitted: bool,
+    tool: OpenTool,
 }
 
 impl GoStream for State {
@@ -299,19 +295,8 @@ impl State {
         }
     }
 
-    /// Cleans streamed tool arguments; a parameterless tool emits its input once.
     fn tool_input(&mut self, args: &[u8], out: &mut Vec<u8>) {
-        let mut partial =
-            clean_claude_tool_arguments_with_translated(args, &self.tool_name, &self.original, &self.translated);
-        if self.tool_parameterless {
-            if self.tool_input_emitted {
-                partial.clear();
-            } else {
-                self.tool_input_emitted = true;
-            }
-        } else if !partial.is_empty() {
-            self.tool_input_emitted = true;
-        }
+        let partial = self.tool.input(args, &self.original, &self.translated);
         push_event(
             out,
             "content_block_delta",
@@ -366,8 +351,7 @@ impl State {
             }
             self.carrier(&sig, out);
             self.close(out);
-            self.tool_parameterless = claude_tool_is_parameterless(&client, &self.original);
-            self.tool_input_emitted = false;
+            self.tool.open(&client, &self.original);
             let mut start = format!(
                 r#"{{"type":"content_block_start","index":{},"content_block":{{"type":"tool_use","id":"","name":"","input":{{}}}}}}"#,
                 self.index
@@ -375,7 +359,6 @@ impl State {
             .into_bytes();
             gj::set_str(&mut start, "content_block.id", next_tool_id(&upstream));
             gj::set_str(&mut start, "content_block.name", &client);
-            self.tool_name = client;
             push_event(out, "content_block_start", &start);
             if args.exists() {
                 self.tool_input(&args.raw, out);
