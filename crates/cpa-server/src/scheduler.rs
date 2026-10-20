@@ -548,13 +548,11 @@ impl Policy {
                 };
             }
         }
-        // Go `shouldSkipCredentialCooldown`: request faults and transport/lifecycle
-        // faults never cool a credential.
         let request = crate::classify::is_request_invalid(error);
         ErrorAction {
             matched: false,
             stop: request,
-            cooldown: !request && !crate::classify::is_transport(error),
+            cooldown: !crate::classify::skips_cooldown(error),
             force_cooldown: false,
         }
     }

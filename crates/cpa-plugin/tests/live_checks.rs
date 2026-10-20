@@ -170,12 +170,102 @@ async fn a_stale_executor_provider_replaced_by_a_builtin_one_is_kept() {
             fuse_on: None,
         };
         let (host, _) = host_with("executor", [("a", a)].into()).await;
-        let changes = host.register_executors(&|_| false, &|_| Vec::new()).await;
-        assert_eq!(changes.register, [("p".to_owned(), "a".to_owned())]);
+        let changes = host.register_executors(&|_| false, &|_| Vec::new()).await.unwrap();
+        let registered: Vec<_> = changes
+            .register
+            .iter()
+            .map(|a| (a.provider.as_str(), a.record.id.as_str()))
+            .collect();
+        assert_eq!(registered, [("p", "a")]);
         host.fuse("a", "Executor.Execute", "test");
         let native = move |p: &str| builtin_took_over && p == "p";
-        let changes = host.register_executors(&native, &|_| Vec::new()).await;
+        let changes = host.register_executors(&native, &|_| Vec::new()).await.unwrap();
         let want: &[&str] = if builtin_took_over { &[] } else { &["p"] };
         assert_eq!(changes.unregister, want, "builtin_took_over={builtin_took_over}");
+    }
+}
+
+#[tokio::test]
+async fn a_builtin_provider_catalog_reserves_its_models_from_plugin_executors() {
+    // Go TestRegisterExecutorsPreservesNativeCatalogPriority: first load, reloads
+    // before and after the native credential publishes the model, a reload after it
+    // withdraws it, then removal of the catalog.
+    for (native_executor, extra_model) in [(true, false), (true, true), (false, false)] {
+        let catalog = Script {
+            caps: r#""model_registrar":true"#,
+            results: [(
+                "model.register",
+                r#"{"Provider":"native-provider","Models":[{"ID":"shared-model"}]}"#,
+            )]
+            .into(),
+            fuse_on: None,
+        };
+        let models = if extra_model {
+            r#"{"Provider":"plugin-provider","Models":[{"ID":"shared-model"},{"ID":"plugin-only"}]}"#
+        } else {
+            r#"{"Provider":"plugin-provider","Models":[{"ID":"shared-model"}]}"#
+        };
+        let competitor = Script {
+            caps: r#""model_registrar":true,"executor":true,"executor_model_scope":"both","executor_input_formats":["openai"],"executor_output_formats":["openai"]"#,
+            results: [
+                ("model.register", models),
+                ("executor.identifier", r#"{"identifier":"plugin-provider"}"#),
+            ]
+            .into(),
+            fuse_on: None,
+        };
+        let (host, _) = host_with("catalog-priority", [("catalog", catalog), ("comp", competitor)].into()).await;
+        let native = move |p: &str| native_executor && p == "native-provider";
+        let ids = |provider: &str| {
+            host.models_for_provider(provider)
+                .into_iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>()
+        };
+        let want: &[&str] = match (native_executor, extra_model) {
+            (true, false) => &[],
+            (true, true) => &["plugin-only"],
+            (false, _) => &["shared-model"],
+        };
+        for (stage, published) in [
+            ("first load", false),
+            ("reload", false),
+            ("published", true),
+            ("withdrawn", false),
+        ] {
+            let case = format!("native_executor={native_executor} extra_model={extra_model} stage={stage}");
+            host.register_models().await;
+            // The native credential lists shared-model once it has published it.
+            let providers = move |m: &str| {
+                if published && native_executor && m == "shared-model" {
+                    vec!["native-provider".to_owned()]
+                } else {
+                    Vec::new()
+                }
+            };
+            let changes = host.register_executors(&native, &providers).await.unwrap();
+            assert_eq!(ids("plugin-provider"), want, "{case}");
+            assert_eq!(
+                changes.register.is_empty(),
+                want.is_empty(),
+                "competing executor registered: {case}"
+            );
+            assert_eq!(ids("native-provider"), ["shared-model"], "{case}");
+        }
+        // Removing the catalog releases the reservation on the next pass.
+        assert!(host.unload_plugin("catalog", None).await);
+        host.register_models().await;
+        let changes = host.register_executors(&native, &|_| Vec::new()).await.unwrap();
+        let all: &[&str] = if extra_model {
+            &["shared-model", "plugin-only"]
+        } else {
+            &["shared-model"]
+        };
+        assert_eq!(
+            ids("plugin-provider"),
+            all,
+            "after removal: native_executor={native_executor}"
+        );
+        assert_eq!(changes.register.len(), 1);
     }
 }
