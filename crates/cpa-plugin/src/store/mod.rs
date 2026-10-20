@@ -25,6 +25,8 @@ pub use checksum::{parse_checksums, verify_checksum};
 pub use client::{Client, Doer, DoerResponse, Release, ReleaseAsset, StoreError, archive_name, select_release_assets};
 pub use doer::WreqDoer;
 pub use home_sync::{PluginSyncItem, PluginSyncRequest, PluginSyncResponse};
+#[cfg(unix)]
+pub(crate) use install::create_temp;
 pub use install::{InstallOptions, InstallResult, LOADED_PLUGIN_LOCKED, install_archive};
 pub use manifest::{Manifest, manifest_from_plugin, manifest_from_release, release_version};
 pub use rate_limit::{GitHubRateLimiter, RateLimitError};
