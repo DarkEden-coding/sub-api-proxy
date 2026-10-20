@@ -33,7 +33,19 @@ passes `stripTranslatedDefaultMaxTokens(from, originalPayload, originalTranslate
 its `ApplyPayloadConfigWithTrackedPaths` calls in `claude_executor_execute.go` and
 `claude_executor_stream.go`, imports `sdktranslator` in `claude_executor.go`, and fixes
 the two translator tests to `6fecc6e`'s single-value converter signatures (and the
-model the upstream test switched to). `go test` passes for the touched translator
+model the upstream test switched to); that resolved commit is
+[`0d18d3b3-on-6fecc6e.patch`](0d18d3b3-on-6fecc6e.patch). On v8.0.27, `0d18d3b3`
+cherry-picks cleanly. Rebuild and check the trees with:
+
+```sh
+git checkout 6fecc6e && git cherry-pick a881c036 d510dccf 2c1dcc7c \
+  && git am /absolute/path/to/cliproxy-rs/crates/cpa-exec/tests/reference/claude/0d18d3b3-on-6fecc6e.patch
+git rev-parse 'HEAD^{tree}'   # e3c8744a1617762452581257505d5d72a12700b1
+git checkout bf93416 && git cherry-pick 0d18d3b3
+git rev-parse 'HEAD^{tree}'   # f24923ca2defe533990dd22bd29ebad6e0ee07db
+```
+
+`go test` passes for the touched translator
 packages and that executor test. Re-recording changed only `max_tokens`, the Gemini
 system text, the Codex/xAI `include` list, and the values the replays already
 normalize (dates, ports, random IDs and the CCH over them).

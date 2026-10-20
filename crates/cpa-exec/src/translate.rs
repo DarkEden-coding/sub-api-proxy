@@ -53,10 +53,15 @@ pub(crate) fn original(
     let (payload, original) = if req.original_body.is_empty() || req.original_body == req.body {
         (&req.body, translated.clone())
     } else {
-        (
-            &req.original_body,
-            translate_body(req, &req.original_body, codex, model, is_compat)?,
-        )
+        // Only the working payload is sent, so a baseline refusal alone is ignored
+        // (TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent).
+        // ponytail: Go keeps the refused baseline's partial translation, which only
+        // payload-rule `original` conditions read; the working translation stands in.
+        // Return the partial body with translator errors if a rule needs the difference.
+        match translate_body(req, &req.original_body, codex, model, is_compat) {
+            Ok(original) => (&req.original_body, original),
+            Err(_) => (&req.body, translated.clone()),
+        }
     };
     let limits: &[&str] = match req.source_format {
         Format::OpenAI => &["max_tokens", "max_completion_tokens"],
@@ -622,6 +627,21 @@ mod tests {
         assert_eq!(error.status, 502);
         assert_eq!(error.scope, FailureScope::Credential);
         assert_eq!(failures.count(), 1);
+    }
+
+    #[test]
+    fn a_refused_baseline_alone_does_not_refuse_the_request() {
+        let mut req = req(false, Operation::Generate);
+        req.original_body = Bytes::from_static(
+            br#"{"model":"m","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-absent"}}]}]}"#,
+        );
+        req.body = Bytes::from_static(br#"{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#);
+        let codex = Default::default();
+        let translated = request(&req, codex, "m", false).unwrap();
+        assert_eq!(original(&req, &translated, codex, "m", false).unwrap(), translated);
+        // The working payload's refusal still counts.
+        std::mem::swap(&mut req.body, &mut req.original_body);
+        assert!(request(&req, codex, "m", false).is_err());
     }
 
     #[test]
