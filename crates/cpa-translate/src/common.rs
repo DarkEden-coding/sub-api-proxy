@@ -1345,6 +1345,60 @@ mod tests {
     }
 
     #[test]
+    fn is_http_url_follows_go_url_parse() {
+        // Expectations recorded from Go's common.IsHTTPURL at v8.0.35 (go 1.26).
+        for (url, want) in [
+            ("https://[broken", false),
+            ("https://ex%zzample.com/", false),
+            ("https://ex%41mple.com/", false),
+            ("https://example.com:80a/", false),
+            ("https://[::1]:x/", false),
+            ("https://a:b:c/", false),
+            ("https://exa mple.com", false),
+            ("https://[1.2.3.4]/", false),
+            ("https://example.com/%zz", false),
+            ("https://example.com/a#%zz", false),
+            ("https://us er@example.com/", false),
+            ("https://user@/", false),
+            ("https:///path", false),
+            ("https:example.com", false),
+            ("ftp://example.com", false),
+            ("http://user:pa%20ss@example.com/x", true),
+            ("https://[::1]:8443/a", true),
+            ("https://[::1%25en0]/", true),
+            ("https://example.com:/", true),
+            ("https://example.com/?%zz", true),
+            ("https://ex<ample.com", true),
+            ("  HTTPS://Example.com/a.png  ", true),
+            ("https://例子.测试/图.png", true),
+        ] {
+            assert_eq!(is_http_url(url.as_bytes()), want, "{url}");
+        }
+        // A Claude turn whose only part is an unparseable image URL empties and is
+        // refused, as Go's claudeImageInputPart drops it; a valid IPv6 URL is sent.
+        let codex = |url: &str| {
+            let body = format!(
+                r#"{{"model":"m","max_tokens":10,"messages":[{{"role":"user","content":[{{"type":"image","source":{{"type":"url","url":"{url}"}}}}]}}]}}"#
+            );
+            let ctx = crate::RequestCtx {
+                model: "m",
+                stream: false,
+            };
+            crate::translate_request(
+                cpa_core::format::Format::Claude,
+                cpa_core::format::Format::Codex,
+                &ctx,
+                body.as_bytes(),
+            )
+        };
+        assert_eq!(
+            codex("https://[broken").unwrap_err().0,
+            "unsupported content part: image"
+        );
+        assert!(codex("https://[::1]:8443/a.png").is_ok());
+    }
+
+    #[test]
     fn trim_space_follows_go_unicode_rules() {
         assert_eq!(trim_space(" \u{a0}x\u{2003}\n".as_bytes()), b"x");
         // Invalid bytes are not whitespace and stop trimming.
@@ -1582,23 +1636,11 @@ pub fn interactions_attachment_type(part: &Res<'_>) -> String {
     String::new()
 }
 
-/// `IsHTTPURL`: an http(s) URL with a host.
-/// ponytail: checks scheme and a non-empty host only; Go's url.Parse also rejects
-/// malformed hosts. Use a URL parser if a caller needs that.
+/// `IsHTTPURL`: Go's `url.Parse` succeeds, the host is non-empty and the scheme is http(s).
 pub fn is_http_url(value: &[u8]) -> bool {
-    let value = trim_space(value);
-    let lower = go_lower(value);
-    let rest = if lower.starts_with(b"https://") {
-        &value[8..]
-    } else if lower.starts_with(b"http://") {
-        &value[7..]
-    } else {
-        return false;
-    };
-    let authority = rest
-        .split(|b| matches!(b, b'/' | b'?' | b'#'))
-        .next()
-        .unwrap_or_default();
-    let host = authority.rsplit(|&b| b == b'@').next().unwrap_or_default();
-    !host.is_empty()
+    // Go keeps invalid UTF-8 bytes; url.Parse accepts any byte >= 0x80 where it accepts
+    // U+FFFD, and only the host's emptiness is read.
+    let value = String::from_utf8_lossy(trim_space(value));
+    cpa_core::config::go_url::parse(&value)
+        .is_some_and(|u| !u.host().is_empty() && matches!(u.scheme.as_str(), "http" | "https"))
 }
