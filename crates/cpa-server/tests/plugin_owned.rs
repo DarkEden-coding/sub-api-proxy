@@ -416,6 +416,29 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
             env.rt.store().reset_cooldown(id);
         }
     }
+    // A request fault wins over transport text in the same statusless error: Go's
+    // resultErrorFromError codes it request-scoped before the lifecycle and transient
+    // checks, so the request stops on the first credential and nothing cools.
+    for message in [
+        r#"{"error":{"type":"invalid_request_error","message":"tls handshake timeout"}}"#,
+        r#"{"error":{"type":"invalid_request_error","message":"broken pipe"}}"#,
+    ] {
+        let dir = env.records.join("respond").join("acme");
+        std::fs::write(
+            dir.join("executor.execute.once.json"),
+            json!({"ok":false,"error":{"code":"x","message":message}}).to_string(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(env.records.join("acme.jsonl"));
+        let (got, body) = env.chat("acme-1").await;
+        assert_ne!(got, 200, "{message}: {body}");
+        let ids: Vec<String> = calls(&env.records, "acme", "executor.execute")
+            .into_iter()
+            .map(|r| r["AuthID"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids.len(), 1, "{message}: no failover: {ids:?}");
+        assert!(env.rt.store().cooldowns(&ids[0]).is_empty(), "{message}: no cooldown");
+    }
     // A connection refused by a built-in executor's upstream is transport: no cooldown.
     let dead_id = env
         .rt
@@ -431,6 +454,85 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         env.rt.store().cooldowns(&dead_id).is_empty(),
         "transport faults do not cool"
     );
+    env.finish().await;
+}
+
+/// Go 3b69068e: when translating the client body into the plugin executor's format
+/// refuses it (an attachment the target cannot carry, leaving the turn empty), the route
+/// answers 400 naming the part and the plugin is never called (`prepareExecutorCall`
+/// returns the envelope's error).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_translation_answers_400_without_calling_the_routed_executor() {
+    // `rt` routes and executes in Claude format; `exo` executes in chat-completions.
+    let Some(env) = env(
+        "plugin-owned-refused-translation",
+        &[
+            ("rt", "model_router,executor\n      inputs: claude"),
+            ("exo", "executor"),
+        ],
+        "",
+        &[],
+        |_| {},
+    )
+    .await
+    else {
+        return;
+    };
+    let route = |target_kind: &str, target: &str| {
+        let dir = env.records.join("respond").join("rt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("model.route.once.json"),
+            json!({"ok":true,"result":{"Handled":true,"TargetKind":target_kind,"Target":target,"Reason":"test"}})
+                .to_string(),
+        )
+        .unwrap();
+    };
+    let cases = [
+        (
+            "/v1/chat/completions",
+            ("self", "rt"),
+            r#"{"model":"m1","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-absent"}}]}]}"#,
+            "file",
+        ),
+        (
+            "/v1/responses",
+            ("self", "rt"),
+            r#"{"model":"m1","input":[{"role":"user","content":[{"type":"input_file","file_id":"file-absent"}]}]}"#,
+            "input_file",
+        ),
+        (
+            "/v1/messages",
+            ("executor", "exo"),
+            r#"{"model":"m1","max_tokens":5,"messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file-absent"}]}]}"#,
+            "container_upload",
+        ),
+    ];
+    for (path, (kind, target), body, part) in cases {
+        route(kind, target);
+        for label in ["rt", "exo"] {
+            let _ = std::fs::remove_file(env.records.join(format!("{label}.jsonl")));
+        }
+        let response = wreq::Client::new()
+            .post(format!("http://{}{path}", env.proxy))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap();
+        assert_eq!(status, 400, "{path}: {text}");
+        assert!(
+            text.contains(&format!("unsupported content part: {part}")),
+            "{path}: {text}"
+        );
+        assert_eq!(calls(&env.records, "rt", "model.route").len(), 1, "{path}: routed");
+        assert!(
+            calls(&env.records, target, "executor.execute").is_empty(),
+            "{path}: not executed"
+        );
+    }
     env.finish().await;
 }
 
