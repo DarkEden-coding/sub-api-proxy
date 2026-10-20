@@ -1640,24 +1640,128 @@ fn channel_models(channel: &str) -> Option<&'static Vec<Value>> {
     definitions().get(&key)?.as_array()
 }
 
-pub(crate) async fn model_definitions(UrlPath(channel): UrlPath<String>) -> Response {
+/// Go `GetStaticModelDefinitions`: the built-in catalog for `channel`, else (v8.0.35,
+/// `50cfd238`) a plugin's static catalog for that provider, else the models its
+/// credentials registered, sorted by ID.
+pub(crate) async fn model_definitions(
+    State(state): State<Arc<Management>>,
+    UrlPath(channel): UrlPath<String>,
+) -> Response {
     let channel = channel.trim().to_owned();
     if channel.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "channel is required");
     }
-    match channel_models(&channel) {
-        Some(models) => reply_ordered(
-            StatusCode::OK,
-            [
-                ("channel", channel.to_lowercase().into()),
-                ("models", Value::Array(models.clone())),
-            ],
-        ),
-        None => reply(
+    let models = match channel_models(&channel) {
+        Some(models) if !models.is_empty() => models.clone(),
+        _ => dynamic_definitions(&state, &channel),
+    };
+    if models.is_empty() {
+        return reply(
             StatusCode::BAD_REQUEST,
             [("error", "unknown channel".into()), ("channel", channel.into())],
-        ),
+        );
     }
+    reply_ordered(
+        StatusCode::OK,
+        [
+            ("channel", channel.to_lowercase().into()),
+            ("models", Value::Array(models)),
+        ],
+    )
+}
+
+/// Go `pluginModelDefinitionsByChannel`, each model as `registry.ModelInfo` encodes.
+fn dynamic_definitions(state: &Management, channel: &str) -> Vec<Value> {
+    let plugin = state.rt.plugins().models_for_provider(channel);
+    if !plugin.is_empty() {
+        return plugin.iter().map(plugin_model_json).collect();
+    }
+    let rt = &state.rt;
+    let mut models: Vec<_> = rt
+        .registry()
+        .available_by_provider(channel, |client, model| rt.suspension(client, model))
+        .iter()
+        .map(|spec| spec.to_info().raw)
+        .collect();
+    models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    models
+        .into_iter()
+        .map(|mut raw| {
+            // `json:"-"` fields of Go's ModelInfo.
+            for internal in [
+                "max_context_length",
+                "support_configuration_update",
+                "is_compat",
+                "user_defined",
+            ] {
+                raw.remove(internal);
+            }
+            Value::Object(raw)
+        })
+        .collect()
+}
+
+/// Go `pluginModelInfoToRegistryModelInfo` then `json.Marshal`: struct order, with
+/// Go's `omitempty` fields left out when zero.
+fn plugin_model_json(m: &cpa_plugin::api::ModelInfo) -> Value {
+    let mut out = Map::new();
+    out.insert("id".into(), m.id.clone().into());
+    out.insert("object".into(), m.object.clone().into());
+    out.insert("created".into(), m.created.into());
+    out.insert("owned_by".into(), m.owned_by.clone().into());
+    out.insert("type".into(), m.model_type.clone().into());
+    let mut text = |key: &str, v: &str| {
+        if !v.is_empty() {
+            out.insert(key.into(), v.into());
+        }
+    };
+    text("display_name", &m.display_name);
+    text("name", &m.name);
+    text("version", &m.version);
+    text("description", &m.description);
+    let numbers = [
+        ("inputTokenLimit", m.input_token_limit),
+        ("outputTokenLimit", m.output_token_limit),
+    ];
+    for (key, v) in numbers {
+        if v != 0 {
+            out.insert(key.into(), v.into());
+        }
+    }
+    let list = |out: &mut Map<String, Value>, key: &str, v: &[String]| {
+        if !v.is_empty() {
+            out.insert(key.into(), v.into());
+        }
+    };
+    list(&mut out, "supportedGenerationMethods", &m.supported_generation_methods);
+    for (key, v) in [
+        ("context_length", m.context_length),
+        ("max_completion_tokens", m.max_completion_tokens),
+    ] {
+        if v != 0 {
+            out.insert(key.into(), v.into());
+        }
+    }
+    list(&mut out, "supported_parameters", &m.supported_parameters);
+    list(&mut out, "supportedInputModalities", &m.supported_input_modalities);
+    list(&mut out, "supportedOutputModalities", &m.supported_output_modalities);
+    if let Some(t) = &m.thinking {
+        let mut thinking = Map::new();
+        for (key, v) in [("min", t.min), ("max", t.max)] {
+            if v != 0 {
+                thinking.insert(key.into(), v.into());
+            }
+        }
+        if t.zero_allowed {
+            thinking.insert("zero_allowed".into(), true.into());
+        }
+        if t.dynamic_allowed {
+            thinking.insert("dynamic_allowed".into(), true.into());
+        }
+        list(&mut thinking, "levels", &t.levels);
+        out.insert("thinking".into(), Value::Object(thinking));
+    }
+    Value::Object(out)
 }
 
 /// Go `GetModelsForClient`: the models the credential registers (the dynamic

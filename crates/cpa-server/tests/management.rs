@@ -1135,6 +1135,53 @@ async fn credential_models_come_from_registrations() {
     server.abort();
 }
 
+/// Go v8.0.35 `GetStaticModelDefinitions` (`50cfd238`): a channel without a built-in
+/// catalog lists the models its credentials registered, sorted by ID, as Go's
+/// `registry.ModelInfo` encodes them; a channel with neither is still unknown.
+#[tokio::test]
+async fn model_definitions_fall_back_to_registered_models_by_channel() {
+    let f = Fixture::from_yaml("definitions", |auth, hash| {
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: http://127.0.0.1:9/v1\n      models: [{{name: up-z, alias: zeta}}, {{name: up-a, alias: alpha}}]\n      keys: [{{api-key: fake-acme}}]\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let get = |channel: &str| {
+        wreq::Client::new()
+            .get(format!("{base}/v8/management/routing/model-definitions/{channel}"))
+            .bearer_auth("fake-management-only")
+            .send()
+    };
+    let r = get("OpenAI-Compatible-Acme").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["channel"], "openai-compatible-acme");
+    let models = v["models"].as_array().unwrap();
+    let ids: Vec<_> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["alpha", "zeta"]);
+    for internal in [
+        "user_defined",
+        "is_compat",
+        "max_context_length",
+        "support_configuration_update",
+    ] {
+        assert!(
+            models.iter().all(|m| m.get(internal).is_none()),
+            "{internal}: {models:?}"
+        );
+    }
+    let r = get("claude").await.unwrap();
+    assert_eq!(r.status(), 200, "the built-in catalog still wins");
+    let r = get("nobody").await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"channel": "nobody", "error": "unknown channel"})
+    );
+    server.abort();
+}
+
 /// A relative auth-dir: an unclaimed upload is one fallback credential with a
 /// relative ID, and once a field patch makes it claimable it is exactly one
 /// synthesized credential (no leftover absolute-path fallback).
