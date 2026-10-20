@@ -387,7 +387,7 @@ impl Host {
         path: &std::path::Path,
         version: &str,
         mut call: ManagementCall,
-        scope: RequestScope,
+        mut scope: RequestScope,
     ) -> Result<ManagementResponse, crate::rpc::CallError> {
         let Some(record) = self.record(plugin_id) else {
             return Ok(ManagementResponse::default());
@@ -395,6 +395,10 @@ impl Host {
         if record.path != path || record.version != version {
             return Ok(ManagementResponse::default());
         }
+        scope.headers = call.headers.clone();
+        scope.query = call.query.clone();
+        scope.cancel = scope.cancel.child_token();
+        let _cancel = scope.cancel.clone().drop_guard();
         let guard = self
             .inner
             .callbacks

@@ -23,6 +23,7 @@ pub mod gojson;
 pub mod host;
 pub mod hostauth;
 mod hosthttp;
+pub mod hostmodel;
 pub use hosthttp::{go_preflight, go_read_error_text, go_url_error, go_url_error_text};
 pub mod interceptors;
 pub mod management;

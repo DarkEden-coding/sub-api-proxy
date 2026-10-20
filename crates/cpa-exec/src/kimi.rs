@@ -471,7 +471,7 @@ async fn execute_chat(
         );
         ResponseBody::Stream(translate_lines(
             tapped,
-            (response_pair.stream)(&ctx),
+            crate::translate::stream(response_pair, &ctx, &req),
             StreamEnd::Chat,
             usage,
         ))
@@ -806,7 +806,7 @@ async fn execute_responses(
         match response_pair {
             Some(pair) => ResponseBody::Stream(translate_lines(
                 bridged,
-                (pair.stream)(&ctx),
+                crate::translate::stream(pair, &ctx, &req),
                 StreamEnd::Responses,
                 usage,
             )),

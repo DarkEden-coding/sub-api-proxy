@@ -10,6 +10,15 @@ use futures_util::StreamExt;
 
 use crate::openai_compat_payload::ensure_responses_usage_details;
 
+/// Choose the output boundary once, before the stream and its interceptors run.
+pub(crate) fn stream(pair: &Pair, ctx: &ResponseCtx<'_>, req: &ExecRequest) -> Box<dyn StreamTranslator> {
+    let mut translator = (pair.stream)(ctx);
+    if req.stream_payloads {
+        translator.executor_chunks();
+    }
+    translator
+}
+
 /// `TranslateRequestWithAPIKeyModelCompatibilityForExecutor` to Claude for `model` (the
 /// base model, without a thinking suffix), through the shared Codex client rewrites
 /// ([`crate::codex_client::translate_request`]): Codex integer tool types, the Responses
@@ -102,7 +111,7 @@ async fn transform(
         match body {
             ResponseBody::Stream(stream) => Ok(ResponseBody::Stream(streaming(
                 stream,
-                (pair.stream)(&context),
+                self::stream(pair, &context, &req),
                 responses,
                 req.usage.clone(),
             ))),
@@ -287,6 +296,7 @@ mod tests {
             operation,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,
+            stream_payloads: false,
             requested_model: "requested".into(),
             model: "resolved".into(),
             original_body: Bytes::from_static(b"original"),

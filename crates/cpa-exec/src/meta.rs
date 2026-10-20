@@ -259,7 +259,7 @@ impl MetaExecutor {
             let (tapped, usage) = defer_usage(lines, &req.usage, UsageRule::MetaResponses);
             ResponseBody::Stream(stream_events(
                 tapped,
-                (prepared.response.stream)(&ctx),
+                crate::translate::stream(prepared.response, &ctx, &req),
                 responses_client,
                 prepared.apply_patch,
                 usage,
