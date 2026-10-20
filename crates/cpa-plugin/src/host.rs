@@ -984,31 +984,6 @@ mod tests {
         }
     }
 
-    /// `model.register` blocks until the gate opens: 0 idle, 1 entered, 2 open.
-    struct GatedRegistrar(Arc<(Mutex<u8>, std::sync::Condvar)>);
-
-    impl PluginClient for GatedRegistrar {
-        fn call(&self, method: &str, _: &[u8]) -> Result<Bytes, String> {
-            Ok(match method {
-                method::PLUGIN_REGISTER | method::PLUGIN_RECONFIGURE => Bytes::from_static(
-                    br#"{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"n","Version":"1","Author":"a","GitHubRepository":"r"},"capabilities":{"model_registrar":true}}}"#,
-                ),
-                method::MODEL_REGISTER => {
-                    let (state, cv) = &*self.0;
-                    let mut state = lock(state);
-                    *state = 1;
-                    cv.notify_all();
-                    while *state != 2 {
-                        state = cv.wait(state).unwrap();
-                    }
-                    Bytes::from_static(br#"{"ok":true,"result":{"Provider":"p","Models":[{"ID":"m"}]}}"#)
-                }
-                _ => Bytes::from_static(br#"{"ok":true,"result":{}}"#),
-            })
-        }
-        fn shutdown(&self) {}
-    }
-
     struct OneLoader(Arc<dyn PluginClient>);
 
     impl Loader for OneLoader {
@@ -1022,57 +997,40 @@ mod tests {
         }
     }
 
-    /// Go publishes the active maps and the snapshot under one lock. A model
-    /// registration that took its snapshot before an unload and finishes while the
-    /// unload is between its state change and the snapshot publication must not
-    /// restore the unloaded plugin's catalog.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn registration_cannot_commit_inside_an_unload() {
+    /// Go publishes the active maps and the snapshot under one lock. Registrations
+    /// compare snapshots and commit under the state lock, so while an unload has
+    /// changed the state but not yet published its snapshot, that lock must be held:
+    /// otherwise a registration that took the old snapshot commits stale results.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unload_publishes_its_snapshot_inside_the_state_lock() {
         let dir = std::env::temp_dir().join(format!("cpa-plugin-fence-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("fence{}", platform::extension(platform::goos()))), b"").unwrap();
-        let gate = Arc::new((Mutex::new(0u8), std::sync::Condvar::new()));
-        let host = Host::with_loader(Arc::new(OneLoader(Arc::new(GatedRegistrar(gate.clone())))));
+        let host = Host::with_loader(Arc::new(OneLoader(Arc::new(FakeClient))));
         let yaml = format!(
             "plugins:\n  enabled: true\n  dir: {}\n  configs:\n    fence:\n      enabled: true\n",
             dir.display()
         );
         host.apply_config(Arc::new(Config::parse(&yaml).unwrap())).await;
         assert!(host.plugin_registered("fence"));
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let registration = {
-            let (host, done) = (host.clone(), done.clone());
-            tokio::spawn(async move {
-                host.register_models().await;
-                done.store(true, Ordering::SeqCst);
-            })
-        };
-        {
-            let (state, cv) = &*gate;
-            let mut state = lock(state);
-            while *state != 1 {
-                state = cv.wait(state).unwrap();
-            }
-        }
+        // (snapshot still lists the plugin, state lock free) observed inside the window.
+        let seen = Arc::new(Mutex::new(None));
         *lock(&UNLOAD_HOOK) = Some({
-            let (gate, done) = (gate.clone(), done.clone());
+            let (host, seen) = (host.clone(), seen.clone());
             Box::new(move || {
-                *lock(&gate.0) = 2;
-                gate.1.notify_all();
-                // Give the registration every chance to commit inside the window.
-                let deadline = std::time::Instant::now() + Duration::from_millis(300);
-                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                let stale = host.snapshot().records.iter().any(|r| r.id == "fence");
+                let lock_free = host.inner.state.try_lock().is_ok();
+                *lock(&seen) = Some((stale, lock_free));
             })
         });
         assert!(host.unload_plugin("fence", None).await);
         *lock(&UNLOAD_HOOK) = None;
-        registration.await.unwrap();
-        let state = host.state();
-        assert!(state.model_registrations.is_empty(), "stale registration restored");
-        assert!(state.model_providers.is_empty());
-        drop(state);
+        assert_eq!(
+            *lock(&seen),
+            Some((true, false)),
+            "the old snapshot is visible only while the state lock is held"
+        );
+        assert!(host.snapshot().records.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -182,7 +182,8 @@ func (r *runner) start(sc *scenario) {
 	}
 }
 
-// settle waits until no recorder file has grown for 300ms (at most 5s).
+// settle waits until no recorder file has grown for 300ms. A recorder still busy
+// after 5s fails the generation rather than recording a truncated golden.
 func (r *runner) settle() {
 	size := func() int64 {
 		var total int64
@@ -202,6 +203,7 @@ func (r *runner) settle() {
 			return
 		}
 	}
+	panic(fmt.Sprintf("plugin recorders in %s still busy after 5s", r.dirs["RECDIR"]))
 }
 
 func (r *runner) stop() {

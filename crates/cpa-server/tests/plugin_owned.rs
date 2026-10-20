@@ -35,6 +35,8 @@ fn calls(records: &Path, label: &str, method: &str) -> Vec<Value> {
 /// A runtime with recorder plugins `(label, caps)` and auth files, serving on a local
 /// port. `prepare` runs on the records dir before the plugins start.
 struct Env {
+    /// The plugin catalog is process-wide; tests in this binary take turns.
+    _serial: tokio::sync::MutexGuard<'static, ()>,
     rt: Arc<cpa_server::Runtime>,
     dir: PathBuf,
     records: PathBuf,
@@ -50,6 +52,8 @@ async fn env(
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
 ) -> Option<Env> {
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let built = cpa_plugin::testing::built_plugins(tmp, "plugin_owned")?;
     let dir = cpa_plugin::testing::scratch(tmp, name);
@@ -95,6 +99,7 @@ async fn env(
         addr
     };
     Some(Env {
+        _serial: serial,
         rt,
         dir,
         records,
@@ -126,54 +131,29 @@ impl Env {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plugin_catalog_models_bind_to_credentials_served_by_a_plugin_executor() {
-    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_owned") else {
+    // `catalog` lists models for provider `acme`; `acme` executes them.
+    let Some(env) = env(
+        "plugin-owned",
+        &[("catalog", "model_provider"), ("acme", "executor")],
+        "",
+        &[(
+            "acme.json",
+            r#"{"type":"acme","token":"t-1","excluded_models":["acme-hidden"]}"#,
+        )],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"ACME","Models":[{"ID":" acme-1 ","OwnedBy":"acme"},{"ID":"acme-hidden"}]}),
+            )
+        },
+    )
+    .await
+    else {
         return;
     };
-    let dir = cpa_plugin::testing::scratch(tmp, "plugin-owned");
-    let (auths, records, plugins) = (dir.join("auths"), dir.join("records"), dir.join("plugins"));
-    for d in [&auths, &records, &plugins] {
-        std::fs::create_dir_all(d).unwrap();
-    }
-    // `catalog` lists models for provider `acme`; `acme` executes them.
-    let mut yaml = format!(
-        "auth-dir: {}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n",
-        auths.display(),
-        plugins.display()
-    );
-    for (label, caps) in [("catalog", "model_provider"), ("acme", "executor")] {
-        std::fs::copy(built.join("recorder.so"), plugins.join(format!("{label}.so"))).unwrap();
-        yaml.push_str(&format!(
-            "    {label}:\n      enabled: true\n      label: {label}\n      record: {}\n      caps: {caps}\n",
-            records.display()
-        ));
-    }
-    canned(
-        &records,
-        "catalog",
-        "model.static",
-        json!({"Provider":"ACME","Models":[{"ID":" acme-1 ","OwnedBy":"acme"},{"ID":"acme-hidden"}]}),
-    );
-    std::fs::write(
-        auths.join("acme.json"),
-        r#"{"type":"acme","token":"t-1","excluded_models":["acme-hidden"]}"#,
-    )
-    .unwrap();
-    let cfg = Config::parse(&yaml).unwrap();
-    let credentials = cpa_core::config::credentials::load(&cfg);
-    let rt = Arc::new(cpa_server::testing::runtime(
-        cfg,
-        credentials,
-        Executors {
-            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex: Default::default(),
-            devices: Default::default(),
-            openai: Default::default(),
-            google: Default::default(),
-        },
-    ));
-    cpa_server::plugins::start(&rt).await;
-    let registry = rt.registry();
+    let registry = env.rt.registry();
     assert!(registry.client_supports("acme.json", "acme-1"));
     assert!(
         !registry.client_supports("acme.json", "acme-hidden"),
@@ -184,16 +164,9 @@ async fn plugin_catalog_models_bind_to_credentials_served_by_a_plugin_executor()
         Vec::<String>::new(),
         "no credential publishes it"
     );
-    let proxy = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = cpa_server::router(rt.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        addr
-    };
     let client = wreq::Client::new();
     let models: Value = client
-        .get(format!("http://{proxy}/v1/models"))
+        .get(format!("http://{}/v1/models", env.proxy))
         .send()
         .await
         .unwrap()
@@ -207,18 +180,14 @@ async fn plugin_catalog_models_bind_to_credentials_served_by_a_plugin_executor()
         .filter_map(|m| m["id"].as_str())
         .collect();
     assert_eq!(ids, ["acme-1"], "{models}");
-    let body = r#"{"model":"acme-1","messages":[{"role":"user","content":"hi"}]}"#;
-    let response = client
-        .post(format!("http://{proxy}/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status().as_u16(), 200);
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200);
     // The recorder echoes the payload it was given.
-    assert_eq!(response.text().await.unwrap(), body);
-    let executed = calls(&records, "acme", "executor.execute");
+    assert_eq!(
+        body,
+        r#"{"model":"acme-1","messages":[{"role":"user","content":"hi"}]}"#
+    );
+    let executed = calls(&env.records, "acme", "executor.execute");
     assert_eq!(executed.len(), 1);
     let request = &executed[0];
     assert_eq!(request["AuthID"], "acme.json", "relative to the auth dir");
@@ -233,17 +202,9 @@ async fn plugin_catalog_models_bind_to_credentials_served_by_a_plugin_executor()
     let storage: Value = serde_json::from_slice(&storage).unwrap();
     assert_eq!(storage["token"], "t-1");
     // A model no credential carries is not routed to the executor.
-    let response = client
-        .post(format!("http://{proxy}/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .body(r#"{"model":"acme-hidden","messages":[]}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(response.status().as_u16(), 200);
-    assert_eq!(calls(&records, "acme", "executor.execute").len(), 1);
-    rt.plugins().shutdown_all(None).await;
-    std::fs::remove_dir_all(dir).unwrap();
+    assert_ne!(env.chat("acme-hidden").await.0, 200);
+    assert_eq!(calls(&env.records, "acme", "executor.execute").len(), 1);
+    env.finish().await;
 }
 
 /// Go `registerModelsForAuth` appends plugin catalogs to OpenAI-compatible credentials
@@ -333,14 +294,17 @@ async fn a_catalog_for_an_unbound_builtin_provider_reserves_nothing() {
     env.finish().await;
 }
 
-/// A failed credential-bound plugin execution is an attempt on that credential (Go's
-/// `rpcError` status): the selection loop moves on to the next credential.
+/// A failed credential-bound plugin execution is an attempt on that credential. Go's
+/// `rpcError` and plain errors are neither request- nor credential-scoped, so the auth
+/// manager classifies them by status and body: each case below fails over to the other
+/// credential and cools the failed one. A real transport fault cools nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failing_plugin_credential_fails_over_to_the_next() {
+    let dead = "openai-compatibility:\n  - name: dead\n    base-url: http://127.0.0.1:1/v1\n    api-key-entries: [{api-key: k1}]\n    models: [{name: dead-model}]\n";
     let Some(env) = env(
         "plugin-owned-failover",
         &[("catalog", "model_provider"), ("acme", "executor")],
-        "",
+        dead,
         &[
             ("acme-a.json", r#"{"type":"acme"}"#),
             ("acme-b.json", r#"{"type":"acme"}"#),
@@ -358,28 +322,66 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
     else {
         return;
     };
-    for status in [429, 500, 401] {
+    let not_found = r#"{"error":{"code":"model_not_found","message":"no such model"}}"#;
+    let cases = [
+        (Some(429), "slow down"),
+        (Some(500), "boom"),
+        (Some(401), "expired"),
+        (Some(404), "not found"),
+        (Some(404), not_found),
+        (Some(400), "requested model is not supported"),
+        // An application error without a status, like an unavailable executor.
+        (None, "plugin broke"),
+    ];
+    for (status, message) in cases {
+        let case = format!("{status:?} {message}");
         let dir = env.records.join("respond").join("acme");
         std::fs::create_dir_all(&dir).unwrap();
+        let mut error = json!({"code":"x","message":message});
+        if let Some(status) = status {
+            error["http_status"] = json!(status);
+        }
         std::fs::write(
             dir.join("executor.execute.once.json"),
-            json!({"ok":false,"error":{"code":"x","message":"slow down","http_status":status}}).to_string(),
+            json!({"ok":false,"error":error}).to_string(),
         )
         .unwrap();
         let _ = std::fs::remove_file(env.records.join("acme.jsonl"));
         let (got, body) = env.chat("acme-1").await;
-        assert_eq!(got, 200, "after a {status}: {body}");
-        let ids: Vec<Value> = calls(&env.records, "acme", "executor.execute")
+        assert_eq!(got, 200, "{case}: {body}");
+        let ids: Vec<String> = calls(&env.records, "acme", "executor.execute")
             .into_iter()
-            .map(|r| r["AuthID"].clone())
+            .map(|r| r["AuthID"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(ids.len(), 2, "after a {status}: {ids:?}");
-        assert_ne!(ids[0], ids[1], "the second attempt uses the other credential");
-        // Cooling may now park the failed credential; let both serve again.
+        assert_eq!(ids.len(), 2, "{case}: {ids:?}");
+        assert_ne!(ids[0], ids[1], "{case}: the second attempt uses the other credential");
+        let cooling = env.rt.store().cooldowns(&ids[0]);
+        assert_eq!(cooling.len(), 1, "{case}: the failed credential cools: {cooling:?}");
+        assert_eq!(
+            (cooling[0].model.as_str(), cooling[0].status),
+            ("acme-1", status.unwrap_or(0)),
+            "{case}"
+        );
+        assert!(env.rt.store().cooldowns(&ids[1]).is_empty(), "{case}");
         for id in ["acme-a.json", "acme-b.json"] {
             env.rt.store().reset_cooldown(id);
         }
     }
+    // A connection refused by a built-in executor's upstream is transport: no cooldown.
+    let dead_id = env
+        .rt
+        .store()
+        .snapshot()
+        .into_iter()
+        .find(|c| c.attributes.get("compat_name").map(String::as_str) == Some("dead"))
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(env.chat("dead-model").await.0, 200);
+    assert!(
+        env.rt.store().cooldowns(&dead_id).is_empty(),
+        "transport faults do not cool"
+    );
     env.finish().await;
 }
 
@@ -470,4 +472,61 @@ async fn removing_a_builtin_catalog_hands_its_model_to_a_plugin_executor() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(calls(&env.records, "acme", "executor.execute").len(), 1);
     env.finish().await;
+}
+
+/// Go binds a built-in executor to an unknown provider (the OpenAI-compatible one)
+/// only when no plugin executor is a candidate for it or a native compatibility config
+/// names it. An auth file typed `openai-compatible-acme` without config goes to the
+/// plugin; a configured entry, with keys or without, keeps the built-in executor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_takes_an_unconfigured_compatible_provider() {
+    let catalog = |records: &Path| {
+        canned(
+            records,
+            "acme",
+            "model.static",
+            json!({"Provider":"openai-compatible-acme","Models":[{"ID":"acme-m"}]}),
+        )
+    };
+    let plugins = [("acme", "model_provider,executor")];
+    let Some(unconfigured) = env(
+        "plugin-owned-compat-candidate",
+        &plugins,
+        "",
+        &[("acme.json", r#"{"type":"openai-compatible-acme"}"#)],
+        catalog,
+    )
+    .await
+    else {
+        return;
+    };
+    let (status, body) = unconfigured.chat("acme-m").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(calls(&unconfigured.records, "acme", "executor.execute").len(), 1);
+    unconfigured.finish().await;
+    for keys in ["    api-key-entries: [{api-key: k1}]\n", ""] {
+        let config = format!("openai-compatibility:\n  - name: acme\n    base-url: http://127.0.0.1:1/v1\n{keys}");
+        let Some(configured) = env("plugin-owned-compat-native", &plugins, &config, &[], catalog).await else {
+            return;
+        };
+        let env = configured;
+        let case = if keys.is_empty() { "keyless" } else { "keyed" };
+        let credential = env
+            .rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.attributes.get("compat_name").map(String::as_str) == Some("acme"))
+            .unwrap_or_else(|| panic!("{case}: a configured credential"));
+        assert!(
+            env.rt.registry().client_supports(&credential.id, "acme-m"),
+            "{case}: the catalog binds to the configured credential"
+        );
+        assert_ne!(env.chat("acme-m").await.0, 200, "{case}: the dead native upstream");
+        assert!(
+            calls(&env.records, "acme", "executor.execute").is_empty(),
+            "{case}: the built-in executor keeps the provider"
+        );
+        env.finish().await;
+    }
 }
