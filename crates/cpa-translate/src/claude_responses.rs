@@ -194,16 +194,19 @@ pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking
                 if !raw_id.is_empty() && !emitted_results.insert(raw_id.clone()) {
                     continue;
                 }
-                let mut output = item.get("output");
-                if let Some(last) = last_result.get(&raw_id) {
-                    output = last.get("output");
-                }
+                let output_item = last_result.get(&raw_id).unwrap_or(item);
+                let output = output_item.get("output");
                 if raw_id.is_empty() || !emitted_uses.contains(&raw_id) {
                     pending.parts(b"user", standalone_tool_output(&output));
                     continue;
                 }
                 let mut result = br#"{"type":"tool_result","tool_use_id":"","content":""}"#.to_vec();
                 gj::set_str(&mut result, "tool_use_id", common::sanitize_claude_tool_id(&raw_id));
+                // Responses reports an unfinished tool output as status
+                // "incomplete"; is_error is Claude's only in-band equivalent.
+                if trim_space(&output_item.get("status").bytes()).eq_ignore_ascii_case(b"incomplete") {
+                    gj::set_bool(&mut result, "is_error", true);
+                }
                 pending.parts(b"user", vec![tool_result_content(result, &output)]);
             }
             _ => {}
@@ -299,14 +302,15 @@ fn max_completion_tokens(model: &str) -> i64 {
     model_info_int(model, "max_completion_tokens")
 }
 
-fn default_max_tokens(model: &str) -> i64 {
-    let base = if model.trim().to_lowercase().contains("fable") {
-        64000
-    } else {
-        32000
-    };
-    let limit = max_completion_tokens(model);
-    if limit > 0 && limit < base { limit } else { base }
+/// The `max_tokens` an OpenAI Chat or Responses request without one gets: the
+/// registered model's output limit, except that Fable keeps its 64000 ceiling.
+pub(crate) fn default_max_tokens(model: &str) -> i64 {
+    let fable = model.trim().to_lowercase().contains("fable");
+    let base = if fable { 64000 } else { 32000 };
+    match max_completion_tokens(model) {
+        limit if limit <= 0 || (fable && limit >= base) => base,
+        limit => limit,
+    }
 }
 
 fn is_system_role(role: &Res<'_>) -> bool {

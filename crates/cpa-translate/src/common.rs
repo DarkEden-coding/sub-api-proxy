@@ -5,6 +5,7 @@ use cpa_common::json::{self as gj, Kind, Res};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -1358,5 +1359,166 @@ mod tests {
         assert_eq!(sanitize_claude_function_name(&[b'a'; 70]).len(), 64);
         let id = sanitize_claude_tool_id(b"");
         assert!(id.starts_with(b"toolu_"));
+    }
+}
+
+/// `ClaudeMessagesJSONToSSE`: a native Messages response (`type: message` with a
+/// `content` array) as the SSE events its stream would have carried, for the SSE
+/// aggregators, plus its model. Anything else is returned unchanged with no model.
+/// Events are written as Go's `json.Marshal` of a map: sorted keys, raw values
+/// compacted and HTML-escaped.
+pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
+    if !gj::valid(raw) {
+        return (Cow::Borrowed(raw), vec![]);
+    }
+    let root = gj::parse(raw);
+    let content = root.get("content");
+    if &*root.get("type").s != b"message" || !content.is_array() {
+        return (Cow::Borrowed(raw), vec![]);
+    }
+    let mut out = Vec::with_capacity(raw.len() * 2);
+    let mut emit = |fields: &[(&str, &[u8])]| {
+        out.extend_from_slice(b"data: {");
+        for (i, (key, value)) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            gj::marshal_str(&mut out, key.as_bytes(), true);
+            out.push(b':');
+            out.extend_from_slice(value);
+        }
+        out.extend_from_slice(b"}\n\n");
+    };
+    let string = |s: &[u8]| {
+        let mut v = vec![];
+        gj::marshal_str(&mut v, s, true);
+        v
+    };
+    let mut message = raw.to_vec();
+    gj::set_raw(&mut message, "content", b"[]");
+    gj::set_raw(&mut message, "stop_reason", b"null");
+    gj::set_raw(&mut message, "stop_sequence", b"null");
+    emit(&[("message", &gj::compact(&message, true)), ("type", b"\"message_start\"")]);
+    for (index, block) in content.array().iter().enumerate() {
+        let index = index.to_string();
+        let kind = block.get("type");
+        let mut start = block.raw().to_vec();
+        let delta = match &*kind.s {
+            b"text" => {
+                gj::set_str(&mut start, "text", "");
+                Some((("text", string(&block.get("text").s)), "\"text_delta\""))
+            }
+            b"tool_use" => {
+                gj::set_raw(&mut start, "input", b"{}");
+                let input = block.get("input");
+                let input = if input.raw().is_empty() { &b"{}"[..] } else { input.raw() };
+                Some((("partial_json", string(input)), "\"input_json_delta\""))
+            }
+            b"thinking" => {
+                gj::set_str(&mut start, "thinking", "");
+                gj::set_str(&mut start, "signature", "");
+                Some((("thinking", string(&block.get("thinking").s)), "\"thinking_delta\""))
+            }
+            _ => None,
+        };
+        let block_delta = |out: &mut dyn FnMut(&[(&str, &[u8])]), (key, value): (&str, &[u8]), kind: &str| {
+            let mut delta = b"{".to_vec();
+            gj::marshal_str(&mut delta, key.as_bytes(), true);
+            delta.push(b':');
+            delta.extend_from_slice(value);
+            delta.extend_from_slice(b",\"type\":");
+            delta.extend_from_slice(kind.as_bytes());
+            delta.push(b'}');
+            out(&[("delta", &delta), ("index", index.as_bytes()), ("type", b"\"content_block_delta\"")]);
+        };
+        emit(&[
+            ("content_block", &gj::compact(&start, true)),
+            ("index", index.as_bytes()),
+            ("type", b"\"content_block_start\""),
+        ]);
+        if let Some(((key, value), kind)) = delta {
+            block_delta(&mut emit, (key, &value), kind);
+        }
+        if &*kind.s == b"text" {
+            for citation in block.get("citations").array() {
+                block_delta(&mut emit, ("citation", &gj::compact(citation.raw(), true)), "\"citations_delta\"");
+            }
+        }
+        let signature = block.get("signature");
+        if &*kind.s == b"thinking" && signature.exists() {
+            block_delta(&mut emit, ("signature", &string(&signature.s)), "\"signature_delta\"");
+        }
+        emit(&[("index", index.as_bytes()), ("type", b"\"content_block_stop\"")]);
+    }
+    let usage = root.get("usage");
+    let usage = if usage.raw().is_empty() { b"{}".to_vec() } else { gj::compact(usage.raw(), true) };
+    let value = |r: Res<'_>| gj::AnyValue::from_res(&r).marshal().unwrap_or_else(|| b"null".to_vec());
+    let mut delta = b"{\"stop_reason\":".to_vec();
+    delta.extend_from_slice(&value(root.get("stop_reason")));
+    delta.extend_from_slice(b",\"stop_sequence\":");
+    delta.extend_from_slice(&value(root.get("stop_sequence")));
+    delta.push(b'}');
+    emit(&[("delta", &delta), ("type", b"\"message_delta\""), ("usage", &usage)]);
+    emit(&[("type", b"\"message_stop\"")]);
+    (Cow::Owned(out), root.get("model").s.to_vec())
+}
+
+/// `UserTurnDrops`: a part a translation cannot send is dropped, but a user turn left
+/// with nothing to send is refused (`UnsupportedPartError`, a request-scoped 400)
+/// rather than forwarded empty. The first dropped type of the first emptied turn is
+/// reported.
+#[derive(Default)]
+pub struct UserTurnDrops {
+    turn: Option<String>,
+    first: Option<String>,
+}
+
+impl UserTurnDrops {
+    pub fn drop_part(&mut self, part_type: &str) {
+        if self.turn.is_none() {
+            self.turn = Some(part_type.to_owned());
+        }
+    }
+
+    /// Closes the current user turn, which contributed `sendable` parts.
+    pub fn end_turn(&mut self, sendable: usize) {
+        let turn = self.turn.take();
+        if sendable == 0 && self.first.is_none() {
+            self.first = turn;
+        }
+    }
+
+    pub fn result(&self) -> Result<(), crate::Error> {
+        match &self.first {
+            None => Ok(()),
+            Some(t) if t.is_empty() => Err(crate::Error("unsupported content part".into())),
+            Some(t) => Err(crate::Error(format!("unsupported content part: {t}"))),
+        }
+    }
+}
+
+/// `UserRun`: consecutive user content a target merges into one user turn.
+#[derive(Default)]
+pub struct UserRun {
+    drops: UserTurnDrops,
+    sendable: usize,
+}
+
+impl UserRun {
+    pub fn add(&mut self) {
+        self.sendable += 1;
+    }
+
+    pub fn drop_part(&mut self, part_type: &str) {
+        self.drops.drop_part(part_type);
+    }
+
+    pub fn end(&mut self) {
+        self.drops.end_turn(self.sendable);
+        self.sendable = 0;
+    }
+
+    pub fn result(&self) -> Result<(), crate::Error> {
+        self.drops.result()
     }
 }

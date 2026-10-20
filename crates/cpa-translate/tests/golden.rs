@@ -117,6 +117,10 @@ fn normalize(outputs: &mut [Vec<u8>], dynamics: &[Dyn], check: Option<(i64, i64)
     errors
 }
 
+fn req_out(r: Result<Vec<u8>, cpa_translate::Error>) -> Vec<u8> {
+    r.unwrap_or_else(|e| format!("ERR:{e}").into_bytes())
+}
+
 fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>> {
     let model = f["model"].as_str().unwrap();
     let pair = pair(client, upstream).unwrap();
@@ -133,7 +137,7 @@ fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>>
         stream: f["stream"].as_bool().unwrap_or(false),
     };
     match f["path"].as_str().unwrap() {
-        "request" => vec![translate_request(client, upstream, &ctx, &input).unwrap()],
+        "request" => vec![req_out(translate_request(client, upstream, &ctx, &input))],
         "request_compat" => vec![
             match (client, upstream) {
                 (Format::OpenAI, Format::Claude) => cpa_translate::openai_to_claude_with_compat(&ctx, &input),
@@ -145,7 +149,7 @@ fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>>
                 }
                 other => panic!("no compat request for {other:?}"),
             }
-            .unwrap(),
+            .map_err(|e| e).map_or_else(|e| format!("ERR:{e}").into_bytes(), |b| b),
         ],
         "request_envelope" => {
             // The executor's ResolvedModelInfo with native web search on.
@@ -156,7 +160,7 @@ fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>>
                     .clone(),
             )
             .unwrap();
-            vec![cpa_translate::translate_request_envelope(client, upstream, &ctx, &input, Some(&info)).unwrap()]
+            vec![req_out(cpa_translate::translate_request_envelope(client, upstream, &ctx, &input, Some(&info)))]
         }
         // Go returns nil (written as "") when the apply_patch bridge rejects the body.
         "non_stream" => vec![match (pair.non_stream)(&rctx, &input) {
@@ -203,13 +207,15 @@ fn canonical(raw: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reference_goldens() {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pairs");
+    let dir = std::env::var("PAIRS_DIR").unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pairs").into());
+    let only = std::env::var("PAIRS_ONLY").ok();
     let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
     files.sort();
     assert!(!files.is_empty());
     let mut failures = vec![];
     let mut total = 0;
     for file in files {
+        if let Some(o) = &only && !file.to_string_lossy().contains(o.as_str()) { continue; }
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let client = Format::parse(doc["client"].as_str().unwrap()).unwrap();
         let upstream = Format::parse(doc["upstream"].as_str().unwrap()).unwrap();
@@ -243,6 +249,7 @@ fn reference_goldens() {
                 .iter()
                 .flat_map(|o| o.as_array().unwrap().iter().map(|c| field(c, bytes)))
                 .collect();
+            if let Some(e) = f["request_error"].as_str() { expected = vec![format!("ERR:{e}").into_bytes()]; }
             let dynamics: Vec<Dyn> = f["dynamic"]
                 .as_array()
                 .map(|d| {
@@ -347,7 +354,7 @@ fn reference_goldens() {
         failures.is_empty(),
         "{} of {total} fixtures failed:\n{}",
         failures.len(),
-        failures[..failures.len().min(12)].join("\n")
+        { if let Ok(p) = std::env::var("FAIL_OUT") { std::fs::write(p, failures.join("\n")).unwrap(); } failures[..failures.len().min(12)].join("\n") }
     );
 }
 
