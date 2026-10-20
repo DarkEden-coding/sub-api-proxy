@@ -155,3 +155,50 @@ async fn closing_fails_waiting_requests_and_notifies_the_observer() {
         "wsrelay: provider aistudio-a not connected"
     );
 }
+
+/// Go's `cancelWithError` evicts a buffered message when a request's channel is
+/// full, so the session's error still arrives and a half-read answer is not a success.
+#[tokio::test]
+async fn closing_with_a_full_buffer_still_fails_the_request() {
+    let relay = Arc::new(Relay::default());
+    let (session, mut frames) = relay.connect_as("aistudio-full".into());
+    let request = HttpRequest::default();
+    let call = relay.non_stream("aistudio-full", &request);
+    tokio::pin!(call);
+    // One poll sends the request; the call then reads nothing until it is awaited.
+    assert!(tokio::time::timeout(Duration::ZERO, &mut call).await.is_err());
+    let id = next(&mut frames).await.id;
+    session
+        .receive(format!(r#"{{"id":"{id}","type":"stream_start","payload":{{"status":200}}}}"#).as_bytes())
+        .await
+        .unwrap();
+    for _ in 1..PENDING_BUFFER {
+        let chunk = format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"x"}}}}"#);
+        session.receive(chunk.as_bytes()).await.unwrap();
+    }
+    session.close("browser went away");
+    assert_eq!(call.await.unwrap_err(), "browser went away (status=0)");
+
+    // A stream sees every buffered message but the oldest, then the error.
+    let (session, mut frames) = relay.connect_as("aistudio-full".into());
+    let mut events = relay.stream("aistudio-full", &HttpRequest::default()).await.unwrap();
+    let id = next(&mut frames).await.id;
+    // The forwarding task holds one event and the outer channel another.
+    for n in 0..PENDING_BUFFER + 2 {
+        let chunk = format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"{n} "}}}}"#);
+        session.receive(chunk.as_bytes()).await.unwrap();
+    }
+    session.close("browser went away");
+    let mut chunks = String::new();
+    let error = loop {
+        let event = events.recv().await.unwrap();
+        match event.error {
+            Some(error) => break error,
+            None => chunks.push_str(std::str::from_utf8(&event.payload).unwrap()),
+        }
+    };
+    assert_eq!(error, "browser went away (status=0)");
+    let got: Vec<usize> = chunks.split_whitespace().map(|n| n.parse().unwrap()).collect();
+    assert_eq!(got.len(), PENDING_BUFFER + 1, "one buffered message was evicted");
+    assert!(!got.contains(&2) && got.ends_with(&[PENDING_BUFFER + 1]), "{got:?}");
+}

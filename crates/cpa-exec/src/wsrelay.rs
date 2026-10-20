@@ -387,7 +387,7 @@ impl Relay {
         let mut stream: Option<HttpResponse> = None;
         let mut body = Vec::new();
         loop {
-            let Some(msg) = responses.rx.recv().await else {
+            let Some(msg) = responses.recv().await else {
                 return match stream {
                     Some(mut resp) => {
                         resp.body = body;
@@ -436,7 +436,7 @@ impl Relay {
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             loop {
-                let Some(msg) = responses.rx.recv().await else {
+                let Some(msg) = responses.recv().await else {
                     let _ = tx
                         .send(StreamEvent {
                             error: Some("wsrelay: stream closed".into()),
@@ -502,15 +502,39 @@ pub struct Session {
     relay: Weak<Relay>,
     out: mpsc::UnboundedSender<String>,
     closed: watch::Sender<bool>,
-    pending: Mutex<HashMap<String, mpsc::Sender<Message>>>,
+    pending: Mutex<HashMap<String, Pending>>,
+}
+
+/// A waiting request's channel. `late` holds the session's error when the session
+/// ended with the channel full.
+struct Pending {
+    tx: mpsc::Sender<Message>,
+    late: Arc<Mutex<Option<Message>>>,
 }
 
 /// The responses to one request; dropping it forgets the request (Go's context
 /// cancellation).
 struct Responses {
     rx: mpsc::Receiver<Message>,
+    late: Arc<Mutex<Option<Message>>>,
+    evicted: bool,
     session: Arc<Session>,
     id: String,
+}
+
+impl Responses {
+    /// The next message. A session error that found the channel full takes the place
+    /// of its oldest message, as Go's `cancelWithError` evicts it, and arrives last.
+    async fn recv(&mut self) -> Option<Message> {
+        if !self.evicted && lock(&self.late).is_some() {
+            self.evicted = true;
+            let _ = self.rx.try_recv();
+        }
+        match self.rx.recv().await {
+            Some(msg) => Some(msg),
+            None => lock(&self.late).take(),
+        }
+    }
 }
 
 impl Drop for Responses {
@@ -547,15 +571,24 @@ impl Session {
             return Err("wsrelay: message id is required".into());
         }
         let (tx, rx) = mpsc::channel(PENDING_BUFFER);
+        let late = Arc::default();
         {
             let mut pending = lock(&self.pending);
             if pending.contains_key(&msg.id) {
                 return Err(format!("wsrelay: duplicate message id {}", msg.id));
             }
-            pending.insert(msg.id.clone(), tx);
+            pending.insert(
+                msg.id.clone(),
+                Pending {
+                    tx,
+                    late: Arc::clone(&late),
+                },
+            );
         }
         let responses = Responses {
             rx,
+            late,
+            evicted: false,
             session: self.clone(),
             id: msg.id.clone(),
         };
@@ -581,7 +614,7 @@ impl Session {
             });
             return Ok(());
         }
-        let Some(tx) = lock(&self.pending).get(&msg.id).cloned() else {
+        let Some(tx) = lock(&self.pending).get(&msg.id).map(|p| p.tx.clone()) else {
             if terminal(&msg.kind) {
                 tracing::debug!(id = %msg.id, provider = %self.provider, "wsrelay: received terminal message for unknown id");
             }
@@ -601,23 +634,25 @@ impl Session {
     }
 
     /// `session.cleanup`: once, every waiting request gets an error message carrying
-    /// `cause`, the session leaves the relay and the observer hears of it.
-    // ponytail: Go makes room for the error in a full request buffer by dropping its
-    // oldest message; here a full buffer just ends without the error message.
+    /// `cause`, the session leaves the relay and the observer hears of it. A full
+    /// request buffer loses its oldest message to the error (see [`Responses::recv`]).
     pub fn close(&self, cause: &str) {
         if self.closed.send_replace(true) {
             return;
         }
-        let pending: Vec<_> = lock(&self.pending).drain().map(|(_, tx)| tx).collect();
-        for tx in pending {
-            let _ = tx.try_send(Message {
+        let pending: Vec<_> = lock(&self.pending).drain().map(|(_, p)| p).collect();
+        for p in pending {
+            let error = Message {
                 id: String::new(),
                 kind: ERROR.into(),
                 payload: Some(BTreeMap::from([(
                     "error".to_owned(),
                     GoValue::String(cause.to_owned()),
                 )])),
-            });
+            };
+            if let Err(mpsc::error::TrySendError::Full(error)) = p.tx.try_send(error) {
+                *lock(&p.late) = Some(error);
+            }
         }
         let Some(relay) = self.relay.upgrade() else {
             return;
