@@ -57,7 +57,9 @@ The translator implementation and test LOC counts also follow the frozen tree.
 
 ## Judgment changes
 
-None of the additions is covered: 197 are partial and 67 missing. `M1-0133`,
+At the freeze, none of the additions was covered: 197 were partial and 67
+missing. Later porting changes may cover an addition with evidence; the verifier
+requires only that each addition keeps a judgment with evidence. `M1-0133`,
 the Claude `/responses/compact` suite, is missing: Rust answers 501 there, as
 Go `6fecc6e` did. Partial means the corresponding subsystem exists, but the
 current Go assertions have not been verified. A source filename, a matching leaf name, or a test's old name does not
