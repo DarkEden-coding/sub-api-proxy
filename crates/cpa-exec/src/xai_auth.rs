@@ -833,7 +833,7 @@ pub(crate) fn metadata_string(credential: &Credential, key: &str) -> String {
 }
 
 /// `fmt.Sprint` of a value decoded by `encoding/json` into `any`.
-fn go_sprint(value: &Value) -> String {
+pub(crate) fn go_sprint(value: &Value) -> String {
     match value {
         Value::Null => "<nil>".into(),
         Value::Bool(b) => b.to_string(),

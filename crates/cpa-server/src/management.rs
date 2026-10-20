@@ -65,6 +65,8 @@ pub struct Management {
     /// Callback forwarders by port (Go `callbackForwarders`).
     pub(crate) forwarders: Mutex<std::collections::HashMap<u16, oauth::Forwarder>>,
     pub(crate) login_base: Option<String>,
+    /// Told the state of every management login that has finished (tests only).
+    pub(crate) login_settled: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Go `Handler.logDir`: resolved once at startup.
     pub(crate) log_dir: PathBuf,
     /// The remote store mirroring config and auth files, when one is configured.
@@ -94,6 +96,9 @@ pub struct Options {
     pub update_check_disabled: Option<bool>,
     /// One local base URL for every provider's login endpoints (tests only).
     pub login_base: Option<String>,
+    /// Receives the state of every management login once its worker has finished,
+    /// saved, failed or cancelled (tests only).
+    pub login_settled: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Overrides the log directory Go resolves at startup (tests only).
     pub log_dir: Option<PathBuf>,
     /// A Postgres, git or object store mirroring config and auth files (Go's
@@ -155,6 +160,7 @@ impl Management {
         let mut options = options;
         let store = options.store.take();
         let auth_dir = options.auth_dir.take();
+        let login_settled = options.login_settled.take();
         let log_zone = options.log_zone;
         let plugin_store = plugin_store::StoreState::new(
             options.plugin_store_registry_url.take(),
@@ -178,6 +184,7 @@ impl Management {
             oauth: oauth::Sessions::default(),
             forwarders: Mutex::default(),
             login_base,
+            login_settled,
             log_dir,
             store,
             auth_dir,
@@ -208,6 +215,24 @@ impl Management {
         };
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         store.delete_auth(path).map_err(|e| format!("{e:#}"))
+    }
+
+    /// Go `saveTokenRecord` on a remote store (`Store.Save`): a credential just written
+    /// to the mirror counts as saved only once the store has it, so a store failure
+    /// reaches the caller instead of only the watcher's log.
+    pub(crate) async fn store_save(&self, path: &std::path::Path) -> Result<(), String> {
+        let Some(store) = self.store.clone() else {
+            return Ok(());
+        };
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        store
+            .persist_auth_files(format!("Update auth {name}"), vec![path])
+            .await
+            .map_err(|e| format!("{e:#}"))
     }
 
     /// Publishes a config and everything Go derives from it on reload: scheduler

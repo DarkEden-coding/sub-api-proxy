@@ -823,15 +823,14 @@ pub enum UploadError {
 pub fn import_upload(auth_dir: &Path, data: &[u8], location: &str) -> Result<Upload, UploadError> {
     let sa = decode_service_account(data).map_err(UploadError::InvalidJson)?;
     let sa = normalize_decoded(sa).map_err(UploadError::InvalidServiceAccount)?;
-    // `valueAsString`: Go's `fmt.Sprint` for a value that is not a string.
-    // ponytail: numbers print as JSON writes them, not in `%v` form (`1e+06`); Google
-    // keys hold strings here.
+    // `valueAsString`: `fmt.Sprint` for a value that is not a string, so a numeric
+    // project ID 1000000 names `vertex-1e+06.json`, as in Go.
     let text = |key: &str| match sa.get(key) {
         None | Some(GoValue::Null) => String::new(),
-        Some(GoValue::String(s)) => s.trim().to_owned(),
-        Some(GoValue::Bool(b)) => b.to_string(),
-        Some(GoValue::Number(n)) => n.clone(),
-        Some(other) => String::from_utf8_lossy(&other.marshal()).into_owned(),
+        Some(value) => {
+            let value = serde_json::from_slice(&value.marshal()).unwrap_or(Value::Null);
+            crate::xai_auth::go_sprint(&value).trim().to_owned()
+        }
     };
     let (project, email) = (text("project_id"), text("client_email"));
     if project.is_empty() {

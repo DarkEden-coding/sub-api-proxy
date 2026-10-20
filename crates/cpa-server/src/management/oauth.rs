@@ -402,16 +402,24 @@ async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMa
         location = query.first("location").trim().to_owned();
     }
     let auth_dir = state.rt.config().auth_dir.clone();
-    let worker = state;
+    let worker = state.clone();
     let saved = tokio::task::spawn_blocking(move || {
         let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        let saved = import_upload(&auth_dir, &file.data, &location);
-        if saved.is_ok() {
-            worker.publish((*worker.rt.config()).clone(), None);
-        }
-        saved
+        import_upload(&auth_dir, &file.data, &location)
     })
     .await;
+    // Go `saveTokenRecord`: success only once a remote store has the file too.
+    let saved = match saved {
+        Ok(Ok(upload)) => match state.store_save(&upload.path).await {
+            Ok(()) => {
+                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+                state.publish((*state.rt.config()).clone(), None);
+                Ok(Ok(upload))
+            }
+            Err(e) => Ok(Err(UploadError::Save(e))),
+        },
+        other => other,
+    };
     let message = |error: &str, message: String| {
         reply(
             StatusCode::BAD_REQUEST,
@@ -459,17 +467,24 @@ async fn save_if_pending<T: Send + 'static>(
     save_error: &str,
 ) -> Outcome {
     let auth_dir = state.rt.config().auth_dir.clone();
-    let (guard, sid, provider) = (state.clone(), sid.to_owned(), provider.to_owned());
+    let (guard, sid, owner) = (state.clone(), sid.to_owned(), provider.to_owned());
     let saved = tokio::task::spawn_blocking(move || {
         // Checked on the blocking thread itself, right before the write.
-        if !guard.oauth.is_pending(&sid, &provider) {
+        if !guard.oauth.is_pending(&sid, &owner) {
             return Ok(None);
         }
         write(auth_dir, value).map(Some)
     })
     .await;
     match saved {
-        Ok(Ok(Some(_))) => Outcome::Saved,
+        // Go `saveTokenRecord`: a remote store must accept the file as well.
+        Ok(Ok(Some(path))) => match state.store_save(&path).await {
+            Ok(()) => Outcome::Saved,
+            Err(e) => {
+                tracing::error!("failed to save {provider} token to the store: {e}");
+                Outcome::Failed(save_error.to_owned())
+            }
+        },
         Ok(Ok(None)) => Outcome::Cancelled,
         _ => Outcome::Failed(save_error.to_owned()),
     }
@@ -486,6 +501,9 @@ fn settle(state: &Management, sid: &str, outcome: Outcome) {
         }
         Outcome::Cancelled => {}
         Outcome::Failed(message) => state.oauth.set_error(sid, &message),
+    }
+    if let Some(settled) = &state.login_settled {
+        let _ = settled.send(sid.to_owned());
     }
 }
 

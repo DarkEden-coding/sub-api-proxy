@@ -1694,6 +1694,14 @@ async fn login_server(f: &Fixture, login_base: &str) -> (String, Arc<Management>
         login_base: Some(login_base.to_owned()),
         ..Default::default()
     };
+    serve_with(f, options).await
+}
+
+/// A management server over `f`'s runtime with `options`.
+async fn serve_with(
+    f: &Fixture,
+    options: management::Options,
+) -> (String, Arc<Management>, tokio::task::JoinHandle<()>) {
     let state = Management::with_options(f.rt.clone(), f.dir.join("config.yaml"), options);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1719,6 +1727,32 @@ async fn oauth_get(base: &str, path: &str) -> Value {
         .json()
         .await
         .unwrap()
+}
+
+/// A remote store that is down: every auth push fails, and its messages are recorded.
+struct DownStore {
+    dir: PathBuf,
+    pushed: std::sync::Mutex<Vec<String>>,
+}
+
+impl cpa_server::persist::StorePersister for DownStore {
+    fn persist_config(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn persist_auth_files(
+        &self,
+        message: String,
+        _: Vec<PathBuf>,
+    ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        self.pushed.lock().unwrap().push(message);
+        Box::pin(async { Err(anyhow::anyhow!("fake store unavailable")) })
+    }
+    fn delete_auth(&self, _: PathBuf) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn auth_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
 }
 
 /// Polls `/oauth/status` until it leaves `wait` (at most `secs`).
@@ -1981,7 +2015,13 @@ async fn antigravity_management_login_flows() {
     let fake = format!("http://{}", listener.local_addr().unwrap());
     let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let f = Fixture::new("antigravitylogin");
-    let (base, _management, server) = login_server(&f, &fake).await;
+    let (settled_tx, mut settled) = tokio::sync::mpsc::unbounded_channel();
+    let options = management::Options {
+        login_base: Some(fake.clone()),
+        login_settled: Some(settled_tx),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&f, options).await;
     for (code, error) in [
         ("success", ""),
         ("no-project", ""),
@@ -2032,8 +2072,13 @@ async fn antigravity_management_login_flows() {
                 .unwrap();
             assert_eq!(cancelled["cancelled"], true);
             resume.add_permits(1);
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
+        // Barrier: the login worker has finished, including a cancelled exchange.
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), settled.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished, sid);
         let status = final_status(&base, sid, 5).await;
         if error.is_empty() {
             assert_eq!(status, json!({"status":"ok"}));
@@ -2071,6 +2116,35 @@ async fn antigravity_management_login_flows() {
             .filter(|c| c.provider == "antigravity")
             .count(),
         2
+    );
+    server.abort();
+    // Go `saveTokenRecord`: with a remote store that is down, the login fails.
+    let down = Fixture::new("antigravitystore");
+    let store = Arc::new(DownStore {
+        dir: down.dir.join("auth"),
+        pushed: Default::default(),
+    });
+    let options = management::Options {
+        login_base: Some(fake.clone()),
+        store: Some(store.clone()),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&down, options).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    let sid = started["state"].as_str().unwrap();
+    wreq::Client::new()
+        .post(format!("{base}/v8/management/oauth/callback"))
+        .json(&json!({"provider": "antigravity", "redirect_url": format!("http://localhost:51121/oauth-callback?state={sid}&code=stored")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        final_status(&base, sid, 5).await,
+        json!({"status": "error", "error": "Failed to save token to file"})
+    );
+    assert_eq!(
+        *store.pushed.lock().unwrap(),
+        ["Update auth antigravity-stored@example.invalid.json"]
     );
     server.abort();
     upstream.abort();
@@ -2202,6 +2276,47 @@ async fn vertex_service_account_import() {
         ),
         (&json!("team"), &json!(true), None, &json!("europe-west4"))
     );
+
+    // Non-string project IDs name the file as Go's fmt.Sprint prints them.
+    for (project, file) in [
+        (json!(1000000), "vertex-1e+06.json"),
+        (json!(["a", "b"]), "vertex-[a-b].json"),
+        (json!({"b": 1, "a": "x"}), "vertex-map[a_x-b_1].json"),
+    ] {
+        let mut sa: Value = serde_json::from_str(key).unwrap();
+        sa["project_id"] = project;
+        let (status, body) = upload(v8, form(&sa.to_string(), None), FORM).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(auth.join(file).exists(), "{file}: {body}");
+    }
+    server.abort();
+
+    // Go `saveTokenRecord`: with a remote store that is down, the import fails.
+    let down = Fixture::new("vertexstore");
+    let store = Arc::new(DownStore {
+        dir: down.dir.join("auth"),
+        pushed: Default::default(),
+    });
+    let options = management::Options {
+        store: Some(store.clone()),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&down, options).await;
+    let response = wreq::Client::new()
+        .post(format!("{base}{v8}"))
+        .bearer_auth("fake-management-only")
+        .header("content-type", FORM)
+        .body(form(key, None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"error": "save_failed", "message": "fake store unavailable"})
+    );
+    assert_eq!(*store.pushed.lock().unwrap(), ["Update auth vertex-proj-1.json"]);
+    assert!(down.rt.store().get("vertex-proj-1.json").is_none(), "not published");
     server.abort();
 }
 
