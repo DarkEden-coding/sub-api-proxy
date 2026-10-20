@@ -174,24 +174,37 @@ class SuiteSkeletonTests(unittest.TestCase):
     def test_every_stripped_fragment_is_returned_for_validation(self):
         extra = self.ROW + (" Removed upstream declarations: `TestG` (historical, not active requirements)."
                             " Moved upstream declarations: `TestH` to a/w_test.go:7.")
-        _, retired, moved = verify.history(extra)
+        _, _, retired, moved = verify.suite_parts(extra)
         self.assertEqual(retired, ["TestB", "TestC", "TestG"])
         self.assertEqual(moved, [("TestD", "a/y_test.go", 4), ("TestE", "a/y_test.go", 9), ("TestH", "a/w_test.go", 7)])
 
     def test_a_moved_entry_without_a_target_line_stays_compared(self):
         bogus = self.ROW + " Moved upstream declarations: `TestBogus` to missing_test.go."
         self.assertNotEqual(verify.suite_skeleton(bogus), verify.suite_skeleton(self.ROW))
-        self.assertNotIn("TestBogus", [name for name, _, _ in verify.history(bogus)[2]])
+        self.assertNotIn("TestBogus", [name for name, _, _ in verify.suite_parts(bogus)[3]])
 
     def test_removing_one_fragment_cannot_form_another_that_goes_unchecked(self):
         nested = self.ROW.replace(
             " Removed upstream declarations:",
             " Moved upstream declarations: `TestBogus` to missing_test.go:3 Removed upstream declarations:")
         nested = nested.replace("requirements).", "requirements)..")
-        stripped, _, moved = verify.history(nested)
+        stripped, _, _, moved = verify.suite_parts(nested)
         self.assertIn("TestBogus", stripped)
         self.assertNotIn("TestBogus", [name for name, _, _ in moved])
         self.assertNotEqual(verify.suite_skeleton(nested), verify.suite_skeleton(self.ROW))
+
+    def test_removing_history_cannot_form_a_declaration_that_goes_unchecked(self):
+        forged = self.ROW.replace(
+            "(L3).",
+            "(L3); `TestBogus` (L999 Removed upstream declarations: `TestZ` (historical, not active requirements).).")
+        skeleton, declared, retired, _ = verify.suite_parts(forged)
+        self.assertEqual(declared, [("TestA", 3)])
+        self.assertIn("TestZ", retired)
+        self.assertTrue(verify.MARKER.search(skeleton))
+        self.assertNotEqual(skeleton, verify.suite_skeleton(self.ROW))
+
+    def test_a_clean_skeleton_keeps_no_markers(self):
+        self.assertIsNone(verify.MARKER.search(verify.suite_skeleton(self.ROW)))
 
     def test_prose_around_or_inside_history_stays_compared(self):
         for changed in (self.ROW + " All cases are optional.",

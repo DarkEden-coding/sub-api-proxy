@@ -144,33 +144,38 @@ DECL = r"`(?:Test|Fuzz|Benchmark|Example)\w*`"
 REMOVED_NOTE = re.compile(rf" Removed upstream declarations: {DECL}(?:, {DECL})* \(historical, not active requirements\)\.")
 MOVED_ENTRY = rf"{DECL} to [\w./\-]+_test\.go:\d+"
 MOVED_NOTE = re.compile(rf" Moved upstream declarations: {MOVED_ENTRY}(?:; {MOVED_ENTRY})*\.")
-HISTORY = re.compile(rf"(?P<removed>{REMOVED_NOTE.pattern})|{MOVED_NOTE.pattern}")
+DECLARED = rf"(?P<declared>`(?P<name>(?:Test|Fuzz|Benchmark|Example)\w*)` \(L(?P<line>\d+)\)(?:; )?)"
+# One pattern for every span regenerated from Go, so a single pass over the original
+# text records and removes each one; removing a span can never form another.
+REGENERATED = re.compile(rf"(?P<removed>{REMOVED_NOTE.pattern})|(?P<moved>{MOVED_NOTE.pattern})|{DECLARED}")
+# Markers no skeleton may keep: a surviving one means a span escaped the parse.
+MARKER = re.compile(rf"{DECL} \(L|upstream declarations:")
 
 
-def history(text):
-    """(text without history fragments, retired names, [(moved name, target, line)]).
+def suite_parts(text):
+    """(skeleton, [(declared name, line)], retired names, [(moved name, target, line)]).
 
-    One substitution over the original text both records and removes each fragment,
-    so exactly the spans that leave the comparison are returned for checking against
-    Go; removing one fragment can never form another that is stripped unchecked.
+    The skeleton is the text without the spans regenerated from Go, normalized; the
+    other parts are exactly the spans removed, returned for checking against Go.
     """
-    retired, moved = [], []
+    declared, retired, moved = [], [], []
 
     def take(match):
-        if match["removed"]:
+        if match["declared"]:
+            declared.append((match["name"], int(match["line"])))
+        elif match["removed"]:
             retired.extend(re.findall(r"`(\w+)`", match[0]))
         else:
             moved.extend((n, t, int(line)) for n, t, line in
                          re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", match[0]))
         return ""
 
-    return HISTORY.sub(take, text), retired, moved
+    return normalized(REGENERATED.sub(take, text)), declared, retired, moved
 
 
 def suite_skeleton(text):
     """Suite text without the fragments regenerated from Go: line ranges, declarations, history."""
-    text = normalized(history(text)[0])
-    return re.sub(r"`(?:Test|Fuzz|Benchmark|Example)\w*` \(L\d+\)(?:; )?", "", text)
+    return suite_parts(text)[0]
 
 
 def normalized(text):
@@ -229,6 +234,7 @@ def main():
             # Declaration lists and history follow Go and are checked against it below.
             check(audit.test_file(now["text"]) == suite, f"suite ID changed its file: {i}")
             check(suite_skeleton(now["text"]) == suite_skeleton(before["text"]), f"suite text changed: {i}")
+            check(not MARKER.search(suite_skeleton(now["text"])), f"unparsed declaration or history text: {i}")
         elif normalized(now["text"]) != normalized(before["text"]):
             changed.add(i)
     check(changed == REWRITTEN, f"retained contracts rewritten without a listed reason: {sorted(changed ^ REWRITTEN)}")
@@ -265,13 +271,13 @@ def main():
     for path, row in suites.items():
         text = source(NEW, path)
         declarations = [(m[1], text.count("\n", 0, m.start()) + 1) for m in TEST.finditer(text)]
-        listed = [(name, int(line)) for name, line in re.findall(r"`((?:Test|Fuzz|Benchmark|Example)\w*)` \(L(\d+)\)", row["text"])]
+        skeleton, listed, names, moves = suite_parts(row["text"])
+        check(not MARKER.search(skeleton), f"unparsed declaration or history text: {row['id']} {path}")
         check(listed == declarations, f"stale declarations or line numbers: {row['id']} {path}")
         span = re.match(rf"\*\*{re.escape(path)}:1-(\d+)\*\*", row["text"])
         check(span and int(span[1]) == len(text.splitlines()), f"suite range is not the whole file: {row['id']}")
         current = {name for name, _ in declarations}
         before = set(TEST.findall(source(OLD, path))) if path in test_files(OLD) else set()
-        _, names, moves = history(row["text"])
         retired += len(names)
         check(set(names) <= before - current, f"retired declarations not removed from this file since {OLD[:7]}: {path}")
         for name, target, line in moves:
