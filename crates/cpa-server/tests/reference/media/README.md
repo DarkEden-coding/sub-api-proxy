@@ -1,4 +1,4 @@
-# Image and video goldens
+# Image, video and speech goldens
 
 Replayed by `tests/media_go.rs`. `main.go` starts the unmodified Go server binary
 (`cmd/server` at CLIProxyAPI `6fecc6e`, run with `-local-model`) against a scripted local
@@ -27,3 +27,23 @@ timestamps from the clock (`"<now>"`), generated `video_<id>` IDs, and the two x
 as `XAI-KEY-<n>` in order of first use. Credential IDs hash the base URL, which holds the
 random capture port, so which key sorts first changes between runs. Request bodies that
 are not valid UTF-8 are stored in `body_b64`.
+
+## Speech goldens
+
+`fixtures/speech_go.json` holds the `/v1/audio/speech` and `/v1/tts` scenarios from
+`speech.go`, recorded from the unmodified Go server at CLIProxyAPI v8.0.35
+(`ae3ee3be`) with the same driver and its own config (`SpeechConfig`: two xAI keys and a
+payload rule for the voice model):
+
+```sh
+# in the CLIProxyAPI tree at ae3ee3be
+go build -o /tmp/cpa-go-server-v8.0.35 ./cmd/server
+cp main.go scenarios.go speech.go "$gen/"
+cd "$gen" && go run . /tmp/cpa-go-server-v8.0.35 ../../fixtures/speech_go.json speech
+```
+
+The driver only needs the standard library, so `$gen` can be any module. The
+model-unavailable 404 runs last because it cools `grok-tts` on both keys. The run also
+records the Grok Shell catalog; the 6fecc6e `models_grok_shell*` expectations take the two
+speech builtins from it (v8.0.35 6a853dce adds them to the xAI catalog).
+

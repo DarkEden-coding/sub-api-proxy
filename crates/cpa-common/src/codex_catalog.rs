@@ -689,7 +689,7 @@ fn thinking_support(model: &Map) -> Option<ThinkingSupport> {
     }
 }
 
-/// `codexClientImageOrVideoModel` IDs, always hidden.
+/// `isCodexClientImageOrVideoModel` IDs (image, video and speech models), always hidden.
 fn image_or_video(id: &str) -> bool {
     let target = base_of(id).unwrap_or(id.trim());
     matches!(
@@ -705,6 +705,8 @@ fn image_or_video(id: &str) -> bool {
             | "grok-imagine-video"
             | "grok-imagine-video-1.5"
             | "grok-imagine-video-1.5-preview"
+            | "grok-tts"
+            | "grok-voice-tts-1.0"
     )
 }
 

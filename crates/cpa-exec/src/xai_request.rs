@@ -61,7 +61,7 @@ pub(crate) fn original(req: &ExecRequest) -> &[u8] {
 }
 
 /// `helps.PayloadRequestedModel`.
-fn requested_model(req: &ExecRequest) -> &str {
+pub(crate) fn requested_model(req: &ExecRequest) -> &str {
     if req.requested_model.trim().is_empty() {
         req.model.trim()
     } else {

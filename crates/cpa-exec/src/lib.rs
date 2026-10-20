@@ -214,6 +214,20 @@ impl Executors {
         }
     }
 
+    /// The OpenAI speech routes (`/v1/audio/speech`, `/v1/tts`): Go's `openai-speech`
+    /// source, which only the xAI executor serves.
+    pub async fn speech(
+        &self,
+        credential: &Credential,
+        req: ExecRequest,
+        cfg: &Config,
+    ) -> Result<ExecResponse, ExecError> {
+        match credential.provider.as_str() {
+            xai::PROVIDER => self.openai.xai.speech(credential, req, cfg).await,
+            other => Err(no_executor(other)),
+        }
+    }
+
     /// One turn of a downstream Responses WebSocket session. Codex and xAI credentials
     /// with `websockets` keep a pooled upstream socket per session; every other credential
     /// runs an ordinary execution and cannot continue upstream state, so a continuation

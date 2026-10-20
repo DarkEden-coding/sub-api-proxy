@@ -50,8 +50,8 @@ pub struct Call {
     /// A turn of a long-lived downstream session (the Responses WebSocket), `None` for
     /// ordinary HTTP requests.
     pub turn: Option<Arc<SessionTurn>>,
-    /// A media route (Go's `openai-image` / `openai-video` handler types), `None` for
-    /// inference routes.
+    /// A media route (Go's `openai-image` / `openai-video` / `openai-speech` handler
+    /// types), `None` for inference routes.
     pub media: Option<Arc<Media>>,
 }
 
@@ -89,6 +89,9 @@ pub enum MediaKind {
     Images,
     /// [`cpa_exec::Executors::videos`].
     Videos,
+    /// [`cpa_exec::Executors::speech`]; speech-only models are allowed, and no
+    /// non-stream keep-alive runs: its newlines would prefix the audio.
+    Speech,
 }
 
 impl Call {
@@ -185,6 +188,8 @@ pub enum Failure {
     UnknownModel(String),
     /// An image-only model on a non-image route.
     ImageOnly(String),
+    /// A speech-only model on a non-speech route (Go `validateSpeechOnlyModel`).
+    SpeechOnly(String),
     /// `auth_not_found` / `auth_unavailable`, enriched like Go.
     Unavailable {
         code: &'static str,
@@ -206,7 +211,7 @@ impl Failure {
     pub fn status(&self) -> u16 {
         match self {
             Failure::Exec(e) | Failure::Remote { error: e, .. } => classify::response_status(e),
-            Failure::UnknownModel(_) => 400,
+            Failure::UnknownModel(_) | Failure::SpeechOnly(_) => 400,
             Failure::ImageOnly(_) | Failure::Unavailable { .. } => 503,
             Failure::Cooldown { .. } => 429,
         }
@@ -222,13 +227,14 @@ impl Failure {
                     r#"{{"error":{{"message":{message},"type":"invalid_request_error","code":"model_not_found","param":"model"}}}}"#
                 )
             }
-            Failure::ImageOnly(model) => {
-                let base = model.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(model);
-                format!(
-                    "model {} is only supported on /v1/images/generations and /v1/images/edits",
-                    base.trim()
-                )
-            }
+            Failure::ImageOnly(model) => format!(
+                "model {} is only supported on /v1/images/generations and /v1/images/edits",
+                route_base_name(model)
+            ),
+            Failure::SpeechOnly(model) => format!(
+                "model {} is only supported on /v1/audio/speech and /v1/tts",
+                route_base_name(model)
+            ),
             Failure::Unavailable {
                 code,
                 providers,
@@ -367,6 +373,35 @@ pub fn upstream_summary(raw: &str) -> String {
     crate::sanitize::summary(raw)
 }
 
+/// Go `routeModelBaseName`: the part after the last `/`, unless that is empty.
+fn route_base_name(model: &str) -> &str {
+    let model = model.trim();
+    model
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(model)
+        .trim()
+}
+
+/// Go `validateImageOnlyModel` and `validateSpeechOnlyModel` on a suffix-free model:
+/// image-only models serve only the image routes, speech-only models only the speech
+/// routes.
+fn check_route_only(base: &str, call: &Call) -> Result<(), RunError> {
+    let name = route_base_name(base).to_lowercase();
+    let kind = call.media.as_ref().map(|m| m.kind);
+    if IMAGE_ONLY.contains(&name.as_str()) && kind != Some(MediaKind::Images) {
+        return Err(Failure::ImageOnly(base.to_owned()).into());
+    }
+    if SPEECH_ONLY.contains(&name.as_str()) && kind != Some(MediaKind::Speech) {
+        return Err(Failure::SpeechOnly(base.to_owned()).into());
+    }
+    Ok(())
+}
+
+/// Go `isXAISpeechOnlyModel`.
+const SPEECH_ONLY: [&str; 2] = ["grok-tts", "grok-voice-tts-1.0"];
+
 const IMAGE_ONLY: [&str; 8] = [
     "gpt-image-1.5",
     "gpt-image-2",
@@ -386,24 +421,15 @@ fn route(
     routed: Option<&(String, Option<String>)>,
 ) -> Result<(Vec<String>, String), RunError> {
     if let Some(provider) = &call.forced_provider {
-        return Ok((vec![provider.clone()], gojson::trim(&call.model).to_owned()));
+        let model = gojson::trim(&call.model);
+        check_route_only(gojson::trim(canonical_model_raw(model)), call)?;
+        return Ok((vec![provider.clone()], model.to_owned()));
     }
     // Go `providersForExecution` with a router's provider: that provider, the router's
     // model or else the client's, and only the image-only check.
     if let Some((provider, model)) = routed {
         let model = model.clone().unwrap_or_else(|| call.model.clone());
-        let base = gojson::trim(canonical_model_raw(&model));
-        let image = base
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(base)
-            .trim()
-            .to_lowercase();
-        let images_route = call.media.as_ref().is_some_and(|m| m.kind == MediaKind::Images);
-        if IMAGE_ONLY.contains(&image.as_str()) && !images_route {
-            return Err(Failure::ImageOnly(base.to_owned()).into());
-        }
+        check_route_only(gojson::trim(canonical_model_raw(&model)), call)?;
         let mut providers = vec![provider.clone()];
         adjust_for_entry(call.entry, &mut providers);
         return Ok((providers, model));
@@ -424,17 +450,7 @@ fn route(
         model.to_owned()
     };
     let base = gojson::trim(canonical_model_raw(&resolved)).to_owned();
-    let image = base
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&base)
-        .trim()
-        .to_lowercase();
-    let images_route = call.media.as_ref().is_some_and(|m| m.kind == MediaKind::Images);
-    if IMAGE_ONLY.contains(&image.as_str()) && !images_route {
-        return Err(Failure::ImageOnly(base).into());
-    }
+    check_route_only(&base, call)?;
     if remote {
         return Ok((vec!["home".to_owned()], resolved));
     }
@@ -612,9 +628,10 @@ fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upst
 /// `requests.nonstream-keepalive-interval` seconds (Go `NonStreamingKeepAliveInterval`;
 /// 0 or below disables it), for the calls whose Go handler starts the keep-alive: only
 /// non-stream generate handlers do; the count-tokens handlers (code_handlers.go,
-/// gemini_handlers.go) never call `StartNonStreamingKeepAlive`.
+/// gemini_handlers.go) and the speech handler never call `StartNonStreamingKeepAlive`.
 fn nonstream_keepalive(call: &Call, cfg: &Config) -> Option<Duration> {
-    if call.stream || call.operation != Operation::Generate {
+    let speech = call.media.as_ref().is_some_and(|m| m.kind == MediaKind::Speech);
+    if call.stream || call.operation != Operation::Generate || speech {
         return None;
     }
     let seconds = cfg
@@ -2129,6 +2146,7 @@ async fn attempt(
                     let path = req.request_path.clone();
                     rt.executors.videos(&credential, req, &path, cfg).await
                 }
+                (None, Some(MediaKind::Speech)) => rt.executors.speech(&credential, req, cfg).await,
                 (None, None) => rt.executors.execute(&credential, req, cfg).await,
             }
         };
