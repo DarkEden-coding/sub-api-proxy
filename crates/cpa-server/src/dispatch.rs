@@ -92,12 +92,17 @@ pub enum MediaKind {
 }
 
 impl Call {
-    /// `WithPinnedAuthID` of a session turn or media call.
-    pub(crate) fn pinned(&self) -> Option<&str> {
+    /// `WithPinnedAuthID` of a session turn, media call or host model callback.
+    pub(crate) fn pinned(&self) -> Option<String> {
         self.turn
             .as_ref()
-            .and_then(|t| t.pinned.as_deref())
-            .or_else(|| self.media.as_ref().and_then(|m| m.pinned.as_deref()))
+            .and_then(|t| t.pinned.clone())
+            .or_else(|| self.media.as_ref().and_then(|m| m.pinned.clone()))
+            .or_else(|| {
+                crate::plugins::model_callbacks::context()
+                    .map(|c| c.auth_id)
+                    .filter(|id| !id.is_empty())
+            })
     }
 
     /// `WithSelectedAuthIDCallback` of a session turn or media call.
@@ -665,7 +670,7 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
         trace.prompt_prefix(call.entry, &call.body);
     }
     let mut call = call;
-    let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1, true).await?;
+    let hooks = crate::plugins::interceptors::start(rt, trace, &mut call, &resolved.1).await?;
     let result = retry_bootstrap(rt, call, trace, &resolved, hooks.as_ref()).await;
     match hooks {
         Some(hooks) => hooks.finish(result, trace).await,
@@ -993,6 +998,7 @@ async fn run_routed(
         original_body: call.body.clone(),
         body: call.body.clone(),
         stream: call.stream,
+        stream_payloads: hooks.is_some() || crate::plugins::model_callbacks::context().is_some(),
         alt: call.alt.clone(),
         session: session.id,
         execution_session: call.execution_session.clone(),
@@ -1148,11 +1154,12 @@ async fn run_routed(
             _ => (0, false),
         };
         let terminal = |round_error: RunError| upstream.clone().map(Fault::into_run_error).unwrap_or(round_error);
+        let pinned = call.pinned();
         let credits = Credits {
             providers: &providers,
             model: &model,
             aliases: &aliases,
-            pinned: call.pinned(),
+            pinned: pinned.as_deref(),
             compact,
         };
         if !retry_round {
@@ -1566,7 +1573,7 @@ async fn remote_round(
                         count <= 1 && round <= 0,
                         &selection.model,
                         &selection.exclude,
-                        cx.call.pinned(),
+                        cx.call.pinned().as_deref(),
                         &releases,
                     )
                 });
@@ -2099,6 +2106,14 @@ async fn attempt(
         let mut tracker = start(&lease.credential, &mut req);
         let session = session.as_ref();
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
+            let credential = match crate::plugins::model_callbacks::context().filter(|c| !c.proxy_url.is_empty()) {
+                Some(context) => {
+                    let mut credential = (*credential).clone();
+                    credential.attributes.insert("proxy_url".into(), context.proxy_url);
+                    Arc::new(credential)
+                }
+                None => credential,
+            };
             let credential = rt.for_executor(&credential);
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
@@ -2721,6 +2736,7 @@ mod tests {
             operation: Operation::Generate,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,
+            stream_payloads: false,
             requested_model: "sol".into(),
             model: "sol".into(),
             original_body: Bytes::new(),

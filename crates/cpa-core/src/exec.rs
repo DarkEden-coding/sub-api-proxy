@@ -59,6 +59,9 @@ pub struct ExecRequest {
     pub body: Bytes,
     /// The client asked for a stream. The upstream mode is the executor's decision.
     pub stream: bool,
+    /// Return Go executor chunks before HTTP framing, for internal model callbacks.
+    /// Captured when preparing the attempt, independent of plugin interceptor lifetime.
+    pub stream_payloads: bool,
     /// Alternate operation from `alt` / `$alt` (for example `responses/compact`).
     pub alt: Option<String>,
     /// Session key for affinity and provider session identity, when one was derived:

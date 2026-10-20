@@ -916,7 +916,7 @@ fn translate_stream(req: &ExecRequest, translated: &str, upstream: ExecStream) -
         original_request: &req.original_body,
         translated_request: translated.as_bytes(),
     };
-    let translator = (pair.stream)(&ctx);
+    let translator = crate::translate::stream(pair, &ctx, req);
     let original = if req.original_body.is_empty() {
         req.body.clone()
     } else {
