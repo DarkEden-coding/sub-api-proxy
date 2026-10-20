@@ -101,7 +101,7 @@ M5-0081	missing	covered	automatic	probe: POST /v8/management/plugins/:id/quota -
 M5-0082	missing	covered	automatic	probe: DELETE /v8/management/plugins/:id/quota -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json	Plugin store and quota integration: management/plugins.rs; tests/plugin_routes.rs.
 M5-0083	partial	covered	automatic	probe: POST /v0/management/oauth-callback -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json	
 M5-0084	partial	covered	automatic	probe: GET /v0/management/oauth-callback -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json	
-M5-0087	missing	covered	automatic	probe: PUT /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs	v0 serves GET config.yaml only (management.rs); v8 has both.
+M5-0087	missing	covered	automatic	probe: PUT /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs	v0 and v8 serve GET and PUT config.yaml; tests/legacy_go.rs replays the v0 PUT route.
 M5-0088	partial	partial	automatic	probe: GET /v0/management/latest-version -> 502; no test requests this path	
 M5-0090	missing	covered	automatic	probe: GET /v0/management/plugin-store -> 502; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json	
 M5-0091	missing	covered	automatic	probe: POST /v0/management/plugin-store/:id/install -> 502; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json	
@@ -152,7 +152,7 @@ M6-0062	partial	partial	manual	crates/cpa-home/src/client.rs, subscriber.rs (cli
 M6-0063	partial	partial	manual	crates/cpa-home/src/dispatch.rs, client.rs rpop_auth and ambiguous-dispatch fencing; dispatch through Home (Home 3)	The sdk/cliproxy/auth home_* suites (M6-0221..0237) are mostly unported.
 M6-0064	partial	partial	manual	crates/cpa-home/src/release.rs, inflight.rs, config.rs (unit tests)	Not every concurrency-release and in-flight contract case is ported (M6-0166, M6-0167).
 M6-0065	partial	partial	manual	crates/cpa-server/src/plugins.rs; crates/cpa-plugin/src/host.rs, native.rs, store; tests/store_go.rs store_matches_go; cpa-server tests/plugin_routes.rs	Store installation and auth exist; model/auth/translation integration and Home plugin synchronization remain incomplete.
-M5-0235	missing	covered	manual	crates/cpa-exec/src/wsrelay.rs, aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs exercises relay request, stream and disconnect cleanup	
+M5-0235	missing	partial	manual	crates/cpa-exec/src/wsrelay.rs Session::close and Manager::non_stream; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects	Saturated pending-response buffers drop the disconnect error in Session::close, unlike Go session.go:183-198, which evicts a buffered message to deliver it. non_stream can then return the accumulated response as success. No saturated-buffer cleanup test; runtime fix deferred.
 M5-0236	partial	partial	manual	crates/cpa-server/src/realtime/* (media.rs, relay.rs), crates/cpa-exec/src/codex_live.rs; tests/realtime.rs (Go fixtures), realtime/media_tests.rs	webrtc-rs lacks some pion behaviours (ponytails in realtime/media.rs).
 M6-0067	partial	partial	manual	crates/cpa-plugin/src/models.rs; tests/go_host.rs register_models	No server catalog registration consumes the capability.
 M6-0068	partial	partial	manual	crates/cpa-plugin/src/models.rs; tests/go_host.rs models_for_auth	No server credential-model registration consumes the capability.
@@ -229,7 +229,7 @@ M6-0145	missing	missing	manual	"crates/cpa-plugin/src/callbacks.rs call_service 
 M6-0146	missing	missing	manual	"crates/cpa-plugin/src/callbacks.rs call_service answers ""unsupported host callback"""	HTTP and auth callbacks exist; model-execution callbacks still need a server service.
 M6-0147	partial	covered	manual	crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.emit; crates/cliproxy/tests/plugin_wiring.rs streams	
 M6-0148	partial	covered	manual	crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.close; crates/cliproxy/tests/plugin_wiring.rs streams	
-M6-0149	partial	covered	manual	crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log	
+M6-0149	partial	covered	manual	crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log	Covered as an RPC envelope contract only: the fixture checks success/error envelopes, not logged fields or request-ID restoration.
 M6-0150	missing	covered	manual	crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store	
 M6-0151	missing	covered	manual	crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store	
 M6-0152	missing	covered	manual	crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store	
@@ -662,8 +662,8 @@ M2-0142	partial	partial	manual	crates/cpa-translate/src/stream.rs responses_fram
 M2-0143	partial	partial	manual	cpa_common::codex_client rewrites; crates/cpa-server/src/openai.rs	Not ported by name.
 M2-0144	partial	partial	manual	crates/cpa-server/src/openai.rs (no handler-side validation)	Untested.
 M2-0145	missing	partial	manual	crates/cpa-server/src/websocket.rs; tests/ws_e2e.rs steering_disabled_credential_cannot_send_another_frame, steering_oauth_only_setting_leaves_api_keys_in_normal_mode	Equivalent end-to-end checks; not all Go authorization cases are ported by name.
-M2-0146	missing	covered	manual	crates/cpa-server/tests/ws_e2e.rs steering_later_error_recovers_with_a_corrected_create, steering_later_error_then_upstream_close_closes_the_client cite both Go cases	
-M2-0147	missing	covered	manual	crates/cpa-server/tests/ws_e2e.rs steering_forwards_steers_and_the_automatic_successor cites Go TestResponseSteeringWSServerIntegration	
+M2-0146	missing	covered	manual	crates/cpa-server/tests/ws_e2e.rs and ws_fixtures/go/zz_rsfix_ws_test.go: TestResponsesSteeringErrorRecoveryIntegration maps to steer_later_error_recovers, steer_initial_error_terminal, steer_later_error_then_upstream_close, steer_oauth_only_skips_api_key, steer_disabled_error_terminal; TestResponsesWebsocketClosesOnIdleCodexDisconnect maps to steer_idle_upstream_close plus _legacy_disabled, _v8_api_key, _v8_oauth	Five error-recovery and four idle-disconnect scenarios are replayed.
+M2-0147	missing	covered	manual	crates/cpa-server/tests/ws_e2e.rs and ws_fixtures/go/zz_rsfix_ws_test.go: TestResponsesSteeringFullDuplexIntegration maps to steer_successor, steer_tool_pending, steer_disconnect_accepted, steer_disconnect_pending	All four full-duplex scenarios are replayed.
 M2-0148	missing	partial	manual	crates/cpa-server/src/websocket.rs; tests/ws_e2e.rs steering_forwards_steers_and_the_automatic_successor, steering_append_inherits_parent_context	Equivalent end-to-end checks; Go helper cases are not ported one by one.
 M2-0149	missing	partial	manual	crates/cpa-server/src/websocket_requests.rs; tests/ws_e2e.rs steering_rejects_bad_frames_locally_and_recovers, steering_rejects_a_create_for_another_parent	Equivalent end-to-end checks; not every Go validation case is ported by name.
 M5-0301	partial	partial	manual	crates/cpa-server/src/websocket*.rs; websocket_requests_tests.rs (Go vectors, ws_vectors.json); tests/ws_e2e.rs (ws_e2e.json)	Not ported by name.

@@ -20,7 +20,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2 | 158 | 113 | 45 | 0 |
 | M3 | 350 | 216 | 134 | 0 |
 | M4 | 510 | 240 | 256 | 14 |
-| M5 | 303 | 202 | 101 | 0 |
+| M5 | 303 | 201 | 102 | 0 |
 | M6 | 248 | 114 | 115 | 19 |
 
 ### Gaps by area
@@ -34,7 +34,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | manage | 0 | 130 | — |
 | codex | 0 | 64 | — |
 | claude | 0 | 48 | — |
-| google | 0 | 35 | — |
+| google | 0 | 36 | — |
 | translate | 0 | 30 | — |
 | home | 0 | 25 | — |
 | device-providers | 0 | 20 | — |
@@ -372,8 +372,8 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2-0143 | sdk/api/handlers/openai/openai_responses_multi_agent_test.go | partial | cpa_common::codex_client rewrites; crates/cpa-server/src/openai.rs | codex | Not ported by name. |
 | M2-0144 | sdk/api/handlers/openai/openai_responses_signature_test.go | partial | crates/cpa-server/src/openai.rs (no handler-side validation) | server | Untested. |
 | M2-0145 | sdk/api/handlers/openai/openai_responses_steering_auth_test.go | partial | crates/cpa-server/src/websocket.rs; tests/ws_e2e.rs steering_disabled_credential_cannot_send_another_frame, steering_oauth_only_setting_leaves_api_keys_in_normal_mode | codex | Equivalent end-to-end checks; not all Go authorization cases are ported by name. |
-| M2-0146 | sdk/api/handlers/openai/openai_responses_steering_error_test.go | covered | crates/cpa-server/tests/ws_e2e.rs steering_later_error_recovers_with_a_corrected_create, steering_later_error_then_upstream_close_closes_the_client cite both Go cases |  |  |
-| M2-0147 | sdk/api/handlers/openai/openai_responses_steering_integration_test.go | covered | crates/cpa-server/tests/ws_e2e.rs steering_forwards_steers_and_the_automatic_successor cites Go TestResponseSteeringWSServerIntegration |  |  |
+| M2-0146 | sdk/api/handlers/openai/openai_responses_steering_error_test.go | covered | crates/cpa-server/tests/ws_e2e.rs and ws_fixtures/go/zz_rsfix_ws_test.go: TestResponsesSteeringErrorRecoveryIntegration maps to steer_later_error_recovers, steer_initial_error_terminal, steer_later_error_then_upstream_close, steer_oauth_only_skips_api_key, steer_disabled_error_terminal; TestResponsesWebsocketClosesOnIdleCodexDisconnect maps to steer_idle_upstream_close plus _legacy_disabled, _v8_api_key, _v8_oauth |  | Five error-recovery and four idle-disconnect scenarios are replayed. |
+| M2-0147 | sdk/api/handlers/openai/openai_responses_steering_integration_test.go | covered | crates/cpa-server/tests/ws_e2e.rs and ws_fixtures/go/zz_rsfix_ws_test.go: TestResponsesSteeringFullDuplexIntegration maps to steer_successor, steer_tool_pending, steer_disconnect_accepted, steer_disconnect_pending |  | All four full-duplex scenarios are replayed. |
 | M2-0148 | sdk/api/handlers/openai/openai_responses_steering_test.go | partial | crates/cpa-server/src/websocket.rs; tests/ws_e2e.rs steering_forwards_steers_and_the_automatic_successor, steering_append_inherits_parent_context | codex | Equivalent end-to-end checks; Go helper cases are not ported one by one. |
 | M2-0149 | sdk/api/handlers/openai/openai_responses_steering_validation_test.go | partial | crates/cpa-server/src/websocket_requests.rs; tests/ws_e2e.rs steering_rejects_bad_frames_locally_and_recovers, steering_rejects_a_create_for_another_parent | codex | Equivalent end-to-end checks; not every Go validation case is ported by name. |
 | M2-0150 | sdk/api/handlers/openai/openai_videos_handlers_test.go | partial | crates/cpa-server/src/videos.rs; tests/media_go.rs media_routes_match_go (create, retrieve, content, edits, extensions, errors and pinned credentials) | openai-xai | Go handler suite is not ported case by case. |
@@ -1462,7 +1462,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0084 | GET /v0/management/oauth-callback | covered | probe: GET /v0/management/oauth-callback -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
 | M5-0085 | GET /v0/management/config | covered | probe: GET /v0/management/config -> 200; tests: crates/cliproxy/src/tui/client.rs, crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0086 | GET /v0/management/config.yaml | covered | probe: GET /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/legacy_go.rs |  |  |
-| M5-0087 | PUT /v0/management/config.yaml | covered | probe: PUT /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs |  | v0 serves GET config.yaml only (management.rs); v8 has both. |
+| M5-0087 | PUT /v0/management/config.yaml | covered | probe: PUT /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs |  | v0 and v8 serve GET and PUT config.yaml; tests/legacy_go.rs replays the v0 PUT route. |
 | M5-0088 | GET /v0/management/latest-version | partial | probe: GET /v0/management/latest-version -> 502; no test requests this path | manage |  |
 | M5-0089 | GET /v0/management/plugins | covered | probe: GET /v0/management/plugins -> 200; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json, crates/cpa-server/tests/plugin_quota_cooldown.rs |  |  |
 | M5-0090 | GET /v0/management/plugin-store | covered | probe: GET /v0/management/plugin-store -> 502; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
@@ -1615,7 +1615,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 |---|---|---|---|---|---|
 | M5-0233 | --password | covered | crates/cliproxy/src/main.rs --password (loopback-only management password) -> serve; every_go_flag_parses_in_single_and_double_dash_form |  |  |
 | M5-0234 | --management-base-url | covered | crates/cliproxy/src/main.rs passes management_base_url to tui::run; tui/client.rs Go client cases; tui/e2e.rs tui_drives_the_management_api |  |  |
-| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | covered | crates/cpa-exec/src/wsrelay.rs, aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs exercises relay request, stream and disconnect cleanup |  |  |
+| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | partial | crates/cpa-exec/src/wsrelay.rs Session::close and Manager::non_stream; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects | google | Saturated pending-response buffers drop the disconnect error in Session::close, unlike Go session.go:183-198, which evicts a buffered message to deliver it. non_stream can then return the accumulated response as success. No saturated-buffer cleanup test; runtime fix deferred. |
 | M5-0236 | Realtime/Live includes SDP negotiation, short-lived client secrets, legacy sessions, worki… | partial | crates/cpa-server/src/realtime/* (media.rs, relay.rs), crates/cpa-exec/src/codex_live.rs; tests/realtime.rs (Go fixtures), realtime/media_tests.rs | realtime | webrtc-rs lacks some pion behaviours (ponytails in realtime/media.rs). |
 
 ### M5: Complete compatibility test-suite inventory
@@ -1859,7 +1859,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0146 | RPC `host.model.stream_close` (constant `MethodHostModelStreamClose`); JSON envelope OK/re… | missing | crates/cpa-plugin/src/callbacks.rs call_service answers "unsupported host callback" | plugins | HTTP and auth callbacks exist; model-execution callbacks still need a server service. |
 | M6-0147 | RPC `host.stream.emit` (constant `MethodHostStreamEmit`); JSON envelope OK/result/error, b… | covered | crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.emit; crates/cliproxy/tests/plugin_wiring.rs streams |  |  |
 | M6-0148 | RPC `host.stream.close` (constant `MethodHostStreamClose`); JSON envelope OK/result/error,… | covered | crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.close; crates/cliproxy/tests/plugin_wiring.rs streams |  |  |
-| M6-0149 | RPC `host.log` (constant `MethodHostLog`); JSON envelope OK/result/error, byte payload and… | covered | crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log |  |  |
+| M6-0149 | RPC `host.log` (constant `MethodHostLog`); JSON envelope OK/result/error, byte payload and… | covered | crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log |  | Covered as an RPC envelope contract only: the fixture checks success/error envelopes, not logged fields or request-ID restoration. |
 | M6-0150 | RPC `host.auth.list` (constant `MethodHostAuthList`); JSON envelope OK/result/error, byte … | covered | crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store |  |  |
 | M6-0151 | RPC `host.auth.get` (constant `MethodHostAuthGet`); JSON envelope OK/result/error, byte pa… | covered | crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store |  |  |
 | M6-0152 | RPC `host.auth.get_runtime` (constant `MethodHostAuthGetRuntime`); JSON envelope OK/result… | covered | crates/cpa-server/src/management/plugin_auth.rs; tests/plugin_host_auth.rs plugin_auth_callbacks_read_and_save_the_credential_store |  |  |

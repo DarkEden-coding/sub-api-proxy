@@ -60,6 +60,23 @@ class SummaryTests(unittest.TestCase):
                 audit.summary(rows)
                 self.assertEqual(first, (readme.read_text(), parity.read_text()))
 
+    def test_invalid_readme_summary_leaves_all_pages_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs").mkdir()
+            paths = [root / "README.md", root / "docs/PARITY.md", root / "status.md"]
+            paths[1].write_text("<!-- parity-summary:start -->\nstale\n<!-- parity-summary:end -->")
+            paths[2].write_text("Existing status page")
+            sentence = "Parity is incomplete: the audit has 9 items, with 3 covered, 4 partial and 2 missing."
+            for readme in ("Summary was reworded", sentence + "\n" + sentence):
+                with self.subTest(readme=readme):
+                    paths[0].write_text(readme)
+                    before = [p.read_text() for p in paths]
+                    with patch.object(audit, "ROOT", str(root)), patch.object(audit, "HERE", str(root)):
+                        with self.assertRaisesRegex(ValueError, "exactly one parity summary"):
+                            audit.render([])
+                    self.assertEqual(before, [p.read_text() for p in paths])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -479,8 +479,8 @@ def render(rows):
                 if r["ms"] == ms and r["section"] == section:
                     w(f"| {r['id']} | {cell(title(r))} | {r['status']} | {cell(r['evidence'])} | {cell(r['owner'])} | {cell(r['note'])} |")
             w("")
-    open(os.path.join(HERE, "status.md"), "w", encoding="utf-8").write("\n".join(out))
     summary(rows)
+    open(os.path.join(HERE, "status.md"), "w", encoding="utf-8").write("\n".join(out))
 
 
 def summary(rows):
@@ -497,12 +497,12 @@ def summary(rows):
             total[k] += v
         lines.append(f"| {ms} | {c['all']} | {c['covered']} | {c['partial']} | {c['missing']} |")
     lines.append(f"| All | {total['all']} | {total['covered']} | {total['partial']} | {total['missing']} |")
-    path = Path(ROOT) / "docs" / "PARITY.md"
-    page = path.read_text(encoding="utf-8")
+    parity_path = Path(ROOT) / "docs" / "PARITY.md"
+    page = parity_path.read_text(encoding="utf-8")
     start, end = "<!-- parity-summary:start -->", "<!-- parity-summary:end -->"
     head, rest = page.split(start, 1)
     tail = rest.split(end, 1)[1]
-    path.write_text(head + start + "\n" + "\n".join(lines) + "\n" + end + tail, encoding="utf-8")
+    parity_page = head + start + "\n" + "\n".join(lines) + "\n" + end + tail
     path = Path(ROOT) / "README.md"
     page = path.read_text(encoding="utf-8")
     sentence = (f"Parity is incomplete: the audit has {total['all']:,} items, with "
@@ -511,6 +511,7 @@ def summary(rows):
                             r"[\d,]+ covered, [\d,]+ partial and [\d,]+ missing\.", sentence, page)
     if replaced != 1:
         raise ValueError("README.md must contain exactly one parity summary sentence")
+    parity_path.write_text(parity_page, encoding="utf-8")
     path.write_text(page, encoding="utf-8")
 
 
