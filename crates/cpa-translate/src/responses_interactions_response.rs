@@ -1925,7 +1925,11 @@ mod tests {
             calls[0].0, calls[1].0
         );
         let out = interactions_to_responses_non_stream(&ctx, body.as_bytes()).unwrap();
-        let names: Vec<_> = gj::get(&out, "output.#.name").array().iter().map(|n| n.str().to_owned()).collect();
+        let names: Vec<_> = gj::get(&out, "output.#.name")
+            .array()
+            .iter()
+            .map(|n| n.str().into_owned())
+            .collect();
         assert_eq!(names, [calls[0].1, calls[1].1], "non-stream");
 
         for (upstream, client) in calls {
@@ -1935,7 +1939,10 @@ mod tests {
             );
             let out: Vec<u8> = stream.line(start.as_bytes()).unwrap().concat();
             let text = String::from_utf8_lossy(&out);
-            assert!(text.contains(&format!(r#""name":"{client}""#)), "stream {upstream}: {text}");
+            assert!(
+                text.contains(&format!(r#""name":"{client}""#)),
+                "stream {upstream}: {text}"
+            );
         }
     }
 }
