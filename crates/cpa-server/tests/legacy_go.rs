@@ -274,11 +274,19 @@ async fn v0_aliases_match_v8_and_lists_carry_live_auth_indexes() {
             .bearer_auth("fake-secret")
             .send()
     };
+    // Each sign-in answers a fresh state; the rest of the answer matches.
+    let mut started = Vec::new();
+    for path in [
+        "/v0/management/antigravity-auth-url",
+        "/v8/management/oauth/auth-url?provider=antigravity",
+    ] {
+        let v: Value = get("GET", path).await.unwrap().json().await.unwrap();
+        let state = v["state"].as_str().unwrap();
+        started.push((v["status"].clone(), v["url"].as_str().unwrap().replace(state, "STATE")));
+    }
+    assert_eq!(started[0], started[1]);
+    assert_eq!(started[0].0, "ok");
     for (v0, v8) in [
-        (
-            "/v0/management/antigravity-auth-url",
-            "/v8/management/oauth/auth-url?provider=antigravity",
-        ),
         (
             "/v0/management/xai-auth-url?is_webui=true",
             "/v8/management/oauth/auth-url?provider=xai&is_webui=true",

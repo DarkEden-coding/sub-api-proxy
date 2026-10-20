@@ -749,12 +749,18 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, body: 
 }
 
 /// POST /v0/management/vertex/import: v8 `/oauth/import?provider=vertex`.
-pub(crate) async fn vertex_import(RawQuery(raw): RawQuery) -> Response {
+pub(crate) async fn vertex_import(
+    state: State<Arc<Management>>,
+    RawQuery(raw): RawQuery,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Go routes straight to the handler: a `provider` in the query does not matter.
     let query = match raw.filter(|r| !r.is_empty()) {
         Some(raw) => format!("provider=vertex&{raw}"),
         None => "provider=vertex".to_owned(),
     };
-    super::oauth::import(RawQuery(Some(query))).await
+    super::oauth::import(state, RawQuery(Some(query)), headers, body).await
 }
 
 #[cfg(test)]

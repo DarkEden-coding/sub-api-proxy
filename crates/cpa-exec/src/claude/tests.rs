@@ -606,7 +606,11 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             .unwrap()
             .replace("AUTH_DIR", dir.join("auth").to_str().unwrap());
         if let Some(auth) = scenario["auth_file"].as_str().filter(|s| !s.is_empty()) {
-            std::fs::write(dir.join("auth").join("fixture.json"), auth).unwrap();
+            // The file name is the credential ID that keys the process-wide continuity
+            // store. One name per run keeps a run's date pins and prompt IDs to itself:
+            // the 6fecc6e and v8.0.27 fixtures send the same requests on different
+            // dates, and whichever ran first used to pin its date for the other.
+            std::fs::write(dir.join("auth").join(format!("fixture-{run}.json")), auth).unwrap();
         }
         let cfg = Config::parse(&text).unwrap();
         let credential = cpa_core::config::credentials::load(&cfg)

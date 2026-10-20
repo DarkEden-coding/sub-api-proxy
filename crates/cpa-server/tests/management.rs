@@ -1694,6 +1694,14 @@ async fn login_server(f: &Fixture, login_base: &str) -> (String, Arc<Management>
         login_base: Some(login_base.to_owned()),
         ..Default::default()
     };
+    serve_with(f, options).await
+}
+
+/// A management server over `f`'s runtime with `options`.
+async fn serve_with(
+    f: &Fixture,
+    options: management::Options,
+) -> (String, Arc<Management>, tokio::task::JoinHandle<()>) {
     let state = Management::with_options(f.rt.clone(), f.dir.join("config.yaml"), options);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1719,6 +1727,42 @@ async fn oauth_get(base: &str, path: &str) -> Value {
         .json()
         .await
         .unwrap()
+}
+
+/// A remote store that records every push and explicit delete; with `down`, every auth
+/// push fails. An explicit delete removes the file, as the real stores do.
+#[derive(Default)]
+struct FakeStore {
+    dir: PathBuf,
+    down: bool,
+    pushed: std::sync::Mutex<Vec<String>>,
+}
+
+impl cpa_server::persist::StorePersister for FakeStore {
+    fn persist_config(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn persist_auth_files(
+        &self,
+        message: String,
+        _: Vec<PathBuf>,
+    ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        self.pushed.lock().unwrap().push(message);
+        let down = self.down;
+        Box::pin(async move {
+            anyhow::ensure!(!down, "fake store unavailable");
+            Ok(())
+        })
+    }
+    fn delete_auth(&self, path: PathBuf) -> anyhow::Result<()> {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        self.pushed.lock().unwrap().push(format!("Delete auth {name}"));
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+    fn auth_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
 }
 
 /// Polls `/oauth/status` until it leaves `wait` (at most `secs`).
@@ -1934,6 +1978,369 @@ async fn codex_login_completes_through_the_main_listener_callback() {
     fake_server.abort();
 }
 
+/// Antigravity management login permits a missing project (unlike CLI completion),
+/// validates the token/email, and never saves a cancelled exchange.
+#[tokio::test]
+async fn antigravity_management_login_flows() {
+    use axum::response::IntoResponse;
+    let exchanging = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Semaphore::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (notice, gate, record) = (exchanging.clone(), resume.clone(), seen.clone());
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+        let (notice, gate, record) = (notice.clone(), gate.clone(), record.clone());
+        async move {
+            assert_ne!(headers.get("authorization").and_then(|v| v.to_str().ok()), Some("Bearer fake-management-only"));
+            let access = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").trim_start_matches("Bearer ");
+            let value = match uri.path() {
+                "/token" => {
+                    let form: std::collections::HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
+                    record.lock().unwrap().push(form.clone());
+                    let code = form.get("code").map(String::as_str).unwrap_or("");
+                    if code == "denied" {
+                        return (axum::http::StatusCode::FORBIDDEN, "secret-sentinel").into_response();
+                    }
+                    if code == "cancelled" {
+                        notice.notify_one();
+                        let _ = gate.acquire().await.unwrap();
+                    }
+                    json!({"access_token": if code == "empty-token" { "" } else { code }, "refresh_token": "fake-ag-rt", "expires_in": 3600})
+                }
+                "/oauth2/v2/userinfo" => {
+                    if access == "bad-user" {
+                        return (axum::http::StatusCode::FORBIDDEN, "secret-sentinel").into_response();
+                    }
+                    json!({"email": if access == "empty-email" { "".into() } else { format!("{access}@example.invalid") }})
+                }
+                "/v1internal:loadCodeAssist" if access == "no-project" => {
+                    return (axum::http::StatusCode::FORBIDDEN, "secret-sentinel").into_response();
+                }
+                "/v1internal:loadCodeAssist" => json!({"cloudaicompanionProject": "fake-project"}),
+                _ => panic!("unexpected login request: {uri}"),
+            };
+            axum::Json(value).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let f = Fixture::new("antigravitylogin");
+    let (settled_tx, mut settled) = tokio::sync::mpsc::unbounded_channel();
+    let options = management::Options {
+        login_base: Some(fake.clone()),
+        login_settled: Some(settled_tx),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&f, options).await;
+    for (code, error) in [
+        ("success", ""),
+        ("no-project", ""),
+        ("denied", "Failed to exchange token"),
+        ("empty-token", "Failed to exchange token"),
+        ("bad-user", "Failed to fetch user info"),
+        ("empty-email", "Failed to fetch user info"),
+        ("cancelled", "unknown or expired state"),
+    ] {
+        let started = if code == "success" {
+            wreq::Client::new()
+                .get(format!("{base}/v0/management/antigravity-auth-url"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        } else {
+            oauth_get(&base, "/oauth/auth-url?provider=antigravity").await
+        };
+        assert_eq!(started["status"], "ok", "{started}");
+        let sid = started["state"].as_str().unwrap();
+        assert_eq!(sid.len(), 32);
+        let url = url::Url::parse(started["url"].as_str().unwrap()).unwrap();
+        assert_eq!(url.origin().ascii_serialization(), "https://accounts.google.com");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["state"], sid);
+        assert_eq!(query["redirect_uri"], "http://localhost:51121/oauth-callback");
+        assert_eq!(query["access_type"], "offline");
+        let callback: Value = wreq::Client::new().post(format!("{base}/v8/management/oauth/callback"))
+            .json(&json!({"provider":"anti-gravity", "redirect_url":format!("http://localhost:51121/oauth-callback?state={sid}&code={code}")}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(callback, json!({"status":"ok"}));
+        if code == "cancelled" {
+            tokio::time::timeout(std::time::Duration::from_secs(5), exchanging.notified())
+                .await
+                .unwrap();
+            let cancelled: Value = wreq::Client::new()
+                .delete(format!("{base}/v8/management/oauth/session?state={sid}"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(cancelled["cancelled"], true);
+            resume.add_permits(1);
+        }
+        // Barrier: the login worker has finished, including a cancelled exchange.
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), settled.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished, sid);
+        let status = final_status(&base, sid, 5).await;
+        if error.is_empty() {
+            assert_eq!(status, json!({"status":"ok"}));
+            let name = format!("antigravity-{code}@example.invalid.json");
+            let saved: Value = serde_json::from_slice(&std::fs::read(f.dir.join("auth").join(&name)).unwrap()).unwrap();
+            assert_eq!(saved["type"], "antigravity");
+            assert_eq!(saved["access_token"], code);
+            assert_eq!(saved["refresh_token"], "fake-ag-rt");
+            assert_eq!(
+                saved["project_id"],
+                if code == "no-project" {
+                    Value::Null
+                } else {
+                    json!("fake-project")
+                }
+            );
+            assert!(f.rt.store().get(&name).is_some(), "published");
+        } else {
+            assert_eq!(status, json!({"status":"error", "error":error}));
+            assert!(
+                !f.dir
+                    .join(format!("auth/antigravity-{code}@example.invalid.json"))
+                    .exists()
+            );
+        }
+    }
+    for form in seen.lock().unwrap().iter() {
+        assert_eq!(form["redirect_uri"], "http://localhost:51121/oauth-callback");
+        assert_eq!(form["grant_type"], "authorization_code");
+    }
+    assert_eq!(
+        f.rt.store()
+            .snapshot()
+            .iter()
+            .filter(|c| c.provider == "antigravity")
+            .count(),
+        2
+    );
+    server.abort();
+    // Go `saveTokenRecord`: with a remote store that is down, the login fails.
+    let down = Fixture::new("antigravitystore");
+    let store = Arc::new(FakeStore {
+        dir: down.dir.join("auth"),
+        down: true,
+        ..Default::default()
+    });
+    let options = management::Options {
+        login_base: Some(fake.clone()),
+        store: Some(store.clone()),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&down, options).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    let sid = started["state"].as_str().unwrap();
+    wreq::Client::new()
+        .post(format!("{base}/v8/management/oauth/callback"))
+        .json(&json!({"provider": "antigravity", "redirect_url": format!("http://localhost:51121/oauth-callback?state={sid}&code=stored")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        final_status(&base, sid, 5).await,
+        json!({"status": "error", "error": "Failed to save token to file"})
+    );
+    assert_eq!(
+        *store.pushed.lock().unwrap(),
+        ["Update auth antigravity-stored@example.invalid.json"]
+    );
+    server.abort();
+    upstream.abort();
+}
+
+/// Vertex service-account upload (Go `ImportVertexCredential`) through v8
+/// `/oauth/import?provider=vertex` and v0 `/vertex/import`: Go's error answers, the
+/// form location winning over the query, Go's file bytes, and settings of an existing
+/// file kept.
+#[tokio::test]
+async fn vertex_service_account_import() {
+    let fixture: Value = serde_json::from_str(include_str!("../../cpa-exec/tests/fixtures/vertex_go.json")).unwrap();
+    let basic = &fixture["import"][0];
+    assert_eq!(basic["name"], "basic");
+    let key = basic["input"].as_str().unwrap();
+    let f = Fixture::new("verteximport");
+    let (base, server) = f.server().await;
+    let upload = |path: &str, body: Vec<u8>, content_type: &str| {
+        let request = wreq::Client::new()
+            .post(format!("{base}{path}"))
+            .bearer_auth("fake-management-only")
+            .header("content-type", content_type)
+            .body(body);
+        async move {
+            let response = request.send().await.unwrap();
+            (response.status().as_u16(), response.json::<Value>().await.unwrap())
+        }
+    };
+    let form = |file: &str, location: Option<&str>| {
+        let mut body = String::new();
+        if let Some(location) = location {
+            body.push_str(&format!(
+                "--b\r\nContent-Disposition: form-data; name=\"location\"\r\n\r\n{location}\r\n"
+            ));
+        }
+        body.push_str(&format!(
+            "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"key.json\"\r\nContent-Type: application/json\r\n\r\n{file}\r\n--b--\r\n"
+        ));
+        body.into_bytes()
+    };
+    const FORM: &str = "multipart/form-data; boundary=b";
+    let v8 = "/v8/management/oauth/import?provider=vertex";
+    let no_project = {
+        let mut sa: Value = serde_json::from_str(key).unwrap();
+        sa.as_object_mut().unwrap().remove("project_id");
+        sa.to_string()
+    };
+    for (body, content_type, want) in [
+        (b"{}".to_vec(), "application/json", json!({"error": "file required"})),
+        (
+            b"--b\r\nContent-Disposition: form-data; name=\"location\"\r\n\r\nx\r\n--b--\r\n".to_vec(),
+            FORM,
+            json!({"error": "file required"}),
+        ),
+        (
+            form("[1]", None),
+            FORM,
+            json!({"error": "invalid json", "message": "json: cannot unmarshal array into Go value of type map[string]interface {}"}),
+        ),
+        (
+            form("null", None),
+            FORM,
+            json!({"error": "invalid service account", "message": "service account payload is empty"}),
+        ),
+        (
+            form("{}", None),
+            FORM,
+            json!({"error": "invalid service account", "message": "service account missing private_key"}),
+        ),
+        (form(&no_project, None), FORM, json!({"error": "project_id missing"})),
+    ] {
+        assert_eq!(upload(v8, body, content_type).await, (400, want));
+    }
+    let auth = f.dir.join("auth");
+    assert_eq!(std::fs::read_dir(&auth).unwrap().count(), 0);
+
+    // A fresh import writes Go's bytes: the CLI golden without its empty prefix.
+    let (status, body) = upload(
+        "/v8/management/oauth/import?provider=VERTEX&location=us-east1",
+        form(key, None),
+        FORM,
+    )
+    .await;
+    let path = auth.join("vertex-proj-1.json");
+    assert_eq!(
+        (status, body),
+        (
+            200,
+            json!({"status": "ok", "auth-file": path.to_str().unwrap(), "project_id": "proj-1",
+                "email": "svc@proj-1.iam.gserviceaccount.com", "location": "us-east1"})
+        )
+    );
+    let golden = basic["files"]["vertex-proj-1.json"]
+        .as_str()
+        .unwrap()
+        .replace("  \"prefix\": \"\",\n", "")
+        .replace("us-central1", "us-east1");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), golden);
+    // The service account holds a private key: never world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let published = f.rt.store().get("vertex-proj-1.json").expect("published");
+    assert_eq!(published.provider, "vertex");
+
+    // Importing again keeps the user's settings and disabled flag, not token payload;
+    // the form location wins over the query.
+    std::fs::write(
+        &path,
+        r#"{"type":"vertex","prefix":"team","disabled":true,"access_token":"fake-stale"}"#,
+    )
+    .unwrap();
+    let (status, body) = upload(
+        "/v0/management/vertex/import?location=us-east1",
+        form(key, Some(" europe-west4 ")),
+        FORM,
+    )
+    .await;
+    assert_eq!((status, &body["location"]), (200, &json!("europe-west4")));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        (
+            &saved["prefix"],
+            &saved["disabled"],
+            saved.get("access_token"),
+            &saved["location"]
+        ),
+        (&json!("team"), &json!(true), None, &json!("europe-west4"))
+    );
+
+    // Non-string project IDs name the file as Go's fmt.Sprint prints the float64 and
+    // composite values json.Unmarshal decodes (names from Go v8.0.35 with these literals).
+    for (project, file) in [
+        ("1000000", "vertex-1e+06.json"),
+        ("51.248178375505404", "vertex-51.248178375505404.json"),
+        ("12345678901234567890", "vertex-1.2345678901234567e+19.json"),
+        ("9007199254740993", "vertex-9.007199254740992e+15.json"),
+        ("0.000001", "vertex-1e-06.json"),
+        (r#"["a", "b"]"#, "vertex-[a-b].json"),
+        (
+            r#"{"b":[1.5,2e-7,true,null],"a":{"c":100000}}"#,
+            "vertex-map[a_map[c_100000]-b_[1.5-2e-07-true-<nil>]].json",
+        ),
+    ] {
+        let mut sa: Value = serde_json::from_str(key).unwrap();
+        sa["project_id"] = json!("@project@");
+        let sa = sa.to_string().replace(r#""@project@""#, project);
+        let (status, body) = upload(v8, form(&sa, None), FORM).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(auth.join(file).exists(), "{file}: {body}");
+    }
+    server.abort();
+
+    // Go `saveTokenRecord`: with a remote store that is down, the import fails.
+    let down = Fixture::new("vertexstore");
+    let store = Arc::new(FakeStore {
+        dir: down.dir.join("auth"),
+        down: true,
+        ..Default::default()
+    });
+    let options = management::Options {
+        store: Some(store.clone()),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&down, options).await;
+    let response = wreq::Client::new()
+        .post(format!("{base}{v8}"))
+        .bearer_auth("fake-management-only")
+        .header("content-type", FORM)
+        .body(form(key, None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"error": "save_failed", "message": "fake store unavailable"})
+    );
+    assert_eq!(*store.pushed.lock().unwrap(), ["Update auth vertex-proj-1.json"]);
+    assert!(down.rt.store().get("vertex-proj-1.json").is_none(), "not published");
+    server.abort();
+}
+
 /// Claude: a pasted callback URL posted to `/oauth/callback` finishes the login.
 #[tokio::test]
 async fn claude_login_completes_from_a_posted_redirect_url() {
@@ -1962,6 +2369,168 @@ async fn claude_login_completes_from_a_posted_redirect_url() {
     assert_eq!(claude.str("access_token"), Some("sk-ant-oat-fake"));
     server.abort();
     fake_server.abort();
+}
+
+/// Go `saveTokenRecord` for Claude: the legacy file a new login replaces is deleted
+/// through the store only after the canonical credential is stored.
+#[tokio::test]
+async fn claude_login_removes_the_legacy_file_only_after_the_store_has_the_new_one() {
+    let (fake, _seen, fake_server) = fake_logins().await;
+    for down in [true, false] {
+        let f = Fixture::new(&format!("claudelegacy-{down}"));
+        let legacy = f.dir.join("auth/claude-a@example.invalid.json");
+        std::fs::write(
+            &legacy,
+            r#"{"type":"claude","email":"a@example.invalid","organization_uuid":"org-1"}"#,
+        )
+        .unwrap();
+        let store = Arc::new(FakeStore {
+            dir: f.dir.join("auth"),
+            down,
+            ..Default::default()
+        });
+        let options = management::Options {
+            login_base: Some(fake.clone()),
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let (base, _state, server) = serve_with(&f, options).await;
+        let started = oauth_get(&base, "/oauth/auth-url?provider=claude").await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        wreq::Client::new()
+            .post(format!("{base}/v8/management/oauth/callback"))
+            .json(&json!({"provider": "claude",
+                "redirect_url": format!("http://localhost:54545/callback?code=fake-code&state={state}")}))
+            .send()
+            .await
+            .unwrap();
+        let status = final_status(&base, &state, 10).await;
+        let pushed = store.pushed.lock().unwrap().clone();
+        assert!(
+            pushed[0].starts_with("Update auth claude-") && pushed[0].ends_with("-a@example.invalid.json"),
+            "{pushed:?}"
+        );
+        if down {
+            assert_eq!(
+                status,
+                json!({"status": "error", "error": "Failed to save authentication tokens"})
+            );
+            assert_eq!(pushed.len(), 1, "{pushed:?}");
+            assert!(legacy.exists(), "kept while the canonical credential is not stored");
+        } else {
+            assert_eq!(status, json!({"status": "ok"}));
+            assert_eq!(pushed[1..], ["Delete auth claude-a@example.invalid.json"]);
+            assert!(!legacy.exists());
+        }
+        server.abort();
+    }
+    fake_server.abort();
+}
+
+/// A store whose pushes are really pending on the runtime's timers. When the Claude
+/// push arrives (its save holds the disk lock), it starts a Vertex import, whose save
+/// takes the lock next and waits on its own push.
+#[derive(Default)]
+struct SlowStore {
+    dir: PathBuf,
+    upload: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+    imported: std::sync::Mutex<Option<tokio::task::JoinHandle<u16>>>,
+}
+
+impl cpa_server::persist::StorePersister for SlowStore {
+    fn persist_config(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn persist_auth_files(
+        &self,
+        message: String,
+        _: Vec<PathBuf>,
+    ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            if message.contains("claude") {
+                let (url, body) = self.upload.lock().unwrap().take().unwrap();
+                *self.imported.lock().unwrap() = Some(tokio::spawn(async move {
+                    let response = wreq::Client::new()
+                        .post(url)
+                        .bearer_auth("fake-management-only")
+                        .header("content-type", "multipart/form-data; boundary=b")
+                        .body(body)
+                        .send()
+                        .await
+                        .unwrap();
+                    response.status().as_u16()
+                }));
+                // Long enough for the import to be waiting on the disk lock.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(())
+        })
+    }
+    fn delete_auth(&self, _: PathBuf) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn auth_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+}
+
+/// A finished login publishes off the runtime workers: on a one-worker runtime, a save
+/// holding the disk lock while its store push waits on a timer must not starve.
+#[test]
+fn a_finished_login_never_waits_for_the_disk_lock_on_a_runtime_worker() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../cpa-exec/tests/fixtures/vertex_go.json")).unwrap();
+        let key = fixture["import"][0]["input"].as_str().unwrap().to_owned();
+        let (fake, _seen, fake_server) = fake_logins().await;
+        let f = Fixture::new("slowstore");
+        let store = Arc::new(SlowStore {
+            dir: f.dir.join("auth"),
+            ..Default::default()
+        });
+        let options = management::Options {
+            login_base: Some(fake.clone()),
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let (base, _state, server) = serve_with(&f, options).await;
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"key.json\"\r\nContent-Type: application/json\r\n\r\n{key}\r\n--b--\r\n"
+        );
+        *store.upload.lock().unwrap() = Some((
+            format!("{base}/v8/management/oauth/import?provider=vertex"),
+            body.into_bytes(),
+        ));
+        let started = oauth_get(&base, "/oauth/auth-url?provider=claude").await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        wreq::Client::new()
+            .post(format!("{base}/v8/management/oauth/callback"))
+            .json(&json!({"provider": "claude",
+                "redirect_url": format!("http://localhost:54545/callback?code=fake-code&state={state}")}))
+            .send()
+            .await
+            .unwrap();
+        let status = final_status(&base, &state, 10).await;
+        let import = store.imported.lock().unwrap().take().unwrap();
+        let imported = import.await.unwrap();
+        server.abort();
+        fake_server.abort();
+        let _ = done.send((status, imported));
+    });
+    let Ok((status, imported)) = finished.recv_timeout(std::time::Duration::from_secs(20)) else {
+        // The runtime's only worker is blocked: dropping it would wait forever.
+        std::mem::forget(rt);
+        panic!("the login and the import deadlocked on the disk lock");
+    };
+    assert_eq!((status, imported), (json!({"status": "ok"}), 200));
 }
 
 /// Kimi device login saves after authorization; a cancelled one saves nothing.
