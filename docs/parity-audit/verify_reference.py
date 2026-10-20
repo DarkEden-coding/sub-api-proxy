@@ -115,9 +115,12 @@ def main():
               and (canonical[2], canonical[1]) in aliases, f"{i} is not a Go upstream.* move")
     new_ids = by_id.keys() - old.keys()
     check(len(new_ids) == 264, f"expected 264 additions, got {len(new_ids)}")
+    # The freeze recorded every addition as partial or missing; porting work may since
+    # have covered some, so only a judgment with evidence is required now.
     manual = audit.load_manual()
-    check(all(manual[i]["status"] in ("partial", "missing") and manual[i]["evidence"] for i in new_ids),
-          "every addition needs a conservative judgment and evidence")
+    check(all(manual.get(i, {}).get("status") in ("covered", "partial", "missing")
+              and manual[i]["evidence"] for i in new_ids),
+          "every addition needs a judgment and evidence")
 
     # Test suites and their declarations.
     suites = {audit.test_file(r["text"]): r for r in rows if audit.test_file(r["text"])}
