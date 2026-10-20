@@ -436,7 +436,13 @@ impl Relay {
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
             loop {
-                let Some(msg) = responses.recv().await else {
+                // A dropped receiver must free the request (dropping `responses`)
+                // instead of waiting for the next upstream message.
+                let next = tokio::select! {
+                    next = responses.recv() => next,
+                    () = tx.closed() => return,
+                };
+                let Some(msg) = next else {
                     let _ = tx
                         .send(StreamEvent {
                             error: Some("wsrelay: stream closed".into()),
