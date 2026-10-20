@@ -155,12 +155,20 @@ REGENERATED = re.compile(rf"(?P<removed>{REMOVED_NOTE.pattern})|(?P<moved>{MOVED
 MARKER = re.compile(rf"{DECL} \(L|upstream declarations:")
 
 
+SENTINEL = "\x00"  # Never in checklist text; stands in for each removed span.
+
+
 def suite_parts(text):
     """(skeleton, [(declared name, line)], retired names, [(moved name, target, line)]).
 
-    The skeleton is the text without the spans regenerated from Go, normalized; the
-    other parts are exactly the spans removed, returned for checking against Go.
+    Links are stripped first, then one pass over that text replaces every span
+    regenerated from Go with a sentinel and records it for checking against Go.
+    A sentinel keeps a removal from joining its neighbours into a new match. Line
+    numbers and LOC counts are normalized last: moved entries need their target
+    lines, and that step only drops digits after a file extension or before " LOC".
+    The skeleton compares without the sentinels.
     """
+    check(SENTINEL not in text, "checklist text contains the verifier's sentinel")
     declared, retired, moved = [], [], []
 
     def take(match):
@@ -171,9 +179,10 @@ def suite_parts(text):
         else:
             moved.extend((n, t, int(line)) for n, t, line in
                          re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", match[0]))
-        return ""
+        return SENTINEL
 
-    return normalized(REGENERATED.sub(take, text)), declared, retired, moved
+    text = REGENERATED.sub(take, audit.LINK.sub(r"\1", text))
+    return normalized_lines(text).replace(SENTINEL, ""), declared, retired, moved
 
 
 def suite_skeleton(text):
@@ -182,8 +191,11 @@ def suite_skeleton(text):
 
 
 def normalized(text):
-    """Contract text without Go line numbers or LOC counts, which follow the tree."""
-    text = audit.LINK.sub(r"\1", text)
+    """Contract text without links, Go line numbers or LOC counts, which follow the tree."""
+    return normalized_lines(audit.LINK.sub(r"\1", text))
+
+
+def normalized_lines(text):
     text = re.sub(r"(\.(?:go|md|json|yaml)):\d+(?:-\d+)?", r"\1", text)
     return re.sub(r"\d+ LOC", "N LOC", text)
 

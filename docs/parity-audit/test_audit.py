@@ -203,6 +203,21 @@ class SuiteSkeletonTests(unittest.TestCase):
         self.assertTrue(verify.MARKER.search(skeleton))
         self.assertNotEqual(skeleton, verify.suite_skeleton(self.ROW))
 
+    def test_removing_history_cannot_form_a_link_that_hides_text(self):
+        one = " Removed upstream declarations: `{}` (historical, not active requirements)."
+        forged = self.ROW.replace(
+            " Removed upstream declarations: `TestB`, `TestC` (historical, not active requirements).",
+            "[`" + one.format("TestB") + "`](`TestBogus` (L999" + one.format("TestC") + ")")
+        skeleton, declared, retired, _ = verify.suite_parts(forged)
+        self.assertEqual(retired, ["TestB", "TestC"])
+        self.assertEqual(declared, [("TestA", 3)])
+        self.assertIn("TestBogus", skeleton)
+        self.assertNotEqual(skeleton, verify.suite_skeleton(self.ROW))
+
+    def test_the_sentinel_is_rejected_in_input(self):
+        with self.assertRaises(SystemExit):
+            verify.suite_parts(self.ROW + verify.SENTINEL)
+
     def test_a_clean_skeleton_keeps_no_markers(self):
         self.assertIsNone(verify.MARKER.search(verify.suite_skeleton(self.ROW)))
 
