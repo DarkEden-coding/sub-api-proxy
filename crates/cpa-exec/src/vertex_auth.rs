@@ -745,7 +745,8 @@ pub fn import(auth_dir: &Path, key_path: &str, prefix: &str) -> Result<PathBuf, 
     go_mkdir_all(dir).map_err(|e| save_failed(format!("auth filestore: create dir failed: {e}")))?;
     // misc.LogSavingCredentials.
     println!("Saving credentials to {}", out.display());
-    std::fs::write(&out, GoValue::Object(doc).encode_indented()).map_err(|e| {
+    // Private (0600) and atomic, like every other credential writer; Go uses os.Create.
+    crate::kimi_auth::write_private(&out, &GoValue::Object(doc).encode_indented()).map_err(|e| {
         save_failed(format!(
             "vertex credential: create file failed: {}",
             path_error("open", &out, &e)
@@ -862,7 +863,7 @@ pub fn import_upload(auth_dir: &Path, data: &[u8], location: &str) -> Result<Upl
     doc.insert("disabled".to_owned(), GoValue::Bool(disabled));
     let dir = path.parent().unwrap_or(Path::new("."));
     go_mkdir_all(dir).map_err(|e| UploadError::Save(format!("auth filestore: create dir failed: {e}")))?;
-    std::fs::write(&path, GoValue::Object(doc).encode_indented()).map_err(|e| {
+    crate::kimi_auth::write_private(&path, &GoValue::Object(doc).encode_indented()).map_err(|e| {
         UploadError::Save(format!(
             "vertex credential: create file failed: {}",
             path_error("open", &path, &e)

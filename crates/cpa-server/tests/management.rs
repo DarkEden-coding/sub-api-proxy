@@ -2169,6 +2169,12 @@ async fn vertex_service_account_import() {
         .replace("  \"prefix\": \"\",\n", "")
         .replace("us-central1", "us-east1");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), golden);
+    // The service account holds a private key: never world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
     let published = f.rt.store().get("vertex-proj-1.json").expect("published");
     assert_eq!(published.provider, "vertex");
 
