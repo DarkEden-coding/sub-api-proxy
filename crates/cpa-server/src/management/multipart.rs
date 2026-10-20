@@ -14,6 +14,8 @@ pub(super) struct FilePart {
     pub data: Vec<u8>,
 }
 
+pub(super) type Files = BTreeMap<String, Vec<FilePart>>;
+
 const NOT_MULTIPART: &str = "request Content-Type isn't multipart/form-data";
 const MISSING_BOUNDARY: &str = "no multipart boundary param in Content-Type";
 const TOO_LARGE: &str = "multipart: message too large";
@@ -27,6 +29,12 @@ pub(super) fn is_form(content_type: &str) -> bool {
 /// File parts grouped by sorted field name (gin's handler sorts `form.File` keys),
 /// in body order within a field. Errors carry Go's text.
 pub(super) fn form_files(content_type: &str, body: &[u8]) -> Result<Vec<FilePart>, String> {
+    Ok(form(content_type, body)?.0.into_values().flatten().collect())
+}
+
+/// `Request.ParseMultipartForm`: file parts and value parts by field name, each in body
+/// order.
+pub(super) fn form(content_type: &str, body: &[u8]) -> Result<(Files, HashMap<String, Vec<String>>), String> {
     let (media, params) = parse_media_type(content_type).map_err(|_| NOT_MULTIPART.to_owned())?;
     if media != "multipart/form-data" {
         return Err(NOT_MULTIPART.into());
@@ -39,7 +47,8 @@ pub(super) fn form_files(content_type: &str, body: &[u8]) -> Result<Vec<FilePart
         dash_boundary: format!("--{boundary}").into_bytes(),
         parts_read: 0,
     };
-    let mut files: BTreeMap<String, Vec<FilePart>> = BTreeMap::new();
+    let mut files: Files = BTreeMap::new();
+    let mut values: HashMap<String, Vec<String>> = HashMap::new();
     let mut parts = 0;
     while let Some(headers) = reader.next_part()? {
         parts += 1;
@@ -69,9 +78,14 @@ pub(super) fn form_files(content_type: &str, body: &[u8]) -> Result<Vec<FilePart
                 filename: go_base(filename).to_owned(),
                 data,
             });
+        } else {
+            values
+                .entry(name)
+                .or_default()
+                .push(String::from_utf8_lossy(&data).into_owned());
         }
     }
-    Ok(files.into_values().flatten().collect())
+    Ok((files, values))
 }
 
 /// Go `filepath.Base` on Unix.

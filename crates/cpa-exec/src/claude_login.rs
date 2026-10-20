@@ -121,9 +121,11 @@ impl ManagedLogin {
     }
 
     /// Writes an exchanged login as the CLI login does (Go file name, merged with an
-    /// existing file and a matching legacy file). Blocking.
-    pub fn save(auth_dir: &Path, patch: MetadataPatch) -> Result<PathBuf, ExecError> {
-        write_login(auth_dir, patch)
+    /// existing file and a matching legacy file). Blocking. Returns the canonical path
+    /// and the legacy file the caller removes once the canonical one is stored (Go
+    /// `saveTokenRecord` deletes it through the store only after a successful save).
+    pub fn save(auth_dir: &Path, patch: MetadataPatch) -> Result<(PathBuf, Option<PathBuf>), ExecError> {
+        write_canonical(auth_dir, patch)
     }
 }
 
@@ -630,9 +632,22 @@ fn go_encode(value: &Value, out: &mut Vec<u8>) {
     }
 }
 
-/// Builds the credential like `CreateTokenStorage` + `Manager.Login` and publishes it
-/// atomically (0600, which is stricter than Go's `os.Create`).
+/// Builds the credential like `CreateTokenStorage` + `Manager.Login`, publishes it
+/// atomically (0600, which is stricter than Go's `os.Create`) and then removes the
+/// matching legacy file.
 pub(crate) fn write_login(directory: &Path, patch: MetadataPatch) -> Result<PathBuf, ExecError> {
+    let (path, legacy) = write_canonical(directory, patch)?;
+    if let Some(legacy) = legacy {
+        std::fs::remove_file(&legacy).map_err(|_| {
+            login_error("cliproxy auth: canonical Claude credential saved but legacy credential cleanup failed")
+        })?;
+    }
+    Ok(path)
+}
+
+/// [`write_login`] without the legacy removal: the canonical path and the legacy file
+/// it replaces.
+fn write_canonical(directory: &Path, patch: MetadataPatch) -> Result<(PathBuf, Option<PathBuf>), ExecError> {
     let string = |key: &str| {
         patch
             .set
@@ -666,12 +681,8 @@ pub(crate) fn write_login(directory: &Path, patch: MetadataPatch) -> Result<Path
     go_encode(&Value::Object(metadata.into_iter().collect()), &mut bytes);
     bytes.push(b'\n');
     publish(directory, &path, &bytes).map_err(|_| login_error("cannot publish Claude credential"))?;
-    if let Some(legacy) = legacy.filter(|l| *l != path) {
-        std::fs::remove_file(&legacy).map_err(|_| {
-            login_error("cliproxy auth: canonical Claude credential saved but legacy credential cleanup failed")
-        })?;
-    }
-    Ok(path)
+    let legacy = legacy.filter(|l| *l != path);
+    Ok((path, legacy))
 }
 
 fn publish(directory: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {

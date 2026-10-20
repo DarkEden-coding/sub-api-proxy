@@ -16,7 +16,8 @@
     session = $state<Data | null>(null),
     status = $state(""),
     problem = $state(""),
-    callback = $state("");
+    callback = $state(""),
+    region = $state("");
   const can = $derived(store.can("GET", "/oauth/auth-url"));
 
   async function start(p: string) {
@@ -77,14 +78,17 @@
     if (!file) return;
     const form = new FormData();
     form.append("file", file);
+    // The server defaults an empty region to us-central1.
+    if (region.trim()) form.append("location", region.trim());
     store.act(async () => {
-      await api("/oauth/import?provider=vertex", "POST", form).catch((e) => {
+      const r = await api("/oauth/import?provider=vertex", "POST", form).catch((e) => {
         if (!(e instanceof ApiError && e.code === "provider_not_found")) throw e;
         gone = [...gone, "vertex"];
         throw new Error("Vertex import is not available on this server.");
       });
       await store.creds.load(true);
-    }, "Vertex service account imported.");
+      store.notify(`Vertex service account for ${r.project_id} imported (${r.location}).`);
+    });
   }
 </script>
 
@@ -157,6 +161,15 @@
   <ul class="list">
     <li class="item">
       <span class="grow">Use a Google Cloud service-account JSON for Vertex AI.</span>
+      <label class="field region"
+        ><span class="sr">Vertex region</span><input
+          bind:value={region}
+          placeholder="us-central1"
+          spellcheck="false"
+          autocomplete="off"
+          disabled={!store.can("POST", "/oauth/import") || gone.includes("vertex")}
+        /></label
+      >
       <label class="key" aria-disabled={!store.can("POST", "/oauth/import") || gone.includes("vertex")}
         ><svg class="i" aria-hidden="true"><use href="#i-upload" /></svg>Import service account<input
           class="file"
