@@ -392,13 +392,8 @@ fn vertex_import_matches_go() {
             }
             None => Ok(case["imported"].as_str().unwrap().to_owned()),
         };
-        let saved = result.as_ref().ok().cloned();
-        let got = result
-            .map(|path| normalized(&path.display().to_string()))
-            .map_err(|e| normalized(&e));
-        assert_eq!(got, want, "{name}");
         #[cfg(unix)]
-        if let Some(path) = &saved {
+        if let Ok(path) = &result {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -406,6 +401,10 @@ fn vertex_import_matches_go() {
                 "{name}"
             );
         }
+        let got = result
+            .map(|path| normalized(&path.display().to_string()))
+            .map_err(|e| normalized(&e));
+        assert_eq!(got, want, "{name}");
         let mut files = serde_json::Map::new();
         for entry in std::fs::read_dir(&written).into_iter().flatten().flatten() {
             let content = std::fs::read_to_string(entry.path()).unwrap();
