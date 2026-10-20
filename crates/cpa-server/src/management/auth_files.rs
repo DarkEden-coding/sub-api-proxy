@@ -1938,4 +1938,30 @@ mod tests {
         let t = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         assert_eq!(go_time(t), "2023-11-14T22:13:20Z");
     }
+
+    /// `registry.ModelInfo`'s JSON tags: struct order, `omitempty` zeros dropped, and
+    /// the identity fields always present.
+    #[test]
+    fn plugin_models_encode_like_go_registry_model_info() {
+        use cpa_plugin::api::{ModelInfo, ThinkingSupport};
+        let model = ModelInfo {
+            id: "work-pro".into(),
+            display_name: "Work Pro".into(),
+            input_token_limit: 1000,
+            supported_generation_methods: vec!["generateContent".into()],
+            max_completion_tokens: 64,
+            supported_input_modalities: vec!["TEXT".into()],
+            thinking: Some(ThinkingSupport {
+                max: 2048,
+                dynamic_allowed: true,
+                ..Default::default()
+            }),
+            user_defined: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&plugin_model_json(&model)).unwrap(),
+            r#"{"id":"work-pro","object":"","created":0,"owned_by":"","type":"","display_name":"Work Pro","inputTokenLimit":1000,"supportedGenerationMethods":["generateContent"],"max_completion_tokens":64,"supportedInputModalities":["TEXT"],"thinking":{"max":2048,"dynamic_allowed":true}}"#
+        );
+    }
 }
