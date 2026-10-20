@@ -442,8 +442,7 @@ fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>
         if let Source::File(path) = &existing.source
             && path.parent() == Some(config.auth_dir.as_path())
             && !files.iter().any(|c| c.id == existing.id)
-            && std::fs::read(path)
-                .is_ok_and(|data| serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err())
+            && std::fs::read(path).is_ok_and(|data| serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err())
         {
             files.push(Credential::clone(&existing));
         }

@@ -118,3 +118,42 @@ async fn codex_builtins_match_go_models_list() {
     assert!(want.iter().any(|m| m["id"] == "gpt-image-2"), "Go lists the built-ins");
     assert_eq!(got, want);
 }
+
+/// M1-0128 `GET /v1/models/*model`: the entry from the catalog this client would list,
+/// and Go's JSON 404 for an unknown or empty ID.
+#[tokio::test]
+async fn model_detail_comes_from_the_clients_catalog() {
+    let (_, _, codex) = get("/v1/models?client_version=0.150.0", CONFIG).await;
+    let (status, content_type, body) = get("/v1/models/sonnet-long?client_version=0.150.0", CONFIG).await;
+    assert_eq!(
+        (status, content_type.as_str()),
+        (200, "application/json; charset=utf-8")
+    );
+    let listed = codex["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["slug"] == "sonnet-long");
+    assert_eq!(Some(&body), listed);
+    let (_, _, openai) = get("/v1/models", CONFIG).await;
+    let (status, _, body) = get("/v1/models/sonnet-long", CONFIG).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        Some(&body),
+        openai["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "sonnet-long")
+    );
+    assert!(body.get("slug").is_none(), "the OpenAI entry, not the Codex one");
+    let missing = serde_json::json!({"error": {"code": "model_not_found", "message": "Model not found", "type": "invalid_request_error"}});
+    for path in ["/v1/models/nope", "/v1/models/", "/v1/models/sonnet-long/extra"] {
+        let (status, content_type, body) = get(path, CONFIG).await;
+        assert_eq!(
+            (status, content_type.as_str(), &body),
+            (404, "application/json; charset=utf-8", &missing),
+            "{path}"
+        );
+    }
+}

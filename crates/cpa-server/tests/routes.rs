@@ -320,6 +320,8 @@ async fn wrong_methods_are_gin_no_route() {
         (wreq::Method::PUT, "/v1/models"),
         (wreq::Method::DELETE, "/v1/messages"),
         (wreq::Method::HEAD, "/v1/models"),
+        (wreq::Method::HEAD, "/v1/models/gpt-5"),
+        (wreq::Method::POST, "/v1/models/gpt-5"),
         (wreq::Method::HEAD, "/"),
         (wreq::Method::POST, "/healthz"),
         (wreq::Method::GET, "/v2/nothing"),
