@@ -49,10 +49,22 @@ impl PluginRuntime {
         &self.host
     }
 
-    /// The registered plugin executor serving credentials of `provider`, if any.
-    pub(crate) fn executor(&self, provider: &str) -> Option<cpa_plugin::executor::Adapter> {
-        let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        executors.get(&provider.trim().to_lowercase()).cloned()
+    /// The registered plugin executor serving `credential`, if any. Go binds a
+    /// credential's executor as the credential arrives (`registerExecutorForAuth`): a
+    /// credential [`binds_native`] replaces a plugin executor registered for its
+    /// provider at once, while the table here changes only on a plugin sync. So the
+    /// table is consulted only for credentials that would leave a plugin executor bound.
+    pub(crate) fn executor(
+        &self,
+        credential: &cpa_core::credential::Credential,
+        cfg: &Config,
+    ) -> Option<cpa_plugin::executor::Adapter> {
+        let adapter = {
+            let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            executors.get(&credential.provider.trim().to_lowercase()).cloned()?
+        };
+        let compat_names = cpa_core::config::credentials::openai_compat_names(cfg);
+        (!binds_native(credential, &compat_names)).then_some(adapter)
     }
 
     /// Whether a plugin executor is registered for `provider`.
@@ -133,6 +145,49 @@ async fn sync_models(rt: &Runtime) {
     }
 }
 
+/// Go `registerExecutorForAuth`'s built-in providers.
+const BUILTIN: [&str; 14] = [
+    "codex",
+    "claude",
+    "gemini",
+    "gemini-interactions",
+    "vertex",
+    "aistudio",
+    "antigravity",
+    "kimi",
+    "kimi-ai",
+    "kimi.ai",
+    "kimi.com",
+    "xai",
+    "devin",
+    "meta",
+];
+
+/// Whether Go binds `c` to a built-in executor even over a registered plugin executor
+/// (`registerExecutorForAuth`): an OpenAI-compatible credential
+/// (`openAICompatInfoFromAuth`; `registerOpenAICompatProviderExecutor` keeps only a bare
+/// compat executor), a built-in provider, or any other provider with a native
+/// compatibility config (`hasNativeOpenAICompatExecutorConfig`: a `base_url` attribute
+/// or an enabled `openai-compatibility` entry named after it; with
+/// `respectNonOwned` Go still replaces a plugin-owned executor). Otherwise a plugin
+/// executor candidate keeps the provider.
+fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -> bool {
+    let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
+    let provider = c.provider.trim().to_lowercase();
+    if !attr("compat_name").is_empty() || provider == "openai-compatibility" || BUILTIN.contains(&provider.as_str()) {
+        return true;
+    }
+    let key = if provider.is_empty() {
+        "openai-compatibility"
+    } else {
+        provider.as_str()
+    };
+    !attr("base_url").is_empty()
+        || [key, &attr("provider_key").to_lowercase(), &provider]
+            .iter()
+            .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate))
+}
+
 /// Go `providerHasNativeExecutor`: providers a built-in executor is actually bound to.
 /// Go binds one per enabled credential (`registerExecutorForAuth`), plus a fixed
 /// baseline in Home mode. An OpenAI-compatible credential or a built-in provider always
@@ -141,50 +196,22 @@ async fn sync_models(rt: &Runtime) {
 /// ponytail: Go keeps a binding after its last credential goes away; here bindings are
 /// recomputed from the current credentials.
 async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
-    // Go `registerExecutorForAuth`'s built-in providers.
-    const BUILTIN: [&str; 14] = [
-        "codex",
-        "claude",
-        "gemini",
-        "gemini-interactions",
-        "vertex",
-        "aistudio",
-        "antigravity",
-        "kimi",
-        "kimi-ai",
-        "kimi.ai",
-        "kimi.com",
-        "xai",
-        "devin",
-        "meta",
-    ];
     let cfg = rt.config();
     let compat_names = cpa_core::config::credentials::openai_compat_names(&cfg);
     let host = rt.plugins();
     let mut native = HashSet::new();
     for c in rt.store().snapshot().iter().filter(|c| !c.disabled) {
-        let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
         let provider = c.provider.trim().to_lowercase();
-        // Go `openAICompatInfoFromAuth`.
-        if !attr("compat_name").is_empty() || provider == "openai-compatibility" {
-            native.insert(cpa_core::registry::dynamic::provider_key(c));
-            continue;
-        }
-        if BUILTIN.contains(&provider.as_str()) {
-            native.insert(provider);
-            continue;
-        }
-        let key = if provider.is_empty() {
+        let key = if !c.attributes.get("compat_name").is_none_or(|v| v.trim().is_empty())
+            || provider == "openai-compatibility"
+        {
+            cpa_core::registry::dynamic::provider_key(c)
+        } else if provider.is_empty() {
             "openai-compatibility".to_owned()
         } else {
-            provider.clone()
+            provider
         };
-        // Go `hasNativeOpenAICompatExecutorConfig`.
-        let native_config = !attr("base_url").is_empty()
-            || [key.as_str(), &attr("provider_key").to_lowercase(), &provider]
-                .iter()
-                .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate));
-        if !native_config && host.has_executor_candidate_provider(&key).await {
+        if !binds_native(c, &compat_names) && host.has_executor_candidate_provider(&key).await {
             continue;
         }
         native.insert(key);

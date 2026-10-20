@@ -302,7 +302,9 @@ async fn run_executor(
         .executor_execute_stream(&adapter, &request, &scope.0)
         .await
         .map_err(call_failure)?;
-    let mut rest = translate_stream(negotiated, request, opened.chunks, scope);
+    let mut rest = translate_stream(negotiated, request, opened.chunks, scope, |error| {
+        ExecError::local(0, FailureScope::Request, error)
+    });
     let first = match rest.next().await {
         Some(Ok(event)) => Some(event),
         Some(Err(error)) => return Err(Failure::Exec(error)),
@@ -407,7 +409,13 @@ pub(crate) async fn execute_credential(
     Ok(cpa_core::exec::ExecResponse {
         status: 200,
         headers,
-        body: cpa_core::exec::ResponseBody::Stream(translate_stream(negotiated, request, opened.chunks, scope)),
+        body: cpa_core::exec::ResponseBody::Stream(translate_stream(
+            negotiated,
+            request,
+            opened.chunks,
+            scope,
+            |error| attempt_error(0, error),
+        )),
     })
 }
 
@@ -416,10 +424,72 @@ pub(crate) async fn execute_credential(
 /// and a plain error (an unavailable executor, a failed negotiation, an undecodable
 /// answer) carries neither; the auth manager classifies both by status and body. So
 /// the error is model-scoped with the plugin's status (0 when it gave none) and the
-/// shared classifier (`classify.rs`) decides failover and cooldown. It is never
-/// transport: Go has no transport fault on this path.
+/// shared classifier (`classify.rs`) decides failover and cooldown.
+///
+/// The exception is Go `resultErrorFromError` on a statusless error that is neither a
+/// model-not-found nor a request fault: lifecycle or transport text gives it the
+/// connection-lifecycle or transient-transport code, which fails over without a
+/// cooldown (sdk/cliproxy/auth/conductor_cooldown.go:1883-1933). That is transport
+/// scope here. Go matches the error itself at that point, so a bare "tls handshake
+/// timeout" counts; the Result-level exclusion of that phrase never sees it.
 fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
-    ExecError::local(status, FailureScope::Model, message)
+    let mut e = ExecError::local(status, FailureScope::Model, message);
+    if status == 0 {
+        let text = crate::classify::error_text(&e);
+        let lower = text.trim().to_lowercase();
+        if (lifecycle_message(&lower) || transient_message(&lower))
+            && !crate::classify::explicit_model_not_found(&text, "")
+            && !crate::classify::is_request_invalid(&e)
+        {
+            e.scope = FailureScope::Transport;
+        }
+    }
+    e
+}
+
+/// Go `isHTTP2ClosedConnectionMessage`.
+fn http2_closed(lower: &str) -> bool {
+    lower.contains("http2: client connection force closed via clientconn.close")
+        || lower.contains("http2: client conn is closed")
+}
+
+/// Go `isConnectionLifecycleMessage` on a trimmed, lowercased message.
+fn lifecycle_message(lower: &str) -> bool {
+    matches!(
+        lower,
+        "context canceled" | "context deadline exceeded" | "eof" | "unexpected eof"
+    ) || [
+        "websocket: close 1000",
+        "websocket: close 1001",
+        "websocket: close 1006",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || http2_closed(lower)
+}
+
+/// Go `isTransientTransportMessage` on a trimmed, lowercased message.
+fn transient_message(lower: &str) -> bool {
+    const NEEDLES: [&str; 16] = [
+        "tls: tls handshake",
+        "tls handshake timeout",
+        "wsarecv",
+        "wsasend",
+        "a connection attempt failed",
+        "connection refused",
+        "connection reset",
+        "i/o timeout",
+        "no such host",
+        "server misbehaving",
+        "network is unreachable",
+        "no route to host",
+        "broken pipe",
+        "connection aborted",
+        "use of closed network connection",
+        "unexpected eof",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle)) || http2_closed(lower)
 }
 
 /// request context plus the request's model facts; `model` is the resolved model.
@@ -522,6 +592,7 @@ fn translate_stream(
     req: ExecutorRequest,
     chunks: BoxStream<'static, Chunk>,
     scope: Scope,
+    chunk_error: fn(String) -> ExecError,
 ) -> ExecStream {
     let translating = !n.requested.is_empty() && n.output != n.requested;
     let formats = Format::parse(&n.requested).zip(Format::parse(&n.output));
@@ -548,6 +619,7 @@ fn translate_stream(
         chunks,
         ready: VecDeque::new(),
         done: false,
+        chunk_error,
         _scope: scope,
     };
     Box::pin(futures_util::stream::unfold(state, |mut s| async move {
@@ -566,8 +638,7 @@ fn translate_stream(
                         }
                     }
                     if let Some(error) = chunk.error {
-                        s.ready
-                            .push_back(Err(ExecError::local(0, FailureScope::Request, error)));
+                        s.ready.push_back(Err((s.chunk_error)(error)));
                         s.done = true;
                     }
                 }
@@ -596,6 +667,10 @@ struct StreamState {
     chunks: BoxStream<'static, Chunk>,
     ready: VecDeque<Result<Bytes, ExecError>>,
     done: bool,
+    /// A chunk error: request-scoped on the model router path; on the credential-bound
+    /// path an attempt (Go hands the plugin's statusless chunk error to the auth
+    /// manager's stream bootstrap, which classifies it like an execution error).
+    chunk_error: fn(String) -> ExecError,
     _scope: Scope,
 }
 

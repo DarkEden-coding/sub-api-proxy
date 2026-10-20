@@ -7,6 +7,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use cpa_core::config::Config;
 use cpa_exec::Executors;
@@ -111,12 +112,24 @@ async fn env(
 
 impl Env {
     async fn chat(&self, model: &str) -> (u16, String) {
+        self.post(format!(
+            r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#
+        ))
+        .await
+    }
+
+    async fn chat_stream(&self, model: &str) -> (u16, String) {
+        self.post(format!(
+            r#"{{"model":"{model}","stream":true,"messages":[{{"role":"user","content":"hi"}}]}}"#
+        ))
+        .await
+    }
+
+    async fn post(&self, body: String) -> (u16, String) {
         let response = wreq::Client::new()
             .post(format!("http://{}/v1/chat/completions", self.proxy))
             .header("content-type", "application/json")
-            .body(format!(
-                r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#
-            ))
+            .body(body)
             .send()
             .await
             .unwrap();
@@ -323,17 +336,26 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         return;
     };
     let not_found = r#"{"error":{"code":"model_not_found","message":"no such model"}}"#;
+    // (status, message, cooldown of the failed credential in seconds, None for none).
+    const HOUR: u64 = 3600;
     let cases = [
-        (Some(429), "slow down"),
-        (Some(500), "boom"),
-        (Some(401), "expired"),
-        (Some(404), "not found"),
-        (Some(404), not_found),
-        (Some(400), "requested model is not supported"),
+        (Some(429), "slow down", Some(1)),
+        (Some(500), "boom", Some(60)),
+        (Some(401), "expired", Some(HOUR / 2)),
+        (Some(404), "not found", Some(12 * HOUR)),
+        (Some(404), not_found, Some(12 * HOUR)),
+        (Some(400), "requested model is not supported", Some(12 * HOUR)),
         // An application error without a status, like an unavailable executor.
-        (None, "plugin broke"),
+        (None, "plugin broke", Some(60)),
+        // Statusless lifecycle and transport text: Go fails over without a cooldown.
+        (None, "broken pipe", None),
+        (None, "unexpected EOF", None),
+        (None, "context deadline exceeded", None),
+        (None, "read tcp 10.0.0.1:443: connection reset by peer", None),
+        // With a status the text is not consulted.
+        (Some(500), "broken pipe", Some(60)),
     ];
-    for (status, message) in cases {
+    for (status, message, cool) in cases {
         let case = format!("{status:?} {message}");
         let dir = env.records.join("respond").join("acme");
         std::fs::create_dir_all(&dir).unwrap();
@@ -356,12 +378,22 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         assert_eq!(ids.len(), 2, "{case}: {ids:?}");
         assert_ne!(ids[0], ids[1], "{case}: the second attempt uses the other credential");
         let cooling = env.rt.store().cooldowns(&ids[0]);
-        assert_eq!(cooling.len(), 1, "{case}: the failed credential cools: {cooling:?}");
-        assert_eq!(
-            (cooling[0].model.as_str(), cooling[0].status),
-            ("acme-1", status.unwrap_or(0)),
-            "{case}"
-        );
+        match cool {
+            None => assert!(cooling.is_empty(), "{case}: no cooldown: {cooling:?}"),
+            Some(secs) => {
+                assert_eq!(cooling.len(), 1, "{case}: the failed credential cools: {cooling:?}");
+                assert_eq!(
+                    (cooling[0].model.as_str(), cooling[0].status),
+                    ("acme-1", status.unwrap_or(0)),
+                    "{case}"
+                );
+                let left = cooling[0].remaining;
+                assert!(
+                    left <= Duration::from_secs(secs) && left > Duration::from_secs(secs.saturating_sub(5)),
+                    "{case}: cools for {secs}s, {left:?} left"
+                );
+            }
+        }
         assert!(env.rt.store().cooldowns(&ids[1]).is_empty(), "{case}");
         for id in ["acme-a.json", "acme-b.json"] {
             env.rt.store().reset_cooldown(id);
@@ -382,6 +414,144 @@ async fn a_failing_plugin_credential_fails_over_to_the_next() {
         env.rt.store().cooldowns(&dead_id).is_empty(),
         "transport faults do not cool"
     );
+    env.finish().await;
+}
+
+/// Go hands a plugin stream's chunk error to the auth manager's stream bootstrap, which
+/// classifies it like an execution error: an error before the first payload fails over
+/// (conductor_stream.go:345-460); one after payload has been sent ends the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_stream_failing_before_its_first_chunk_fails_over() {
+    let Some(env) = env(
+        "plugin-owned-stream-failover",
+        &[("catalog", "model_provider"), ("acme", "executor")],
+        "",
+        &[
+            ("acme-a.json", r#"{"type":"acme"}"#),
+            ("acme-b.json", r#"{"type":"acme"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let script = |chunks: Value, error: &str| {
+        let dir = env.records.join("respond").join("acme");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("executor.execute_stream.script.once.json"),
+            json!({"chunks":chunks,"error":error}).to_string(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(env.records.join("acme.jsonl"));
+    };
+    let attempts = || -> Vec<String> {
+        calls(&env.records, "acme", "executor.execute_stream")
+            .into_iter()
+            .map(|r| r["AuthID"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // (first-chunk error, cooldown of the failed credential in seconds).
+    for (error, cool) in [("plugin stream broke", Some(60)), ("broken pipe", None)] {
+        script(json!([]), error);
+        let (got, body) = env.chat_stream("acme-1").await;
+        assert_eq!(got, 200, "{error}: {body}");
+        assert!(body.contains("one") && body.contains("three"), "{error}: {body}");
+        let ids = attempts();
+        assert_eq!(ids.len(), 2, "{error}: {ids:?}");
+        assert_ne!(ids[0], ids[1], "{error}: the second attempt uses the other credential");
+        let cooling = env.rt.store().cooldowns(&ids[0]);
+        match cool {
+            None => assert!(cooling.is_empty(), "{error}: {cooling:?}"),
+            Some(secs) => {
+                assert_eq!(cooling.len(), 1, "{error}: {cooling:?}");
+                assert_eq!((cooling[0].model.as_str(), cooling[0].status), ("acme-1", 0), "{error}");
+                let left = cooling[0].remaining;
+                assert!(
+                    left <= Duration::from_secs(secs) && left > Duration::from_secs(secs - 5),
+                    "{error}: {left:?}"
+                );
+            }
+        }
+        for id in ["acme-a.json", "acme-b.json"] {
+            env.rt.store().reset_cooldown(id);
+        }
+    }
+    // After payload has reached the client the stream ends; there is no second attempt.
+    script(json!(["data: early\n\n"]), "plugin stream broke late");
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert!(body.contains("early") && !body.contains("three"), "{body}");
+    assert_eq!(attempts().len(), 1);
+    env.finish().await;
+}
+
+/// A plugin executor may claim a built-in provider while no credential of it exists, but
+/// Go rebinds the built-in executor as soon as such a credential arrives
+/// (`registerExecutorForAuth`), before any plugin sync. Credentials reach the store
+/// without a sync both from a management publish (the store reconciles after the sync is
+/// signalled) and from a plugin login (`upsert`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_builtin_credential_never_reaches_a_plugin_executor_for_its_provider() {
+    let Some(env) = env(
+        "plugin-owned-builtin-rebind",
+        &[("catalog", "model_provider"), ("claude", "executor")],
+        "",
+        &[],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"claude","Models":[{"ID":"claude-plug-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let cfg = env.rt.config();
+    let credential = |file: &str| {
+        let path = cfg.auth_dir.join(file);
+        let body = br#"{"type":"claude","access_token":"fake"}"#;
+        std::fs::write(&path, body).unwrap();
+        cpa_core::config::credentials::from_file(&cfg, &cfg.auth_dir, &path, body)
+            .unwrap()
+            .unwrap()
+    };
+    let check = |stage: &str, (got, body): (u16, String)| {
+        assert_ne!(got, 200, "{stage}: the built-in executor's dead upstream: {body}");
+        assert!(
+            calls(&env.records, "claude", "executor.execute").is_empty(),
+            "{stage}: the plugin executor served a built-in credential"
+        );
+    };
+    // A management publish: the store reconciles with the new file, no sync follows.
+    let mut all: Vec<_> = env.rt.store().snapshot().iter().map(|c| (**c).clone()).collect();
+    all.push(credential("claude-a.json"));
+    env.rt.store().reconcile(all);
+    check("publish", env.chat("claude-plug-1").await);
+    // A plugin login: the credential is upserted, no sync follows.
+    let rest: Vec<_> = env
+        .rt
+        .store()
+        .snapshot()
+        .iter()
+        .filter(|c| c.provider != "claude")
+        .map(|c| (**c).clone())
+        .collect();
+    env.rt.store().reconcile(rest);
+    env.rt.store().upsert(credential("claude-b.json"));
+    check("plugin login", env.chat("claude-plug-1").await);
     env.finish().await;
 }
 
