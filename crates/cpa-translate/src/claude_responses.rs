@@ -321,9 +321,29 @@ fn is_role(message: &[u8], role: &str) -> bool {
     common::norm(&gj::get(message, "role")) == role
 }
 
+/// claudeModelRejectsAssistantPrefill: Fable, Opus 5+ and Sonnet 4.6+, after any
+/// provider namespace and `claude-` prefix. Eight-digit snapshot dates are not versions.
 fn rejects_assistant_prefill(model: &str) -> bool {
     let model = model.trim().to_lowercase();
-    ["fable", "opus-5", "sonnet-4-6"].iter().any(|f| model.contains(f))
+    let model = model.rsplit('/').next().unwrap_or_default();
+    let model = model.strip_prefix("claude-").unwrap_or(model).replace('.', "-");
+    let tokens: Vec<&str> = model.split('-').collect();
+    if tokens[0] == "fable" {
+        return true;
+    }
+    if tokens.len() < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet") {
+        return false;
+    }
+    let version = |token: &str| -> Option<u32> {
+        (!token.is_empty() && token.len() < 8 && token.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| token.parse().ok())
+            .flatten()
+    };
+    match version(tokens[1]) {
+        Some(major) if major >= 5 => true,
+        Some(4) => tokens[0] == "sonnet" && tokens.get(2).and_then(|t| version(t)).is_some_and(|minor| minor >= 6),
+        _ => false,
+    }
 }
 
 /// Builds one Claude message, collapsing a lone plain text block to a string.

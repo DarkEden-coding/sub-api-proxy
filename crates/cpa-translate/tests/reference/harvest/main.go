@@ -229,7 +229,18 @@ func main() {
 			if sel, ok := call.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "Register" {
 				return true
 			}
-			add(dir, call.Args[2].(*ast.Ident).Name)
+			if name := call.Args[2].(*ast.Ident).Name; name != "nil" {
+				add(dir, name)
+			} else {
+				// The request is registered as an envelope; tests call its byte form.
+				for _, decl := range funcDecls(dir) {
+					n := decl.Name.Name
+					if decl.Name.IsExported() && strings.HasPrefix(n, "Convert") && strings.Contains(n, "RequestTo") &&
+						!strings.Contains(n, "Envelope") && !strings.HasSuffix(n, "WithCompat") && !strings.HasSuffix(n, "Context") {
+						add(dir, n)
+					}
+				}
+			}
 			for _, el := range call.Args[3].(*ast.CompositeLit).Elts {
 				kv := el.(*ast.KeyValueExpr)
 				if key := kv.Key.(*ast.Ident).Name; key == "Stream" || key == "NonStream" {
