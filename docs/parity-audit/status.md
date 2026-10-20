@@ -20,7 +20,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2 | 189 | 71 | 114 | 4 |
 | M3 | 424 | 187 | 215 | 22 |
 | M4 | 589 | 244 | 330 | 15 |
-| M5 | 331 | 196 | 125 | 10 |
+| M5 | 331 | 197 | 124 | 10 |
 | M6 | 267 | 114 | 130 | 23 |
 
 ### Gaps by area
@@ -34,7 +34,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | openai-xai | 6 | 31 | M3-0356, M3-0359, M3-0365, M3-0366, M3-0399, M6-0217 |
 | manage | 5 | 148 | M4-0526, M4-0528, M5-0304, M5-0312, M5-0313 |
 | translate | 5 | 123 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
-| google | 4 | 80 | M3-0353, M3-0354, M3-0360, M3-0361 |
+| google | 4 | 79 | M3-0353, M3-0354, M3-0360, M3-0361 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
 | tui | 1 | 9 | M4-0521 |
 | home | 0 | 27 | — |
@@ -1868,7 +1868,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 |---|---|---|---|---|---|
 | M5-0233 | --password | covered | crates/cliproxy/src/main.rs --password (loopback-only management password) -> serve; every_go_flag_parses_in_single_and_double_dash_form |  |  |
 | M5-0234 | --management-base-url | covered | crates/cliproxy/src/main.rs passes management_base_url to tui::run; tui/client.rs Go client cases; tui/e2e.rs tui_drives_the_management_api |  |  |
-| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | partial | crates/cpa-exec/src/wsrelay.rs Session::close and Manager::non_stream; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects | google | Saturated pending-response buffers drop the disconnect error in Session::close, unlike Go session.go:183-198, which evicts a buffered message to deliver it. non_stream can then return the accumulated response as success. No saturated-buffer cleanup test; runtime fix deferred. |
+| M5-0235 | AI Studio relay protocol carries HTTP requests/responses and streaming chunks over session… | covered | crates/cpa-exec/src/wsrelay.rs Pending (deliver, end) and Responses::recv; wsrelay_tests.rs closing_with_a_full_buffer_still_fails_the_request and a_terminal_message_blocked_at_close_never_follows_the_eviction; aistudio_tests.rs; crates/cpa-server/tests/aistudio_relay.rs checks relay requests, streams and ordinary disconnects |  | Delivery, terminal messages and the close decide under one per-request lock, as Go's pendingRequest.mu serializes deliver, deliverTerminal and cancelWithError: a full queue loses its oldest message to the close error, and a terminal message already queued suppresses it. internal/wsrelay is unchanged from 6fecc6e to v8.0.35. |
 | M5-0236 | Realtime/Live includes SDP negotiation, short-lived client secrets, legacy sessions, worki… | partial | crates/cpa-server/src/realtime/* (media.rs, relay.rs), crates/cpa-exec/src/codex_live.rs; tests/realtime.rs (Go fixtures), realtime/media_tests.rs | realtime | webrtc-rs lacks some pion behaviours (ponytails in realtime/media.rs). |
 
 ### M5: Complete compatibility test-suite inventory
