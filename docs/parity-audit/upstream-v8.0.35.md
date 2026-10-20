@@ -22,7 +22,7 @@ Columns:
 | Translation to and from Claude | 17 | 13 | 4 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
 | Codex | 19 | 0 | 19 | 0 | 0 | 0 |
-| Gemini, Vertex and AI Studio | 20 | 1 | 19 | 0 | 0 | 0 |
+| Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 0 | 8 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **34** | **190** | **0** | **61** | **3** |
+| **All** | **288** | **33** | **191** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -175,7 +175,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`9126772d`](https://github.com/router-for-me/CLIProxyAPI/commit/9126772d) | fix(gemini): strip unsupported dependent schema keywords | yes | to port | S (+1 −0) | unsupported dependent schema keywords stripped |
 | [`a0fd8448`](https://github.com/router-for-me/CLIProxyAPI/commit/a0fd8448) | fix(schema): preserve multi-branch anyOf/oneOf unions during schema sanitization | yes | to port | M (+209 −53) | multi-branch schema unions; carry the later reference-inlining and keyword fixes as one cleaner update |
 | [`77fd91e8`](https://github.com/router-for-me/CLIProxyAPI/commit/77fd91e8) | feat(gemini): support client-executed tool_search in OpenAI Responses translator | yes | to port | L (+433 −33) | client-executed tool_search in Gemini Responses conversion |
-| [`7f2f17d7`](https://github.com/router-for-me/CLIProxyAPI/commit/7f2f17d7) | feat(gemini): treat MALFORMED_FUNCTION_CALL as retryable API error in Claude translation | yes | ported here | M (+243 −16) | Gemini to Claude: MALFORMED_FUNCTION_CALL without a tool call becomes an API error; #76 |
+| [`7f2f17d7`](https://github.com/router-for-me/CLIProxyAPI/commit/7f2f17d7) | feat(gemini): treat MALFORMED_FUNCTION_CALL as retryable API error in Claude translation | yes | to port | M (+243 −16) | Gemini to Claude: MALFORMED_FUNCTION_CALL as an API error, and the Gemini, Vertex and AI Studio executors answer 502 or end the stream with that error; translator and executor halves land together (the rest of the Gemini to Claude translator is in #76) |
 | [`ceb4397f`](https://github.com/router-for-me/CLIProxyAPI/commit/ceb4397f) | feat(executor): drop trailing thought-only model turns in Gemini Vertex requests | yes | to port | S (+6 −2) | drop trailing thought-only model turns in Gemini Vertex requests |
 | [`e9ba5c50`](https://github.com/router-for-me/CLIProxyAPI/commit/e9ba5c50) | feat(util): strip unsupported discriminator keyword from JSON schemas for Gemini and Antigravity | yes | to port | S (+1 −1) | strip unsupported discriminator keyword from JSON schemas for Gemini and Antigravity |
 | [`2d7f5377`](https://github.com/router-for-me/CLIProxyAPI/commit/2d7f5377) | feat(vertex): honor full /publishers/ prefix in API-key base-url | yes | to port | M (+60 −15) | honor full /publishers/ prefix in API-key base-url |
