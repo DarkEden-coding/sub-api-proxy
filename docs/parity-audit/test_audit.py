@@ -25,6 +25,9 @@ class SummaryTests(unittest.TestCase):
         key = "DELETE /v8/management/plugins/:id/quota"
         result = audit.judge_route({"text": f"`{key}`"}, {key: {"routed": True, "status": 400}}, tests)
         self.assertEqual(result[0], "covered")
+        for key in ("GET /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/config"):
+            result = audit.judge_route({"text": f"`{key}`"}, {key: {"routed": True, "status": 400}}, tests)
+            self.assertEqual(result[0], "partial")
         key = "POST /v1/videos/extensions"
         result = audit.judge_route({"text": f"`{key}`"}, {key: {"routed": True, "status": 401}}, tests)
         self.assertEqual(result[0], "covered")

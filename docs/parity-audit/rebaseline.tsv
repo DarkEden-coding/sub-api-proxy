@@ -832,3 +832,16 @@ M3-0348	partial	partial	manual	crates/cpa-server/src/openai.rs; codex_go.json oa
 M3-0349	partial	partial	manual	crates/cpa-server/tests/routes.rs failover_stop_rules_and_cooldown_contracts; codex_go.json oauth_usage_limit_429	Not ported by name.
 M3-0350	partial	partial	manual	crates/cpa-server/tests/routes.rs empty_stream_fails_over_and_reports_empty_stream, bootstrap retries	Not ported by name.
 M4-0510	partial	partial	manual	crates/cpa-server/tests/routes.rs usage_queue_records_every_attempt	Not ported by name.
+M5-0106	covered	partial	automatic	probe: PATCH /v0/management/logging-to-file -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0109	covered	partial	automatic	probe: PATCH /v0/management/logs-max-total-size-mb -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0112	covered	partial	automatic	probe: PATCH /v0/management/error-logs-max-files -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0115	covered	partial	automatic	probe: PATCH /v0/management/usage-statistics-enabled -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0118	covered	partial	automatic	probe: PATCH /v0/management/proxy-url -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0123	covered	partial	automatic	probe: PATCH /v0/management/quota-exceeded/switch-project -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0125	covered	partial	automatic	probe: PUT /v0/management/quota-exceeded/switch-preview-model -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0152	covered	partial	automatic	probe: PATCH /v0/management/request-log -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0155	covered	partial	automatic	probe: PATCH /v0/management/ws-auth -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0158	covered	partial	automatic	probe: PATCH /v0/management/request-retry -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0161	covered	partial	automatic	probe: PATCH /v0/management/max-retry-credentials -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0163	covered	partial	automatic	probe: PUT /v0/management/max-retry-interval -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
+M5-0167	covered	partial	automatic	probe: PATCH /v0/management/force-model-prefix -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.

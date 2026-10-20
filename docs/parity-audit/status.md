@@ -20,7 +20,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2 | 158 | 113 | 45 | 0 |
 | M3 | 350 | 216 | 134 | 0 |
 | M4 | 510 | 240 | 256 | 14 |
-| M5 | 303 | 215 | 88 | 0 |
+| M5 | 303 | 202 | 101 | 0 |
 | M6 | 248 | 114 | 115 | 19 |
 
 ### Gaps by area
@@ -31,7 +31,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | observe | 12 | 1 | M4-0001, M4-0002, M4-0003, M4-0004, M4-0005, M4-0006, M4-0007, M4-0008, M4-0009, M4-0010, M4-0011, M4-0485 |
 | server | 2 | 222 | M4-0371, M4-0372 |
 | openai-xai | 1 | 27 | M6-0217 |
-| manage | 0 | 117 | — |
+| manage | 0 | 130 | — |
 | codex | 0 | 64 | — |
 | claude | 0 | 48 | — |
 | google | 0 | 35 | — |
@@ -1461,7 +1461,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0083 | POST /v0/management/oauth-callback | covered | probe: POST /v0/management/oauth-callback -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
 | M5-0084 | GET /v0/management/oauth-callback | covered | probe: GET /v0/management/oauth-callback -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
 | M5-0085 | GET /v0/management/config | covered | probe: GET /v0/management/config -> 200; tests: crates/cliproxy/src/tui/client.rs, crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0086 | GET /v0/management/config.yaml | covered | probe: GET /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs |  |  |
+| M5-0086 | GET /v0/management/config.yaml | covered | probe: GET /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/legacy_go.rs |  |  |
 | M5-0087 | PUT /v0/management/config.yaml | covered | probe: PUT /v0/management/config.yaml -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs |  | v0 serves GET config.yaml only (management.rs); v8 has both. |
 | M5-0088 | GET /v0/management/latest-version | partial | probe: GET /v0/management/latest-version -> 502; no test requests this path | manage |  |
 | M5-0089 | GET /v0/management/plugins | covered | probe: GET /v0/management/plugins -> 200; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json, crates/cpa-server/tests/plugin_quota_cooldown.rs |  |  |
@@ -1481,26 +1481,26 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0103 | PATCH /v0/management/debug | covered | probe: PATCH /v0/management/debug -> 400; tests: crates/cliproxy/src/tui/client.rs, crates/cpa-server/tests/fixtures/legacy_go.json (+1) |  |  |
 | M5-0104 | GET /v0/management/logging-to-file | covered | probe: GET /v0/management/logging-to-file -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0105 | PUT /v0/management/logging-to-file | covered | probe: PUT /v0/management/logging-to-file -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0106 | PATCH /v0/management/logging-to-file | covered | probe: PATCH /v0/management/logging-to-file -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0106 | PATCH /v0/management/logging-to-file | partial | probe: PATCH /v0/management/logging-to-file -> 400; no test requests this path | manage |  |
 | M5-0107 | GET /v0/management/logs-max-total-size-mb | covered | probe: GET /v0/management/logs-max-total-size-mb -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0108 | PUT /v0/management/logs-max-total-size-mb | covered | probe: PUT /v0/management/logs-max-total-size-mb -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0109 | PATCH /v0/management/logs-max-total-size-mb | covered | probe: PATCH /v0/management/logs-max-total-size-mb -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0109 | PATCH /v0/management/logs-max-total-size-mb | partial | probe: PATCH /v0/management/logs-max-total-size-mb -> 400; no test requests this path | manage |  |
 | M5-0110 | GET /v0/management/error-logs-max-files | covered | probe: GET /v0/management/error-logs-max-files -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0111 | PUT /v0/management/error-logs-max-files | covered | probe: PUT /v0/management/error-logs-max-files -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0112 | PATCH /v0/management/error-logs-max-files | covered | probe: PATCH /v0/management/error-logs-max-files -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0112 | PATCH /v0/management/error-logs-max-files | partial | probe: PATCH /v0/management/error-logs-max-files -> 400; no test requests this path | manage |  |
 | M5-0113 | GET /v0/management/usage-statistics-enabled | covered | probe: GET /v0/management/usage-statistics-enabled -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0114 | PUT /v0/management/usage-statistics-enabled | covered | probe: PUT /v0/management/usage-statistics-enabled -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0115 | PATCH /v0/management/usage-statistics-enabled | covered | probe: PATCH /v0/management/usage-statistics-enabled -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0115 | PATCH /v0/management/usage-statistics-enabled | partial | probe: PATCH /v0/management/usage-statistics-enabled -> 400; no test requests this path | manage |  |
 | M5-0116 | GET /v0/management/proxy-url | covered | probe: GET /v0/management/proxy-url -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0117 | PUT /v0/management/proxy-url | covered | probe: PUT /v0/management/proxy-url -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0118 | PATCH /v0/management/proxy-url | covered | probe: PATCH /v0/management/proxy-url -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0118 | PATCH /v0/management/proxy-url | partial | probe: PATCH /v0/management/proxy-url -> 400; no test requests this path | manage |  |
 | M5-0119 | DELETE /v0/management/proxy-url | covered | probe: DELETE /v0/management/proxy-url -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0120 | POST /v0/management/api-call | partial | probe: POST /v0/management/api-call -> 400; no test requests this path | manage |  |
 | M5-0121 | GET /v0/management/quota-exceeded/switch-project | covered | probe: GET /v0/management/quota-exceeded/switch-project -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0122 | PUT /v0/management/quota-exceeded/switch-project | covered | probe: PUT /v0/management/quota-exceeded/switch-project -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0123 | PATCH /v0/management/quota-exceeded/switch-project | covered | probe: PATCH /v0/management/quota-exceeded/switch-project -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0123 | PATCH /v0/management/quota-exceeded/switch-project | partial | probe: PATCH /v0/management/quota-exceeded/switch-project -> 400; no test requests this path | manage |  |
 | M5-0124 | GET /v0/management/quota-exceeded/switch-preview-model | covered | probe: GET /v0/management/quota-exceeded/switch-preview-model -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0125 | PUT /v0/management/quota-exceeded/switch-preview-model | covered | probe: PUT /v0/management/quota-exceeded/switch-preview-model -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0125 | PUT /v0/management/quota-exceeded/switch-preview-model | partial | probe: PUT /v0/management/quota-exceeded/switch-preview-model -> 400; no test requests this path | manage |  |
 | M5-0126 | PATCH /v0/management/quota-exceeded/switch-preview-model | covered | probe: PATCH /v0/management/quota-exceeded/switch-preview-model -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0127 | POST /v0/management/reset-quota | covered | probe: POST /v0/management/reset-quota -> 400; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
 | M5-0128 | GET /v0/management/quota/providers | covered | probe: GET /v0/management/quota/providers -> 200; tests: crates/cpa-server/tests/fixtures/plugin_routes_go.json |  |  |
@@ -1527,22 +1527,22 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0149 | GET /v0/management/request-log-by-id/:id | covered | probe: GET /v0/management/request-log-by-id/:id -> 404; tests: crates/cpa-server/tests/legacy_go.rs |  |  |
 | M5-0150 | GET /v0/management/request-log | covered | probe: GET /v0/management/request-log -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0151 | PUT /v0/management/request-log | covered | probe: PUT /v0/management/request-log -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0152 | PATCH /v0/management/request-log | covered | probe: PATCH /v0/management/request-log -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0152 | PATCH /v0/management/request-log | partial | probe: PATCH /v0/management/request-log -> 400; no test requests this path | manage |  |
 | M5-0153 | GET /v0/management/ws-auth | covered | probe: GET /v0/management/ws-auth -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0154 | PUT /v0/management/ws-auth | covered | probe: PUT /v0/management/ws-auth -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0155 | PATCH /v0/management/ws-auth | covered | probe: PATCH /v0/management/ws-auth -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0155 | PATCH /v0/management/ws-auth | partial | probe: PATCH /v0/management/ws-auth -> 400; no test requests this path | manage |  |
 | M5-0156 | GET /v0/management/request-retry | covered | probe: GET /v0/management/request-retry -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0157 | PUT /v0/management/request-retry | covered | probe: PUT /v0/management/request-retry -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0158 | PATCH /v0/management/request-retry | covered | probe: PATCH /v0/management/request-retry -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0158 | PATCH /v0/management/request-retry | partial | probe: PATCH /v0/management/request-retry -> 400; no test requests this path | manage |  |
 | M5-0159 | GET /v0/management/max-retry-credentials | covered | probe: GET /v0/management/max-retry-credentials -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0160 | PUT /v0/management/max-retry-credentials | covered | probe: PUT /v0/management/max-retry-credentials -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0161 | PATCH /v0/management/max-retry-credentials | covered | probe: PATCH /v0/management/max-retry-credentials -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0161 | PATCH /v0/management/max-retry-credentials | partial | probe: PATCH /v0/management/max-retry-credentials -> 400; no test requests this path | manage |  |
 | M5-0162 | GET /v0/management/max-retry-interval | covered | probe: GET /v0/management/max-retry-interval -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0163 | PUT /v0/management/max-retry-interval | covered | probe: PUT /v0/management/max-retry-interval -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0163 | PUT /v0/management/max-retry-interval | partial | probe: PUT /v0/management/max-retry-interval -> 400; no test requests this path | manage |  |
 | M5-0164 | PATCH /v0/management/max-retry-interval | covered | probe: PATCH /v0/management/max-retry-interval -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0165 | GET /v0/management/force-model-prefix | covered | probe: GET /v0/management/force-model-prefix -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
 | M5-0166 | PUT /v0/management/force-model-prefix | covered | probe: PUT /v0/management/force-model-prefix -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
-| M5-0167 | PATCH /v0/management/force-model-prefix | covered | probe: PATCH /v0/management/force-model-prefix -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json |  |  |
+| M5-0167 | PATCH /v0/management/force-model-prefix | partial | probe: PATCH /v0/management/force-model-prefix -> 400; no test requests this path | manage |  |
 | M5-0168 | GET /v0/management/routing/strategy | covered | probe: GET /v0/management/routing/strategy -> 200; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs (+1) |  |  |
 | M5-0169 | PUT /v0/management/routing/strategy | covered | probe: PUT /v0/management/routing/strategy -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs (+1) |  |  |
 | M5-0170 | PATCH /v0/management/routing/strategy | covered | probe: PATCH /v0/management/routing/strategy -> 400; tests: crates/cpa-server/tests/fixtures/legacy_go.json, crates/cpa-server/tests/legacy_go.rs (+1) |  |  |

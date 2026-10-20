@@ -235,7 +235,11 @@ def judge_route(item, routes, tests):
     if literal != "/" and literal.endswith("/") and len(literal) > 1:
         literal = literal
     pattern = re.compile(re.escape(literal) + (r'["?/ {]' if not literal.endswith("/") else ""))
-    users = [rel for rel, text in tests.items() if pattern.search(text)]
+    route_path = "/".join('[^/"]+' if part.startswith(":") else '.+' if part.startswith("*")
+                          else re.escape(part) for part in path.split("/"))
+    fixture_request = re.compile(r'^' + method + r' "' + route_path + r'(?:\?[^"\n]*)?"$', re.M)
+    users = [rel for rel, text in tests.items()
+             if (fixture_request if rel.endswith(".json") else pattern).search(text)]
     if users:
         return ("covered", f"probe: {key} -> {hit['status']}; tests: {short(users)}")
     return ("partial", f"probe: {key} -> {hit['status']}; no test requests this path")

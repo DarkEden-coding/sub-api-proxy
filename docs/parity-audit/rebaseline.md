@@ -15,9 +15,9 @@ the README's 835 / 707 / 145 was already stale.
 | M2 | 111 / 40 / 7 | 113 / 45 / 0 |
 | M3 | 208 / 125 / 17 | 216 / 134 / 0 |
 | M4 | 233 / 259 / 18 | 240 / 256 / 14 |
-| M5 | 180 / 102 / 21 | 215 / 88 / 0 |
+| M5 | 180 / 102 / 21 | 202 / 101 / 0 |
 | M6 | 69 / 131 / 48 | 114 / 115 / 19 |
-| **All** | **854 / 722 / 111** | **964 / 690 / 33** |
+| **All** | **854 / 722 / 111** | **951 / 703 / 33** |
 
 Only gaps have an area in the generated audit. These counts are partial / missing.
 
@@ -28,7 +28,7 @@ Only gaps have an area in the generated audit. These counts are partial / missin
 | device-providers | 20 / 1 | 20 / 0 |
 | google | 28 / 12 | 35 / 0 |
 | home | 22 / 5 | 25 / 0 |
-| manage | 125 / 13 | 117 / 0 |
+| manage | 125 / 13 | 130 / 0 |
 | observe | 1 / 12 | 1 / 12 |
 | openai-xai | 27 / 8 | 27 / 1 |
 | plugins | 108 / 39 | 86 / 18 |
@@ -40,13 +40,16 @@ Only gaps have an area in the generated audit. These counts are partial / missin
 ## Review evidence and decisions
 
 [rebaseline.tsv](rebaseline.tsv) records each of the 833 previous gaps, including all
-627 explicit missing or partial judgments in `manual.tsv`. Each row records its previous
+627 explicit missing or partial judgments in `manual.tsv`, plus 13 previously covered
+operations whose fixtures do not request the matching HTTP method. Each row records its previous
 status, revised status, implementation or test evidence, and remaining gap. It is a
 snapshot of this review, not another source of judgments. `manual.tsv` remains the
 editable source; `status.md` is generated from it and the automatic evidence.
 
-There are 151 status changes: 73 partial to covered, 37 missing to covered, and 41
-missing to partial. A working subsystem does not make an entire Go test suite covered.
+There are 164 status changes: 73 partial to covered, 37 missing to covered, 41
+missing to partial, and 13 covered to partial. Extracted fixture evidence now requires
+both the HTTP method and the complete route, not another operation on the same path.
+A working subsystem does not make an entire Go test suite covered.
 The retained partial judgments still lack complete case-level proof or runtime wiring.
 Names in comments are search hints, not proof that every assertion was ported.
 
