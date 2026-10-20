@@ -2792,3 +2792,45 @@ async fn kimi_channel_selects_kimi_ai_and_codex_exchange_errors_read_like_go() {
     bad_server.abort();
     fake_server.abort();
 }
+
+/// Go v8.0.35 `TestConfigV8SaveNormalizesCollectionStylesToBlockYAML` (`0a23627d`):
+/// JSON written through the v8 config API lands as block YAML with plain keys, and an
+/// empty list stays `[]`. Untouched text keeps its own style (DIFFERENCES-FROM-GO.md).
+#[tokio::test]
+async fn config_writes_render_json_values_as_block_yaml() {
+    let f = Fixture::new("styles");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let send = |method, at: &str, body: &str| {
+        client
+            .request(method, format!("{base}/v8/management{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body.to_owned())
+            .send()
+    };
+    let compat = |n: &str| {
+        format!(
+            r#"[{{"name":"compat-{n}","base-url":"https://api.example.com","headers":{{"User-Agent":"$User-Agent"}},"models":[{{"alias":"coding","name":"gpt-4o"}}],"keys":[{{"api-key":"fake-compat-{n}"}}]}}]"#
+        )
+    };
+    let block = "api-keys:\n  openai-compatibility:\n    - name: compat-N\n      base-url: https://api.example.com\n      headers:\n        User-Agent: $User-Agent\n      models:\n        - alias: coding\n          name: gpt-4o\n      keys:\n        - api-key: fake-compat-N\n";
+    let r = send(wreq::Method::PUT, "/config/api-keys/openai-compatibility", &compat("1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(f.file().ends_with(&block.replace('N', "1")), "{}", f.file());
+    let patch = format!(
+        r#"{{"api-keys":{{"openai-compatibility":{}}},"server":{{"trusted-proxies":[]}}}}"#,
+        compat("2")
+    );
+    let r = send(wreq::Method::PATCH, "/config", &patch).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let file = f.file();
+    assert!(file.ends_with(&block.replace('N', "2")), "{file}");
+    assert!(file.contains("  trusted-proxies: []\n"), "{file}");
+    assert!(
+        file.contains("  api-keys: [fake-client]\n"),
+        "untouched text keeps its style: {file}"
+    );
+    server.abort();
+}
