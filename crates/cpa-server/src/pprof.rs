@@ -715,7 +715,11 @@ mod tests {
         let mut held = tokio::net::TcpStream::connect(&next).await.unwrap();
         held.write_all(b"POST /debug/pprof/symbol HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
         let mut interim = [0; 25];
-        held.read_exact(&mut interim).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), held.read_exact(&mut interim))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
         let (accepted, observed) = tokio::sync::oneshot::channel();
         server
             .accept_errors
@@ -728,8 +732,15 @@ mod tests {
         // Unlike Go, the next publication drains surviving connections before binding:
         // the held request keeps running and the replacement waits for it.
         rt.publish_config(config(true, &next, false));
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // EOF on the idle connection proves the publication started its graceful drain.
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(3), keep.read_to_end(&mut rest)).await;
+        assert!(matches!(read, Ok(Ok(0))), "{read:?}");
+        // Draining waits for the held request, so nothing is bound yet.
         assert!(tokio::net::TcpStream::connect(&next).await.is_err());
+        // Released well inside the five-second drain. Had the drain timed out instead,
+        // the request would be detached and nothing rebound, so `fetch` below fails
+        // within its own seven-second bound.
         held.write_all(b"0x0").await.unwrap();
         let mut completed = String::new();
         tokio::time::timeout(Duration::from_secs(5), held.read_to_string(&mut completed))
