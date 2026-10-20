@@ -17,7 +17,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | Milestone | Items | covered | partial | missing |
 |---|---:|---:|---:|---:|
 | M1 | 151 | 54 | 83 | 14 |
-| M2 | 189 | 99 | 86 | 4 |
+| M2 | 189 | 98 | 87 | 4 |
 | M3 | 424 | 191 | 211 | 22 |
 | M4 | 589 | 245 | 329 | 15 |
 | M5 | 331 | 198 | 123 | 10 |
@@ -33,7 +33,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | codex | 11 | 82 | M3-0351, M3-0355, M3-0358, M3-0362, M3-0363, M3-0364, M3-0367, M3-0369, M3-0380, M3-0422, M5-0323 |
 | openai-xai | 6 | 31 | M3-0356, M3-0359, M3-0365, M3-0366, M3-0399, M6-0217 |
 | manage | 5 | 147 | M4-0526, M4-0528, M5-0304, M5-0312, M5-0313 |
-| translate | 5 | 92 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
+| translate | 5 | 93 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
 | google | 4 | 78 | M3-0353, M3-0354, M3-0360, M3-0361 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
 | tui | 1 | 9 | M4-0521 |
@@ -359,7 +359,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2-0087 | internal/translator/common/responses_test.go | partial | implementation cites responses.go (crates/cpa-translate/src/claude_responses.rs); no case matched by name | translate |  |
 | M2-0088 | internal/translator/gemini/claude/gemini_claude_compat_test.go | covered | 2/2 cases: crates/cpa-translate/tests/fixtures/pairs/claude-gemini.json (v8.0.35 goldens) |  | Go cases replayed from goldens recorded at v8.0.35 (ae3ee3be). |
 | M2-0089 | internal/translator/gemini/claude/gemini_claude_request_test.go | covered | 19/19 cases: crates/cpa-translate/tests/fixtures/pairs/claude-gemini.json (v8.0.35 goldens) |  | Go cases replayed from goldens recorded at v8.0.35 (ae3ee3be). |
-| M2-0090 | internal/translator/gemini/claude/gemini_claude_response_test.go | covered | 28/28 cases: crates/cpa-translate/tests/fixtures/pairs/claude-gemini.json (v8.0.35 goldens) |  |  |
+| M2-0090 | internal/translator/gemini/claude/gemini_claude_response_test.go | partial | 28/28 cases: crates/cpa-translate/tests/fixtures/pairs/claude-gemini.json (v8.0.35 goldens) | translate | 24 of the 28 cases match Go. The four MALFORMED_FUNCTION_CALL cases are PENDING in crates/cpa-translate/tests/golden.rs until 7f2f17d7 lands with its Gemini executor half. |
 | M2-0091 | internal/translator/gemini/gemini/gemini_gemini_request_test.go | partial | 2/8 cases: crates/cpa-translate/tests/fixtures/pairs/gemini-gemini.json; not matched: TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload, TestBackfillEmptyFunctionResponseNames_Single, TestBackfillEmptyFunctionResponseNames_Parallel, TestBackfillEmptyFunctionResponseNames_PreservesExisting … | translate | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
 | M2-0092 | internal/translator/gemini/interactions/interactions_gemini_common_test.go | partial | 42/56 cases: crates/cpa-translate/tests/fixtures/pairs/gemini-interactions.json, crates/cpa-translate/tests/fixtures/pairs/interactions-gemini.json; not matched: TestConvertGeminiResponseToInteractionsNonStream, TestConvertGeminiResponseToInteractionsNonStreamSnakeCaseUsage, TestConvertGeminiResponseToInteractionsNonStreamFunctionCall, TestConvertGeminiResponseToInteractionsNonStreamFunctionCallPreservesCallID … | translate | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
 | M2-0093 | internal/translator/gemini/interactions/interactions_gemini_file_data_test.go | partial | 1/1 cases: crates/cpa-translate/tests/fixtures/pairs/interactions-gemini.json | translate | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
