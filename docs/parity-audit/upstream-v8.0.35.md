@@ -1,0 +1,445 @@
+# Go commits from 6fecc6e to v8.0.35
+
+The checklist still targets CLIProxyAPI at [`6fecc6e`](https://github.com/router-for-me/CLIProxyAPI/commit/6fecc6e5567912661654a4eaf9b8f5436facd1c2) (v8.0.10). The latest released Go version is [v8.0.35](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.35), published on 19 October 2026, at [`ae3ee3be`](https://github.com/router-for-me/CLIProxyAPI/commit/ae3ee3be303fb07fb8173279923413005bf32177). This inventory lists all 288 intervening commits, including 32 merges. The extension after v8.0.27 adds 110 non-merge commits and 11 merges. It does not move the checklist reference.
+
+"Ported here" means implemented before this documentation-only audit, not implemented by this PR. The original 12 Claude commits have v8.0.27 goldens or Go-case Rust tests (`crates/cpa-exec/tests/reference/claude/README.md`). Seven Antigravity commits are also already implemented and tested; [DIFFERENCES-FROM-GO.md](../DIFFERENCES-FROM-GO.md#antigravity) identifies them and the outstanding v8.0.27 work. A cloaked API key's caller system prompt deliberately stays as at `6fecc6e`: Go's later placement changes between turns and misses the prompt cache.
+
+Columns:
+
+- User-visible: whether the commit changes what a client, an operator or an upstream sees (bytes on the wire, answers, routing, config). Refactors, races fixed without a visible symptom, logs and tests are "no".
+- This PR: "ported here", "to port" (implement or establish equivalent Rust behavior with tests in a later PR), "not applicable" (no corresponding product surface), "nothing to port" (docs, assets, Go tests, merges, or behavior cliproxy-rs already has), or "differs on purpose" (listed in `docs/DIFFERENCES-FROM-GO.md`). Antigravity has a Rust counterpart and is applicable. An existing analogous implementation is not enough to call an entire newer commit ported.
+- Size: lines added and removed in Go, without tests and test data. S is under 50 lines, M under 300, L 300 or more. The size of the Rust port can differ.
+
+## Totals
+
+| Area | Commits | Ported here | To port | Not applicable | Nothing to port | Differs on purpose |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude: prompt cache and prompt shaping | 10 | 6 | 0 | 0 | 1 | 3 |
+| Claude: thread continuation | 4 | 4 | 0 | 0 | 0 | 0 |
+| Claude: rate limits and error answers | 2 | 2 | 0 | 0 | 0 | 0 |
+| Claude: other executor work | 13 | 0 | 13 | 0 | 0 | 0 |
+| Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
+| Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
+| Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
+| Codex | 19 | 0 | 19 | 0 | 0 | 0 |
+| Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
+| xAI | 8 | 0 | 8 | 0 | 0 | 0 |
+| OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
+| Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
+| Credentials, selection and cooldowns | 22 | 0 | 22 | 0 | 0 | 0 |
+| Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
+| Config and Management API | 15 | 0 | 15 | 0 | 0 | 0 |
+| Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
+| Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
+| Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
+| Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
+| Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
+| Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
+| Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
+| Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
+| **All** | **288** | **19** | **205** | **0** | **61** | **3** |
+
+Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
+
+## Claude: prompt cache and prompt shaping
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`6d57ac90`](https://github.com/router-for-me/CLIProxyAPI/commit/6d57ac90) | fix(claude): pin session date in cloaked reminder to prevent prompt cache invalidation | yes | ported here | M (+77 −15) | currentDate reminder pinned per session; replays its Go tests |
+| [`5dbce4f3`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbce4f3) | perf(claude): prefilter JSON payloads before diagnostic walks | no | ported here | M (+59 −1) | byte prefilter before the title-helper and 1h-TTL walks |
+| [`5d890405`](https://github.com/router-for-me/CLIProxyAPI/commit/5d890405) | fix(claude): keep system messages top level for terminal user turns | yes | differs on purpose | S (+31 −0) | keeps an API key's caller system text top-level for a terminal user run, then moves it on the second turn, which misses the cache; cliproxy-rs keeps it after the leading user run (DIFFERENCES-FROM-GO.md) |
+| [`26e5efbb`](https://github.com/router-for-me/CLIProxyAPI/commit/26e5efbb) | fix(claude): reserve cache breakpoint for thread continuation | yes | ported here | S (+6 −0) | a `thread` request keeps one breakpoint free |
+| [`eb6a768d`](https://github.com/router-for-me/CLIProxyAPI/commit/eb6a768d) | feat(claude): support explicit prompt cache options | yes | ported here | M (+235 −64) | `prompt_cache_options.mode: explicit`; also marks caller blocks kept beside advisor history |
+| [`eca1d113`](https://github.com/router-for-me/CLIProxyAPI/commit/eca1d113) | fix(claude): keep system prompt at top level for single terminal user turn | yes | differs on purpose | S (+1 −1) | single terminal user turn; as `5d890405` |
+| [`39632e52`](https://github.com/router-for-me/CLIProxyAPI/commit/39632e52) | fix(claude): keep system prompt at top level for leading user message runs | yes | differs on purpose | S (+1 −1) | leading user run of several turns; as `5d890405` |
+| [`14dc4e05`](https://github.com/router-for-me/CLIProxyAPI/commit/14dc4e05) | fix(claude): relocate caller system prompt to messages for OAuth requests | yes | nothing to port | S (+17 −8) | OAuth tokens always relocate caller system text, in Messages and count_tokens, as cliproxy-rs does for API keys too; checked by the v8.0.27 goldens |
+| [`2d8ec73b`](https://github.com/router-for-me/CLIProxyAPI/commit/2d8ec73b) | fix(claude): preserve mid-conversation effort directives during system insertion | yes | ported here | S (+25 −12) | effort directives do not end the leading user run |
+| [`be8c35f2`](https://github.com/router-for-me/CLIProxyAPI/commit/be8c35f2) | fix(claude): ignore invalid and null cache control entries in executor | yes | ported here | S (+14 −18) | null and non-ephemeral `cache_control` are not breakpoints |
+
+## Claude: thread continuation
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`5c959cb0`](https://github.com/router-for-me/CLIProxyAPI/commit/5c959cb0) | fix(claude): mark missing thread state error for client replay | yes | ported here | M (+64 −4) | `details.error_code: thread_not_found`; a request fault, so no failover or cooldown |
+| [`678a9257`](https://github.com/router-for-me/CLIProxyAPI/commit/678a9257) | feat(claude): preserve OAuth tool aliases across thread continuations | yes | ported here | M (+158 −4) | aliases kept per thread turn (1,024 keys) |
+| [`a2976eb8`](https://github.com/router-for-me/CLIProxyAPI/commit/a2976eb8) | fix(claude): share OAuth tool alias store across scoped executor copies | no | ported here | S (+14 −6) | one store per executor; the Rust executor is never copied per request |
+| [`e7b22260`](https://github.com/router-for-me/CLIProxyAPI/commit/e7b22260) | fix(claude): support plain-text and structured response bodies for missing thread errors | yes | ported here | S (+18 −7) | plain-text missing-thread errors |
+
+## Claude: rate limits and error answers
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`42d484f9`](https://github.com/router-for-me/CLIProxyAPI/commit/42d484f9) | fix(claude): map request timeout status to timeout_error | yes | ported here | S (+1 −1) | 408 answers `timeout_error` |
+| [`80809679`](https://github.com/router-for-me/CLIProxyAPI/commit/80809679) | fix(claude): ignore overage billing resets in unified rate limit parsing | yes | ported here | M (+60 −5) | overage billing resets and resets past seven days set no cooldown |
+
+## Claude: other executor work
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`2bc236d2`](https://github.com/router-for-me/CLIProxyAPI/commit/2bc236d2) | feat(claude): support responses compaction in claude executor | yes | to port | L (+318 −4) | `/responses/compact` through Claude; Rust answers 501 as Go 6fecc6e did |
+| [`e9c8769a`](https://github.com/router-for-me/CLIProxyAPI/commit/e9c8769a) | fix(executor): normalize and restore non-portable tool call IDs | yes | to port | M (+129 −3) | tool_use IDs rewritten to Anthropic's charset and restored (also Devin) |
+| [`02fc76b1`](https://github.com/router-for-me/CLIProxyAPI/commit/02fc76b1) | fix(claude): restore passthrough MCP tools wrapped with their full mcp__ name | yes | to port | S (+22 −0) | full mcp__ wrapper restoration; verify Rust alias restoration against the new regression |
+| [`0d18d3b3`](https://github.com/router-for-me/CLIProxyAPI/commit/0d18d3b3) | feat(claude): support model-specific default max tokens from registry in OpenAI chat completions | yes | to port | M (+68 −4) | support model-specific default max tokens from registry in OpenAI chat completions |
+| [`345cc9d5`](https://github.com/router-for-me/CLIProxyAPI/commit/345cc9d5) | feat(claude): add timeout and retry logic for silent TLS handshakes | yes | to port | L (+326 −8) | silent TLS handshake deadline, retry marker and conductor classification; followed by b3dc6c3f |
+| [`7604d3df`](https://github.com/router-for-me/CLIProxyAPI/commit/7604d3df) | feat(claude): add session date pin retention to preserve continuity across credential switches | yes | to port | L (+325 −19) | date-pin retention across credential switches and configurable retention; not just session-local pinning |
+| [`911f49cb`](https://github.com/router-for-me/CLIProxyAPI/commit/911f49cb) | feat(claude): add automatic thinking block binding and beta policy for preserved-thinking models | yes | to port | M (+103 −2) | preserved-thinking block binding and beta policy; followed by e13bc9a1 and ad9e456d |
+| [`e13bc9a1`](https://github.com/router-for-me/CLIProxyAPI/commit/e13bc9a1) | feat(claude): synthesize adaptive thinking block binding for preserved-thinking models | yes | to port | S (+22 −10) | synthesize adaptive thinking block binding for preserved-thinking models |
+| [`ad9e456d`](https://github.com/router-for-me/CLIProxyAPI/commit/ad9e456d) | feat(claude): support `between_tools` thinking disable type and adaptive fallbacks | yes | to port | M (+188 −57) | support `between_tools` thinking disable type and adaptive fallbacks |
+| [`db1bab01`](https://github.com/router-for-me/CLIProxyAPI/commit/db1bab01) | feat(runtime): narrow Claude per-minute rate-limit cooldown when short Retry-After is present | yes | to port | M (+103 −2) | narrow Claude per-minute rate-limit cooldown when short Retry-After is present |
+| [`9d453bc0`](https://github.com/router-for-me/CLIProxyAPI/commit/9d453bc0) | feat(cache): add Claude web search result caching and restoration for sessions | yes | to port | L (+508 −0) | session web-search result restoration and cache configuration; ab9c06b4 adds Home persistence |
+| [`084b9ca7`](https://github.com/router-for-me/CLIProxyAPI/commit/084b9ca7) | feat(claude): strip Claude Code identity on API keys with cloak mode never or uncloak | yes | to port | M (+139 −12) | cloak never/uncloak must remove Claude Code identity, not merely disable injected cloaking |
+| [`ab9c06b4`](https://github.com/router-for-me/CLIProxyAPI/commit/ab9c06b4) | feat(cache): add Home KV support to Claude web search result cache | yes | to port | M (+106 −17) | add Home KV support to Claude web search result cache |
+
+## Claude: Responses tool_search
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`58c0f6a2`](https://github.com/router-for-me/CLIProxyAPI/commit/58c0f6a2) | feat(claude): support Codex client tool_search on the Responses API | yes | to port | L (+295 −74) | Codex `tool_search` as Anthropic native tool search |
+| [`a68ad134`](https://github.com/router-for-me/CLIProxyAPI/commit/a68ad134) | fix(claude): address tool_search review findings | yes | to port | M (+67 −33) | follow-up fixes to the above |
+| [`48ad3487`](https://github.com/router-for-me/CLIProxyAPI/commit/48ad3487) | feat(executor): add Responses tool_search strip and legacy model helpers | yes | to port | M (+158 −0) | helpers that strip `tool_search` for unsupported routes |
+| [`aeec5e97`](https://github.com/router-for-me/CLIProxyAPI/commit/aeec5e97) | feat(claude): emit native deferred tools and tool_reference for tool_search | yes | to port | S (+40 −4) | deferred tools and `tool_reference` blocks |
+| [`ae33711c`](https://github.com/router-for-me/CLIProxyAPI/commit/ae33711c) | feat(config): add native-tool-search switch for Claude API keys | yes | to port | S (+12 −0) | `native-tool-search` switch per Claude API key |
+| [`52992659`](https://github.com/router-for-me/CLIProxyAPI/commit/52992659) | feat(claude): fall back to pre-tool-search translation on unsupported upstreams | yes | to port | M (+52 −0) | fallback translation for unsupported upstreams |
+| [`11f04c20`](https://github.com/router-for-me/CLIProxyAPI/commit/11f04c20) | feat(codex): advertise tool search only for natively supported Claude routes | yes | to port | M (+135 −20) | Codex model catalog advertises tool search per route |
+| [`8eed08ef`](https://github.com/router-for-me/CLIProxyAPI/commit/8eed08ef) | fix(claude): drop cache_control from deferred tool_search tools | yes | to port | S (+2 −0) | no `cache_control` on deferred tools |
+| [`77e3d0d3`](https://github.com/router-for-me/CLIProxyAPI/commit/77e3d0d3) | feat(config): add upstream.claude.tool-search switch | yes | to port | S (+18 −1) | `upstream.claude.tool-search` switch |
+| [`956c3da1`](https://github.com/router-for-me/CLIProxyAPI/commit/956c3da1) | feat(claude): gate Responses tool_search translation behind upstream.claude.tool-search | yes | to port | M (+52 −14) | translation gated behind the switch |
+| [`03a3cfec`](https://github.com/router-for-me/CLIProxyAPI/commit/03a3cfec) | feat(claude): honor upstream.claude.tool-search in executor, catalog and server | yes | to port | S (+29 −5) | executor, catalog and server honour the switch |
+| [`29bd0415`](https://github.com/router-for-me/CLIProxyAPI/commit/29bd0415) | fix(claude): pin upstream.claude.tool-search per request | yes | to port | M (+130 −64) | switch pinned per request |
+| [`97ba1e89`](https://github.com/router-for-me/CLIProxyAPI/commit/97ba1e89) | fix(claude): keep prompt cache when tool_search discovers the first deferred tool | yes | to port | S (+37 −3) | keep prompt cache when tool_search discovers the first deferred tool |
+
+## Translation to and from Claude
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`e6f6f26a`](https://github.com/router-for-me/CLIProxyAPI/commit/e6f6f26a) | fix(claude): handle pause_turn stop reason in responses translation | yes | to port | S (+7 −1) | Claude `pause_turn` in Responses output |
+| [`2c1dcc7c`](https://github.com/router-for-me/CLIProxyAPI/commit/2c1dcc7c) | fix(claude): include web search sources in codex request when search tool is present | yes | to port | S (+7 −1) | Claude to Codex: web search sources requested |
+| [`61a70dc6`](https://github.com/router-for-me/CLIProxyAPI/commit/61a70dc6) | feat(claude): adapt native messages JSON to SSE for non-stream translation | yes | to port | M (+90 −0) | non-stream Claude JSON adapted to SSE for Chat and Responses |
+| [`33ec5502`](https://github.com/router-for-me/CLIProxyAPI/commit/33ec5502) | fix(claude): refine model version parsing for assistant prefill rejection | yes | to port | S (+31 −4) | model version parsing for the assistant prefill rule |
+| [`68afd0d1`](https://github.com/router-for-me/CLIProxyAPI/commit/68afd0d1) | feat(codex): support action sources in Claude web search translation | yes | to port | S (+11 −3) | Codex web search action sources in Claude output |
+| [`ba1bbd75`](https://github.com/router-for-me/CLIProxyAPI/commit/ba1bbd75) | fix(gemini): support document blocks in Claude request translation | yes | to port | S (+4 −2) | Claude to Gemini: document blocks |
+| [`d510dccf`](https://github.com/router-for-me/CLIProxyAPI/commit/d510dccf) | fix(gemini): support camelCase systemInstruction in request translation | yes | to port | S (+5 −1) | Gemini to Claude: camelCase `systemInstruction` |
+| [`a0d31924`](https://github.com/router-for-me/CLIProxyAPI/commit/a0d31924) | fix(gemini): map refusal finish reasons and handle partless stream completion in Claude response translation | yes | to port | M (+87 −41) | Gemini to Claude: refusal finish reasons, partless completion |
+| [`68ea171d`](https://github.com/router-for-me/CLIProxyAPI/commit/68ea171d) | fix(gemini): handle carrier thinking blocks for signed visible text and tool calls in Claude response translation | yes | to port | M (+156 −89) | Gemini to Claude: signed carrier thinking blocks |
+| [`3b69068e`](https://github.com/router-for-me/CLIProxyAPI/commit/3b69068e) | fix(translator): stop dropping attachments and empty turns | yes | to port | L (+453 −141) | attachments and empty turns no longer dropped (many translators, Claude executor) |
+| [`a881c036`](https://github.com/router-for-me/CLIProxyAPI/commit/a881c036) | fix(claude): respect registry completion limit for default responses max tokens | yes | to port | S (+12 −4) | Responses to Claude: default `max_tokens` from the registry |
+| [`9a7db8e3`](https://github.com/router-for-me/CLIProxyAPI/commit/9a7db8e3) | fix(claude): defer stream message delta emission to trailing usage chunk | yes | to port | S (+5 −3) | OpenAI to Claude stream: `message_delta` waits for trailing usage |
+| [`58257007`](https://github.com/router-for-me/CLIProxyAPI/commit/58257007) | feat(claude): ensure unique tool use IDs across turns in Gemini response translator | yes | to port | S (+1 −3) | ensure unique tool use IDs across turns in Gemini response translator |
+| [`59930ba3`](https://github.com/router-for-me/CLIProxyAPI/commit/59930ba3) | feat(claude): map incomplete OpenAI Responses tool status to tool_result is_error | yes | to port | S (+9 −2) | map incomplete OpenAI Responses tool status to tool_result is_error |
+| [`7a511e4d`](https://github.com/router-for-me/CLIProxyAPI/commit/7a511e4d) | feat(claude): pin validated request body per-stream in OpenAI Responses translation | no | to port | S (+7 −3) | pin validated request body per-stream in OpenAI Responses translation |
+| [`202b8b8c`](https://github.com/router-for-me/CLIProxyAPI/commit/202b8b8c) | feat(claude): clean and normalize Claude tool arguments against original schemas | yes | to port | L (+1367 −20) | clean and normalize Claude tool arguments against original schemas |
+| [`030d17ed`](https://github.com/router-for-me/CLIProxyAPI/commit/030d17ed) | perf(openai): cache stream preferences and tool maps per stream in Claude response translator | no | to port | S (+22 −7) | cache stream preferences and tool maps per stream in Claude response translator |
+
+## Payload rules
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go |
+
+## Codex
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`8fbf152b`](https://github.com/router-for-me/CLIProxyAPI/commit/8fbf152b) | fix(executor): preserve top-level responses token usage when service tier is present | yes | to port | S (+26 −6) | top-level Responses usage kept beside `service_tier` |
+| [`d306f2c5`](https://github.com/router-for-me/CLIProxyAPI/commit/d306f2c5) | fix(codex): retain template freeform apply_patch capability by default | yes | to port | S (+9 −5) | freeform `apply_patch` kept by default |
+| [`2044a01f`](https://github.com/router-for-me/CLIProxyAPI/commit/2044a01f) | fix(codex): preserve web search sources in responses request include | yes | to port | S (+22 −4) | web search sources kept in `include` |
+| [`a3b77566`](https://github.com/router-for-me/CLIProxyAPI/commit/a3b77566) | fix(codex): publish main usage before image tool usage in execute | yes | to port | S (+1 −1) | main usage published before image tool usage |
+| [`d7914afd`](https://github.com/router-for-me/CLIProxyAPI/commit/d7914afd) | fix(codex): expand integer field normalization mappings for tools | yes | to port | M (+107 −21) | integer field normalization for tool schemas |
+| [`d31b61cb`](https://github.com/router-for-me/CLIProxyAPI/commit/d31b61cb) | fix(websockets): propagate upstream disconnect errors during session activation | yes | to port | S (+47 −2) | upstream disconnects during session activation (Codex and xAI) |
+| [`16d98881`](https://github.com/router-for-me/CLIProxyAPI/commit/16d98881) | feat(codex): preserve URL citations in OpenAI response translation | yes | to port | M (+125 −9) | URL citations in Chat Completions output |
+| [`c7b4d573`](https://github.com/router-for-me/CLIProxyAPI/commit/c7b4d573) | fix(codex): record reasoning effort after applying payload overrides | yes | to port | S (+5 −5) | reasoning effort recorded after payload overrides |
+| [`6331b38b`](https://github.com/router-for-me/CLIProxyAPI/commit/6331b38b) | feat(openai): support response.interrupt in responses websocket handling | yes | to port | M (+257 −24) | `response.interrupt` on the Responses WebSocket |
+| [`51bde0ff`](https://github.com/router-for-me/CLIProxyAPI/commit/51bde0ff) | fix(codex): preserve resolved upstream model in direct openai image requests | yes | to port | S (+42 −7) | resolved upstream model kept for direct image requests |
+| [`d318bcc3`](https://github.com/router-for-me/CLIProxyAPI/commit/d318bcc3) | fix(codex): handle late response interrupts on websocket sessions | yes | to port | M (+106 −13) | late `response.interrupt` on WebSocket sessions |
+| [`b0debb35`](https://github.com/router-for-me/CLIProxyAPI/commit/b0debb35) | fix(codex): shorten over-length tool call IDs in chat completions | yes | to port | S (+26 −0) | over-length tool call IDs shortened |
+| [`7b0319fb`](https://github.com/router-for-me/CLIProxyAPI/commit/7b0319fb) | feat(codex): support Sign in with ChatGPT | yes | to port | L (+2384 −256) | Sign in with ChatGPT |
+| [`e240bd84`](https://github.com/router-for-me/CLIProxyAPI/commit/e240bd84) | fix(codex): fallback default model template when gpt-5.5 is missing | yes | to port | M (+85 −25) | default model template when gpt-5.5 is missing |
+| [`1e37b52b`](https://github.com/router-for-me/CLIProxyAPI/commit/1e37b52b) | fix(executor): preserve websocket sessions across reload and auth removal | yes | to port | M (+199 −33) | WebSocket sessions survive reload and credential removal |
+| [`7795de19`](https://github.com/router-for-me/CLIProxyAPI/commit/7795de19) | feat(sse): implement CodexSSEScanner for improved event data handling | yes | to port | L (+379 −24) | Codex SSE event assembly, error events and terminal markers; Rust has a scanner, but needs these new cases |
+| [`57d005fe`](https://github.com/router-for-me/CLIProxyAPI/commit/57d005fe) | fix(codex): strip out-of-range int64 numeric bounds from tool schemas | yes | to port | M (+111 −6) | strip out-of-range int64 numeric bounds from tool schemas |
+| [`8df4e42a`](https://github.com/router-for-me/CLIProxyAPI/commit/8df4e42a) | fix(codex): advertise direct tool mode and disable responses lite for non-codex routes | yes | to port | S (+16 −0) | advertise direct tool mode and disable responses lite for non-codex routes |
+| [`e7d4c731`](https://github.com/router-for-me/CLIProxyAPI/commit/e7d4c731) | fix(codex): reconcile replayed web_search_call history with tool declarations | yes | to port | M (+80 −0) | reconcile replayed web_search_call history with tool declarations |
+
+## Gemini, Vertex and AI Studio
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`5ec31442`](https://github.com/router-for-me/CLIProxyAPI/commit/5ec31442) | fix(gemini): handle split usage metadata and max tokens in responses translation | yes | to port | M (+183 −77) | split usage metadata and max tokens in Responses translation |
+| [`ed4d972e`](https://github.com/router-for-me/CLIProxyAPI/commit/ed4d972e) | fix(responses): complete reasoning summary stream lifecycle events | yes | to port | S (+32 −13) | Interactions to Responses: reasoning summary events |
+| [`e1e3a811`](https://github.com/router-for-me/CLIProxyAPI/commit/e1e3a811) | fix(gemini): enforce object type on schema nodes with properties | yes | to port | S (+36 −0) | `type: object` on schema nodes with properties |
+| [`dbc4aad9`](https://github.com/router-for-me/CLIProxyAPI/commit/dbc4aad9) | fix(gemini): ignore context cancellation after terminal chunk in Vertex stream | yes | to port | S (+43 −0) | Vertex: cancellation after the terminal chunk |
+| [`f51624aa`](https://github.com/router-for-me/CLIProxyAPI/commit/f51624aa) | fix(translator): report unsendable user turn attachments in openai responses to interactions | yes | to port | L (+1462 −356) | Responses to Interactions: unsendable attachments reported |
+| [`0f96f568`](https://github.com/router-for-me/CLIProxyAPI/commit/0f96f568) | refactor(translator): update openai and interactions request converters to return errors | no | to port | L (+126 −231) | request converters return errors (refactor behind f51624aa) |
+| [`2d5351b3`](https://github.com/router-for-me/CLIProxyAPI/commit/2d5351b3) | feat(vertex): add support for native gemini interactions api | yes | to port | L (+591 −110) | Vertex native Interactions API |
+| [`15d2148b`](https://github.com/router-for-me/CLIProxyAPI/commit/15d2148b) | fix(gemini): ensure trailing user turn for function response with media | yes | to port | S (+24 −1) | trailing user turn for a function response with media |
+| [`9126772d`](https://github.com/router-for-me/CLIProxyAPI/commit/9126772d) | fix(gemini): strip unsupported dependent schema keywords | yes | to port | S (+1 −0) | unsupported dependent schema keywords stripped |
+| [`a0fd8448`](https://github.com/router-for-me/CLIProxyAPI/commit/a0fd8448) | fix(schema): preserve multi-branch anyOf/oneOf unions during schema sanitization | yes | to port | M (+209 −53) | multi-branch schema unions; carry the later reference-inlining and keyword fixes as one cleaner update |
+| [`77fd91e8`](https://github.com/router-for-me/CLIProxyAPI/commit/77fd91e8) | feat(gemini): support client-executed tool_search in OpenAI Responses translator | yes | to port | L (+433 −33) | client-executed tool_search in Gemini Responses conversion |
+| [`7f2f17d7`](https://github.com/router-for-me/CLIProxyAPI/commit/7f2f17d7) | feat(gemini): treat MALFORMED_FUNCTION_CALL as retryable API error in Claude translation | yes | to port | M (+243 −16) | treat MALFORMED_FUNCTION_CALL as retryable API error in Claude translation |
+| [`ceb4397f`](https://github.com/router-for-me/CLIProxyAPI/commit/ceb4397f) | feat(executor): drop trailing thought-only model turns in Gemini Vertex requests | yes | to port | S (+6 −2) | drop trailing thought-only model turns in Gemini Vertex requests |
+| [`e9ba5c50`](https://github.com/router-for-me/CLIProxyAPI/commit/e9ba5c50) | feat(util): strip unsupported discriminator keyword from JSON schemas for Gemini and Antigravity | yes | to port | S (+1 −1) | strip unsupported discriminator keyword from JSON schemas for Gemini and Antigravity |
+| [`2d7f5377`](https://github.com/router-for-me/CLIProxyAPI/commit/2d7f5377) | feat(vertex): honor full /publishers/ prefix in API-key base-url | yes | to port | M (+60 −15) | honor full /publishers/ prefix in API-key base-url |
+| [`a43026d7`](https://github.com/router-for-me/CLIProxyAPI/commit/a43026d7) | feat(gemini): strip unsupported contentMediaType and contentEncoding JSON schema keywords | yes | to port | S (+1 −1) | strip unsupported contentMediaType and contentEncoding JSON schema keywords |
+| [`c558d320`](https://github.com/router-for-me/CLIProxyAPI/commit/c558d320) | feat(util): inline local schema references in Gemini cleaners and preserve literal values | yes | to port | L (+474 −40) | inline local schema references in Gemini cleaners and preserve literal values |
+| [`5de9de9a`](https://github.com/router-for-me/CLIProxyAPI/commit/5de9de9a) | perf(gemini): pin request payload and resolved tool maps per stream in OpenAI response translators | no | to port | M (+46 −22) | pin request payload and resolved tool maps per stream in OpenAI response translators |
+| [`d9451cb6`](https://github.com/router-for-me/CLIProxyAPI/commit/d9451cb6) | feat(vertex): support partner and open models via endpoints/openapi route | yes | to port | L (+624 −24) | Vertex partner/open models through endpoints/openapi; auth classification, executor and catalog changes |
+| [`154d5144`](https://github.com/router-for-me/CLIProxyAPI/commit/154d5144) | fix(util): strip readOnly and writeOnly keywords in Gemini schema cleaners | yes | to port | S (+1 −1) | strip readOnly and writeOnly keywords in Gemini schema cleaners |
+
+## xAI
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`6a853dce`](https://github.com/router-for-me/CLIProxyAPI/commit/6a853dce) | feat(xai): expose Grok TTS on /v1/audio/speech | yes | to port | L (+376 −9) | Grok TTS on `/v1/audio/speech` |
+| [`57bde351`](https://github.com/router-for-me/CLIProxyAPI/commit/57bde351) | fix(executor): preserve upstream usage on apply patch failures | yes | to port | M (+53 −19) | upstream usage kept on apply_patch failures (xAI and Meta) |
+| [`306c9bd8`](https://github.com/router-for-me/CLIProxyAPI/commit/306c9bd8) | fix(routing): restrict speech-only models to speech endpoints and refine xAI error scoping | yes | to port | M (+113 −5) | speech-only models limited to speech routes; xAI error scoping |
+| [`90654da5`](https://github.com/router-for-me/CLIProxyAPI/commit/90654da5) | feat(xai): dynamically fetch latest Grok CLI version from npm registry with fallback | yes | to port | M (+200 −3) | Grok CLI version fetched from npm at startup |
+| [`34e73c75`](https://github.com/router-for-me/CLIProxyAPI/commit/34e73c75) | fix(xai): add proxy support and semver validation to Grok CLI updater | yes | to port | M (+131 −32) | proxy and semver checks for the version fetch |
+| [`76c87ce9`](https://github.com/router-for-me/CLIProxyAPI/commit/76c87ce9) | fix(xai): reset terminal error on websocket connection configuration | yes | to port | S (+1 −0) | WebSocket terminal error reset |
+| [`bbfd7886`](https://github.com/router-for-me/CLIProxyAPI/commit/bbfd7886) | fix(xai): drop web_search options the Responses API rejects | yes | to port | S (+31 −5) | drop web_search options the Responses API rejects |
+| [`45ccd9c3`](https://github.com/router-for-me/CLIProxyAPI/commit/45ccd9c3) | fix(openai): preserve model prefix when routing xAI image requests | yes | to port | M (+70 −14) | preserve model prefix when routing xAI image requests |
+
+## OpenAI-compatible and Responses translation
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`91c934f6`](https://github.com/router-for-me/CLIProxyAPI/commit/91c934f6) | feat(responses): support local shell tool translation | yes | to port | M (+213 −6) | Responses `local_shell` tool |
+| [`97dd9eec`](https://github.com/router-for-me/CLIProxyAPI/commit/97dd9eec) | fix(openai): report error on truncated stream missing finish_reason | yes | to port | S (+33 −3) | error on a truncated stream without `finish_reason` |
+| [`0ea4e1dc`](https://github.com/router-for-me/CLIProxyAPI/commit/0ea4e1dc) | fix(openai): complete responses stream on clean EOF after finish reason | yes | to port | M (+56 −6) | Responses stream completes on clean EOF after the finish reason |
+| [`d2597a24`](https://github.com/router-for-me/CLIProxyAPI/commit/d2597a24) | fix(openai): preserve unknown encrypted content in responses compat mode | yes | to port | S (+5 −1) | unknown encrypted content kept in Responses compat mode |
+| [`f8e4a840`](https://github.com/router-for-me/CLIProxyAPI/commit/f8e4a840) | fix(openai-compat): measure streaming TTFT on effective token frames | no | to port | S (+4 −2) | TTFT measured on token frames (usage timing only) |
+| [`b0db5448`](https://github.com/router-for-me/CLIProxyAPI/commit/b0db5448) | feat(translator): use unique prefixes for fallback item IDs in OpenAI responses stream | yes | to port | S (+18 −6) | use unique prefixes for fallback item IDs in OpenAI responses stream |
+
+## Devin and Meta
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`ea8ffd5f`](https://github.com/router-for-me/CLIProxyAPI/commit/ea8ffd5f) | fix(devin): stream content early and defer thought stop for late signatures | yes | to port | S (+27 −7) | Devin streams content early, late thought signatures |
+| [`249e9ef9`](https://github.com/router-for-me/CLIProxyAPI/commit/249e9ef9) | fix(meta): preserve foreign reasoning encrypted content in responses requests | yes | to port | S (+14 −5) | Meta: foreign reasoning encrypted content kept |
+| [`cad1b503`](https://github.com/router-for-me/CLIProxyAPI/commit/cad1b503) | fix(devin): do not seed input token estimates for claude streams | yes | to port | S (+4 −3) | Devin: no seeded input tokens for Claude streams |
+| [`40ce0e01`](https://github.com/router-for-me/CLIProxyAPI/commit/40ce0e01) | feat(kimi): support schema normalization for namespaced tools and input tool lists | yes | to port | S (+39 −10) | support schema normalization for namespaced tools and input tool lists |
+| [`088e4457`](https://github.com/router-for-me/CLIProxyAPI/commit/088e4457) | test(meta): handle client disconnect gracefully after terminal stream events | yes | to port | S (+8 −0) | despite the test subject this adds production handling of disconnect after a terminal Meta event |
+| [`b946d54e`](https://github.com/router-for-me/CLIProxyAPI/commit/b946d54e) | feat(devin): add account-wide quota exhaustion tracking and credential cooldown refresh | yes | to port | L (+619 −18) | add account-wide quota exhaustion tracking and credential cooldown refresh |
+| [`3a072298`](https://github.com/router-for-me/CLIProxyAPI/commit/3a072298) | feat(meta): filter subscription usage telemetry from SSE streams and responses | yes | to port | M (+127 −10) | filter subscription usage telemetry from SSE streams and responses |
+| [`344e0ef9`](https://github.com/router-for-me/CLIProxyAPI/commit/344e0ef9) | feat(executor): support Codex remote-compaction v2 on Kimi and Meta Responses routes | yes | to port | L (+325 −53) | remote-compaction v2 on Kimi/Meta plus shared Claude/Antigravity capsule changes |
+
+## Credentials, selection and cooldowns
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`c163bae4`](https://github.com/router-for-me/CLIProxyAPI/commit/c163bae4) | fix(auth): preserve terminal unauthorized state and prevent unsafe refresh retry | yes | to port | M (+132 −26) | terminal unauthorized state and single-use refresh tokens; touches Claude OAuth refresh |
+| [`d4692663`](https://github.com/router-for-me/CLIProxyAPI/commit/d4692663) | fix(auth): snapshot auth before unlocking during registration and update | no | to port | S (+12 −2) | race: snapshot before unlock (check the Rust scheduler for the same window) |
+| [`8a01bc02`](https://github.com/router-for-me/CLIProxyAPI/commit/8a01bc02) | feat(auth): introduce mutation locking and persistence delta merging | no | to port | M (+210 −30) | mutation locking and persistence delta merging |
+| [`50d5fe18`](https://github.com/router-for-me/CLIProxyAPI/commit/50d5fe18) | fix(cliproxy): avoid selecting rejected credentials during refresh and preserve active quota cooldowns | yes | to port | M (+68 −6) | rejected credentials not selected during refresh; quota cooldowns kept |
+| [`6920ed5d`](https://github.com/router-for-me/CLIProxyAPI/commit/6920ed5d) | fix(cliproxy): propagate credential version and registration epoch in execution results | no | to port | M (+80 −18) | credential version and registration epoch in results |
+| [`935aa6e3`](https://github.com/router-for-me/CLIProxyAPI/commit/935aa6e3) | fix(cliproxy): prevent in-flight token refresh from overwriting concurrently updated credentials | yes | to port | S (+6 −0) | in-flight refresh does not overwrite a newer credential |
+| [`7c2133e2`](https://github.com/router-for-me/CLIProxyAPI/commit/7c2133e2) | fix(cliproxy): reconcile concurrent auth updates during batch model registration | no | to port | S (+39 −8) | concurrent auth updates during batch model registration |
+| [`4a8ecf5c`](https://github.com/router-for-me/CLIProxyAPI/commit/4a8ecf5c) | fix(auth): skip local filtering for home dispatch | yes | to port | S (+7 −2) | Home dispatch skips local filtering |
+| [`5dbd92a0`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbd92a0) | fix(auth): preserve upstream error cooldown on canceled stream contexts | yes | to port | S (+39 −4) | upstream error cooldown kept on canceled streams |
+| [`7a687f42`](https://github.com/router-for-me/CLIProxyAPI/commit/7a687f42) | feat(routing): support session-affinity-rebind-on option | yes | to port | L (+297 −19) | `session-affinity-rebind-on` |
+| [`56eee6a4`](https://github.com/router-for-me/CLIProxyAPI/commit/56eee6a4) | fix(cliproxy): treat HTTP/2 closed connection errors as transient lifecycle drops | yes | to port | S (+11 −4) | treat HTTP/2 closed connection errors as transient lifecycle drops |
+| [`08e5762a`](https://github.com/router-for-me/CLIProxyAPI/commit/08e5762a) | fix(cliproxy): add model registration fencings and epoch-checked publications to prevent superseded updates | yes | to port | L (+298 −45) | add model registration fencings and epoch-checked publications to prevent superseded updates |
+| [`5fc580b1`](https://github.com/router-for-me/CLIProxyAPI/commit/5fc580b1) | feat(watcher): add file removal tracking and single-file auth snapshotting for robust deletion reconciliation | yes | to port | M (+164 −6) | add file removal tracking and single-file auth snapshotting for robust deletion reconciliation |
+| [`1631875b`](https://github.com/router-for-me/CLIProxyAPI/commit/1631875b) | fix(watcher): guard management saves against stale config reloads and serialize file updates | yes | to port | M (+129 −47) | guard management saves against stale config reloads and serialize file updates |
+| [`35af74f9`](https://github.com/router-for-me/CLIProxyAPI/commit/35af74f9) | fix(auth): protect active model and credential cooldowns from being cleared by stale in-flight execution successes | yes | to port | M (+137 −25) | protect active model and credential cooldowns from being cleared by stale in-flight execution successes |
+| [`c4c1d43e`](https://github.com/router-for-me/CLIProxyAPI/commit/c4c1d43e) | feat(auth): prevent stale file snapshots from overwriting later persisted state | yes | to port | M (+133 −2) | prevent stale file snapshots from overwriting later persisted state |
+| [`f75ea073`](https://github.com/router-for-me/CLIProxyAPI/commit/f75ea073) | feat(cliproxy): reconcile latest auth state when model registration is superseded mid-flight | yes | to port | M (+121 −60) | reconcile latest auth state when model registration is superseded mid-flight |
+| [`b015f208`](https://github.com/router-for-me/CLIProxyAPI/commit/b015f208) | fix(oauth): restore credential exclusion priority | yes | to port | S (+28 −14) | restore credential exclusion priority |
+| [`94d1a9a0`](https://github.com/router-for-me/CLIProxyAPI/commit/94d1a9a0) | Refactor authentication exclusion handling and improve model registration | yes | to port | M (+157 −116) | Refactor authentication exclusion handling and improve model registration |
+| [`1a28c61e`](https://github.com/router-for-me/CLIProxyAPI/commit/1a28c61e) | fix(auth): tolerate invalid excluded models on load | yes | to port | M (+40 −23) | tolerate invalid excluded models on load |
+| [`7484a521`](https://github.com/router-for-me/CLIProxyAPI/commit/7484a521) | feat(watcher): protect credentials from unindexed deletion during incomplete or in-place file writes | yes | to port | L (+288 −70) | protect credentials from unindexed deletion during incomplete or in-place file writes |
+| [`feb63984`](https://github.com/router-for-me/CLIProxyAPI/commit/feb63984) | feat(auth): increase Codex proactive refresh lead to 96 hours and improve rejected token handling | yes | to port | M (+52 −18) | increase Codex proactive refresh lead to 96 hours and improve rejected token handling |
+
+## Model registry and catalogs
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`1672be5d`](https://github.com/router-for-me/CLIProxyAPI/commit/1672be5d) | feat(registry): support custom model catalog sources and dynamic reload | yes | to port | L (+361 −287) | custom model catalog sources and reload |
+| [`01e28567`](https://github.com/router-for-me/CLIProxyAPI/commit/01e28567) | fix(registry): disable Devin catalog for home builds | yes | to port | S (+3 −1) | no Devin catalog in Home builds |
+| [`18b6cc8a`](https://github.com/router-for-me/CLIProxyAPI/commit/18b6cc8a) | refactor(registry): use model getters for Devin and Meta | no | nothing to port | S (+2 −3) | Go refactor |
+| [`bbcd5734`](https://github.com/router-for-me/CLIProxyAPI/commit/bbcd5734) | fix(registry): treat credential_quota as quota cooldown in model availability | yes | to port | S (+23 −13) | `credential_quota` counts as a quota cooldown in availability |
+| [`4c159069`](https://github.com/router-for-me/CLIProxyAPI/commit/4c159069) | feat(registry): add muse-wonder-1.0 models | yes | to port | M (+62 −0) | add muse-wonder-1.0 models |
+| [`4f9630df`](https://github.com/router-for-me/CLIProxyAPI/commit/4f9630df) | feat(registry): add web_search native capability | yes | to port | S (+4 −1) | add web_search native capability |
+| [`f62d4d28`](https://github.com/router-for-me/CLIProxyAPI/commit/f62d4d28) | feat(registry): add claude-haiku-5-5 and remove legacy gemini models | yes | to port | M (+32 −238) | add claude-haiku-5-5 and remove legacy gemini models |
+| [`866d84d0`](https://github.com/router-for-me/CLIProxyAPI/commit/866d84d0) | feat(registry): add gemini-4-argon-high model | yes | to port | S (+34 −0) | add gemini-4-argon-high model |
+| [`6143cc11`](https://github.com/router-for-me/CLIProxyAPI/commit/6143cc11) | feat(registry): add gemini-4-argon model | yes | to port | S (+33 −0) | add gemini-4-argon model |
+| [`f9ac397b`](https://github.com/router-for-me/CLIProxyAPI/commit/f9ac397b) | feat(registry): add muse-wonder-full-1.0 model variants and update context limits | yes | to port | M (+66 −4) | add muse-wonder-full-1.0 model variants and update context limits |
+| [`74592556`](https://github.com/router-for-me/CLIProxyAPI/commit/74592556) | feat(registry): add gemini-4-argon model definition | yes | to port | S (+33 −0) | add gemini-4-argon model definition |
+
+## Config and Management API
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | to port | L (+205 −156) | shared `upstream` provider settings |
+| [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | to port | M (+212 −46) | historical v8 config aliases |
+| [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | to port | L (+503 −8) | auth indexes in v8 `api-keys` |
+| [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |
+| [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | to port | S (+20 −7) | v8 API: collection styles and quoted mapping keys |
+| [`0c708401`](https://github.com/router-for-me/CLIProxyAPI/commit/0c708401) | fix(management): resolve v8 plugin quota contract gaps | yes | to port | M (+64 −41) | v8 plugin quota contract |
+| [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | to port | S (+3 −1) | `quota_plugin_id` on v8 auth files |
+| [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | to port | M (+48 −43) | move tls-handshake-timeout-seconds to root request configuration |
+| [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
+| [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |
+| [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | to port | M (+74 −3) | ETag/If-Match optimistic concurrency and CORS headers for v8 configuration |
+| [`d69962e4`](https://github.com/router-for-me/CLIProxyAPI/commit/d69962e4) | feat(management): add safe Modify method for auth records with epoch validation and locking | yes | to port | M (+112 −53) | add safe Modify method for auth records with epoch validation and locking |
+| [`50cfd238`](https://github.com/router-for-me/CLIProxyAPI/commit/50cfd238) | feat(management): add support for static and plugin model definitions retrieval by channel | yes | to port | S (+33 −1) | channel-selectable static and plugin model definitions |
+| [`d50a1995`](https://github.com/router-for-me/CLIProxyAPI/commit/d50a1995) | feat(management): add v8 SIWC credential binding | yes | to port | L (+837 −16) | SIWC prepare, complete and bind routes, one-time state and credential binding |
+| [`ae3ee3be`](https://github.com/router-for-me/CLIProxyAPI/commit/ae3ee3be) | fix(management): reject legacy SIWC callbacks and symlink targets | yes | to port | S (+16 −1) | reject SIWC on legacy callback and refuse symlink credential targets; keep with d50a1995 |
+
+## Plugins
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`8348923a`](https://github.com/router-for-me/CLIProxyAPI/commit/8348923a) | feat(pluginhost): add host routing reset cooldown callback | yes | to port | M (+66 −0) | host routing reset-cooldown callback |
+| [`67465884`](https://github.com/router-for-me/CLIProxyAPI/commit/67465884) | fix(pluginhost): detach unselected plugins on config apply | yes | to port | M (+69 −0) | unselected plugins detached on config apply |
+| [`6e4c54e5`](https://github.com/router-for-me/CLIProxyAPI/commit/6e4c54e5) | feat(pluginhost): expose quota provider plugin IDs | yes | to port | S (+9 −0) | quota provider plugin IDs |
+| [`fdbc6103`](https://github.com/router-for-me/CLIProxyAPI/commit/fdbc6103) | feat(auth): enhance plugin auth handling with multi-auth support and improved state management | yes | to port | M (+250 −32) | multi-auth plugin credentials |
+| [`50eaed0d`](https://github.com/router-for-me/CLIProxyAPI/commit/50eaed0d) | feat(pluginapi): expose config field defaults | yes | to port | S (+14 −0) | expose config field defaults |
+| [`355fd10e`](https://github.com/router-for-me/CLIProxyAPI/commit/355fd10e) | feat(pluginhost): add content-addressed shadow copies for dynamic library loading | yes | to port | L (+419 −214) | shadow-copy native libraries; also changes Codex thinking/model-resolution publication, not a loader-only port |
+| [`3e309fb4`](https://github.com/router-for-me/CLIProxyAPI/commit/3e309fb4) | fix(auth): preserve plugin excluded models on synthesis | yes | to port | S (+20 −12) | preserve plugin excluded models on synthesis |
+| [`d7005b63`](https://github.com/router-for-me/CLIProxyAPI/commit/d7005b63) | fix(cliproxy): apply excluded models to plugin models | yes | to port | S (+12 −9) | apply excluded models to plugin models |
+| [`adc436ff`](https://github.com/router-for-me/CLIProxyAPI/commit/adc436ff) | fix(pluginhost): bind catalog-only plugin models to credentials | yes | to port | M (+28 −44) | bind catalog-only plugin models to credentials |
+| [`a7608a8a`](https://github.com/router-for-me/CLIProxyAPI/commit/a7608a8a) | feat(pluginhost): preserve auth identity and model registration for relative auth paths | yes | to port | S (+25 −21) | preserve auth identity and model registration for relative auth paths |
+| [`66c27581`](https://github.com/router-for-me/CLIProxyAPI/commit/66c27581) | feat(pluginhost): remove max line buffer size limit in stream executor to preserve usage telemetry | yes | to port | S (+0 −5) | remove max line buffer size limit in stream executor to preserve usage telemetry |
+| [`1ad175b6`](https://github.com/router-for-me/CLIProxyAPI/commit/1ad175b6) | feat(auth): snapshot plugin scheduler and release host lock during executor registration | no | to port | S (+21 −16) | snapshot plugin scheduler and release host lock during executor registration |
+
+## Server, handlers and streaming
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`c997cbb5`](https://github.com/router-for-me/CLIProxyAPI/commit/c997cbb5) | feat(httpwire): introduce error-aware response flushing helper | no | to port | L (+328 −66) | error-aware flushing (Go `http.Flusher` plumbing; check the Rust writers) |
+| [`cd9e5ace`](https://github.com/router-for-me/CLIProxyAPI/commit/cd9e5ace) | fix(api): compact json error response bodies for SSE compatibility | yes | to port | S (+6 −1) | upstream JSON error bodies compacted to one line for SSE |
+| [`dd7b4334`](https://github.com/router-for-me/CLIProxyAPI/commit/dd7b4334) | feat(server): support max-request-body-bytes request body limit | yes | to port | M (+222 −68) | `max-request-body-bytes` |
+| [`519d590e`](https://github.com/router-for-me/CLIProxyAPI/commit/519d590e) | feat(streaming): support send-keepalive-before-ft option | yes | to port | L (+475 −123) | `send-keepalive-before-ft` |
+| [`e235fb3d`](https://github.com/router-for-me/CLIProxyAPI/commit/e235fb3d) | fix(server): prevent data races during concurrent config access and reloads | no | to port | M (+132 −76) | Go config access race fix; Rust uses locked snapshots, but equivalent reload consistency needs verification |
+| [`51952a7b`](https://github.com/router-for-me/CLIProxyAPI/commit/51952a7b) | feat(httptransport): add request-scoped HTTP transport decorator | yes | to port | M (+91 −5) | add request-scoped HTTP transport decorator |
+| [`e230a04b`](https://github.com/router-for-me/CLIProxyAPI/commit/e230a04b) | fix(server): prevent data races during concurrent config access and reloads | no | to port | M (+164 −78) | Go lifecycle config race fix; audit Rust snapshot consistency and publication boundaries |
+| [`81573f04`](https://github.com/router-for-me/CLIProxyAPI/commit/81573f04) | fix(server): prevent data races during concurrent config access and reloads | no | to port | M (+146 −62) | Go handler config race fix; verify request-pinned configuration in Rust |
+| [`4f2e5270`](https://github.com/router-for-me/CLIProxyAPI/commit/4f2e5270) | feat(runtime): detect upstream stream truncation across executors and proxy handlers | yes | to port | L (+341 −45) | Rust already detects transport truncation; verify the new cross-provider terminal and handler cases before claiming this whole commit |
+| [`294ed097`](https://github.com/router-for-me/CLIProxyAPI/commit/294ed097) | feat(discovery): add robust mDNS host conflict resolution and IP binding fallback | yes | to port | L (+2531 −44) | add robust mDNS host conflict resolution and IP binding fallback |
+| [`07feedf7`](https://github.com/router-for-me/CLIProxyAPI/commit/07feedf7) | fix(api): allow empty home model catalog | yes | to port | S (+10 −3) | allow empty home model catalog |
+| [`4d34502f`](https://github.com/router-for-me/CLIProxyAPI/commit/4d34502f) | fix(api): reject home models error envelopes | yes | to port | S (+4 −0) | reject home models error envelopes |
+
+## Usage and logging
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`611ebba4`](https://github.com/router-for-me/CLIProxyAPI/commit/611ebba4) | refactor(executor): unify model reporting and replay logs | no | to port | M (+52 −144) | shared model observation; log wording |
+| [`37fe2608`](https://github.com/router-for-me/CLIProxyAPI/commit/37fe2608) | feat(usage): propagate access provider and native key metadata to usage records | yes | to port | M (+243 −5) | access provider and native key in usage records |
+| [`4337f1f0`](https://github.com/router-for-me/CLIProxyAPI/commit/4337f1f0) | fix(logging): escape request path in access log to prevent log injection | yes | to port | S (+1 −1) | quote/escape the request path before writing an access-log record |
+
+## Antigravity
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`d7c3c0aa`](https://github.com/router-for-me/CLIProxyAPI/commit/d7c3c0aa) | feat(antigravity): trace upstream connection reuse in debug logs | no | to port | M (+91 −9) | connection reuse debug trace; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`e3abd9ae`](https://github.com/router-for-me/CLIProxyAPI/commit/e3abd9ae) | fix(antigravity): replace retired Claude 4.6 models with 5.5 | yes | ported here | S (+8 −8) | Claude 4.6 models replaced with 5.5; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`c575291a`](https://github.com/router-for-me/CLIProxyAPI/commit/c575291a) | fix(antigravity): align Claude 5.5 token limits with upstream catalog | yes | ported here | S (+4 −4) | Claude 5.5 token limits; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`6b037f61`](https://github.com/router-for-me/CLIProxyAPI/commit/6b037f61) | fix(antigravity): use actual Claude 5.5 high model IDs | yes | ported here | S (+8 −8) | Claude 5.5 high model IDs; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`8a945b3f`](https://github.com/router-for-me/CLIProxyAPI/commit/8a945b3f) | fix(antigravity): restore Claude 4.6 model definitions | yes | ported here | S (+48 −0) | Claude 4.6 models restored; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`9b9c2bdf`](https://github.com/router-for-me/CLIProxyAPI/commit/9b9c2bdf) | feat(antigravity): support Claude 5.5 CAQS thinking signature replay | yes | ported here | M (+136 −22) | Claude 5.5 CAQS signature replay; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`174248ca`](https://github.com/router-for-me/CLIProxyAPI/commit/174248ca) | fix(antigravity): reject ambiguous CAQS signature wrappers | yes | ported here | S (+34 −8) | ambiguous CAQS wrappers rejected; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`7e857c37`](https://github.com/router-for-me/CLIProxyAPI/commit/7e857c37) | feat(antigravity): refresh per-account model entitlements safely | yes | to port | L (+749 −234) | per-account model entitlements; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`9521fe29`](https://github.com/router-for-me/CLIProxyAPI/commit/9521fe29) | fix(antigravity): preserve model lifecycle and cooldown state | yes | to port | S (+21 −9) | model lifecycle and cooldown state; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`ad381435`](https://github.com/router-for-me/CLIProxyAPI/commit/ad381435) | fix(antigravity): coalesce probes and respect plugin model ownership | yes | to port | M (+144 −99) | coalesced probes, plugin model ownership; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`cbc4cd55`](https://github.com/router-for-me/CLIProxyAPI/commit/cbc4cd55) | feat(interactions): support antigravity session continuation and model detail lookup | yes | to port | L (+299 −14) | Interactions session continuation; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`4e4dede4`](https://github.com/router-for-me/CLIProxyAPI/commit/4e4dede4) | fix(antigravity): surface backend errors and support multi-line stream payloads | yes | ported here | S (+33 −0) | backend errors, multi-line stream payloads; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`a4acc9f7`](https://github.com/router-for-me/CLIProxyAPI/commit/a4acc9f7) | fix(antigravity): treat client disconnect after terminal stream chunk as success | yes | to port | M (+52 −0) | client disconnect after the terminal chunk; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`17dc1b81`](https://github.com/router-for-me/CLIProxyAPI/commit/17dc1b81) | feat(antigravity): enhance context hash rejection logging and introduce replay phases | yes | to port | M (+47 −26) | context hash rejection logging, replay phases; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`40f4df07`](https://github.com/router-for-me/CLIProxyAPI/commit/40f4df07) | feat(antigravity): enhance context hash rejection logging and batch retry logic | yes | to port | M (+71 −23) | context hash rejection batch retry; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`ab151f5d`](https://github.com/router-for-me/CLIProxyAPI/commit/ab151f5d) | fix(antigravity): include thoughts token count in openai completion tokens | yes | to port | S (+1 −1) | thoughts tokens in completion tokens; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`dfe0a0ef`](https://github.com/router-for-me/CLIProxyAPI/commit/dfe0a0ef) | fix(antigravity): omit tool_calls from default streaming delta template | yes | to port | S (+1 −1) | no `tool_calls` in the default delta template; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`a2718314`](https://github.com/router-for-me/CLIProxyAPI/commit/a2718314) | fix(antigravity): drop trailing thought-only model turns | yes | to port | M (+51 −1) | trailing thought-only model turns dropped; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`091ff27f`](https://github.com/router-for-me/CLIProxyAPI/commit/091ff27f) | feat(antigravity): persist model capability hints in auth metadata | yes | to port | L (+801 −77) | model capability hints in auth metadata; see DIFFERENCES-FROM-GO.md#antigravity |
+| [`912a038b`](https://github.com/router-for-me/CLIProxyAPI/commit/912a038b) | fix(antigravity): correct token usage calculations for cached tokens in Gemini responses | yes | to port | S (+11 −3) | correct token usage calculations for cached tokens in Gemini responses |
+| [`8fb633c9`](https://github.com/router-for-me/CLIProxyAPI/commit/8fb633c9) | fix(antigravity): raise fallback client version to 2.23.0 | yes | to port | S (+2 −2) | raise fallback client version to 2.23.0 |
+| [`5efe9758`](https://github.com/router-for-me/CLIProxyAPI/commit/5efe9758) | feat(antigravity): flatten multi-branch tool unions for Claude model requests | yes | to port | M (+116 −32) | flatten multi-branch tool unions for Claude model requests |
+| [`b8d4e14a`](https://github.com/router-for-me/CLIProxyAPI/commit/b8d4e14a) | feat(runtime): optimize antigravity schema sanitization to scale linearly with declarations | no | to port | M (+161 −21) | Rust already walks declarations linearly (DIFFERENCES-FROM-GO.md); verify the new Go schema matrix, including duplicate keys |
+| [`acaab599`](https://github.com/router-for-me/CLIProxyAPI/commit/acaab599) | feat(sdk): expose antigravity user agent helpers | yes | to port | S (+12 −0) | expose antigravity user agent helpers |
+| [`904ec710`](https://github.com/router-for-me/CLIProxyAPI/commit/904ec710) | feat(auth): enable expired antigravity AI credits negative hint recovery and retry logic | yes | to port | S (+25 −4) | enable expired antigravity AI credits negative hint recovery and retry logic |
+
+## Docs and assets
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`980c3bc3`](https://github.com/router-for-me/CLIProxyAPI/commit/980c3bc3) | docs(readme): add panel4cliproxyapi to community projects | no | nothing to port | S (+8 −0) |  |
+| [`6d06098d`](https://github.com/router-for-me/CLIProxyAPI/commit/6d06098d) | docs(readme): add cliproxy-rs to More choices | no | nothing to port | S (+12 −0) |  |
+| [`8ef43e4d`](https://github.com/router-for-me/CLIProxyAPI/commit/8ef43e4d) | fix(readme): remove AxisNow sponsorship details from README files | no | nothing to port | S (+0 −12) |  |
+| [`dfd7c638`](https://github.com/router-for-me/CLIProxyAPI/commit/dfd7c638) | docs(readme): add Oh-My-CPA to usage statistics | no | nothing to port | S (+12 −0) |  |
+| [`d2e3a77e`](https://github.com/router-for-me/CLIProxyAPI/commit/d2e3a77e) | docs(readme): add japanese translation for panel4cliproxyapi | no | nothing to port | S (+4 −0) |  |
+| [`54946fa3`](https://github.com/router-for-me/CLIProxyAPI/commit/54946fa3) | docs(readme): remove full QQ group in README_CN | no | nothing to port | S (+1 −1) |  |
+| [`5cff76dd`](https://github.com/router-for-me/CLIProxyAPI/commit/5cff76dd) | docs: refresh CPA-Manager-Plus descriptions in multilingual READMEs | no | nothing to port | S (+3 −3) |  |
+| [`3de4e248`](https://github.com/router-for-me/CLIProxyAPI/commit/3de4e248) | docs(readme): remove aiberm sponsorship | no | nothing to port | S (+0 −12) |  |
+| [`0cb6ecfd`](https://github.com/router-for-me/CLIProxyAPI/commit/0cb6ecfd) | feat(sponsorship): add Modelflare sponsorship details to README files | no | nothing to port | S (+12 −0) |  |
+| [`f1d4a94e`](https://github.com/router-for-me/CLIProxyAPI/commit/f1d4a94e) | fix(assets): update Modelflare logo image | no | nothing to port | - |  |
+| [`67870b67`](https://github.com/router-for-me/CLIProxyAPI/commit/67870b67) | docs: add sub2api to "Who is with us?" | no | nothing to port | S (+12 −0) |  |
+| [`a4a545c0`](https://github.com/router-for-me/CLIProxyAPI/commit/a4a545c0) | docs(readme): clarify Antigravity Claude 5.5 availability | no | nothing to port | S (+3 −3) | clarify Antigravity Claude 5.5 availability |
+| [`02efbf13`](https://github.com/router-for-me/CLIProxyAPI/commit/02efbf13) | docs(readme): add Haiku 5.5 and refresh Antigravity availability | no | nothing to port | S (+6 −6) | add Haiku 5.5 and refresh Antigravity availability |
+| [`333f62b3`](https://github.com/router-for-me/CLIProxyAPI/commit/333f62b3) | docs(readme): note Meta Muse Wonder availability | no | nothing to port | S (+3 −3) | note Meta Muse Wonder availability |
+| [`50bfc50f`](https://github.com/router-for-me/CLIProxyAPI/commit/50bfc50f) | docs(readme): list Muse Wonder models first | no | nothing to port | S (+3 −3) | list Muse Wonder models first |
+| [`39ace7e9`](https://github.com/router-for-me/CLIProxyAPI/commit/39ace7e9) | docs(readme): note Gemini 4 Argon availability | no | nothing to port | S (+3 −3) | note Gemini 4 Argon availability |
+| [`c96d9c92`](https://github.com/router-for-me/CLIProxyAPI/commit/c96d9c92) | docs(readme): keep Gemini model list consistent | no | nothing to port | S (+3 −3) | keep Gemini model list consistent |
+| [`e7003d2a`](https://github.com/router-for-me/CLIProxyAPI/commit/e7003d2a) | feat(docs): add kedaya.ai as a new AI model API relay service provider in README files | no | nothing to port | S (+8 −0) | add kedaya.ai as a new AI model API relay service provider in README files |
+| [`8071ef59`](https://github.com/router-for-me/CLIProxyAPI/commit/8071ef59) | docs(readme): add Hermes CLIProxyAPI Provider to "Who is with us?" | no | nothing to port | S (+12 −0) | add Hermes CLIProxyAPI Provider to "Who is with us?" |
+| [`bb428247`](https://github.com/router-for-me/CLIProxyAPI/commit/bb428247) | docs(config): clarify oauth excluded-models priority | no | nothing to port | S (+5 −0) | clarify oauth excluded-models priority |
+
+## Go tests only
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`30aa1f12`](https://github.com/router-for-me/CLIProxyAPI/commit/30aa1f12) | test(executor): relax connection reuse bounds in transport tests | no | nothing to port | tests only | transport test bounds |
+| [`da5f109f`](https://github.com/router-for-me/CLIProxyAPI/commit/da5f109f) | test(cliproxy): fix model catalog restore configuration in tests | no | nothing to port | tests only | catalog restore in tests |
+| [`ce518c9b`](https://github.com/router-for-me/CLIProxyAPI/commit/ce518c9b) | test(claude): cover a reload between tool_search fallback and translation | no | nothing to port | tests only | tool_search test |
+| [`77cf88b0`](https://github.com/router-for-me/CLIProxyAPI/commit/77cf88b0) | test(claude): pin executor clock in tool_search disabled golden | no | nothing to port | tests only | tool_search golden clock |
+| [`a19a8ecd`](https://github.com/router-for-me/CLIProxyAPI/commit/a19a8ecd) | feat(registry): add gemini-3.8 model variants and update test cases | no | nothing to port | S (+0 −0) | test-only diff despite the registry feature subject |
+| [`4e8a4125`](https://github.com/router-for-me/CLIProxyAPI/commit/4e8a4125) | feat(config): add operator overrides for Claude header defaults and client request ID modes | no | nothing to port | S (+0 −0) | test-only follow-up despite the config feature subject |
+| [`16b53545`](https://github.com/router-for-me/CLIProxyAPI/commit/16b53545) | test(cliproxy): stabilize antigravity dynamic registration lifecycle tests | no | nothing to port | S (+0 −0) | Go lifecycle test stabilization only |
+
+## Merge commits
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`e2bff010`](https://github.com/router-for-me/CLIProxyAPI/commit/e2bff010) | Merge pull request #6285 from sususu98/feat/antigravity-connection-debug-trace | no | nothing to port | - | no change of its own |
+| [`0594a632`](https://github.com/router-for-me/CLIProxyAPI/commit/0594a632) | Merge pull request #6318 from router-for-me/feat/antigravity-caqs-signature-replay | no | nothing to port | - | no change of its own |
+| [`38a089ea`](https://github.com/router-for-me/CLIProxyAPI/commit/38a089ea) | Merge pull request #6330 from sususu98/feat/antigravity-account-model-entitlements | no | nothing to port | - | no change of its own |
+| [`13da3cee`](https://github.com/router-for-me/CLIProxyAPI/commit/13da3cee) | Merge pull request #6373 from WizisCool/docs/add-oh-my-cpa-usage-statistics | no | nothing to port | - | no change of its own |
+| [`3e83083b`](https://github.com/router-for-me/CLIProxyAPI/commit/3e83083b) | Merge pull request #6386 from router-for-me/logs | no | nothing to port | - | no change of its own |
+| [`30700d44`](https://github.com/router-for-me/CLIProxyAPI/commit/30700d44) | Merge pull request #6391 from router-for-me/home | no | nothing to port | - | no change of its own |
+| [`7dc25a7e`](https://github.com/router-for-me/CLIProxyAPI/commit/7dc25a7e) | Merge pull request #6355 from vayungodara/docs/add-cliproxy-rs | no | nothing to port | - | no change of its own |
+| [`abe54e85`](https://github.com/router-for-me/CLIProxyAPI/commit/abe54e85) | Merge pull request #6112 from yaanlaan/docs/add-panel4cliproxyapi | no | nothing to port | - | no change of its own |
+| [`061001f8`](https://github.com/router-for-me/CLIProxyAPI/commit/061001f8) | Merge PR #6418: feat(xai): expose Grok TTS on /v1/audio/speech | no | nothing to port | - | no change of its own |
+| [`f3703e82`](https://github.com/router-for-me/CLIProxyAPI/commit/f3703e82) | Merge pull request #6444 from router-for-me/feat/server-github-token | no | nothing to port | - | no change of its own |
+| [`7cd8f7ba`](https://github.com/router-for-me/CLIProxyAPI/commit/7cd8f7ba) | Merge pull request #6441 from soilSpoon/fix/attachment-parts | no | nothing to port | - | no change of its own |
+| [`298649f6`](https://github.com/router-for-me/CLIProxyAPI/commit/298649f6) | Merge pull request #6446 from jellyfish-p/feat/grok-cli-dynamic-version | no | nothing to port | - | no change of its own |
+| [`84740392`](https://github.com/router-for-me/CLIProxyAPI/commit/84740392) | Merge pull request #6488 from router-for-me/fix/openai-compat-stream-ttft | no | nothing to port | - | no change of its own |
+| [`9612b7ac`](https://github.com/router-for-me/CLIProxyAPI/commit/9612b7ac) | Merge pull request #6490 from router-for-me/home | no | nothing to port | - | no change of its own |
+| [`763b41d4`](https://github.com/router-for-me/CLIProxyAPI/commit/763b41d4) | Merge pull request #6499 from seakee/docs/update-cpamp-description | no | nothing to port | - | no change of its own |
+| [`d739485d`](https://github.com/router-for-me/CLIProxyAPI/commit/d739485d) | Merge pull request #6525 from router-for-me/models | no | nothing to port | - | no change of its own |
+| [`82912f24`](https://github.com/router-for-me/CLIProxyAPI/commit/82912f24) | Merge pull request #6520 from gitrvc-hub/fix/claude-responses-tool-search | no | nothing to port | - | no change of its own |
+| [`89006da1`](https://github.com/router-for-me/CLIProxyAPI/commit/89006da1) | Merge branch 'pr6520' into dev | no | nothing to port | - | no change of its own |
+| [`696bbaee`](https://github.com/router-for-me/CLIProxyAPI/commit/696bbaee) | Merge pull request #6547 from router-for-me/mgmt | no | nothing to port | - | no change of its own |
+| [`a27799ec`](https://github.com/router-for-me/CLIProxyAPI/commit/a27799ec) | Merge pull request #6548 from gracjankubicki/fix/tool-search-golden-date | no | nothing to port | - | no change of its own |
+| [`bf934162`](https://github.com/router-for-me/CLIProxyAPI/commit/bf934162) | Merge pull request #6557 from devbymak/docs/add-sub2api | no | nothing to port | - | no change of its own |
+| [`fb87727d`](https://github.com/router-for-me/CLIProxyAPI/commit/fb87727d) | Merge pull request #6543 from RoySRose/pr/claude-oauth-wrapped-full-mcp-name | no | nothing to port | — | merge; individual commits listed above |
+| [`1fbb06d5`](https://github.com/router-for-me/CLIProxyAPI/commit/1fbb06d5) | Merge pull request #6560 from gracjankubicki/fix/tool-search-deferred-anchor | no | nothing to port | — | merge; individual commits listed above |
+| [`f88b6b2f`](https://github.com/router-for-me/CLIProxyAPI/commit/f88b6b2f) | Merge pull request #6327 from kdcokenny/docs/antigravity-claude-55-availability | no | nothing to port | — | merge; individual commits listed above |
+| [`207d119d`](https://github.com/router-for-me/CLIProxyAPI/commit/207d119d) | Merge pull request #6642 from trukhinyuri/fix/xai-web-search-unsupported-args | no | nothing to port | — | merge; individual commits listed above |
+| [`5be2cdab`](https://github.com/router-for-me/CLIProxyAPI/commit/5be2cdab) | Merge pull request #6658 from xyonium/feat/vertex-api-key-full-baseurl | no | nothing to port | — | merge; individual commits listed above |
+| [`cba68c25`](https://github.com/router-for-me/CLIProxyAPI/commit/cba68c25) | Merge pull request #6684 from duu261/docs/readme-hermes-cliproxyapi-provider | no | nothing to port | — | merge; individual commits listed above |
+| [`69d0ff8e`](https://github.com/router-for-me/CLIProxyAPI/commit/69d0ff8e) | Merge pull request #6691 from router-for-me/fix/oauth-credential-exclusion-priority | no | nothing to port | — | merge; individual commits listed above |
+| [`2422c6b0`](https://github.com/router-for-me/CLIProxyAPI/commit/2422c6b0) | Merge pull request #6737 from router-for-me/plugins | no | nothing to port | — | merge; individual commits listed above |
+| [`29076c98`](https://github.com/router-for-me/CLIProxyAPI/commit/29076c98) | Merge pull request #6738 from sususu98/feat/meta-muse-signature-replay | no | nothing to port | — | merge; individual commits listed above |
+| [`3bbd1652`](https://github.com/router-for-me/CLIProxyAPI/commit/3bbd1652) | Merge pull request #6765 from router-for-me/models | no | nothing to port | — | merge; individual commits listed above |
+| [`c95c3e7b`](https://github.com/router-for-me/CLIProxyAPI/commit/c95c3e7b) | Merge pull request #6786 from router-for-me/feat/siwc-management-bind | no | nothing to port | — | merge; individual commits listed above |
+
+## Reasoning signature carriage
+
+| Commit | Subject | User-visible | This PR | Size | Notes |
+|---|---|---|---|---|---|
+| [`7a0b7563`](https://github.com/router-for-me/CLIProxyAPI/commit/7a0b7563) | feat(signature): recognize Meta Muse reasoning envelopes and gate replay by target | yes | to port | M (+207 −18) | recognize Meta Muse reasoning envelopes and gate replay by target |
+| [`88ac14f3`](https://github.com/router-for-me/CLIProxyAPI/commit/88ac14f3) | fix(translator): carry reasoning thought signatures through Gemini protocol | yes | to port | M (+130 −3) | carry reasoning thought signatures through Gemini protocol |
+| [`a4660260`](https://github.com/router-for-me/CLIProxyAPI/commit/a4660260) | fix(signature): make Gemini thought-signature carriage SDK-safe and order-preserving | yes | to port | M (+179 −68) | make Gemini thought-signature carriage SDK-safe and order-preserving |
+| [`cc5682c5`](https://github.com/router-for-me/CLIProxyAPI/commit/cc5682c5) | fix(signature): replay OpenRouter router-suffixed Meta Muse signatures | yes | to port | M (+104 −24) | replay OpenRouter router-suffixed Meta Muse signatures |
+| [`772df04b`](https://github.com/router-for-me/CLIProxyAPI/commit/772df04b) | feat(translator): relay reasoning signatures through the Interactions protocol | yes | to port | M (+160 −56) | relay reasoning signatures through the Interactions protocol |
+| [`674dbe8f`](https://github.com/router-for-me/CLIProxyAPI/commit/674dbe8f) | fix(signature): support Meta Muse signatures across third-party Responses providers | yes | to port | M (+112 −62) | support Meta Muse signatures across third-party Responses providers |
+| [`be9fbd94`](https://github.com/router-for-me/CLIProxyAPI/commit/be9fbd94) | feat(signature): support router-suffixed GPT/Grok envelopes and multi-family Responses targets | yes | to port | M (+66 −27) | support router-suffixed GPT/Grok envelopes and multi-family Responses targets |
+| [`a68c7d8e`](https://github.com/router-for-me/CLIProxyAPI/commit/a68c7d8e) | fix(signature): strip OpenRouter private RouterSuffix on official and non-OpenRouter upstreams | yes | to port | L (+519 −171) | private RouterSuffix stripping at every official/non-OpenRouter boundary |

@@ -19,8 +19,8 @@ Windows plugin loading remains unsupported.
 Claude cache observations require the separate default-off
 `observability.usage.claude-cache-telemetry` opt-in as well as usage statistics.
 The `bytes` values measure serialized fingerprint input, including path and role
-strings and tuple JSON framing, not raw section lengths or token counts. All
-exported telemetry hashes use a private random process-local HMAC key and rotate
+strings and tuple JSON framing, not raw section lengths or token counts. Claude
+cache telemetry hashes use a private random process-local HMAC key and rotate
 on restart, including identities derived from configured API keys.
 
 The queue and RESP channel gain additional zero-token observations marked
