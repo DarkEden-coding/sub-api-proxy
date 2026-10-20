@@ -1345,14 +1345,21 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) ->
             set: Map::from_iter([("disabled".into(), disabled.into())]),
             remove: vec![],
         };
-        match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
-            Ok(_) => {
-                note_disabled(&state, &target.id, Some(disabled));
-                resync(&state);
-                reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())])
+        // Go v8.0.35 `Manager.Modify`: the flag lands on the record as it is now, so a
+        // token refresh between the lookup and the write does not fail the toggle.
+        let mut revision = target.revision;
+        for _ in 0..16 {
+            match state.rt.store().apply_patch(&target.id, revision, &patch) {
+                Ok(_) => {
+                    note_disabled(&state, &target.id, Some(disabled));
+                    resync(&state);
+                    return reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())]);
+                }
+                Err(PatchError::Stale { current }) => revision = current,
+                Err(e) => return patch_error(Some(e)),
             }
-            Err(e) => patch_error(Some(e)),
         }
+        patch_error(Some(PatchError::Stale { current: revision }))
     })
     .await
     .unwrap_or_else(|_| patch_error(None))
@@ -1433,14 +1440,37 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     fields.retain(|(p, _)| p != "request_retry");
+    tokio::task::spawn_blocking(move || {
+        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // ponytail: a credential removed and re-added under the same ID takes the edit;
+        // Go's registration epoch refuses it (404). Bounded so a busy record cannot spin.
+        (0..16)
+            .find_map(|_| apply_fields(&state, &name, &fields, retry))
+            .unwrap_or_else(|| fail(StatusCode::CONFLICT, "stale credential"))
+    })
+    .await
+    .unwrap_or_else(|_| patch_error(None))
+}
+
+/// One attempt of [`fields`] on the credential as it is now; `None` when a concurrent
+/// update (a token refresh, say) changed it first, so the caller re-reads and retries.
+/// Go v8.0.35 `Manager.Modify` (`d69962e4`) applies the edit to the current record
+/// for the same reason instead of failing.
+fn apply_fields(
+    state: &Management,
+    name: &str,
+    fields: &[(String, Value)],
+    retry: Option<Option<i64>>,
+) -> Option<Response> {
+    let root = |p: &str| p.split('.').next().unwrap_or_default().trim().to_owned();
     let all = state.rt.store().snapshot();
     let Some(target) = all
         .iter()
         .find(|c| c.id == name)
-        .or_else(|| all.iter().find(|c| file_name(c).as_deref() == Some(name.as_str())))
+        .or_else(|| all.iter().find(|c| file_name(c).as_deref() == Some(name)))
         .cloned()
     else {
-        return fail(StatusCode::NOT_FOUND, "auth file not found");
+        return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
     };
     // Start from Go's normalized metadata so aliases persist under canonical names.
     let mut meta = target.metadata.clone();
@@ -1450,31 +1480,31 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     let mut changed = false;
-    for (path, value) in &fields {
+    for (path, value) in fields {
         if path.is_empty() {
-            return fail(StatusCode::BAD_REQUEST, "field name is required");
+            return Some(fail(StatusCode::BAD_REQUEST, "field name is required"));
         }
         if path == "weight" {
             if value.is_null() {
                 meta.remove("weight");
             } else if !value.is_number() {
-                return fail(StatusCode::BAD_REQUEST, "weight must be an integer");
+                return Some(fail(StatusCode::BAD_REQUEST, "weight must be an integer"));
             } else {
                 match credentials::parse_weight(value) {
                     Ok(w) => {
                         meta.insert("weight".into(), w.into());
                     }
-                    Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+                    Err(e) => return Some(fail(StatusCode::BAD_REQUEST, e)),
                 }
             }
         } else if root(path) == "weight" {
-            return fail(StatusCode::BAD_REQUEST, "weight does not support nested fields");
+            return Some(fail(StatusCode::BAD_REQUEST, "weight does not support nested fields"));
         } else if path == "headers" {
             merge_headers(&mut meta, value);
         } else {
             let parts: Vec<&str> = path.split('.').map(str::trim).collect();
             if parts.iter().any(|p| p.is_empty()) {
-                return fail(StatusCode::BAD_REQUEST, format!("invalid field path: {path}"));
+                return Some(fail(StatusCode::BAD_REQUEST, format!("invalid field path: {path}")));
             }
             set_path(&mut meta, &parts, value.clone());
         }
@@ -1488,7 +1518,7 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         changed = true;
     }
     if !changed {
-        return fail(StatusCode::BAD_REQUEST, "no fields to update");
+        return Some(fail(StatusCode::BAD_REQUEST, "no fields to update"));
     }
     let mut roots: Vec<String> = fields.iter().map(|(p, _)| root(p)).collect();
     if retry.is_some() {
@@ -1508,10 +1538,11 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         let result = state.rt.store().replace_config_backed(next, target.revision);
         return match result {
             Ok(_) => {
-                note_disabled(&state, &target.id, disabled_note);
-                reply(StatusCode::OK, [("status", "ok".into())])
+                note_disabled(state, &target.id, disabled_note);
+                Some(reply(StatusCode::OK, [("status", "ok".into())]))
             }
-            Err(e) => patch_error(Some(e)),
+            Err(PatchError::Stale { .. }) => None,
+            Err(e) => Some(patch_error(Some(e))),
         };
     }
     // Go's file store writes the auth's disabled flag on every save; a patched
@@ -1530,42 +1561,38 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     let retyped = patch.set.contains_key("type") || patch.remove.iter().any(|k| k == "type");
-    tokio::task::spawn_blocking(move || {
-        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        if retyped {
-            // `type` picks the executor, so the store refuses it in place; Go allows it
-            // and the file's next synthesis picks the new provider. Write the file the
-            // way Go's store does and re-synthesize.
-            // ponytail: no revision check against a concurrent token refresh here.
-            let Some(path) = path_of(&target).map(Path::to_path_buf) else {
-                return patch_error(None);
-            };
-            let mut next = target.metadata.clone();
-            patch.apply(&mut next);
-            let sorted: BTreeMap<&String, &Value> = next.iter().collect();
-            let written = serde_json::to_vec(&sorted)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| write_file(&path, &bytes).map_err(|e| e.to_string()));
-            return match written {
-                Ok(()) => {
-                    note_disabled(&state, &target.id, disabled_note);
-                    resync(&state);
-                    reply(StatusCode::OK, [("status", "ok".into())])
-                }
-                Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update auth: {e}")),
-            };
-        }
-        match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
-            Ok(_) => {
-                note_disabled(&state, &target.id, disabled_note);
-                resync(&state);
+    if retyped {
+        // `type` picks the executor, so the store refuses it in place; Go allows it
+        // and the file's next synthesis picks the new provider. Write the file the
+        // way Go's store does and re-synthesize.
+        // ponytail: no revision check against a concurrent token refresh here.
+        let Some(path) = path_of(&target).map(Path::to_path_buf) else {
+            return Some(patch_error(None));
+        };
+        let mut next = target.metadata.clone();
+        patch.apply(&mut next);
+        let sorted: BTreeMap<&String, &Value> = next.iter().collect();
+        let written = serde_json::to_vec(&sorted)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| write_file(&path, &bytes).map_err(|e| e.to_string()));
+        return Some(match written {
+            Ok(()) => {
+                note_disabled(state, &target.id, disabled_note);
+                resync(state);
                 reply(StatusCode::OK, [("status", "ok".into())])
             }
-            Err(e) => patch_error(Some(e)),
+            Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update auth: {e}")),
+        });
+    }
+    match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
+        Ok(_) => {
+            note_disabled(state, &target.id, disabled_note);
+            resync(state);
+            Some(reply(StatusCode::OK, [("status", "ok".into())]))
         }
-    })
-    .await
-    .unwrap_or_else(|_| patch_error(None))
+        Err(PatchError::Stale { .. }) => None,
+        Err(e) => Some(patch_error(Some(e))),
+    }
 }
 
 fn set_path(meta: &mut Map<String, Value>, parts: &[&str], value: Value) {

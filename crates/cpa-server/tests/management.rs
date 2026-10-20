@@ -1283,6 +1283,74 @@ async fn fallback_with_relative_auth_dir_is_retired_once_synthesized() {
     server.abort();
 }
 
+/// Go v8.0.35 `Manager.Modify` (`d69962e4`): field and status patches land on the
+/// record as it is when they commit, so concurrent token refreshes neither fail them
+/// nor lose their own writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credential_patches_survive_concurrent_refreshes() {
+    let f = Fixture::new("modify");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let r = client
+        .post(format!("{base}/v8/management/credentials?name=claude-m.json"))
+        .bearer_auth("fake-management-only")
+        .body(r#"{"type":"claude","email":"m@example.invalid","access_token":"fake-0"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rt = f.rt.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresher = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let mut n = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let c = rt
+                    .store()
+                    .snapshot()
+                    .into_iter()
+                    .find(|c| c.id == "claude-m.json")
+                    .unwrap();
+                n += 1;
+                let patch = cpa_core::credential::MetadataPatch {
+                    set: serde_json::Map::from_iter([("access_token".into(), format!("fake-{n}").into())]),
+                    remove: vec![],
+                };
+                if rt.store().apply_patch(&c.id, c.revision, &patch).is_err() {
+                    n -= 1;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            n
+        }
+    });
+    for i in 0..40 {
+        let (path, body) = if i % 4 == 3 {
+            ("status", json!({"name": "claude-m.json", "disabled": i % 8 == 3}))
+        } else {
+            ("fields", json!({"name": "claude-m.json", format!("note_{i}"): i}))
+        };
+        let r = client
+            .patch(format!("{base}/v8/management/credentials/{path}"))
+            .bearer_auth("fake-management-only")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "patch {i}: {}", r.text().await.unwrap());
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let refreshed = refresher.join().unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(f.dir.join("auth/claude-m.json")).unwrap()).unwrap();
+    for i in (0..40).filter(|i| i % 4 != 3) {
+        assert_eq!(saved[format!("note_{i}")], json!(i), "{saved}");
+    }
+    assert_eq!(saved["access_token"], format!("fake-{refreshed}"));
+    assert_eq!(saved["disabled"], json!(false));
+    server.abort();
+}
+
 /// A config-backed field patch invalidates the cached registry: a new prefix is
 /// routable at once.
 #[tokio::test]
