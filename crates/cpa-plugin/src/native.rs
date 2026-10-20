@@ -180,7 +180,8 @@ impl NativeClient {
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if handle.is_null() {
             let error = dlerror();
-            let _ = std::fs::remove_file(&load_path);
+            // The shadow stays: another open may have just reused it, and unlinking here
+            // would bypass shadow publication. Stale cleanup removes it with this process.
             // The shadow path shows where a noexec TMPDIR refused the mapping.
             return Err(format!(
                 "dlopen {} (shadow copy {}): {error}",
