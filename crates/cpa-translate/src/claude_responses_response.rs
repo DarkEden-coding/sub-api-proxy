@@ -208,7 +208,11 @@ fn incomplete_details(stop: &[u8]) -> Option<&'static str> {
 }
 
 fn output_status(stop: &[u8]) -> &'static str {
-    if incomplete_details(stop).is_some() { "incomplete" } else { "completed" }
+    if incomplete_details(stop).is_some() {
+        "incomplete"
+    } else {
+        "completed"
+    }
 }
 
 fn web_search_query(input: &[u8]) -> Vec<u8> {

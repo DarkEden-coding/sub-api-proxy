@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use cpa_common::json::{self as gj, Kind, Res};
 
 use crate::common::{
-    UserTurnDrops, align_claude_tool_results, claude_message_system_reminder_text, go_lower, now_nanos, trim_space};
+    UserTurnDrops, align_claude_tool_results, claude_message_system_reminder_text, go_lower, now_nanos, trim_space,
+};
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::first_nonblank;
 use crate::stream::GoStream;

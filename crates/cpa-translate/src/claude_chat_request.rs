@@ -96,7 +96,11 @@ fn convert(model: &str, raw: &[u8], stream: bool, preserve_thinking: bool) -> Re
     let user_id = common::derive_claude_user_id(raw);
     let mut out = br#"{"model":"","max_tokens":32000,"messages":[],"metadata":{}}"#.to_vec();
     gj::set_str(&mut out, "metadata.user_id", &user_id);
-    gj::set_int(&mut out, "max_tokens", crate::claude_responses::default_max_tokens(model));
+    gj::set_int(
+        &mut out,
+        "max_tokens",
+        crate::claude_responses::default_max_tokens(model),
+    );
     let root = gj::parse(raw);
     thinking_config(&mut out, &root, model);
     gj::set_str(&mut out, "model", model);

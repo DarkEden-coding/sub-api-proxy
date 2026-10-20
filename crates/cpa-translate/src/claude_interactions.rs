@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use cpa_common::json::{self as gj, Kind, Res};
 
 use crate::common::{
-    UserRun, format_rfc3339_utc, go_lower, interactions_attachment_type, is_http_url,
-    is_interactions_instruction_step, normalize_claude_tool_input_schema, now_nanos, now_unix,
-    sanitize_claude_function_name, sanitize_claude_tool_id, sse_event, trim_space,
+    UserRun, format_rfc3339_utc, go_lower, interactions_attachment_type, is_http_url, is_interactions_instruction_step,
+    normalize_claude_tool_input_schema, now_nanos, now_unix, sanitize_claude_function_name, sanitize_claude_tool_id,
+    sse_event, trim_space,
 };
 use crate::gemini_interactions::first_existing;
 use crate::stream::GoStream;
@@ -339,7 +339,13 @@ fn input_item(messages: &mut Accumulator, step: &Res<'_>, run: &mut UserRun) {
 /// appendInteractionsStepToClaude. `instruction` says the step sits in a developer or
 /// system wrapper: that content is sent as user content but is not the user's own
 /// turn, so it closes the open user turn and never keeps an emptied one alive.
-fn step_to_message(messages: &mut Accumulator, step: &Res<'_>, default_role: &str, instruction: bool, run: &mut UserRun) {
+fn step_to_message(
+    messages: &mut Accumulator,
+    step: &Res<'_>,
+    default_role: &str,
+    instruction: bool,
+    run: &mut UserRun,
+) {
     let role = match step.get("role").bytes().as_ref() {
         b"user" => "user",
         b"assistant" => "assistant",

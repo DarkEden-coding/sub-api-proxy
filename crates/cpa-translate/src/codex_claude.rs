@@ -714,7 +714,11 @@ fn convert(model: &str, raw: &[u8], preserve: bool) -> Result<Vec<u8>, Error> {
     gj::set_bool(&mut out, "stream", true);
     gj::set_bool(&mut out, "store", false);
     if has_web_search {
-        gj::set_strs(&mut out, "include", &["reasoning.encrypted_content", "web_search_call.action.sources"]);
+        gj::set_strs(
+            &mut out,
+            "include",
+            &["reasoning.encrypted_content", "web_search_call.action.sources"],
+        );
     } else {
         gj::set_strs(&mut out, "include", &["reasoning.encrypted_content"]);
     }

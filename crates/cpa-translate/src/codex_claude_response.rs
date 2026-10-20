@@ -1004,10 +1004,18 @@ fn web_search_blocks(blocks: &mut Vec<Vec<u8>>, item: &Res<'_>, seen: &mut HashS
 /// extractCodexReasoningItemText: the summary text, else the content text.
 fn reasoning_item_text(item: &Res<'_>) -> Vec<u8> {
     let summary = item.get("summary");
-    let thinking = if summary.exists() { joined_text(&summary) } else { vec![] };
+    let thinking = if summary.exists() {
+        joined_text(&summary)
+    } else {
+        vec![]
+    };
     if !thinking.is_empty() {
         return thinking;
     }
     let content = item.get("content");
-    if content.exists() { joined_text(&content) } else { vec![] }
+    if content.exists() {
+        joined_text(&content)
+    } else {
+        vec![]
+    }
 }

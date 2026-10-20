@@ -1398,7 +1398,10 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
     gj::set_raw(&mut message, "content", b"[]");
     gj::set_raw(&mut message, "stop_reason", b"null");
     gj::set_raw(&mut message, "stop_sequence", b"null");
-    emit(&[("message", &gj::compact(&message, true)), ("type", b"\"message_start\"")]);
+    emit(&[
+        ("message", &gj::compact(&message, true)),
+        ("type", b"\"message_start\""),
+    ]);
     for (index, block) in content.array().iter().enumerate() {
         let index = index.to_string();
         let kind = block.get("type");
@@ -1411,7 +1414,11 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
             b"tool_use" => {
                 gj::set_raw(&mut start, "input", b"{}");
                 let input = block.get("input");
-                let input = if input.raw().is_empty() { &b"{}"[..] } else { input.raw() };
+                let input = if input.raw().is_empty() {
+                    &b"{}"[..]
+                } else {
+                    input.raw()
+                };
                 Some((("partial_json", string(input)), "\"input_json_delta\""))
             }
             b"thinking" => {
@@ -1429,7 +1436,11 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
             delta.extend_from_slice(b",\"type\":");
             delta.extend_from_slice(kind.as_bytes());
             delta.push(b'}');
-            out(&[("delta", &delta), ("index", index.as_bytes()), ("type", b"\"content_block_delta\"")]);
+            out(&[
+                ("delta", &delta),
+                ("index", index.as_bytes()),
+                ("type", b"\"content_block_delta\""),
+            ]);
         };
         emit(&[
             ("content_block", &gj::compact(&start, true)),
@@ -1441,7 +1452,11 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
         }
         if &*kind.s == b"text" {
             for citation in block.get("citations").array() {
-                block_delta(&mut emit, ("citation", &gj::compact(citation.raw(), true)), "\"citations_delta\"");
+                block_delta(
+                    &mut emit,
+                    ("citation", &gj::compact(citation.raw(), true)),
+                    "\"citations_delta\"",
+                );
             }
         }
         let signature = block.get("signature");
@@ -1451,7 +1466,11 @@ pub fn claude_messages_json_to_sse(raw: &[u8]) -> (Cow<'_, [u8]>, Vec<u8>) {
         emit(&[("index", index.as_bytes()), ("type", b"\"content_block_stop\"")]);
     }
     let usage = root.get("usage");
-    let usage = if usage.raw().is_empty() { b"{}".to_vec() } else { gj::compact(usage.raw(), true) };
+    let usage = if usage.raw().is_empty() {
+        b"{}".to_vec()
+    } else {
+        gj::compact(usage.raw(), true)
+    };
     let value = |r: Res<'_>| gj::AnyValue::from_res(&r).marshal().unwrap_or_else(|| b"null".to_vec());
     let mut delta = b"{\"stop_reason\":".to_vec();
     delta.extend_from_slice(&value(root.get("stop_reason")));
@@ -1545,7 +1564,11 @@ pub fn interactions_attachment_type(part: &Res<'_>) -> String {
     }
     let kind = go_lower(trim_space(&part.get("type").bytes()));
     if !kind.is_empty() {
-        return if kind == b"text" { String::new() } else { String::from_utf8_lossy(&kind).into_owned() };
+        return if kind == b"text" {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&kind).into_owned()
+        };
     }
     if part.get("inlineData").exists() || part.get("inline_data").exists() {
         return "inlineData".into();
@@ -1569,7 +1592,10 @@ pub fn is_http_url(value: &[u8]) -> bool {
     } else {
         return false;
     };
-    let authority = rest.split(|b| matches!(b, b'/' | b'?' | b'#')).next().unwrap_or_default();
+    let authority = rest
+        .split(|b| matches!(b, b'/' | b'?' | b'#'))
+        .next()
+        .unwrap_or_default();
     let host = authority.rsplit(|&b| b == b'@').next().unwrap_or_default();
     !host.is_empty()
 }

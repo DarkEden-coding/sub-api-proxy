@@ -6,8 +6,8 @@ use crate::{
     common::{self, UserTurnDrops, go_lower, trim_space},
     openai_claude_response as response,
 };
-use cpa_common::json::{self as gj, AnyValue, Kind, Res};
 use base64::Engine as _;
+use cpa_common::json::{self as gj, AnyValue, Kind, Res};
 use std::collections::HashMap;
 
 pub static PAIR: Registered = registered!(

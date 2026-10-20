@@ -158,7 +158,10 @@ fn pending(pair: &str, fixture: &Value) -> Option<usize> {
     let name = fixture["name"].as_str().unwrap_or_default();
     let path = fixture["path"].as_str().unwrap_or_default();
     PENDING.iter().position(|(p, key, _)| {
-        *p == pair && key.strip_prefix("path:").map_or_else(|| name.starts_with(key), |want| want == path)
+        *p == pair
+            && key
+                .strip_prefix("path:")
+                .map_or_else(|| name.starts_with(key), |want| want == path)
     })
 }
 
@@ -179,18 +182,14 @@ fn run(client: Format, upstream: Format, f: &Value, bytes: bool) -> Vec<Vec<u8>>
     };
     match f["path"].as_str().unwrap() {
         "request" => vec![request_output(translate_request(client, upstream, &ctx, &input))],
-        "request_compat" => vec![request_output(
-            match (client, upstream) {
-                (Format::OpenAI, Format::Claude) => cpa_translate::openai_to_claude_with_compat(&ctx, &input),
-                (Format::Claude, Format::OpenAI) => cpa_translate::claude_to_openai_with_compat(&ctx, &input),
-                (Format::Claude, Format::Gemini) => cpa_translate::claude_to_gemini_with_compat(&ctx, &input),
-                (Format::Claude, Format::Codex) => cpa_translate::claude_to_codex_with_compat(&ctx, &input),
-                (Format::Claude, Format::Interactions) => {
-                    cpa_translate::claude_to_interactions_with_compat(&ctx, &input)
-                }
-                other => panic!("no compat request for {other:?}"),
-            },
-        )],
+        "request_compat" => vec![request_output(match (client, upstream) {
+            (Format::OpenAI, Format::Claude) => cpa_translate::openai_to_claude_with_compat(&ctx, &input),
+            (Format::Claude, Format::OpenAI) => cpa_translate::claude_to_openai_with_compat(&ctx, &input),
+            (Format::Claude, Format::Gemini) => cpa_translate::claude_to_gemini_with_compat(&ctx, &input),
+            (Format::Claude, Format::Codex) => cpa_translate::claude_to_codex_with_compat(&ctx, &input),
+            (Format::Claude, Format::Interactions) => cpa_translate::claude_to_interactions_with_compat(&ctx, &input),
+            other => panic!("no compat request for {other:?}"),
+        })],
         "request_envelope" => {
             // The executor's ResolvedModelInfo with native web search on.
             let info = cpa_core::registry::ModelInfo::from_raw(

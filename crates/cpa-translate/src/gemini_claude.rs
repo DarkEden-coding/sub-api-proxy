@@ -82,7 +82,14 @@ fn convert(model: &str, raw: &[u8], preserve_thinking: bool) -> Result<Vec<u8>, 
         let mut names: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         let mut pending: Vec<Vec<u8>> = vec![];
         messages.each(|_, message| {
-            message_contents(&message, preserve_thinking, &mut names, &mut pending, &mut contents, &mut drops);
+            message_contents(
+                &message,
+                preserve_thinking,
+                &mut names,
+                &mut pending,
+                &mut contents,
+                &mut drops,
+            );
             true
         });
         if let Some(last) = contents.last() {
@@ -374,7 +381,14 @@ fn gemini_part_is_sendable(part: &[u8]) -> bool {
     let text = part.get("text");
     !text.exists()
         || !trim_space(&text.bytes()).is_empty()
-        || ["functionCall", "functionResponse", "inlineData", "inline_data", "fileData", "file_data"]
-            .iter()
-            .any(|key| part.get(key).exists())
+        || [
+            "functionCall",
+            "functionResponse",
+            "inlineData",
+            "inline_data",
+            "fileData",
+            "file_data",
+        ]
+        .iter()
+        .any(|key| part.get(key).exists())
 }
