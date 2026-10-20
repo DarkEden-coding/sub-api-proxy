@@ -403,8 +403,10 @@ async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMa
     }
     let auth_dir = state.rt.config().auth_dir.clone();
     let saved = tokio::task::spawn_blocking(move || {
-        let upload = import_upload(&auth_dir, &file.data, &location)?;
+        // Under `disk` from the read of an existing file to the write, so a concurrent
+        // management edit (for example `disabled`) is neither lost nor overwritten.
         let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let upload = import_upload(&auth_dir, &file.data, &location)?;
         // Go `saveTokenRecord`: success only once the token store has the file.
         let mut written = Ok(());
         let stored = state.store_write(Box::new(|| {
@@ -489,18 +491,30 @@ async fn save_if_pending<T: Send + 'static>(
     }
 }
 
-fn settle(state: &Management, sid: &str, outcome: Outcome) {
+async fn settle(state: &Arc<Management>, sid: &str, outcome: Outcome) {
     match outcome {
         Outcome::Saved => {
-            {
-                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-                state.publish((*state.rt.config()).clone(), None);
-            }
+            // `disk` can be held by a save that waits on the store's async I/O, so it is
+            // never taken on a runtime worker.
+            let worker = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
+                worker.publish((*worker.rt.config()).clone(), None);
+            })
+            .await;
             state.oauth.complete(sid);
         }
         Outcome::Cancelled => {}
-        Outcome::Failed(message) => state.oauth.set_error(sid, &message),
+        Outcome::Failed(message) => return fail_session(state, sid, &message),
     }
+    if let Some(settled) = &state.login_settled {
+        let _ = settled.send(sid.to_owned());
+    }
+}
+
+/// [`settle`] for a failed login, which publishes nothing.
+fn fail_session(state: &Management, sid: &str, message: &str) {
+    state.oauth.set_error(sid, message);
     if let Some(settled) = &state.login_settled {
         let _ = settled.send(sid.to_owned());
     }
@@ -571,7 +585,7 @@ async fn start_claude(state: Arc<Management>, webui: bool) -> Response {
                 }
                 Err(_) => Outcome::Failed("Failed to exchange authorization code for tokens".into()),
             };
-            settle(&worker, &login.state, outcome);
+            settle(&worker, &login.state, outcome).await;
         }
         stop_forwarder(&worker, ANTHROPIC_CALLBACK_PORT, forwarder);
     });
@@ -658,7 +672,7 @@ async fn start_codex(state: Arc<Management>, webui: bool) -> Response {
                     &exec_text(&e),
                 )),
             };
-            settle(&worker, &flow, outcome);
+            settle(&worker, &flow, outcome).await;
         }
         stop_forwarder(&worker, CODEX_CALLBACK_PORT, forwarder);
     });
@@ -737,7 +751,7 @@ async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
                 .await
             }
             .await;
-            settle(&worker, &flow, outcome);
+            settle(&worker, &flow, outcome).await;
         }
         stop_forwarder(&worker, DEFAULT_CALLBACK_PORT, forwarder);
     });
@@ -815,7 +829,7 @@ async fn start_devin(state: Arc<Management>) -> Response {
         };
         let fail = |message: &str| {
             if worker.oauth.is_pending(&flow, "devin") {
-                settle(&worker, &flow, Outcome::Failed(message.into()));
+                fail_session(&worker, &flow, message);
             }
         };
         if cb.state != flow {
@@ -858,7 +872,7 @@ async fn start_devin(state: Arc<Management>) -> Response {
             "Failed to save authentication tokens",
         )
         .await;
-        settle(&worker, &flow, outcome);
+        settle(&worker, &flow, outcome).await;
     });
     started(url, sid)
 }
@@ -951,7 +965,7 @@ async fn start_kimi(state: Arc<Management>, domain: String) -> Response {
             Err(_) if !worker.oauth.is_pending(&sid, provider) => Outcome::Cancelled,
             Err(e) => Outcome::Failed(with_cause("Authentication failed", &exec_text(&e))),
         };
-        settle(&worker, &sid, outcome);
+        settle(&worker, &sid, outcome).await;
     });
     response
 }
@@ -1003,7 +1017,7 @@ async fn start_meta(state: Arc<Management>) -> Response {
                 save_if_pending(&worker, &sid, "meta", bundle, write, "Failed to save token to file").await
             }
         };
-        settle(&worker, &sid, outcome);
+        settle(&worker, &sid, outcome).await;
     });
     response
 }
@@ -1065,7 +1079,7 @@ async fn start_xai(state: Arc<Management>) -> Response {
                 save_if_pending(&worker, &sid, "xai", record, write, "Failed to save token to file").await
             }
         };
-        settle(&worker, &sid, outcome);
+        settle(&worker, &sid, outcome).await;
     });
     response
 }

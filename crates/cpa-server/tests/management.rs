@@ -2427,6 +2427,112 @@ async fn claude_login_removes_the_legacy_file_only_after_the_store_has_the_new_o
     fake_server.abort();
 }
 
+/// A store whose pushes are really pending on the runtime's timers. When the Claude
+/// push arrives (its save holds the disk lock), it starts a Vertex import, whose save
+/// takes the lock next and waits on its own push.
+#[derive(Default)]
+struct SlowStore {
+    dir: PathBuf,
+    upload: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+    imported: std::sync::Mutex<Option<tokio::task::JoinHandle<u16>>>,
+}
+
+impl cpa_server::persist::StorePersister for SlowStore {
+    fn persist_config(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn persist_auth_files(
+        &self,
+        message: String,
+        _: Vec<PathBuf>,
+    ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            if message.contains("claude") {
+                let (url, body) = self.upload.lock().unwrap().take().unwrap();
+                *self.imported.lock().unwrap() = Some(tokio::spawn(async move {
+                    let response = wreq::Client::new()
+                        .post(url)
+                        .bearer_auth("fake-management-only")
+                        .header("content-type", "multipart/form-data; boundary=b")
+                        .body(body)
+                        .send()
+                        .await
+                        .unwrap();
+                    response.status().as_u16()
+                }));
+                // Long enough for the import to be waiting on the disk lock.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(())
+        })
+    }
+    fn delete_auth(&self, _: PathBuf) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn auth_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+}
+
+/// A finished login publishes off the runtime workers: on a one-worker runtime, a save
+/// holding the disk lock while its store push waits on a timer must not starve.
+#[test]
+fn a_finished_login_never_waits_for_the_disk_lock_on_a_runtime_worker() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../cpa-exec/tests/fixtures/vertex_go.json")).unwrap();
+        let key = fixture["import"][0]["input"].as_str().unwrap().to_owned();
+        let (fake, _seen, fake_server) = fake_logins().await;
+        let f = Fixture::new("slowstore");
+        let store = Arc::new(SlowStore {
+            dir: f.dir.join("auth"),
+            ..Default::default()
+        });
+        let options = management::Options {
+            login_base: Some(fake.clone()),
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let (base, _state, server) = serve_with(&f, options).await;
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"key.json\"\r\nContent-Type: application/json\r\n\r\n{key}\r\n--b--\r\n"
+        );
+        *store.upload.lock().unwrap() = Some((
+            format!("{base}/v8/management/oauth/import?provider=vertex"),
+            body.into_bytes(),
+        ));
+        let started = oauth_get(&base, "/oauth/auth-url?provider=claude").await;
+        let state = started["state"].as_str().unwrap().to_owned();
+        wreq::Client::new()
+            .post(format!("{base}/v8/management/oauth/callback"))
+            .json(&json!({"provider": "claude",
+                "redirect_url": format!("http://localhost:54545/callback?code=fake-code&state={state}")}))
+            .send()
+            .await
+            .unwrap();
+        let status = final_status(&base, &state, 10).await;
+        let import = store.imported.lock().unwrap().take().unwrap();
+        let imported = import.await.unwrap();
+        server.abort();
+        fake_server.abort();
+        let _ = done.send((status, imported));
+    });
+    let Ok((status, imported)) = finished.recv_timeout(std::time::Duration::from_secs(20)) else {
+        // The runtime's only worker is blocked: dropping it would wait forever.
+        std::mem::forget(rt);
+        panic!("the login and the import deadlocked on the disk lock");
+    };
+    assert_eq!((status, imported), (json!({"status": "ok"}), 200));
+}
+
 /// Kimi device login saves after authorization; a cancelled one saves nothing.
 #[tokio::test]
 async fn kimi_device_login_saves_and_a_cancelled_one_does_not() {
