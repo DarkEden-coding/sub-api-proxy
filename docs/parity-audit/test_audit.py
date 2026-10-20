@@ -183,6 +183,16 @@ class SuiteSkeletonTests(unittest.TestCase):
         self.assertNotEqual(verify.suite_skeleton(bogus), verify.suite_skeleton(self.ROW))
         self.assertNotIn("TestBogus", [name for name, _, _ in verify.history(bogus)[2]])
 
+    def test_removing_one_fragment_cannot_form_another_that_goes_unchecked(self):
+        nested = self.ROW.replace(
+            " Removed upstream declarations:",
+            " Moved upstream declarations: `TestBogus` to missing_test.go:3 Removed upstream declarations:")
+        nested = nested.replace("requirements).", "requirements)..")
+        stripped, _, moved = verify.history(nested)
+        self.assertIn("TestBogus", stripped)
+        self.assertNotIn("TestBogus", [name for name, _, _ in moved])
+        self.assertNotEqual(verify.suite_skeleton(nested), verify.suite_skeleton(self.ROW))
+
     def test_prose_around_or_inside_history_stays_compared(self):
         for changed in (self.ROW + " All cases are optional.",
                         self.ROW.replace("(L3).", "(L3). Optional."),

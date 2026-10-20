@@ -144,20 +144,27 @@ DECL = r"`(?:Test|Fuzz|Benchmark|Example)\w*`"
 REMOVED_NOTE = re.compile(rf" Removed upstream declarations: {DECL}(?:, {DECL})* \(historical, not active requirements\)\.")
 MOVED_ENTRY = rf"{DECL} to [\w./\-]+_test\.go:\d+"
 MOVED_NOTE = re.compile(rf" Moved upstream declarations: {MOVED_ENTRY}(?:; {MOVED_ENTRY})*\.")
+HISTORY = re.compile(rf"(?P<removed>{REMOVED_NOTE.pattern})|{MOVED_NOTE.pattern}")
 
 
 def history(text):
     """(text without history fragments, retired names, [(moved name, target, line)]).
 
-    Stripping and validation share this one parse, so every fragment that is
-    stripped from the comparison is also returned for checking against Go.
+    One substitution over the original text both records and removes each fragment,
+    so exactly the spans that leave the comparison are returned for checking against
+    Go; removing one fragment can never form another that is stripped unchecked.
     """
     retired, moved = [], []
-    for note in REMOVED_NOTE.finditer(text):
-        retired += re.findall(r"`(\w+)`", note[0])
-    for note in MOVED_NOTE.finditer(text):
-        moved += [(n, t, int(line)) for n, t, line in re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", note[0])]
-    return MOVED_NOTE.sub("", REMOVED_NOTE.sub("", text)), retired, moved
+
+    def take(match):
+        if match["removed"]:
+            retired.extend(re.findall(r"`(\w+)`", match[0]))
+        else:
+            moved.extend((n, t, int(line)) for n, t, line in
+                         re.findall(r"`(\w+)` to ([\w./\-]+_test\.go):(\d+)", match[0]))
+        return ""
+
+    return HISTORY.sub(take, text), retired, moved
 
 
 def suite_skeleton(text):
