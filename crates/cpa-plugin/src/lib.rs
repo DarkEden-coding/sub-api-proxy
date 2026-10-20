@@ -34,6 +34,8 @@ pub mod platform;
 pub mod quota;
 pub mod routing;
 pub mod rpc;
+#[cfg(unix)]
+mod shadow;
 pub mod store;
 pub mod streams;
 #[cfg(feature = "test-support")]

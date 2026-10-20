@@ -21,14 +21,14 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M3 | 424 | 187 | 215 | 22 |
 | M4 | 589 | 244 | 330 | 15 |
 | M5 | 331 | 196 | 125 | 10 |
-| M6 | 267 | 117 | 132 | 18 |
+| M6 | 267 | 119 | 131 | 17 |
 
 ### Gaps by area
 
 | Area | missing | partial | Missing items |
 |---|---:|---:|---|
 | server | 19 | 286 | M1-0119, M1-0128, M4-0371, M4-0372, M4-0511, M4-0512, M4-0513, M4-0514, M4-0515, M4-0543, M4-0578, M4-0579, M4-0580, M4-0585, M5-0316, M5-0318, M5-0320, M5-0329, M5-0330 |
-| plugins | 17 | 101 | M6-0169, M6-0170, M6-0171, M6-0174, M6-0187, M6-0192, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242, M6-0249, M6-0250, M6-0251, M6-0252 |
+| plugins | 16 | 100 | M6-0169, M6-0170, M6-0171, M6-0174, M6-0192, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242, M6-0249, M6-0250, M6-0251, M6-0252 |
 | claude | 13 | 75 | M1-0120, M1-0121, M1-0122, M1-0123, M1-0124, M1-0125, M1-0126, M1-0127, M1-0133, M1-0136, M1-0137, M1-0147, M5-0314 |
 | codex | 11 | 82 | M3-0351, M3-0355, M3-0358, M3-0362, M3-0363, M3-0364, M3-0367, M3-0369, M3-0380, M3-0422, M5-0323 |
 | openai-xai | 6 | 31 | M3-0356, M3-0359, M3-0365, M3-0366, M3-0399, M6-0217 |
@@ -1019,7 +1019,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0035 | routing.force-model-prefix | covered | read in crates/cliproxy/src/tui/config.rs, crates/cpa-core/src/config.rs (+3); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-core/src/registry/dynamic.rs (+5) |  | heuristic: key name match |
 | M4-0036 | observability.logs.request-log | covered | read in crates/cliproxy/src/tui/config.rs, crates/cpa-home/src/client.rs (+5); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-home/tests/fixtures/go_home_golden.json (+8) |  | heuristic: key name match |
 | M4-0037 | requests.passthrough-headers | covered | read in crates/cpa-server/src/respond.rs; set in crates/cliproxy/tests/fixtures/plugin_wiring_go.json, crates/cpa-server/tests/fixtures/legacy_go.json (+1) |  | heuristic: key name match |
-| M4-0038 | server.host | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/discovery/tests.rs (+18); set in crates/cliproxy/src/discovery/mdns.rs, crates/cliproxy/src/home.rs (+45) |  | heuristic: key name match |
+| M4-0038 | server.host | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/discovery/tests.rs (+18); set in crates/cliproxy/src/discovery/mdns.rs, crates/cliproxy/src/home.rs (+46) |  | heuristic: key name match |
 | M4-0039 | server.port | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/discovery/tests.rs (+6); set in crates/cliproxy/src/discovery/mdns.rs, crates/cliproxy/src/home.rs (+33) |  | heuristic: key name match |
 | M4-0040 | server.trusted-proxies | covered | read in crates/cpa-core/src/config.rs; set in crates/cpa-server/src/observability.rs, crates/cpa-server/tests/fixtures/legacy_go.json (+2) |  | heuristic: key name match |
 | M4-0041 | server.tls.enable | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/listener.rs (+2); set in crates/cliproxy/src/home.rs, crates/cpa-home/src/cert_tests.rs (+5) |  | heuristic: key name match |
@@ -2191,7 +2191,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0184 | internal/pluginhost/host_test.go | partial | implementation cites host.go (crates/cpa-plugin/src/host.rs); no case matched by name | plugins | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
 | M6-0185 | internal/pluginhost/http_bridge_test.go | partial | implementation cites http_bridge.go (crates/cpa-plugin/src/hosthttp.rs, crates/cpa-plugin/tests/host_http.rs); no case matched by name | plugins |  |
 | M6-0186 | internal/pluginhost/http_operation_bridge_test.go | partial | implementation cites http_operation_bridge.go (crates/cpa-plugin/src/hosthttp.rs); no case matched by name | plugins |  |
-| M6-0187 | internal/pluginhost/loader_windows_test.go | missing | 0/7 cases matched; loader_windows.go not cited | plugins | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
+| M6-0187 | internal/pluginhost/loader_windows_test.go | covered | docs/DIFFERENCES-FROM-GO.md (Plugins: loading plugins on Windows is not supported) |  | Deliberate difference by owner ruling: Windows plugin loading is unsupported, so these Windows loader cases do not apply. The moved shadow declarations are M6-0260. |
 | M6-0188 | internal/pluginhost/logging_test.go | partial | crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log | plugins | Logging exists; Go's name/version/path field and error-wrapper cases are not reproduced. |
 | M6-0189 | internal/pluginhost/management_test.go | partial | implementation cites management.go (crates/cpa-plugin/src/management.rs); no case matched by name | plugins |  |
 | M6-0190 | internal/pluginhost/model_router_test.go | partial | implementation cites model_router.go (crates/cpa-plugin/src/routing.rs); no case matched by name | plugins | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
@@ -2265,7 +2265,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0257 | internal/pluginhost/loader_unix_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/pluginhost/loader_unix_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M6-0258 | internal/pluginhost/native_catalog_priority_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/pluginhost/native_catalog_priority_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M6-0259 | internal/pluginhost/routing_callbacks_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/pluginhost/routing_callbacks_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
-| M6-0260 | internal/pluginhost/shadow_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/pluginhost/shadow_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
+| M6-0260 | internal/pluginhost/shadow_test.go | covered | crates/cpa-plugin/src/shadow.rs tests (content_addressed_copies_reuse_change_and_repair, cleanup_preserves_unrelated_files_and_live_processes, unsafe_directories_and_shadows_are_refused); crates/cpa-plugin/tests/native_abi.rs replacing_an_artifact_keeps_old_images_and_rejects_late_callbacks |  | Process-scoped directory, content reuse, changed builds, corrupt-shadow repair, stale file and dead-process cleanup match v8.0.35 under a private per-user root; the shared-temp trust checks are a documented deliberate difference. The helper-process tests are Go test scaffolding. |
 | M6-0261 | internal/pluginstore/global_token_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/pluginstore/global_token_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M6-0262 | internal/runtime/executor/helps/plugin_executor_usage_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite internal/runtime/executor/helps/plugin_executor_usage_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M6-0263 | sdk/api/handlers/openai/openai_responses_plugin_route_test.go | partial | Existing subsystem: crates/cpa-plugin/src/; new Go suite sdk/api/handlers/openai/openai_responses_plugin_route_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | plugins | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |

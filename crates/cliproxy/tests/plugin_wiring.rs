@@ -201,6 +201,8 @@ impl Runner {
             .env("HOME", &runner.work)
             .env("PATH", "/usr/bin:/bin")
             .env("TZ", "UTC")
+            // Keeps native shadow copies in the test's TMPDIR (private under nextest).
+            .env("TMPDIR", std::env::temp_dir())
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()
