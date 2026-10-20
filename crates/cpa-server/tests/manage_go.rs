@@ -794,10 +794,13 @@ mod config_writes {
                 } else if want.is_null() {
                     assert!(body.is_empty(), "{at}: {body}");
                 } else {
-                    let got: Value = serde_json::from_str(&body).unwrap();
+                    let mut got: Value = serde_json::from_str(&body).unwrap();
+                    // The goldens predate v8.0.35, whose v8 api-keys reads carry each
+                    // key's `auth_index` (`0fb50a18`; tests/management.rs pins them).
+                    let indexed = step["method"] == "GET" && strip_auth_indexes(&mut got);
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
-                        if got == *want {
+                        if got == *want && !indexed {
                             bytes_compared += 1;
                             if body != raw {
                                 failures.push(format!("{at}: bytes differ\n go: {raw}\n rs: {body}"));
@@ -857,6 +860,21 @@ mod config_writes {
         assert_eq!(compared, 98);
         eprintln!("config writes: {bytes_compared} of {compared} steps compared byte for byte");
         assert!(bytes_compared >= 40, "only {bytes_compared} byte comparisons");
+    }
+}
+
+/// Removes every `auth_index` key; whether there was one.
+fn strip_auth_indexes(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut found = map.shift_remove("auth_index").is_some();
+            for v in map.values_mut() {
+                found |= strip_auth_indexes(v);
+            }
+            found
+        }
+        Value::Array(items) => items.iter_mut().fold(false, |found, v| strip_auth_indexes(v) | found),
+        _ => false,
     }
 }
 
