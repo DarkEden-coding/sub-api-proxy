@@ -21,13 +21,13 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M3 | 350 | 216 | 134 | 0 |
 | M4 | 510 | 240 | 256 | 14 |
 | M5 | 303 | 201 | 102 | 0 |
-| M6 | 248 | 115 | 115 | 18 |
+| M6 | 248 | 117 | 117 | 14 |
 
 ### Gaps by area
 
 | Area | missing | partial | Missing items |
 |---|---:|---:|---|
-| plugins | 17 | 86 | M6-0143, M6-0144, M6-0145, M6-0146, M6-0169, M6-0170, M6-0171, M6-0174, M6-0187, M6-0192, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242 |
+| plugins | 13 | 88 | M6-0169, M6-0170, M6-0171, M6-0174, M6-0187, M6-0192, M6-0211, M6-0213, M6-0220, M6-0239, M6-0240, M6-0241, M6-0242 |
 | observe | 12 | 1 | M4-0001, M4-0002, M4-0003, M4-0004, M4-0005, M4-0006, M4-0007, M4-0008, M4-0009, M4-0010, M4-0011, M4-0485 |
 | server | 2 | 222 | M4-0371, M4-0372 |
 | openai-xai | 1 | 27 | M6-0217 |
@@ -1853,10 +1853,10 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0140 | RPC `host.http.cancel` (constant `MethodHostHTTPCancel`); JSON envelope OK/result/error, b… | covered | crates/cpa-plugin/src/hosthttp.rs; tests/host_http.rs cancelling_a_whole_body_read_captures_what_arrived |  |  |
 | M6-0141 | RPC `host.http.stream_read` (constant `MethodHostHTTPStreamRead`); JSON envelope OK/result… | covered | crates/cpa-plugin/src/hosthttp.rs; tests/host_http.rs stream_reads_wait_for_the_plugin_and_close_cancels_the_read |  |  |
 | M6-0142 | RPC `host.http.stream_close` (constant `MethodHostHTTPStreamClose`); JSON envelope OK/resu… | covered | crates/cpa-plugin/src/hosthttp.rs; tests/host_http.rs request_cancellation_ends_open_operations, stream_reads_wait_for_the_plugin_and_close_cancels_the_read |  |  |
-| M6-0143 | RPC `host.model.execute` (constant `MethodHostModelExecute`); JSON envelope OK/result/erro… | missing | crates/cpa-plugin/src/callbacks.rs call_service answers "unsupported host callback" | plugins | HTTP and auth callbacks exist; model-execution callbacks still need a server service. |
-| M6-0144 | RPC `host.model.execute_stream` (constant `MethodHostModelExecuteStream`); JSON envelope O… | missing | crates/cpa-plugin/src/callbacks.rs call_service answers "unsupported host callback" | plugins | HTTP and auth callbacks exist; model-execution callbacks still need a server service. |
-| M6-0145 | RPC `host.model.stream_read` (constant `MethodHostModelStreamRead`); JSON envelope OK/resu… | missing | crates/cpa-plugin/src/callbacks.rs call_service answers "unsupported host callback" | plugins | HTTP and auth callbacks exist; model-execution callbacks still need a server service. |
-| M6-0146 | RPC `host.model.stream_close` (constant `MethodHostModelStreamClose`); JSON envelope OK/re… | missing | crates/cpa-plugin/src/callbacks.rs call_service answers "unsupported host callback" | plugins | HTTP and auth callbacks exist; model-execution callbacks still need a server service. |
+| M6-0143 | RPC `host.model.execute` (constant `MethodHostModelExecute`); JSON envelope OK/result/erro… | partial | crates/cpa-plugin/src/hostmodel.rs; tests/host_model.rs; crates/cpa-server/src/plugins/model_callbacks.rs; tests/plugin_host_model.rs | plugins | Buffered callback uses shared dispatch; nested pins, execution sessions and paths are inherited, explicit pins override, omitted proxies clear. Two plugins and two private credentials exercise this. Custom plugin protocols await translators. |
+| M6-0144 | RPC `host.model.execute_stream` (constant `MethodHostModelExecuteStream`); JSON envelope O… | partial | crates/cpa-plugin/src/hostmodel.rs; tests/host_model.rs; crates/cpa-server/tests/plugin_host_model.rs callback_streams_preserve_executor_bytes_across_interceptor_unload | plugins | Byte-exact OpenAI multiline, Gemini, Claude and Codex-to-Responses fixtures cover absent, present and unloaded interceptors. Executor chunks precede HTTP framing. Custom plugin protocols await translators. |
+| M6-0145 | RPC `host.model.stream_read` (constant `MethodHostModelStreamRead`); JSON envelope OK/resu… | covered | crates/cpa-plugin/src/hostmodel.rs; tests/host_model.rs; crates/cpa-server/tests/plugin_host_model.rs |  | Chunk reads, payload errors, EOF and reads after close match Go v8.0.35; built-in streams have native-plugin integration coverage. |
+| M6-0146 | RPC `host.model.stream_close` (constant `MethodHostModelStreamClose`); JSON envelope OK/re… | covered | crates/cpa-plugin/src/hostmodel.rs; tests/host_model.rs; crates/cpa-server/tests/plugin_host_model.rs |  | Idempotent close and callback-owned stream cleanup match Go v8.0.35. |
 | M6-0147 | RPC `host.stream.emit` (constant `MethodHostStreamEmit`); JSON envelope OK/result/error, b… | covered | crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.emit; crates/cliproxy/tests/plugin_wiring.rs streams |  |  |
 | M6-0148 | RPC `host.stream.close` (constant `MethodHostStreamClose`); JSON envelope OK/result/error,… | covered | crates/cpa-plugin/src/callbacks.rs, streams.rs; tests/go_host.rs host.stream.close; crates/cliproxy/tests/plugin_wiring.rs streams |  |  |
 | M6-0149 | RPC `host.log` (constant `MethodHostLog`); JSON envelope OK/result/error, byte payload and… | covered | crates/cpa-plugin/src/callbacks.rs host_log; tests/go_host.rs host.log |  | Covered as an RPC envelope contract only: the fixture checks success/error envelopes, not logged fields or request-ID restoration. |
