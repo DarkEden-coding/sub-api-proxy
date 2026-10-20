@@ -286,20 +286,31 @@ All Go inspection uses `git show`, `git diff`, and `git ls-tree` against a read-
 clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
 
 - the exact tag commit;
-- stable IDs: all 1,687 retained IDs keep their milestone and section. Retained
-  non-suite rows keep their contract text apart from Go line numbers and LOC
-  counts. Suite rows are checked by filename and declarations only. The 28 listed
-  rewrites are exempt from the text comparison: for the 18 `upstream.*` moves only
-  the canonical path and previous alias are checked against Go's `config_v8.go`
-  alias table, and the 10 changed contracts above are not compared at all;
+- stable IDs: all 1,687 retained IDs keep their milestone, section and contract
+  text, compared without Go line numbers, LOC counts and link targets. Suite rows
+  compare their text outside the fragments regenerated from Go (line range,
+  declaration list, removed and moved declarations), each matched entry by entry so
+  prose around or inside them stays compared; those fragments are checked against
+  Go below. Each of the 18 `upstream.*`
+  moves must name a canonical path and previous alias from Go's `config_v8.go`
+  alias table and must equal its old text once that prefix is rewritten back. The
+  other 10 rewrites are pinned to the approved text by a SHA-256 prefix;
 - test suites: the 228 added Go files, 989 suite entries with their declarations
-  and lines, the excluded support-only file, and 43 retired declarations;
-- routes: each of Go's 257 literal router and `ServeMux` registration call sites
-  under `internal/` and `sdk/` is cited by a route item whose method matches and
-  whose path ends with the registered literal, and every route item cites one.
-  Group and constant prefixes (such as `Group("/v1")`) are not resolved, so a
-  wrong prefix would pass, and a registration in a method loop counts as one
-  any-method call site;
+  and lines and a range covering the whole file, and the excluded support-only
+  file. Each of the 43 retired declarations was declared in the same file at
+  `6fecc6e` and is not at v8.0.35; each of the 5 moved declarations likewise left
+  its file and is found at its cited target line;
+- routes: each of Go's 260 router and `ServeMux` registrations under `internal/`
+  and `sdk/` is cited by a route item with the same method and full path, and every
+  route item cites one. Full paths resolve gin `Group` prefixes, nested groups and
+  string constants; a `Handle(method, ...)` inside a method-list loop counts once
+  per listed method; `ServeMux` registrations accept any method. The resolver
+  recognizes the registration forms in the frozen tree (`receiver.METHOD(path, ...)`
+  on the engine, a `ServeMux` or a `Group` variable); such a call it cannot reduce to
+  methods and a full path fails unless listed. The only listed call is
+  `AttachWebsocketRoute`'s `s.engine.GET(trimmed, ...)`, which registers the wsrelay
+  gateway path passed in at runtime (`M5-0021`). Forms absent at v8.0.35, such as
+  `Match` or a chained `Group(...).GET`, are not recognized;
 - config leaves: the 434 YAML leaves walked from Go's `Config` struct equal the
   checklist's legacy paths, and the 28 added since `6fecc6e` equal the additions
   section;
@@ -310,7 +321,7 @@ clone. The verifier fails explicitly, so `python -O` cannot skip it. It checks:
 
 It does not check Rust behavior, whether item prose (handlers, types, defaults,
 meanings) is accurate, plugin capabilities and data contracts that predate
-`6fecc6e`, or the two routes Go serves without a literal path registration
+`6fecc6e`, or the two routes Go serves without a statically resolved path registration
 (`M5-0020`, the WebUI OAuth forwarder, and `M5-0021`, the AI Studio relay route)
 and plugin-defined routes.
 
@@ -324,7 +335,15 @@ python3 docs/parity-audit/audit.py
 sha256sum -c /tmp/parity-summary.sha256
 ```
 
-The five Python tests pass. The route matcher accepts ordinary query strings and
+The sixteen Python tests pass, including the route resolver's group, constant,
+loop, `ServeMux` and unresolved-call cases, and suite-text cases where prose
+appended after or inserted inside a history fragment must stay compared, every
+stripped history fragment and declaration is returned for validation, and a span
+that only forms once another is removed (a declaration, a history note or a link)
+is never stripped. Links are stripped first; one pass over that text then replaces
+each declaration and history span with a sentinel that checklist text may not
+contain, so no removal can join its neighbours; line numbers are normalized last.
+A skeleton that still holds a declaration or history marker fails with the row ID. The route matcher accepts ordinary query strings and
 wildcard paths, but rejects route suffixes hidden in queries, embedded quotes,
 and line breaks. Its regression fails in six cases before the matcher fix.
 The matcher fix does not change any current judgments.
