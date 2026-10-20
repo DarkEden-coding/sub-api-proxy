@@ -8,12 +8,12 @@
 //! Go's message encoding and the request bookkeeping, shared with the AI Studio executor
 //! through one [`Relay`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use bytes::Bytes;
 use cpa_common::json::{self as gj, GoValue};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::meta_wire;
 
@@ -502,39 +502,109 @@ pub struct Session {
     relay: Weak<Relay>,
     out: mpsc::UnboundedSender<String>,
     closed: watch::Sender<bool>,
-    pending: Mutex<HashMap<String, Pending>>,
+    pending: Mutex<HashMap<String, Arc<Pending>>>,
 }
 
-/// A waiting request's channel. `late` holds the session's error when the session
-/// ended with the channel full.
+/// One waiting request (`pendingRequest`): up to [`PENDING_BUFFER`] messages the
+/// reader has not taken yet. Delivery, the terminal message and the session's close
+/// decide under one lock, as Go's `pr.mu` serializes `deliver`, `deliverTerminal`
+/// and `cancelWithError`.
+#[derive(Default)]
 struct Pending {
-    tx: mpsc::Sender<Message>,
-    late: Arc<Mutex<Option<Message>>>,
+    state: Mutex<PendingState>,
+    /// Signalled when a message is queued or the request ends.
+    readable: Notify,
+    /// Signalled when a slot frees or the request ends.
+    writable: Notify,
+}
+
+#[derive(Default)]
+struct PendingState {
+    queue: VecDeque<Message>,
+    /// No more messages are accepted; the reader drains the queue and then ends.
+    closed: bool,
+    /// A terminal message was queued; nothing follows it, not even the close error.
+    terminal: bool,
+}
+
+impl Pending {
+    /// `deliver` and `deliverTerminal`: waits for a free slot, or gives up once the
+    /// request has ended.
+    async fn deliver(&self, msg: Message) {
+        let last = terminal(&msg.kind);
+        let mut msg = Some(msg);
+        loop {
+            let writable = self.writable.notified();
+            {
+                let mut state = lock(&self.state);
+                if state.closed || state.terminal {
+                    return;
+                }
+                if state.queue.len() < PENDING_BUFFER {
+                    state.queue.extend(msg.take());
+                    state.terminal = last;
+                    self.readable.notify_one();
+                    return;
+                }
+            }
+            writable.await;
+        }
+    }
+
+    /// `cancelWithError` (with `cause`) or `cancel`: once, the request stops taking
+    /// messages. Unless a terminal message already won, the error is queued last; a
+    /// full queue loses its oldest message to it. A reader taking a message at the
+    /// same time decides which one that is, as in Go.
+    fn end(&self, cause: Option<&str>) {
+        let mut state = lock(&self.state);
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        if let Some(cause) = cause.filter(|_| !state.terminal) {
+            if state.queue.len() >= PENDING_BUFFER {
+                state.queue.pop_front();
+            }
+            state.queue.push_back(Message {
+                id: String::new(),
+                kind: ERROR.into(),
+                payload: Some(BTreeMap::from([(
+                    "error".to_owned(),
+                    GoValue::String(cause.to_owned()),
+                )])),
+            });
+        }
+        drop(state);
+        self.readable.notify_one();
+        self.writable.notify_one();
+    }
 }
 
 /// The responses to one request; dropping it forgets the request (Go's context
 /// cancellation).
 struct Responses {
-    rx: mpsc::Receiver<Message>,
-    late: Arc<Mutex<Option<Message>>>,
-    evicted: bool,
+    pending: Arc<Pending>,
     session: Arc<Session>,
     id: String,
 }
 
 impl Responses {
-    /// The next message. A session error that found the channel full takes the place
-    /// of its oldest message, as Go's `cancelWithError` evicts it, and arrives last.
-    /// A read racing the close can take the oldest message itself, and then the next
-    /// one is evicted: Go's close-side `<-pr.ch` races the reader the same way.
+    /// The next message, or `None` once the request has ended and its queue is empty.
     async fn recv(&mut self) -> Option<Message> {
-        if !self.evicted && lock(&self.late).is_some() {
-            self.evicted = true;
-            let _ = self.rx.try_recv();
-        }
-        match self.rx.recv().await {
-            Some(msg) => Some(msg),
-            None => lock(&self.late).take(),
+        loop {
+            let readable = self.pending.readable.notified();
+            {
+                let mut state = lock(&self.pending.state);
+                if let Some(msg) = state.queue.pop_front() {
+                    drop(state);
+                    self.pending.writable.notify_one();
+                    return Some(msg);
+                }
+                if state.closed || state.terminal {
+                    return None;
+                }
+            }
+            readable.await;
         }
     }
 }
@@ -542,6 +612,7 @@ impl Responses {
 impl Drop for Responses {
     fn drop(&mut self) {
         lock(&self.session.pending).remove(&self.id);
+        self.pending.end(None);
     }
 }
 
@@ -572,25 +643,16 @@ impl Session {
         if msg.id.is_empty() {
             return Err("wsrelay: message id is required".into());
         }
-        let (tx, rx) = mpsc::channel(PENDING_BUFFER);
-        let late = Arc::default();
+        let pending = Arc::new(Pending::default());
         {
-            let mut pending = lock(&self.pending);
-            if pending.contains_key(&msg.id) {
+            let mut map = lock(&self.pending);
+            if map.contains_key(&msg.id) {
                 return Err(format!("wsrelay: duplicate message id {}", msg.id));
             }
-            pending.insert(
-                msg.id.clone(),
-                Pending {
-                    tx,
-                    late: Arc::clone(&late),
-                },
-            );
+            map.insert(msg.id.clone(), pending.clone());
         }
         let responses = Responses {
-            rx,
-            late,
-            evicted: false,
+            pending,
             session: self.clone(),
             id: msg.id.clone(),
         };
@@ -616,18 +678,14 @@ impl Session {
             });
             return Ok(());
         }
-        let Some(tx) = lock(&self.pending).get(&msg.id).map(|p| p.tx.clone()) else {
+        let Some(pending) = lock(&self.pending).get(&msg.id).cloned() else {
             if terminal(&msg.kind) {
                 tracing::debug!(id = %msg.id, provider = %self.provider, "wsrelay: received terminal message for unknown id");
             }
             return Ok(());
         };
         let (id, last) = (msg.id.clone(), terminal(&msg.kind));
-        let mut closed = self.closed();
-        tokio::select! {
-            _ = tx.send(msg) => {}
-            _ = wait_closed(&mut closed) => {}
-        }
+        pending.deliver(msg).await;
         // A terminal message closes the request: its receiver sees the end after it.
         if last {
             lock(&self.pending).remove(&id);
@@ -636,25 +694,15 @@ impl Session {
     }
 
     /// `session.cleanup`: once, every waiting request gets an error message carrying
-    /// `cause`, the session leaves the relay and the observer hears of it. A full
-    /// request buffer loses its oldest message to the error (see [`Responses::recv`]).
+    /// `cause` (see [`Pending::end`]), the session leaves the relay and the observer
+    /// hears of it.
     pub fn close(&self, cause: &str) {
         if self.closed.send_replace(true) {
             return;
         }
         let pending: Vec<_> = lock(&self.pending).drain().map(|(_, p)| p).collect();
         for p in pending {
-            let error = Message {
-                id: String::new(),
-                kind: ERROR.into(),
-                payload: Some(BTreeMap::from([(
-                    "error".to_owned(),
-                    GoValue::String(cause.to_owned()),
-                )])),
-            };
-            if let Err(mpsc::error::TrySendError::Full(error)) = p.tx.try_send(error) {
-                *lock(&p.late) = Some(error);
-            }
+            p.end(Some(cause));
         }
         let Some(relay) = self.relay.upgrade() else {
             return;

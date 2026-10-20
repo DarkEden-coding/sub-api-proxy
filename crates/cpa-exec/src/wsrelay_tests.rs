@@ -156,6 +156,17 @@ async fn closing_fails_waiting_requests_and_notifies_the_observer() {
     );
 }
 
+/// Bounds a read so a regression fails instead of hanging.
+async fn bounded<T>(f: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), f)
+        .await
+        .expect("timed out")
+}
+
+fn chunk(id: &str, data: &str) -> Vec<u8> {
+    format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"{data}"}}}}"#).into_bytes()
+}
+
 /// Go's `cancelWithError` evicts a buffered message when a request's channel is
 /// full, so the session's error still arrives and a half-read answer is not a success.
 #[tokio::test]
@@ -173,32 +184,80 @@ async fn closing_with_a_full_buffer_still_fails_the_request() {
         .await
         .unwrap();
     for _ in 1..PENDING_BUFFER {
-        let chunk = format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"x"}}}}"#);
-        session.receive(chunk.as_bytes()).await.unwrap();
+        session.receive(&chunk(&id, "x")).await.unwrap();
     }
     session.close("browser went away");
-    assert_eq!(call.await.unwrap_err(), "browser went away (status=0)");
+    assert_eq!(bounded(call).await.unwrap_err(), "browser went away (status=0)");
 
-    // A stream sees every buffered message but the oldest, then the error.
+    // A stream sees every buffered message but the oldest queued one, then the error.
     let (session, mut frames) = relay.connect_as("aistudio-full".into());
     let mut events = relay.stream("aistudio-full", &HttpRequest::default()).await.unwrap();
     let id = next(&mut frames).await.id;
-    // The forwarding task holds one event and the outer channel another.
+    // The forwarding task holds chunk 1 and the outer channel chunk 0, so the
+    // request's queue holds 2..=65 and loses 2.
     for n in 0..PENDING_BUFFER + 2 {
-        let chunk = format!(r#"{{"id":"{id}","type":"stream_chunk","payload":{{"data":"{n} "}}}}"#);
-        session.receive(chunk.as_bytes()).await.unwrap();
+        session.receive(&chunk(&id, &format!("{n} "))).await.unwrap();
     }
     session.close("browser went away");
-    let mut chunks = String::new();
+    let mut got = vec![];
     let error = loop {
-        let event = events.recv().await.unwrap();
+        let event = bounded(events.recv()).await.unwrap();
         match event.error {
             Some(error) => break error,
-            None => chunks.push_str(std::str::from_utf8(&event.payload).unwrap()),
+            None => got.push(
+                std::str::from_utf8(&event.payload)
+                    .unwrap()
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap(),
+            ),
         }
     };
+    let want: Vec<usize> = [0, 1].into_iter().chain(3..PENDING_BUFFER + 2).collect();
+    assert_eq!(got, want);
     assert_eq!(error, "browser went away (status=0)");
-    let got: Vec<usize> = chunks.split_whitespace().map(|n| n.parse().unwrap()).collect();
-    assert_eq!(got.len(), PENDING_BUFFER + 1, "one buffered message was evicted");
-    assert!(!got.contains(&2) && got.ends_with(&[PENDING_BUFFER + 1]), "{got:?}");
+    assert!(bounded(events.recv()).await.is_none());
+}
+
+/// Delivery and the close decide under one lock, as Go's `pr.mu` makes them: a
+/// terminal message blocked on a full queue when the session closes never lands after
+/// the eviction, so the request fails instead of ending as a truncated success.
+#[tokio::test]
+async fn a_terminal_message_blocked_at_close_never_follows_the_eviction() {
+    for _ in 0..32 {
+        let relay = Arc::new(Relay::default());
+        let (session, mut frames) = relay.connect_as("aistudio-race".into());
+        let request = HttpRequest::default();
+        let call = relay.non_stream("aistudio-race", &request);
+        tokio::pin!(call);
+        assert!(tokio::time::timeout(Duration::ZERO, &mut call).await.is_err());
+        let id = next(&mut frames).await.id;
+        for _ in 0..PENDING_BUFFER {
+            session.receive(&chunk(&id, "x")).await.unwrap();
+        }
+        let end = format!(r#"{{"id":"{id}","type":"stream_end"}}"#);
+        let blocked = session.clone();
+        let delivery = tokio::spawn(async move { blocked.receive(end.as_bytes()).await });
+        tokio::task::yield_now().await;
+        assert!(!delivery.is_finished(), "stream_end waits for a free slot");
+        session.close("browser went away");
+        assert_eq!(bounded(call).await.unwrap_err(), "browser went away (status=0)");
+        bounded(delivery).await.unwrap().unwrap();
+    }
+
+    // A terminal message queued before the close wins: no error follows it.
+    let relay = Arc::new(Relay::default());
+    let (session, mut frames) = relay.connect_as("aistudio-race".into());
+    let request = HttpRequest::default();
+    let call = relay.non_stream("aistudio-race", &request);
+    tokio::pin!(call);
+    assert!(tokio::time::timeout(Duration::ZERO, &mut call).await.is_err());
+    let id = next(&mut frames).await.id;
+    session.receive(&chunk(&id, "ab")).await.unwrap();
+    session
+        .receive(format!(r#"{{"id":"{id}","type":"stream_end"}}"#).as_bytes())
+        .await
+        .unwrap();
+    session.close("browser went away");
+    assert_eq!(bounded(call).await.unwrap().body, b"ab");
 }
