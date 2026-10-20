@@ -29,8 +29,11 @@
 # (+0.84 MB binary, +0.35 MB archive) over master's build at 586eba0 in this job; the
 # rest of the rise from the previous budget values came with master's changes since
 # 2026-10-05.
+# 2026-10-20: Claude tool argument cleaner (202b8b8c) and the v8.0.35 Gemini to Claude
+# response translator, +103 KB .text over the head of #75 (27,692,535) in this job; .text
+# set to the measured 27,795,383. The other sizes stay within their budgets.
 size.x86_64-unknown-linux-gnu.binary_bytes   41_287_408  2
-size.x86_64-unknown-linux-gnu.text_bytes     27_195_447  2
+size.x86_64-unknown-linux-gnu.text_bytes     27_795_383  2
 size.x86_64-unknown-linux-gnu.rodata_bytes    8_508_896  2
 size.x86_64-unknown-linux-gnu.archive_bytes  17_516_134  2
 # Crates linked into the binary in two or more versions; a new one fails until it is
