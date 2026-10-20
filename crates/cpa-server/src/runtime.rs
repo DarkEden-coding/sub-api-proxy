@@ -305,7 +305,7 @@ impl Runtime {
     ) -> Result<Lease, AcquireError> {
         let aliases = crate::registry::global_aliases(cfg);
         let scope = selection.clone();
-        let admit = admission(registry, &aliases, &scope, &self.executors);
+        let admit = admission(registry, &aliases, &scope, &self.executors, self.plugin_runtime());
         // `soonest-reset` ranks by the quota windows the executors last observed.
         let now = std::time::SystemTime::now();
         let ranks = |c: &Credential| {
@@ -783,16 +783,20 @@ pub enum Outcome {
 /// cooldowns live. `None` rejects the credential.
 pub type Admit<'a> = dyn Fn(&Credential) -> Option<String> + 'a;
 
-/// Registry admission (Go `authSupportsRouteModel`) plus a registered executor.
+/// Registry admission (Go `authSupportsRouteModel`) plus a registered executor, built-in
+/// or plugin.
 pub fn admission<'a>(
     registry: &'a Registry,
     aliases: &'a HashMap<String, Vec<crate::registry::OAuthAlias>>,
     selection: &'a Selection,
     executors: &'a Executors,
+    plugins: &'a crate::plugins::PluginRuntime,
 ) -> impl Fn(&Credential) -> Option<String> + 'a {
     move |c| {
         let provider = crate::registry::provider_key(c);
-        if !selection.provider_keys().contains(&provider) || !executors.supports(&c.provider) {
+        if !selection.provider_keys().contains(&provider)
+            || !(executors.supports(&c.provider) || plugins.has_executor(&c.provider))
+        {
             return None;
         }
         let key = crate::registry::selection_model(aliases, c, &selection.model);

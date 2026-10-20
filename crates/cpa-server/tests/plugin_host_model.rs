@@ -754,17 +754,20 @@ async fn responses_bootstrap_flushes_a_pending_payload() {
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_bootstrap") else {
         return;
     };
-    for broken in [false, true] {
+    // 0: one data line, then EOF. 1: one whole event, then a reset. 2: one data line
+    // without its blank line, then a reset (no deliverable payload).
+    for case in 0..3 {
+        let broken = case > 0;
+        let mut unhooked = None;
         let upstream = {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let app = axum::Router::new().fallback(move || async move {
                 let tail = broken.then(|| Err::<String, _>(std::io::Error::other("reset")));
-                // One whole event, then a reset; or one data line, then EOF.
-                let event = if broken {
-                    format!("data: {CREATED}\n\n")
-                } else {
-                    format!("data: {COMPLETED}")
+                let event = match case {
+                    0 => format!("data: {COMPLETED}"),
+                    1 => format!("data: {CREATED}\n\n"),
+                    _ => format!("data: {CREATED}\n"),
                 };
                 let body = futures_util::stream::iter(std::iter::once(Ok(event)).chain(tail)).then(|item| async move {
                     if item.is_err() {
@@ -782,7 +785,7 @@ async fn responses_bootstrap_flushes_a_pending_payload() {
             url
         };
         for hooked in [false, true] {
-            let dir = cpa_plugin::testing::scratch(tmp, &format!("bootstrap-{broken}-{hooked}"));
+            let dir = cpa_plugin::testing::scratch(tmp, &format!("bootstrap-{case}-{hooked}"));
             let (auths, records, plugins) = (dir.join("auths"), dir.join("records"), dir.join("plugins"));
             for d in [&auths, &records, &plugins] {
                 std::fs::create_dir_all(d).unwrap();
@@ -833,7 +836,18 @@ async fn responses_bootstrap_flushes_a_pending_payload() {
                 .unwrap();
             let status = response.status().as_u16();
             let body = response.text().await.unwrap();
-            let case = format!("broken={broken} hooked={hooked}");
+            let label = format!("case={case} hooked={hooked}");
+            if case == 2 {
+                // Hooks must not change the answer: the JSON error, as without hooks.
+                assert_eq!(status, 500, "{label}: {body}");
+                match &unhooked {
+                    None => unhooked = Some(body),
+                    Some(want) => assert_eq!(&body, want, "{label}"),
+                }
+                rt.plugins().shutdown_all(None).await;
+                std::fs::remove_dir_all(dir).unwrap();
+                continue;
+            }
             let expected = if broken {
                 // The pending event is delivered, then the error ends the stream.
                 concat!(
@@ -846,7 +860,7 @@ async fn responses_bootstrap_flushes_a_pending_payload() {
             } else {
                 format!("data: {COMPLETED}\n\n\n")
             };
-            assert_eq!((status, body.as_str()), (200, expected.as_str()), "{case}");
+            assert_eq!((status, body.as_str()), (200, expected.as_str()), "{label}");
             rt.plugins().shutdown_all(None).await;
             std::fs::remove_dir_all(dir).unwrap();
         }

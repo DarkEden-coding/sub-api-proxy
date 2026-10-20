@@ -15,7 +15,7 @@ Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.
 - Routing: round-robin, weighted and fill-first selection, retries, cooldowns, session affinity, model aliases and exclusions, payload rules, per-credential and global proxies.
 - The v8 Management API for configuration, credentials, OAuth sign-in, quota checks (`/requests/api-call`), usage counters, logs and model catalogs, plus the dashboard at `/management.html`.
 - HTTPS on the main port (`server.tls`), logging in Go's format to stdout or a rotating `main.log` with Go's per-request access log lines, request log files with client and upstream sections, LAN discovery (`-discover` and the `server.discovery` advertisement), `.env` loading, and remote model catalog updates as in Go (`--local-model` turns them off).
-- Plugins (`plugins`, Linux and macOS): loading and configuration, plugin-defined routes, the Management API routes to list, enable, configure and delete plugins, the plugin quota routes, and the HTTP, auth, affinity and model host callbacks. Model callbacks run through the ordinary dispatcher with inherited credential pins, execution sessions and request paths, and stream executor payloads before HTTP framing. Native plugins load from content-addressed shadow copies, which keep source artifacts replaceable, and loaded images remain resident after logical unload; the copies live in a per-user directory under `$TMPDIR` ([DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md)).
+- Plugins (`plugins`, Linux and macOS): loading and configuration, plugin-defined routes, the Management API routes to list, enable, configure and delete plugins, the plugin quota routes, and the HTTP, auth, affinity and model host callbacks. Model callbacks run through the ordinary dispatcher with inherited credential pins, execution sessions and request paths, and stream executor payloads before HTTP framing. Plugin model catalogs bind to credentials of their provider (with the credential's excluded models applied), and plugin executors serve those credentials without a model router; plugin `auth.parse` and `model.for_auth` are not used yet. Native plugins load from content-addressed shadow copies, which keep source artifacts replaceable, and loaded images remain resident after logical unload; the copies live in a per-user directory under `$TMPDIR` ([DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md)).
 - Home mode (`-home-jwt`): bootstrap, config updates, request dispatch, usage, process and request logs, in-flight reporting and shared KV state. Home-managed plugin sync, tasks and status reporting remain unavailable.
 - The `PGSTORE_*`, `OBJECTSTORE_*` and `GITSTORE_*` storage backends, and the Redis-protocol usage subscriber on the main port.
 - Config and credential files are watched and reloaded without a restart. A plaintext management key is hashed on first start, as Go does.
@@ -35,8 +35,8 @@ Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 | M3 | 424 | 191 | 211 | 22 |
 | M4 | 589 | 245 | 329 | 15 |
 | M5 | 331 | 198 | 123 | 10 |
-| M6 | 267 | 119 | 131 | 17 |
-| All | 1951 | 905 | 964 | 82 |
+| M6 | 267 | 121 | 129 | 17 |
+| All | 1951 | 906 | 963 | 82 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.

@@ -257,6 +257,86 @@ pub fn credential_scoped(e: &ExecError) -> bool {
     e.scope == FailureScope::Credential && e.status == 429
 }
 
+/// A statusless model-scoped error. Only plugin executors report these (an `rpcError`
+/// without a status or a plain error); built-in executors report connection faults as
+/// transport. Go classifies such an error by its message, in three separate decisions
+/// (sdk/cliproxy/auth/conductor_cooldown.go): the result code (`resultErrorFromError`),
+/// the cooldown skip on that result (`shouldSkipCredentialCooldown`) and the retry round
+/// on the error (`isRequestRetryRoundError`).
+fn statusless(e: &ExecError) -> Option<(String, String)> {
+    (e.status == 0 && e.scope == FailureScope::Model).then(|| {
+        let text = error_text(e);
+        let lower = text.trim().to_lowercase();
+        (text, lower)
+    })
+}
+
+/// Go `shouldSkipCredentialCooldown`: request faults and transport or connection
+/// lifecycle faults never cool a credential. For a statusless error, the code
+/// `resultErrorFromError` assigns (model-not-found first, then lifecycle, then
+/// transient) and the result's message fallbacks decide; a model-not-found code leaves
+/// both fallbacks to the message, where the transient one ignores a message naming a
+/// TLS handshake timeout.
+pub fn skips_cooldown(e: &ExecError) -> bool {
+    if is_request_invalid(e) || is_transport(e) {
+        return true;
+    }
+    let Some((text, lower)) = statusless(e) else {
+        return false;
+    };
+    let (lifecycle, transient) = (lifecycle_message(&lower), transient_message(&lower));
+    if explicit_model_not_found(&text, "") {
+        lifecycle || (transient && !lower.contains("tls handshake timeout"))
+    } else {
+        lifecycle || transient
+    }
+}
+
+/// Go `isConnectionLifecycleMessage` on a trimmed, lowercased message.
+fn lifecycle_message(lower: &str) -> bool {
+    matches!(
+        lower,
+        "context canceled" | "context deadline exceeded" | "eof" | "unexpected eof"
+    ) || [
+        "websocket: close 1000",
+        "websocket: close 1001",
+        "websocket: close 1006",
+        "unexpected eof",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || http2_closed(lower)
+}
+
+/// Go `isTransientTransportMessage` on a trimmed, lowercased message.
+fn transient_message(lower: &str) -> bool {
+    const NEEDLES: [&str; 16] = [
+        "tls: tls handshake",
+        "tls handshake timeout",
+        "wsarecv",
+        "wsasend",
+        "a connection attempt failed",
+        "connection refused",
+        "connection reset",
+        "i/o timeout",
+        "no such host",
+        "server misbehaving",
+        "network is unreachable",
+        "no route to host",
+        "broken pipe",
+        "connection aborted",
+        "use of closed network connection",
+        "unexpected eof",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle)) || http2_closed(lower)
+}
+
+/// Go `isHTTP2ClosedConnectionMessage`.
+fn http2_closed(lower: &str) -> bool {
+    lower.contains("http2: client connection force closed via clientconn.close")
+        || lower.contains("http2: client conn is closed")
+}
+
 /// Transport, timeout and connection-lifecycle faults: no cooldown, retry-round eligible.
 pub fn is_transport(e: &ExecError) -> bool {
     if e.scope == FailureScope::Transport {
@@ -268,8 +348,12 @@ pub fn is_transport(e: &ExecError) -> bool {
 }
 
 /// `isCredentialRetryRoundStatus` or a transport fault (`isRequestRetryRoundError`).
+/// A statusless error counts when its message is Go's transient transport text
+/// (`isTransientTransportError`), which leaves out the lifecycle-only texts.
 pub fn is_retry_round(e: &ExecError) -> bool {
-    is_transport(e) || matches!(e.status, 403 | 408 | 429 | 500 | 502 | 503 | 504)
+    is_transport(e)
+        || matches!(e.status, 403 | 408 | 429 | 500 | 502 | 503 | 504)
+        || statusless(e).is_some_and(|(_, lower)| transient_message(&lower))
 }
 
 /// `isExplicitModelNotFoundError` on an error text.

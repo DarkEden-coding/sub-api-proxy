@@ -23,6 +23,8 @@ pub struct PluginRuntime {
     host: cpa_plugin::Host,
     latest: watch::Sender<Option<Arc<Config>>>,
     access: RwLock<Arc<AccessRegistry>>,
+    /// Go's executor table entries owned by plugins: provider to the registered executor.
+    executors: RwLock<HashMap<String, cpa_plugin::executor::Adapter>>,
 }
 
 impl Default for PluginRuntime {
@@ -39,11 +41,36 @@ impl PluginRuntime {
             host,
             latest: watch::Sender::new(None),
             access: RwLock::default(),
+            executors: RwLock::default(),
         }
     }
 
     pub fn host(&self) -> &cpa_plugin::Host {
         &self.host
+    }
+
+    /// The registered plugin executor serving `credential`, if any. Go binds a
+    /// credential's executor as the credential arrives (`registerExecutorForAuth`): a
+    /// credential [`binds_native`] replaces a plugin executor registered for its
+    /// provider at once, while the table here changes only on a plugin sync. So the
+    /// table is consulted only for credentials that would leave a plugin executor bound.
+    pub(crate) fn executor(
+        &self,
+        credential: &cpa_core::credential::Credential,
+        cfg: &Config,
+    ) -> Option<cpa_plugin::executor::Adapter> {
+        let adapter = {
+            let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            executors.get(&credential.provider.trim().to_lowercase()).cloned()?
+        };
+        let compat_names = cpa_core::config::credentials::openai_compat_names(cfg);
+        (!binds_native(credential, &compat_names)).then_some(adapter)
+    }
+
+    /// Whether a plugin executor is registered for `provider`.
+    pub(crate) fn has_executor(&self, provider: &str) -> bool {
+        let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        executors.contains_key(&provider.trim().to_lowercase())
     }
 
     /// Records a published config; the worker started by [`start`] applies it.
@@ -55,9 +82,9 @@ impl PluginRuntime {
 /// Go's startup and reload sequence (`syncPluginRuntimeConfigForConfig` and
 /// `RefreshPluginManagementRoutes`): apply the config, register the client-key and
 /// plugin frontend auth providers, then rebuild the plugin management routes around the
-/// built-in ones.
-/// ponytail: usage, model and executor registration join the sync with the dispatch
-/// wiring.
+/// built-in ones, then register plugin models and executors (`syncPluginModelRuntime`).
+/// Go runs that last step only once its listener is up; here it completes before
+/// serving.
 pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     let host = rt.plugins();
     host.apply_config(cfg.clone()).await;
@@ -67,6 +94,173 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     rt.plugin_runtime()
         .register_access(!cfg.api_keys.is_empty(), providers, exclusive);
     host.register_management_routes(&reserved_management_routes()).await;
+    sync_models(rt).await;
+}
+
+/// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim
+/// the providers and models no built-in executor serves, then publishes the catalogs
+/// for credential-bound registration and the claimed executor models.
+async fn sync_models(rt: &Runtime) {
+    let host = rt.plugins();
+    host.register_models().await;
+    let native = native_executor_providers(rt).await;
+    // Ownership is decided against the registry, whose credentials carry the published
+    // plugin catalog. Republishing changes that registry (a removed built-in catalog
+    // frees its models), so repeat until the catalog is stable; Go decides once against
+    // the previous catalog and catches up on the next sync.
+    for _ in 0..3 {
+        let registry = rt.registry();
+        let Some(changes) = host
+            .register_executors(&|p| native.contains(p), &|m| registry.model_providers(m))
+            .await
+        else {
+            // The plugin set changed meanwhile; its own sync follows.
+            return;
+        };
+        *rt.plugin_runtime()
+            .executors
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = changes
+            .register
+            .into_iter()
+            .map(|adapter| (adapter.provider.clone(), adapter))
+            .collect();
+        let specs = |models: &[cpa_plugin::api::ModelInfo]| models.iter().map(model_spec).collect::<Vec<_>>();
+        let changed = cpa_core::registry::dynamic::set_plugin_catalog(cpa_core::registry::dynamic::PluginCatalog {
+            providers: host
+                .provider_models()
+                .iter()
+                .map(|(provider, models)| (provider.clone(), specs(models)))
+                .collect(),
+            clients: changes
+                .clients
+                .register
+                .iter()
+                .map(|(client, provider, models)| (client.clone(), provider.clone(), specs(models)))
+                .collect(),
+        });
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// Go `registerExecutorForAuth`'s built-in providers.
+const BUILTIN: [&str; 14] = [
+    "codex",
+    "claude",
+    "gemini",
+    "gemini-interactions",
+    "vertex",
+    "aistudio",
+    "antigravity",
+    "kimi",
+    "kimi-ai",
+    "kimi.ai",
+    "kimi.com",
+    "xai",
+    "devin",
+    "meta",
+];
+
+/// Whether Go binds `c` to a built-in executor even over a registered plugin executor
+/// (`registerExecutorForAuth`): an OpenAI-compatible credential
+/// (`openAICompatInfoFromAuth`; `registerOpenAICompatProviderExecutor` keeps only a bare
+/// compat executor), a built-in provider, or any other provider with a native
+/// compatibility config (`hasNativeOpenAICompatExecutorConfig`: a `base_url` attribute
+/// or an enabled `openai-compatibility` entry named after it; `OwnsExecutor` is true
+/// for this host's plugin adapter, so `shouldKeepExistingOpenAICompatExecutor` returns
+/// false and Go replaces it even with `respectNonOwned`). Otherwise a plugin executor
+/// candidate keeps the provider.
+fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -> bool {
+    let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
+    let provider = c.provider.trim().to_lowercase();
+    if !attr("compat_name").is_empty() || provider == "openai-compatibility" || BUILTIN.contains(&provider.as_str()) {
+        return true;
+    }
+    let key = if provider.is_empty() {
+        "openai-compatibility"
+    } else {
+        provider.as_str()
+    };
+    !attr("base_url").is_empty()
+        || [key, &attr("provider_key").to_lowercase(), &provider]
+            .iter()
+            .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate))
+}
+
+/// Go `providerHasNativeExecutor`: providers a built-in executor is actually bound to.
+/// Go binds one per enabled credential (`registerExecutorForAuth`), plus a fixed
+/// baseline in Home mode. An OpenAI-compatible credential or a built-in provider always
+/// binds; any other provider binds the OpenAI-compatible executor unless a plugin
+/// executor is a candidate for it and no native compatibility config names it.
+/// ponytail: Go keeps a binding after its last credential goes away; here bindings are
+/// recomputed from the current credentials.
+async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
+    let cfg = rt.config();
+    let compat_names = cpa_core::config::credentials::openai_compat_names(&cfg);
+    let host = rt.plugins();
+    let mut native = HashSet::new();
+    for c in rt.store().snapshot().iter().filter(|c| !c.disabled) {
+        let provider = c.provider.trim().to_lowercase();
+        let key = if !c.attributes.get("compat_name").is_none_or(|v| v.trim().is_empty())
+            || provider == "openai-compatibility"
+        {
+            cpa_core::registry::dynamic::provider_key(c)
+        } else if provider.is_empty() {
+            "openai-compatibility".to_owned()
+        } else {
+            provider
+        };
+        if !binds_native(c, &compat_names) && host.has_executor_candidate_provider(&key).await {
+            continue;
+        }
+        native.insert(key);
+    }
+    if rt.remote_dispatch().is_some() {
+        // Go `baselineExecutorAuths`: the built-in providers but `kimi.com`, plus the
+        // OpenAI-compatible executor.
+        native.extend(
+            BUILTIN
+                .iter()
+                .filter(|p| **p != "kimi.com")
+                .chain(&["openai-compatibility"])
+                .map(|p| (*p).to_owned()),
+        );
+    }
+    native
+}
+
+/// Go `pluginModelInfoToRegistryModelInfo`.
+fn model_spec(m: &cpa_plugin::api::ModelInfo) -> cpa_core::registry::dynamic::Spec {
+    cpa_core::registry::dynamic::Spec {
+        id: m.id.trim().to_owned(),
+        object: m.object.clone(),
+        created: m.created,
+        owned_by: m.owned_by.clone(),
+        kind: m.model_type.clone(),
+        display_name: m.display_name.clone(),
+        name: m.name.clone(),
+        version: m.version.clone(),
+        description: m.description.clone(),
+        input_token_limit: m.input_token_limit,
+        output_token_limit: m.output_token_limit,
+        supported_generation_methods: m.supported_generation_methods.clone(),
+        context_length: m.context_length,
+        max_completion_tokens: m.max_completion_tokens,
+        supported_parameters: m.supported_parameters.clone(),
+        supported_input_modalities: m.supported_input_modalities.clone(),
+        supported_output_modalities: m.supported_output_modalities.clone(),
+        thinking: m.thinking.as_ref().map(|t| cpa_core::registry::ThinkingSupport {
+            min: t.min,
+            max: t.max,
+            zero_allowed: t.zero_allowed,
+            dynamic_allowed: t.dynamic_allowed,
+            levels: t.levels.clone(),
+        }),
+        user_defined: m.user_defined,
+        ..Default::default()
+    }
 }
 
 // ---- Frontend auth (Go `sdk/access`) -------------------------------------------------
