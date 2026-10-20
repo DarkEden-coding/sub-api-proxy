@@ -411,20 +411,15 @@ pub(crate) async fn execute_credential(
     })
 }
 
-/// A credential-bound plugin executor's failure as an attempt on that credential.
-/// Go's `rpcError` has a status but no `IsCredentialScoped`, so the auth manager treats
-/// it like a plain status error: a 429 cools the model, auth, quota and server
-/// statuses the credential, other statuses fail the request. An error without a status
-/// (an unavailable or stale executor, a failed negotiation) neither cools nor stops the
-/// loop; the client gets 500 with its text.
+/// A credential-bound plugin executor's failure as an attempt on that credential. Go's
+/// `rpcError` carries a status but neither `IsRequestScoped` nor `IsCredentialScoped`,
+/// and a plain error (an unavailable executor, a failed negotiation, an undecodable
+/// answer) carries neither; the auth manager classifies both by status and body. So
+/// the error is model-scoped with the plugin's status (0 when it gave none) and the
+/// shared classifier (`classify.rs`) decides failover and cooldown. It is never
+/// transport: Go has no transport fault on this path.
 fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
-    let scope = match status {
-        0 => FailureScope::Transport,
-        429 => FailureScope::Model,
-        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
-        _ => FailureScope::Request,
-    };
-    ExecError::local(if status == 0 { 500 } else { status }, scope, message)
+    ExecError::local(status, FailureScope::Model, message)
 }
 
 /// request context plus the request's model facts; `model` is the resolved model.
