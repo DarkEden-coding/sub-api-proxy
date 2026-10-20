@@ -1283,10 +1283,9 @@ pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
     scan_auth_dir(cfg).0
 }
 
-/// [`from_auth_dir`], plus the files this same read found present but not complete:
-/// empty or not valid JSON (Go v8.0.35 `SynthesisContext.IncompleteFiles`), or unreadable
-/// for a reason other than being gone (Go's incremental `addOrUpdateClientLocked` keeps
-/// the credential on a read failure). A caller keeps their last good credentials.
+/// [`from_auth_dir`], plus the files this same read found empty or not valid JSON (Go
+/// v8.0.35 `SynthesisContext.IncompleteFiles`); a caller keeps their last good
+/// credentials. A file that cannot be read is skipped, as in Go's full scan.
 pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
     let mut incomplete = HashSet::new();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
@@ -1306,15 +1305,7 @@ pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
         {
             continue;
         }
-        let data = match std::fs::read(&path) {
-            Ok(data) => data,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    incomplete.insert(path);
-                }
-                continue;
-            }
-        };
+        let Ok(data) = std::fs::read(&path) else { continue };
         if serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err() {
             incomplete.insert(path);
             continue;

@@ -444,7 +444,7 @@ fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>
     }
 }
 
-/// An empty, half-written or unreadable file is not a deletion (Go 7484a521): keep the
+/// An empty or half-written file is not a deletion (Go 7484a521): keep the
 /// last good credentials of the files the scan found incomplete. Deciding from the scan's
 /// own read, never a second one, means a file completed after the scan is picked up by
 /// the reload its write triggers instead of being dropped now. Removal and valid JSON
@@ -554,11 +554,13 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Go's incremental update keeps a credential whose file cannot be read (here a
-    /// symlink loop, which fails to read for every user).
+    /// A file that cannot be read (here a symlink loop, for every user) drops its
+    /// credential, as Go's full scan does; only a read that succeeded can mark a file
+    /// incomplete. The watcher does not observe such an entry, so keeping it would
+    /// leave the credential live after the entry is deleted.
     #[cfg(unix)]
     #[tokio::test]
-    async fn an_unreadable_file_keeps_its_credential() {
+    async fn an_unreadable_file_drops_its_credential() {
         let (state, dir) = state();
         let file = dir.join("a.json");
         std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
@@ -567,7 +569,7 @@ mod tests {
         std::os::unix::fs::symlink(&file, &file).unwrap();
         assert!(std::fs::read(&file).is_err());
         reload(&state).unwrap();
-        assert!(state.rt.store().snapshot().iter().any(|c| c.id == "a.json"));
+        assert!(!state.rt.store().snapshot().iter().any(|c| c.id == "a.json"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
