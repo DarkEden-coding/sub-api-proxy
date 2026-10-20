@@ -204,12 +204,10 @@ async fn closing_with_a_full_buffer_still_fails_the_request() {
     // One poll sends the request; the call then reads nothing until it is awaited.
     assert!(tokio::time::timeout(Duration::ZERO, &mut call).await.is_err());
     let id = next(&mut frames).await.id;
-    session
-        .receive(format!(r#"{{"id":"{id}","type":"stream_start","payload":{{"status":200}}}}"#).as_bytes())
-        .await
-        .unwrap();
+    let start = format!(r#"{{"id":"{id}","type":"stream_start","payload":{{"status":200}}}}"#);
+    bounded(session.receive(start.as_bytes())).await.unwrap();
     for _ in 1..PENDING_BUFFER {
-        session.receive(&chunk(&id, "x")).await.unwrap();
+        bounded(session.receive(&chunk(&id, "x"))).await.unwrap();
     }
     session.close("browser went away");
     assert_eq!(bounded(call).await.unwrap_err(), "browser went away (status=0)");
@@ -258,7 +256,7 @@ async fn a_terminal_message_blocked_at_close_never_follows_the_eviction() {
         assert!(tokio::time::timeout(Duration::ZERO, &mut call).await.is_err());
         let id = next(&mut frames).await.id;
         for _ in 0..PENDING_BUFFER {
-            session.receive(&chunk(&id, "x")).await.unwrap();
+            bounded(session.receive(&chunk(&id, "x"))).await.unwrap();
         }
         let end = format!(r#"{{"id":"{id}","type":"stream_end"}}"#);
         let blocked = session.clone();
@@ -309,4 +307,24 @@ async fn dropping_the_reader_releases_every_waiting_delivery() {
         bounded(delivery).await.unwrap().unwrap();
     }
     assert!(!lock(&session.pending).contains_key(&id));
+}
+
+/// Dropping a stream's receiver ends its request even while the browser sends nothing.
+#[tokio::test]
+async fn dropping_a_stream_receiver_frees_its_request() {
+    let relay = Arc::new(Relay::default());
+    let (session, mut frames) = relay.connect_as("aistudio-stream-drop".into());
+    let events = relay
+        .stream("aistudio-stream-drop", &HttpRequest::default())
+        .await
+        .unwrap();
+    let id = next(&mut frames).await.id;
+    assert!(lock(&session.pending).contains_key(&id));
+    drop(events);
+    bounded(async {
+        while lock(&session.pending).contains_key(&id) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
 }
