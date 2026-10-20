@@ -29,8 +29,13 @@
 # (+0.84 MB binary, +0.35 MB archive) over master's build at 586eba0 in this job; the
 # rest of the rise from the previous budget values came with master's changes since
 # 2026-10-05.
+# 2026-10-20: plugin-owned catalogs, credentials and executors (#73): credential-bound
+# plugin execution (buffered, streaming and count_tokens translation), catalog
+# arbitration and the executor table, +125 KB .text over master's build at 450fca7 in
+# this job (27_641_079 to 27_766_199); the rest of the rise came with master's changes
+# since 2026-10-13. The other metrics stay within their budgets.
 size.x86_64-unknown-linux-gnu.binary_bytes   41_287_408  2
-size.x86_64-unknown-linux-gnu.text_bytes     27_195_447  2
+size.x86_64-unknown-linux-gnu.text_bytes     27_766_199  2
 size.x86_64-unknown-linux-gnu.rodata_bytes    8_508_896  2
 size.x86_64-unknown-linux-gnu.archive_bytes  17_516_134  2
 # Crates linked into the binary in two or more versions; a new one fails until it is
