@@ -36,11 +36,14 @@ ones still waiting.
 (`helps.TranslateStreamWithClaudeInputTokens` with an upstream format that has no stream
 transform, so chunks reach the estimator unchanged).
 
-Regenerate with a temporary module inside the reference module's internal-package
-boundary (the reference checkout is not modified):
+Regenerate from the patched tree described in
+[Translator commits in the recorded tree](#translator-commits-in-the-recorded-tree), not
+from plain `6fecc6e`, which would record stale Gemini to Claude expectations. Use a
+temporary module inside the reference module's internal-package boundary (the reference
+checkout is not modified):
 
 ```sh
-reference=/absolute/path/to/CLIProxyAPI   # at 6fecc6e
+reference=/absolute/path/to/CLIProxyAPI   # the patched tree below (tree cc013917), not plain 6fecc6e
 crate=/absolute/path/to/cliproxy-rs/crates/cpa-exec
 tmp=$(mktemp -d)
 cp "$crate"/tests/reference/gemini/*.go "$tmp/"
