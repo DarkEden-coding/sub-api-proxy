@@ -7,7 +7,7 @@ Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.
 ## What works today
 
 - Client APIs: `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic), `POST /v1/chat/completions`, `/v1/completions`, `/v1/responses` and `/v1/responses/compact` (OpenAI), `/v1beta/models/...` and `/v1beta/interactions` (Gemini), `GET /v1/models`, and the Codex paths under `/backend-api/codex/`. Streaming (SSE) and non-streaming, with format translation between the three protocols.
-- Images and video: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, and the `/v1/videos` and `/openai/v1/videos` routes for xAI video.
+- Images, video and speech: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, the `/v1/videos` and `/openai/v1/videos` routes for xAI video, and `POST /v1/audio/speech` and `/v1/tts` for xAI text-to-speech (Grok TTS).
 - WebSocket: the Responses WebSocket on `GET /v1/responses` and `GET /backend-api/codex/responses`, used by Codex clients, including response steering (`oauth.providers.codex.response-steering`).
 - Realtime and live through a Codex account: `/v1/realtime` (WebSocket and WebRTC calls), `/v1/live`, call sidebands and local ephemeral keys (`/v1/realtime/client_secrets`). The WebRTC media relay is an optional build feature (`cargo build --release -p cliproxy --features cpa-server/media-relay`) and is not in the release binaries.
 - Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Google Antigravity, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import` or from the dashboard, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
@@ -52,7 +52,7 @@ An item is covered when it is implemented and a Rust test or a fixture recorded 
 | M5 | The Management API, WebSockets, realtime and live voice, and access control |
 | M6 | Plugins, the terminal UI, LAN discovery and Home (cluster) mode |
 
-Missing items now also include v8.0.35 speech routes, SIWC, tool search, model catalog sources, new configuration and plugin contracts. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
+Missing items now also include SIWC, tool search, model catalog sources, new configuration and plugin contracts. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
 
 Antigravity (M3) is implemented: sign-in from the command line, the dashboard and the Management API, the executor, AI credits, connection pool settings, reasoning replay and the web-search capability probe. The executor features have Go-recorded tests with local mock upstreams; sign-in is tested against local mock endpoints. Selected v8.0.27 changes add Claude 5.5 models, CAQS thinking signatures and backend errors inside streams. This is not full v8.0.35 parity: model entitlements, session continuation, newer schema and usage fixes, and several suites remain unported. [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) and the upstream inventory list them. No live Antigravity account has been used in these tests.
 
