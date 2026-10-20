@@ -508,7 +508,13 @@ mod tests {
         std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
         reload(&state).unwrap();
         assert!(loaded(&state));
-        for (contents, kept) in [("", true), (r#"{"type":"codex""#, true), (" \n", true), ("null", false)] {
+        for (contents, kept) in [
+            ("", true),
+            (r#"{"type":"codex""#, true),
+            (" \n", true),
+            ("null", false),
+            ("{}", false),
+        ] {
             std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
             reload(&state).unwrap();
             std::fs::write(&file, contents).unwrap();

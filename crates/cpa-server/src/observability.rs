@@ -1,4 +1,4 @@
-//! HTTP access logging, following internal/logging/gin_logger.go at 6fecc6e.
+//! HTTP access logging, following internal/logging/gin_logger.go (v8.0.35).
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -265,7 +265,10 @@ fn access_line(status: u16, latency: Duration, client: &str, method: &str, path:
             }
         }
     };
-    format!("{status:3} | {latency:>13} | {client:>15} | {method:<7} \"{path}\"")
+    // Go v8.0.35 (`4337f1f0`) quotes the path with `%q`, so a decoded line break cannot
+    // forge a second entry.
+    let path = cpa_common::gostr::quote(path);
+    format!("{status:3} | {latency:>13} | {client:>15} | {method:<7} {path}")
 }
 
 struct AccessBody {
@@ -623,6 +626,11 @@ mod tests {
                 case["out"]
             );
         }
+        // Go v8.0.35 `TestGinLogrusLoggerEscapesEncodedNewlineInPath`.
+        assert!(
+            access_line(404, Duration::ZERO, "127.0.0.1", "GET", "/x\n200 forged")
+                .ends_with(r#"GET     "/x\n200 forged""#)
+        );
         for path in [
             "/v1",
             "/v1/images/edits",
