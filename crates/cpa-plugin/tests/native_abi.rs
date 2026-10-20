@@ -153,8 +153,9 @@ int cliproxy_plugin_init(const host_api *in, plugin_api *out) {
     };
     build(10);
     let first = open();
+    // SAFETY: geteuid has no preconditions.
     let shadow_dir = std::env::temp_dir()
-        .join("cliproxy-pluginhost")
+        .join(format!("cliproxy-pluginhost-{}", unsafe { libc::geteuid() }))
         .join(format!("pid-{}", std::process::id()));
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(

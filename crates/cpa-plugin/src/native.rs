@@ -180,8 +180,13 @@ impl NativeClient {
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if handle.is_null() {
             let error = dlerror();
-            let _ = std::fs::remove_file(load_path);
-            return Err(format!("dlopen {}: {error}", path.display()));
+            let _ = std::fs::remove_file(&load_path);
+            // The shadow path shows where a noexec TMPDIR refused the mapping.
+            return Err(format!(
+                "dlopen {} (shadow copy {}): {error}",
+                path.display(),
+                load_path.display()
+            ));
         }
         // Go loader_unix.go: dlopen can start a Go c-shared runtime before init.
         // Never dlclose a mapped image, including on all subsequent failure paths.
