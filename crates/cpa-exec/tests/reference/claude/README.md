@@ -48,7 +48,7 @@ time zone and is recorded per scenario; the replay pins its clock to it.
 ## v8.0.27 goldens
 
 The Claude prompt-cache and prompt-shaping fixes this executor follows from v8.0.27
-(see `docs/parity-audit/upstream-v8.0.27.md`) have their own goldens, recorded from a
+(see `docs/parity-audit/upstream-v8.0.35.md`) have their own goldens, recorded from a
 v8.0.27 checkout (`bf93416`) the same way; everything else stays on `6fecc6e`.
 
 - `../../../src/claude/testdata/go_executor_v8.0.27.json`: this generator on
@@ -99,4 +99,3 @@ payload rules to the end of the pipeline (`868e137`), which is not ported yet. O
 them, `TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate`, also
 checks the date a probe keeps when a payload rule makes it an ordinary request;
 `claude::tests::declassified_probes_keep_their_own_date` checks that date instead.
-

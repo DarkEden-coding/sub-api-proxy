@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerates docs/parity-audit/status.md and the summary table in docs/PARITY.md from the
+"""Regenerates docs/parity-audit/status.md and the summaries in docs/PARITY.md and README.md from the
 checklist (checklist.md), a scan of this repository, the route probe (probe.py,
 routes.json) and the manual judgments in manual.tsv.
 
@@ -23,6 +23,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -200,6 +201,16 @@ def test_texts():
             steps = (s for sc in json.loads(text)["scenarios"] for s in sc.get("steps", []))
             out[rel] = "\n".join(f'{s["method"]} "/v0/management{s["path"]}"' for s in steps if "path" in s)
             continue
+        if rel.endswith("cpa-server/tests/fixtures/plugin_routes_go.json"):
+            # plugin_routes.rs replays every HTTP step, including v0/v8 aliases.
+            steps = json.loads(text)["steps"]
+            out[rel] = "\n".join(f'{s["args"]["method"]} "{s["args"]["path"]}"'
+                                  for s in steps if s["op"] == "http")
+            continue
+        if rel.endswith("cpa-server/tests/fixtures/media_go.json"):
+            # media_go.rs requests each scenario's path and compares its response.
+            out[rel] = "\n".join(f'{s["method"]} "{s["path"]}"' for s in json.loads(text)["scenarios"])
+            continue
         if not rel.endswith(".rs"):
             continue
         if "/tests/" in rel or rel.endswith("_tests.rs"):
@@ -230,11 +241,9 @@ def judge_route(item, routes, tests):
     return ("partial", f"probe: {key} -> {hit['status']}; no test requests this path")
 
 
-# Provider families with no executor in Rust: their keys are accepted and never used.
-NO_EXECUTOR = {"aistudio": "google"}
 FAMILY_OWNER = {"claude": "claude", "codex": "codex", "gemini": "google", "interactions": "google",
                 "meta": "device-providers", "kimi": "device-providers", "openai-compatibility": "openai-xai",
-                **NO_EXECUTOR, "antigravity": "google", "vertex": "google", "xai": "openai-xai",
+                "aistudio": "google", "antigravity": "google", "vertex": "google", "xai": "openai-xai",
                 "devin": "device-providers"}
 SECTION_OWNER = [("management.", "manage"), ("config-version", "manage"), ("plugins.", "plugins"),
                  ("server.discovery", "tui"), ("credentials.", "home"),
@@ -313,8 +322,6 @@ def judge_config(item, sources):
     key = m.group(1)
     family = config_family(key)
     owner = config_owner(key)
-    if family in NO_EXECUTOR:
-        return ("missing", f"no {family} executor in crates/cpa-exec", owner, "")
     leaf = key.replace("[]", "").split(".")[-1]
     if "{" in leaf:
         leaf = key.replace("[]", "").split(".")[-2].strip("{}")
@@ -379,13 +386,14 @@ def main():
         counts[r["ms"]][r["status"]] += 1
     for ms in sorted(counts):
         print(ms, dict(counts[ms]))
-    render([r for r in rows if r["ms"] in AUDITED])
+    if not only:
+        render([r for r in rows if r["ms"] in AUDITED])
 
 
 # Milestones whose rows have been reviewed by hand; the others are not rendered yet.
 AUDITED = ["M1", "M2", "M3", "M4", "M5", "M6"]
 # What the audited tree is called in the rendered pages: a release or a date.
-BASE = "2026-10-13"
+BASE = "2026-10-20 (v0.2.6, d1261f2)"
 
 
 def title(r):
@@ -472,7 +480,7 @@ def render(rows):
 
 
 def summary(rows):
-    """Rewrites the table between the parity-summary markers in docs/PARITY.md."""
+    """Rewrites the PARITY.md table and README sentence from the same totals."""
     lines = [f"Audit of {BASE}.", "", "| Milestone | Items | Covered | Partial | Missing |", "|---|---:|---:|---:|---:|"]
     total = defaultdict(int)
     for ms in AUDITED:
@@ -485,12 +493,21 @@ def summary(rows):
             total[k] += v
         lines.append(f"| {ms} | {c['all']} | {c['covered']} | {c['partial']} | {c['missing']} |")
     lines.append(f"| All | {total['all']} | {total['covered']} | {total['partial']} | {total['missing']} |")
-    path = os.path.join(ROOT, "docs", "PARITY.md")
-    page = open(path, encoding="utf-8").read()
+    path = Path(ROOT) / "docs" / "PARITY.md"
+    page = path.read_text(encoding="utf-8")
     start, end = "<!-- parity-summary:start -->", "<!-- parity-summary:end -->"
     head, rest = page.split(start, 1)
     tail = rest.split(end, 1)[1]
-    open(path, "w", encoding="utf-8").write(head + start + "\n" + "\n".join(lines) + "\n" + end + tail)
+    path.write_text(head + start + "\n" + "\n".join(lines) + "\n" + end + tail, encoding="utf-8")
+    path = Path(ROOT) / "README.md"
+    page = path.read_text(encoding="utf-8")
+    sentence = (f"Parity is incomplete: the audit has {total['all']:,} items, with "
+                f"{total['covered']:,} covered, {total['partial']:,} partial and {total['missing']:,} missing.")
+    page, replaced = re.subn(r"Parity is incomplete: the audit has [\d,]+ items, with "
+                            r"[\d,]+ covered, [\d,]+ partial and [\d,]+ missing\.", sentence, page)
+    if replaced != 1:
+        raise ValueError("README.md must contain exactly one parity summary sentence")
+    path.write_text(page, encoding="utf-8")
 
 
 if __name__ == "__main__":
