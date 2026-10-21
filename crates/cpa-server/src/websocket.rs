@@ -49,7 +49,6 @@ use tokio::sync::{mpsc, watch};
 
 use crate::registry::provider_key;
 use crate::runtime::Runtime;
-use crate::scheduler::canonical_model;
 use crate::websocket_requests::{
     self as requests, APPEND, CREATE, Turn, WsError, delete, error_payload, field, payloads_from_chunk,
 };
@@ -785,7 +784,11 @@ impl Connection {
     fn providers(&self, model: &str) -> (Vec<String>, String) {
         let registry = self.rt.registry();
         let resolved = resolve_auto(&self.rt, &registry, model);
-        let key = canonical_model(&resolved).to_owned();
+        // Go trims the base after splitting off the suffix: `gpt-5(high) ` has no suffix.
+        let key = cpa_common::thinking::parse_suffix(&resolved)
+            .model_name
+            .trim()
+            .to_owned();
         let mut providers = registry.providers(&key);
         if providers.is_empty() && key != resolved {
             providers = registry.providers(&resolved);
@@ -843,15 +846,20 @@ impl Connection {
     }
 
     /// `responsesWebsocketPinnedAuthMatchesModel`. A Home credential (`home` holds the
-    /// model key it was pinned for) is in no local registry or scheduler: it matches
-    /// while enabled and pinned for the same model key.
+    /// model key it was pinned for) is in no local registry or scheduler: its snapshot
+    /// decides availability, and it matches while pinned for the same model key.
+    /// ponytail: provider membership reads `provider_key`, which honours a `provider_key`
+    /// attribute; Go lower-cases `auth.Provider`. They agree for Codex and xAI snapshots.
     fn pin_matches(&self, credential: &Credential, model: &str, home: Option<&str>) -> bool {
         let (providers, key) = self.providers(model);
         if !providers.contains(&provider_key(credential)) {
             return false;
         }
         match home {
-            Some(pinned_key) => !credential.disabled && pinned_key.trim().go_eq_fold(key.trim()),
+            Some(pinned_key) => {
+                crate::remote::available_for_model(credential, &key, SystemTime::now())
+                    && pinned_key.trim().go_eq_fold(key.trim())
+            }
             None => self.usable(credential, &key) && self.rt.registry().client_supports(&credential.id, &key),
         }
     }

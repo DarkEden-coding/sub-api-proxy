@@ -658,8 +658,21 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
     for key in [
         cpa_server::remote::MODEL_INFO,
         cpa_core::config::credentials::HOME_MODEL_OPTIONS,
+        cpa_server::remote::AVAILABILITY,
     ] {
         credential.attributes.remove(key);
+    }
+    // The snapshot's runtime state, which Go keeps on the auth and the Responses
+    // WebSocket pin check reads (`responsesWebsocketAuthAvailableForModel`).
+    let availability: serde_json::Map<String, Value> = ["status", "unavailable", "next_retry_after", "model_states"]
+        .into_iter()
+        .filter_map(|key| auth.get(key).map(|value| (key.to_owned(), value.clone())))
+        .collect();
+    if !availability.is_empty() {
+        credential.attributes.insert(
+            cpa_server::remote::AVAILABILITY.into(),
+            Value::Object(availability).to_string(),
+        );
     }
     let info = response.model_info.as_ref().filter(|info| {
         info.get("id")
@@ -3011,30 +3024,31 @@ mod tests {
         (base, counts)
     }
 
-    /// Go `bindExecutionLifecycle` and `retainedHomeSessionSelection`: a Responses
-    /// WebSocket turn on a Home Codex key with upstream WebSockets leaves its pick with
-    /// the pooled socket. The pick outlives the response, the next turn runs on it
-    /// without another pick (natively, as a continuation), and Home draining it closes the
-    /// socket before the release.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pooled_codex_socket_keeps_its_home_pick() {
-        use futures_util::StreamExt;
-        use wreq::ws::message::Message;
-        let (upstream, counts) = responses_ws_upstream().await;
-        let pick = |id: &str| {
-            format!(
-                r#"{{"model":"gpt-5-codex","auth_index":"{id}","concurrency":{{"accounted":true,"credential_id":"{id}","model":"gpt-5-codex"}},"auth":{{"id":"{id}","provider":"codex","attributes":{{"api_key":"sk-fake-{id}","base_url":"{upstream}","websockets":"true"}}}}}}"#
-            )
-        };
-        let home = scripted(
-            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s",
-            vec![pick("cred-ws"), pick("cred-spare")],
+    const CODEX_TURN: &str =
+        r#"{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+    /// Continues upstream state: only a native passthrough on the pinned credential's
+    /// socket serves it; otherwise the client must replay over HTTP (1012).
+    const CODEX_CONTINUATION: &str = r#"{"type":"response.create","model":"gpt-5-codex","previous_response_id":"r1","input":[{"type":"message","role":"user","content":"more"}]}"#;
+
+    /// A Home Codex pick for `gpt-5-codex` on the Responses WebSocket upstream; `state`
+    /// adds runtime-state fields to the auth.
+    fn codex_ws_pick(id: &str, upstream: &str, state: &str) -> String {
+        format!(
+            r#"{{"model":"gpt-5-codex","auth_index":"{id}","concurrency":{{"accounted":true,"credential_id":"{id}","model":"gpt-5-codex"}},"auth":{{"id":"{id}","provider":"codex"{state},"attributes":{{"api_key":"sk-fake-{id}","base_url":"{upstream}","websockets":"true"}}}}}}"#
         )
-        .await;
-        // A local Codex key (Go synthesizes one from a key in Home's config) puts the model
-        // in the registry, so the session keeps its pin on the Home credential (Go
-        // `responsesWebsocketPinnedAuthMatchesModel` with a Home runtime auth).
-        let keys = overlay(b"codex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n", None).unwrap();
+    }
+
+    /// A Home node whose registry knows `gpt-5-codex` for Codex through a local key (Go
+    /// synthesizes one from a key in Home's config), so a Responses WebSocket session
+    /// can keep its pin on a Home credential (Go `responsesWebsocketPinnedAuthMatchesModel`
+    /// with a Home runtime auth). Without the model in the registry Go and cliproxy-rs
+    /// both drop the pin.
+    async fn codex_ws_node(home: &FakeHome) -> (String, Arc<Runtime>, CancellationToken, tokio::task::JoinHandle<()>) {
+        let keys = overlay(
+            b"codex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n",
+            None,
+        )
+        .unwrap();
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
             codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
@@ -3043,12 +3057,16 @@ mod tests {
             google: Default::default(),
         };
         let local = cpa_core::config::credentials::from_config(&keys);
-        let (base, rt, shutdown, task) = node_full(&home, executors, local).await;
+        let (base, rt, shutdown, task) = node_full(home, executors, local).await;
         eventually("dispatch published", || {
             rt.remote_dispatch().is_some_and(|d| d.available())
         })
         .await;
-        let mut socket = wreq::Client::new()
+        (base, rt, shutdown, task)
+    }
+
+    async fn ws_connect(base: &str) -> wreq::ws::WebSocket {
+        wreq::Client::new()
             .websocket(format!("ws{}/v1/responses", base.trim_start_matches("http")))
             .header("authorization", "Bearer client-key")
             .send()
@@ -3056,28 +3074,148 @@ mod tests {
             .unwrap()
             .into_websocket()
             .await
-            .unwrap();
-        let turn = r#"{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
-        // Go `GetExecutionSessionAuthByID`: the kept Home auth stays the session's pin, so
-        // a continuation of upstream state passes through natively on it instead of
-        // asking the client to replay over HTTP.
-        let continuation = r#"{"type":"response.create","model":"gpt-5-codex","previous_response_id":"r1","input":[{"type":"message","role":"user","content":"more"}]}"#;
-        for round in 0..2 {
-            socket
-                .send(Message::text(if round == 0 { turn } else { continuation }))
+            .unwrap()
+    }
+
+    /// Sends one turn and reads to its `response.completed`; any other end is the error.
+    async fn ws_turn(socket: &mut wreq::ws::WebSocket, frame: &str) -> Result<(), String> {
+        use futures_util::StreamExt;
+        use wreq::ws::message::Message;
+        socket.send(Message::text(frame)).await.map_err(|e| e.to_string())?;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
                 .await
-                .unwrap();
-            loop {
-                let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                    .await
-                    .expect("turn completes");
-                let Some(Ok(Message::Text(text))) = next else {
-                    panic!("turn {round}: {next:?}");
-                };
-                if text.as_str().contains("response.completed") {
-                    break;
+                .map_err(|_| "no answer".to_owned())?;
+            match next {
+                Some(Ok(Message::Text(text))) if text.as_str().contains("response.completed") => return Ok(()),
+                Some(Ok(Message::Text(_))) => {}
+                other => return Err(format!("{other:?}")),
+            }
+        }
+    }
+
+    /// Go `responsesWebsocketAuthAvailableForModel` on a kept Home auth: a snapshot that
+    /// is disabled by status, cooling for the model, or cooling as a whole drops the
+    /// pin, so the continuation must replay over HTTP; a cooldown already over keeps it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kept_home_pin_follows_its_snapshot_availability() {
+        let (upstream, _) = responses_ws_upstream().await;
+        let cases = [
+            (r#","status":"disabled""#, false),
+            (
+                r#","model_states":{"gpt-5-codex":{"unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z"}}"#,
+                false,
+            ),
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z""#,
+                false,
+            ),
+            (r#","unavailable":true,"next_retry_after":"2001-01-01T00:00:00Z""#, true),
+            // The model's own state decides over the auth-wide one.
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z","model_states":{"gpt-5-codex":{"status":"active"}}"#,
+                true,
+            ),
+        ];
+        for (state, native) in cases {
+            let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, state)]).await;
+            let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+            let mut socket = ws_connect(&base).await;
+            ws_turn(&mut socket, CODEX_TURN)
+                .await
+                .unwrap_or_else(|e| panic!("{state}: {e}"));
+            match ws_turn(&mut socket, CODEX_CONTINUATION).await {
+                Ok(()) => assert!(native, "{state}: the pin was kept"),
+                Err(close) => {
+                    assert!(!native, "{state}: {close}");
+                    assert!(
+                        close.contains("1012") && close.contains("upstream requires HTTP replay"),
+                        "{state}: {close}"
+                    );
                 }
             }
+            assert_eq!(rpops(&home).len(), 1, "{state}");
+            drop(socket);
+            shutdown.cancel();
+            task.await.unwrap();
+        }
+    }
+
+    /// Go `responsesWebsocketProviderSetForModel` trims the base after splitting off the
+    /// thinking suffix, so `gpt-5-codex(high) ` (trailing space) has no suffix, no
+    /// provider and keeps no pin: its continuation must replay over HTTP.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_model_with_a_spaced_suffix_keeps_no_home_pin() {
+        let (upstream, _) = responses_ws_upstream().await;
+        let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, "")]).await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        let spaced = |frame: &str| frame.replace(r#""gpt-5-codex""#, r#""gpt-5-codex(high) ""#);
+        ws_turn(&mut socket, &spaced(CODEX_TURN)).await.unwrap();
+        let close = ws_turn(&mut socket, &spaced(CODEX_CONTINUATION)).await.unwrap_err();
+        assert!(close.contains("upstream requires HTTP replay"), "{close}");
+        drop(socket);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    /// Go `forgetHomeRuntimeAuth` when a selection ends: after a turn on another provider
+    /// ended the kept Codex pick, a turn back on the Codex model asks Home afresh instead
+    /// of pinning the forgotten credential.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_back_after_a_provider_switch_does_not_pin_the_ended_pick() {
+        let (upstream, counts) = responses_ws_upstream().await;
+        let contract = ContractUpstream::start(vec![]).await;
+        let home = scripted(
+            "port: 0\n",
+            vec![
+                codex_ws_pick("cred-a", &upstream, ""),
+                contract_pick("cred-b", &contract.base, None, &Value::Null),
+                codex_ws_pick("cred-c", &upstream, ""),
+            ],
+        )
+        .await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        let other =
+            r#"{"type":"response.create","model":"gpt","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+        ws_turn(&mut socket, other).await.unwrap();
+        eventually("the switch ended the kept pick", || {
+            releases(&home).iter().any(|f| f["credential_id"] == "cred-a")
+        })
+        .await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        let picks = rpops(&home);
+        assert_eq!(picks.len(), 3, "{picks:?}");
+        assert!(picks[2].get("pinned_auth_id").is_none(), "{:?}", picks[2]);
+        assert_eq!(contract.calls(), ["cred-b"]);
+        assert_eq!(counts.lock().unwrap().0, 2, "a new socket for cred-c");
+        drop(socket);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    /// Go `bindExecutionLifecycle` and `retainedHomeSessionSelection`: a Responses
+    /// WebSocket turn on a Home Codex key with upstream WebSockets leaves its pick with
+    /// the pooled socket. The pick outlives the response, the next turn runs on it
+    /// without another pick (natively, as a continuation), and Home draining it closes the
+    /// socket before the release.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pooled_codex_socket_keeps_its_home_pick() {
+        let (upstream, counts) = responses_ws_upstream().await;
+        let pick = |id: &str| codex_ws_pick(id, &upstream, "");
+        let home = scripted(
+            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\n",
+            vec![pick("cred-ws"), pick("cred-spare")],
+        )
+        .await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        for (round, frame) in [CODEX_TURN, CODEX_CONTINUATION].into_iter().enumerate() {
+            ws_turn(&mut socket, frame)
+                .await
+                .unwrap_or_else(|e| panic!("turn {round}: {e}"));
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(releases(&home).is_empty(), "turn {round}: the socket keeps the pick");
         }
@@ -4934,11 +5072,11 @@ mod tests {
     }
 
     /// Go `TestPickNextViaHomeClassifiesTransportErrorsAsHomeUnavailable`,
-    /// `TestPickNextViaHomeAbortsBeforeEndingPendingDispatch`,
     /// `TestPickNextViaHomeDoesNotAbortDeterministicDispatchFailure` and
     /// `TestPickNextViaHomeAbortsAmbiguousTransport`: a failed RPOP is `home_unavailable`
-    /// (503). Only a connection lost after the command was sent fences the client, which
-    /// happens inside the RPOP, before the pending dispatch ends; the registry then drains.
+    /// (503). Only a connection lost after the command was sent fences the client; the
+    /// pending dispatch ends and the registry drains. (The client fences inside the RPOP,
+    /// so before the pending dispatch ends, as Go's abort-first ordering requires.)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_rpops_are_home_unavailable_and_fence_only_when_ambiguous() {
         for (reply, fenced) in [

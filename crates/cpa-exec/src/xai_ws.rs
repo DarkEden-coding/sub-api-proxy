@@ -431,9 +431,10 @@ impl Ids<'_> {
 
 // --- request and frame helpers ----------------------------------------------------------
 
-/// `xaiWebsocketsEnabled`: the `websockets` attribute when it parses, else the metadata
-/// value (a bool, or a string that parses).
-pub(crate) fn websockets_enabled(credential: &Credential) -> bool {
+/// `xaiWebsocketsEnabled` (and Go's identical `authWebsocketsEnabled`): the
+/// `websockets` attribute when it parses, else the metadata value (a bool, or a string
+/// that parses).
+pub fn websockets_enabled(credential: &Credential) -> bool {
     if let Some(parsed) = credential
         .attributes
         .get("websockets")

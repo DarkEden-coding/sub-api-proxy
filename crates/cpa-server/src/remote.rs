@@ -32,6 +32,59 @@ pub const MODEL_INFO: &str = "home_model_info";
 pub const SESSION: &str = "home_session_id";
 /// Its parent (Go `HomeDispatchSelection.ParentSessionID`).
 pub const PARENT_SESSION: &str = "home_parent_session_id";
+/// The dispatched auth's runtime availability as Home sent it: a JSON object with Go's
+/// `status`, `unavailable`, `next_retry_after` and `model_states` fields, those present.
+pub const AVAILABILITY: &str = "home_availability";
+
+/// Go `responsesWebsocketAuthAvailableForModel` on a dispatched auth's snapshot:
+/// enabled (`disabled` and `status`), then the model's state when the snapshot has one
+/// (its status and cooldown decide), else the auth-wide cooldown. A cooldown counts only
+/// while its retry time is set and in the future.
+pub fn available_for_model(credential: &Credential, model: &str, now: std::time::SystemTime) -> bool {
+    use serde_json::Value;
+    if credential.disabled {
+        return false;
+    }
+    let snapshot: serde_json::Map<String, Value> = credential
+        .attributes
+        .get(AVAILABILITY)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let disabled =
+        |state: &serde_json::Map<String, Value>| state.get("status").and_then(Value::as_str) == Some("disabled");
+    let cooling = |state: &serde_json::Map<String, Value>| {
+        state.get("unavailable").and_then(Value::as_bool) == Some(true)
+            && state
+                .get("next_retry_after")
+                .and_then(Value::as_str)
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(std::time::SystemTime::from)
+                // Go's zero time is year 1, long before the epoch.
+                .is_some_and(|at| at > now)
+    };
+    if disabled(&snapshot) {
+        return false;
+    }
+    let states = snapshot.get("model_states").and_then(Value::as_object);
+    if !model.is_empty()
+        && let Some(states) = states.filter(|states| !states.is_empty())
+    {
+        let base = cpa_common::thinking::parse_suffix(model).model_name;
+        let state = states
+            .get(model)
+            .filter(|state| !state.is_null())
+            .or_else(|| {
+                Some(base.trim())
+                    .filter(|b| !b.is_empty() && *b != model)
+                    .and_then(|b| states.get(b))
+            })
+            .and_then(Value::as_object);
+        if let Some(state) = state {
+            return !disabled(state) && !cooling(state);
+        }
+    }
+    !cooling(&snapshot)
+}
 
 /// Go `HomeDispatchSelection.Provider`: the dispatched auth's provider, lower-cased.
 pub fn selection_provider(credential: &Credential) -> String {

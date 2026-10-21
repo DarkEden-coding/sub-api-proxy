@@ -33,6 +33,8 @@ struct State {
     lease: Option<Lease>,
     /// Closes the pick when Home drains its lease.
     watcher: Option<tokio::task::AbortHandle>,
+    /// Forgets the session's view of the credential when the pick ends.
+    forget: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Retainable for Pick {
@@ -47,14 +49,17 @@ impl Retainable for Pick {
     }
 
     fn end(&self) {
-        let (lease, watcher) = {
+        let (lease, watcher, forget) = {
             let mut state = self.state();
             state.ended = true;
             state.close = None;
-            (state.lease.take(), state.watcher.take())
+            (state.lease.take(), state.watcher.take(), state.forget.take())
         };
         if let Some(watcher) = watcher {
             watcher.abort();
+        }
+        if let Some(forget) = forget {
+            forget();
         }
         drop(lease);
     }
@@ -94,13 +99,21 @@ impl Pick {
     /// Go `End` from the request side: closes the retaining socket, then releases the
     /// lease. Idempotent.
     pub(crate) fn close(&self) {
-        let (close, lease, watcher) = {
+        let (close, lease, watcher, forget) = {
             let mut state = self.state();
             state.ended = true;
-            (state.close.take(), state.lease.take(), state.watcher.take())
+            (
+                state.close.take(),
+                state.lease.take(),
+                state.watcher.take(),
+                state.forget.take(),
+            )
         };
         if let Some(close) = close {
             close();
+        }
+        if let Some(forget) = forget {
+            forget();
         }
         drop(lease);
         if let Some(watcher) = watcher {
@@ -179,11 +192,15 @@ pub struct SessionHome {
     kept: Mutex<Option<Kept>>,
     /// Home's request-retry limit with the session's latest fresh pick.
     granted_retry: Mutex<Option<i64>>,
-    /// Every Home credential a pooled socket kept for this session, by ID (Go
-    /// `homeRuntimeAuths` for one session): the turn loop's view of its pin, which the
-    /// local store does not hold. Kept until the connection ends.
-    auths: Mutex<HashMap<String, Arc<Credential>>>,
+    /// The Home credentials this session's kept picks hold, by ID, each with the pick
+    /// that owns the entry (Go `homeRuntimeAuths` and `homeRuntimeAuthOwners` for one
+    /// session): the turn loop's view of its pin, which the local store does not hold.
+    /// An entry goes when its owning pick ends.
+    auths: Mutex<HashMap<String, Remembered>>,
 }
+
+/// A remembered credential and the pick that owns the entry.
+type Remembered = (Weak<Pick>, Arc<Credential>);
 
 impl SessionHome {
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Kept>> {
@@ -198,13 +215,13 @@ impl SessionHome {
 
     /// Go `retainHomeWebsocketSelection`: a pick kept for a previous turn ends
     /// (`target_replaced`).
-    /// The session remembers the credential (Go `rememberHomeRuntimeAuth`).
-    pub(crate) fn keep(&self, pick: Arc<Pick>, credential: &Arc<Credential>, route: &str, user_key: String) {
+    /// The session remembers a credential with WebSockets enabled until this pick ends
+    /// (Go `bindHomeSelectionRuntimeAuth`).
+    pub(crate) fn keep(self: &Arc<Self>, pick: Arc<Pick>, credential: &Arc<Credential>, route: &str, user_key: String) {
         let request_retry = *self.granted_retry.lock().unwrap_or_else(PoisonError::into_inner);
-        self.auths
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(credential.id.clone(), credential.clone());
+        if cpa_exec::websockets_enabled(credential) {
+            self.remember(&pick, credential);
+        }
         let previous = self.slot().replace(Kept {
             pick,
             credential: credential.id.clone(),
@@ -274,13 +291,40 @@ impl SessionHome {
         }
     }
 
-    /// Go `GetExecutionSessionAuthByID`: a Home credential this session kept.
+    fn remember(self: &Arc<Self>, pick: &Arc<Pick>, credential: &Arc<Credential>) {
+        let id = credential.id.clone();
+        let owner = Arc::downgrade(pick);
+        self.auths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.clone(), (owner.clone(), credential.clone()));
+        // Go `forgetHomeRuntimeAuth`: only while this pick still owns the entry, so an
+        // ended pick never erases a newer pick's credential with the same ID.
+        let session = Arc::downgrade(self);
+        let forget = move || {
+            if let Some(session) = session.upgrade() {
+                let mut auths = session.auths.lock().unwrap_or_else(PoisonError::into_inner);
+                if auths.get(&id).is_some_and(|(current, _)| current.ptr_eq(&owner)) {
+                    auths.remove(&id);
+                }
+            }
+        };
+        let mut state = pick.state();
+        if state.ended {
+            drop(state);
+            forget();
+        } else {
+            state.forget = Some(Box::new(forget));
+        }
+    }
+
+    /// Go `GetExecutionSessionAuthByID`: a Home credential a live kept pick holds.
     pub(crate) fn auth(&self, id: &str) -> Option<Arc<Credential>> {
         self.auths
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(id)
-            .cloned()
+            .map(|(_, credential)| credential.clone())
     }
 
     /// The downstream connection ended (Go `CloseExecutionSession`).
@@ -295,41 +339,156 @@ impl SessionHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::{ModelsError, RemoteDispatch, RemoteError, RemoteGrant, RemoteRequest};
+    use futures_util::future::BoxFuture;
 
-    /// Go `TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthWithoutSelection`,
-    /// `TestPickNextViaHomeRejectsSessionScopedAuthCache` and
-    /// `TestCloseExecutionSessionClearsHomeRuntimeAuthForSession`: a remembered Home
-    /// credential stays visible to its session's turn loop after its pick ended, but no
-    /// turn runs on it without a live pick; closing one session forgets only its own.
-    /// Dispatch never reads the view, so a tried, excluded, non-first or non-WebSocket
-    /// pin cannot select it either (`TestPickNextViaHomeDoesNotReuseTriedPinnedWebsocketAuth`,
-    /// `TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthAfterFirstHomeAttempt`,
-    /// `TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth`).
-    #[test]
-    fn a_remembered_home_credential_is_a_view_not_a_selection() {
-        let credential = Arc::new(Credential::relay_session("home-auth-1"));
-        let (one, two) = (SessionHome::default(), SessionHome::default());
-        for session in [&one, &two] {
-            session.keep(Arc::default(), &credential, "gpt-5", String::new());
+    /// Grants one credential on every pick.
+    struct Grant(Credential);
+
+    impl RemoteDispatch for Grant {
+        fn available(&self) -> bool {
+            true
         }
-        let releases = crate::remote::PendingReleases::default();
-        let tried = ["home-auth-1".to_owned()];
-        for (first_pick, excluded) in [(true, &[][..]), (true, &tried[..]), (false, &[][..])] {
+
+        fn dispatch(&self, _: RemoteRequest) -> BoxFuture<'_, Result<RemoteGrant, RemoteError>> {
+            let credential = self.0.clone();
+            Box::pin(async move {
+                Ok(RemoteGrant {
+                    credential,
+                    end: Box::new(|| None),
+                    cancel: None,
+                    request_retry: None,
+                    user_api_key: String::new(),
+                })
+            })
+        }
+
+        fn models(
+            &self,
+            _: Vec<(String, String)>,
+            _: Vec<(String, String)>,
+        ) -> BoxFuture<'_, Result<Vec<u8>, ModelsError>> {
+            Box::pin(async { Err(ModelsError::Unavailable) })
+        }
+    }
+
+    fn home_credential(id: &str, websockets: &str) -> Credential {
+        let mut credential = Credential::relay_session(id);
+        credential.attributes.insert("websockets".into(), websockets.into());
+        credential
+    }
+
+    struct Fixture {
+        rt: crate::runtime::Runtime,
+        releases: crate::remote::PendingReleases,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let executors = cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            };
+            Self {
+                rt: crate::testing::runtime(Default::default(), Vec::new(), executors),
+                releases: Default::default(),
+            }
+        }
+
+        /// A successful turn on `credential` for route `gpt-5` whose socket retained its
+        /// pick, which the session keeps.
+        async fn keep(&self, home: &Arc<SessionHome>, credential: Credential) -> Arc<Pick> {
+            let selection = crate::runtime::Selection {
+                model: "gpt-5".into(),
+                ..Default::default()
+            };
+            let (lease, _, _) = self
+                .rt
+                .acquire_remote(&Grant(credential), selection, RemoteRequest::default(), &self.releases)
+                .await
+                .unwrap();
+            let credential = lease.credential.clone();
+            let pick: Arc<Pick> = Arc::default();
+            assert!(pick.retain(Box::new(|| ())));
+            assert!(pick.keep(lease).is_none());
+            home.keep(pick.clone(), &credential, "gpt-5", String::new());
+            pick
+        }
+
+        fn reuse(&self, home: &SessionHome, first_pick: bool, route: &str, excluded: &[String]) -> bool {
+            home.reuse(first_pick, route, excluded, Some("home-a"), &self.releases)
+                .is_some()
+        }
+    }
+
+    /// Go `TestPickNextViaHomeDoesNotReuseTriedPinnedWebsocketAuth` and
+    /// `TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthAfterFirstHomeAttempt`: a live
+    /// kept pick serves only the first pick of the first round, for the same route, of
+    /// a credential not tried yet. Any other pick ends it, and the session forgets its
+    /// credential (Go `forgetHomeRuntimeAuth` from the selection's end), so a later
+    /// turn back on the route cannot pin it.
+    #[tokio::test]
+    async fn a_kept_pick_serves_only_a_first_untried_pick_and_takes_its_credential_along() {
+        let fixture = Fixture::new();
+        let home = Arc::new(SessionHome::default());
+        let tried = ["home-a".to_owned()];
+        for (first_pick, route, excluded) in [
+            (false, "gpt-5", &[][..]),
+            (true, "gpt-5", &tried[..]),
+            (true, "claude-x", &[][..]),
+        ] {
+            fixture.keep(&home, home_credential("home-a", "true")).await;
+            assert!(home.auth("home-a").is_some());
             assert!(
-                one.reuse(first_pick, "gpt-5", excluded, Some("home-auth-1"), &releases)
-                    .is_none()
+                !fixture.reuse(&home, first_pick, route, excluded),
+                "{first_pick} {route} {excluded:?}"
             );
-            one.keep(Arc::default(), &credential, "gpt-5", String::new());
+            assert!(home.auth("home-a").is_none(), "{first_pick} {route} {excluded:?}");
         }
-        assert_eq!(
-            one.auth("home-auth-1").map(|c| c.id.clone()).as_deref(),
-            Some("home-auth-1")
-        );
+        // The control: the same kept pick serves a fitting first pick and stays known.
+        fixture.keep(&home, home_credential("home-a", "true")).await;
+        assert!(fixture.reuse(&home, true, "gpt-5", &[]));
+        assert!(home.auth("home-a").is_some());
+    }
 
+    /// Go `bindHomeSelectionRuntimeAuth`, `forgetHomeRuntimeAuth`'s owner check,
+    /// `TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth` and
+    /// `TestCloseExecutionSessionClearsHomeRuntimeAuthForSession`: the session sees a
+    /// kept credential only while its pick lives, a replaced pick with the same ID does
+    /// not erase its successor's entry, a credential without WebSockets is never
+    /// remembered, and closing one session forgets only its own.
+    #[tokio::test]
+    async fn a_remembered_home_credential_lives_with_its_pick() {
+        let fixture = Fixture::new();
+        let (one, two) = (Arc::new(SessionHome::default()), Arc::new(SessionHome::default()));
+
+        let first = fixture.keep(&one, home_credential("home-a", "true")).await;
+        Retainable::end(first.as_ref());
+        assert!(one.auth("home-a").is_none(), "the socket's end forgets it");
+
+        let first = fixture.keep(&one, home_credential("home-a", "true")).await;
+        let second = fixture.keep(&one, home_credential("home-a", "true")).await;
+        assert!(first.state().ended, "target_replaced");
+        first.close();
+        assert!(
+            one.auth("home-a").is_some(),
+            "the old pick does not erase its successor"
+        );
+        second.close();
+        assert!(one.auth("home-a").is_none());
+
+        fixture.keep(&one, home_credential("home-b", "false")).await;
+        assert!(one.auth("home-b").is_none(), "no WebSockets, no view");
+
+        fixture.keep(&one, home_credential("home-a", "true")).await;
+        fixture.keep(&two, home_credential("home-a", "true")).await;
         one.close();
-        assert!(one.auth("home-auth-1").is_none());
-        assert!(two.auth("home-auth-1").is_some(), "another session keeps its own");
+        assert!(one.auth("home-a").is_none());
+        assert!(two.auth("home-a").is_some(), "another session keeps its own");
         two.close();
-        assert!(two.auth("home-auth-1").is_none());
+        assert!(two.auth("home-a").is_none());
     }
 }
