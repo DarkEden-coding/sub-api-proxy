@@ -14,6 +14,7 @@
 //! applied. While nothing changes it does no work and sets no timer. As in Go, changes
 //! made by another machine on a network or FUSE file system raise no event and are seen
 //! with the next local change.
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -113,7 +114,7 @@ impl HashCache {
 fn is_auth_json(path: &Path) -> bool {
     // Go matches the extension case-insensitively when scanning.
     path.file_name()
-        .is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".json"))
+        .is_some_and(|n| n.to_string_lossy().go_lower().ends_with(".json"))
 }
 
 fn observe(state: &Management, cache: &mut HashCache) -> Snapshot {

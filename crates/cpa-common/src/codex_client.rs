@@ -13,6 +13,7 @@
 //!
 //! Edits go through [`crate::json`], so untouched bytes stay as the client sent them.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{HashMap, HashSet};
 
 use cpa_core::config::Config;
@@ -513,7 +514,7 @@ fn catalog_int(model: &Res<'_>, key: &str) -> i64 {
 }
 
 fn normalize_effort(effort: &str) -> String {
-    let effort = effort.trim().to_lowercase();
+    let effort = effort.trim().go_lower();
     match effort.as_str() {
         "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => effort,
         _ => String::new(),
@@ -621,8 +622,8 @@ fn spawn_models(available: &[AvailableModel], lookup: &dyn Fn(&str) -> Option<Mo
     from_catalog.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
     synthesized.sort_by(|a, b| {
         a.display_name
-            .to_lowercase()
-            .cmp(&b.display_name.to_lowercase())
+            .go_lower()
+            .cmp(&b.display_name.go_lower())
             .then_with(|| a.id.cmp(&b.id))
     });
     from_catalog.extend(synthesized);

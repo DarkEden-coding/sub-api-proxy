@@ -2,6 +2,7 @@
 //! (codex_executor_terminal.go, codex_websockets_errors.go), per-event SSE processing,
 //! bootstrap buffering, and buffered (non-streaming) assembly.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -885,7 +886,7 @@ impl Processor {
 /// `grokbuild.IsGrokClientHeaders`: any `User-Agent` value naming Grok Pager or Shell.
 pub(crate) fn is_grok_client(headers: &http::HeaderMap) -> bool {
     headers.get_all(http::header::USER_AGENT).iter().any(|v| {
-        let ua = String::from_utf8_lossy(v.as_bytes()).to_lowercase();
+        let ua = String::from_utf8_lossy(v.as_bytes()).go_lower();
         ua.contains("grok-pager") || ua.contains("grok-shell")
     })
 }

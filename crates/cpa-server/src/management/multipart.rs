@@ -5,6 +5,7 @@
 //! ponytail: no quoted-printable part decoding, no header count or size limits, and
 //! `%q` quoting is exact for ASCII only.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, HashMap};
 
 /// A file field of the form.
@@ -412,13 +413,13 @@ fn consume_media_param(v: &str) -> Option<(String, String, &str)> {
     if value.is_empty() && after.len() == rest.len() {
         return None;
     }
-    Some((param.to_lowercase(), value, after))
+    Some((param.go_lower(), value, after))
 }
 
 /// Go `mime.ParseMediaType`, including RFC 2231 continuations and charsets.
 pub(super) fn parse_media_type(v: &str) -> Result<(String, HashMap<String, String>), ()> {
     let base = v.split(';').next().unwrap_or_default();
-    let media = base.to_lowercase().trim().to_owned();
+    let media = base.go_lower().trim().to_owned();
     let (kind, rest) = consume_token(&media);
     if kind.is_empty() {
         return Err(());
@@ -488,7 +489,7 @@ pub(super) fn parse_media_type(v: &str) -> Result<(String, HashMap<String, Strin
 fn decode_2231(v: &str) -> Option<String> {
     let (charset, rest) = v.split_once('\'')?;
     let (_, value) = rest.split_once('\'')?;
-    match charset.to_lowercase().as_str() {
+    match charset.go_lower().as_str() {
         "us-ascii" | "utf-8" => percent_unescape(value),
         _ => None,
     }

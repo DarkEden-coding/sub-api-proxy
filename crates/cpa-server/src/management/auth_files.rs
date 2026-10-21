@@ -126,7 +126,7 @@ fn local(t: SystemTime) -> String {
 /// Go `quotaObservationPayloadForProvider`: the latest passive quota snapshot
 /// (`observed_at`, `signals`) for providers Go observes; empty signals otherwise.
 fn quota_observation(state: &Management, c: &Credential) -> Value {
-    let snapshot = match c.provider.trim().to_lowercase().as_str() {
+    let snapshot = match c.provider.trim().go_lower().as_str() {
         "codex" => state.rt.executors.codex.quota().snapshot(&c.id),
         "claude" => state.rt.executors.claude.quota().snapshot(&c.id),
         // Devin's credential snapshot comes from its status refresh.
@@ -142,7 +142,7 @@ fn quota_observation(state: &Management, c: &Credential) -> Value {
 /// Go `modelQuotaObservationPayload`: the latest snapshot per (canonical) model;
 /// empty for providers without observations.
 fn model_quota_observations(state: &Management, c: &Credential) -> Map<String, Value> {
-    match c.provider.trim().to_lowercase().as_str() {
+    match c.provider.trim().go_lower().as_str() {
         "codex" => state
             .rt
             .executors
@@ -245,7 +245,7 @@ fn unsafe_name(name: &str) -> bool {
 }
 
 fn ends_json(name: &str) -> bool {
-    name.to_lowercase().ends_with(".json")
+    name.go_lower().ends_with(".json")
 }
 
 // ---------------------------------------------------------------------------
@@ -780,7 +780,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
             .iter()
             .filter_map(|c| entry(&state, c, v8, &quota).map(|e| (list_name(c), entry_value(e))))
             .collect();
-        files.sort_by_key(|(n, _)| n.to_lowercase());
+        files.sort_by_key(|(n, _)| n.go_lower());
         return reply_ordered(
             StatusCode::OK,
             [
@@ -793,8 +793,8 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     matching.retain(|c| path_of(c).is_some_and(|p| p.exists() || !c.disabled) || (runtime_only(c) && !c.disabled));
     matching.sort_by(|a, b| {
         let (na, nb) = (list_name(a), list_name(b));
-        na.to_lowercase()
-            .cmp(&nb.to_lowercase())
+        na.go_lower()
+            .cmp(&nb.go_lower())
             .then_with(|| na.cmp(&nb))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -1161,7 +1161,7 @@ fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response
         };
         let mut deleted = 0;
         for entry in entries.flatten() {
-            let is_json = entry.file_name().to_string_lossy().to_lowercase().ends_with(".json");
+            let is_json = entry.file_name().to_string_lossy().go_lower().ends_with(".json");
             if entry.file_type().is_ok_and(|t| !t.is_dir()) && is_json && {
                 if v8 {
                     state.oauth.invalidate_siwc(&entry.path());

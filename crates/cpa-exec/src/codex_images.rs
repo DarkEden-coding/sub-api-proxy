@@ -8,6 +8,7 @@
 //! `response.completed` become an Images API response, or `<prefix>.partial_image` and
 //! `<prefix>.completed` SSE frames when streaming.
 
+use cpa_core::gostr::GoStr;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -398,7 +399,7 @@ fn image_base_model(model: &str) -> String {
     {
         base = base[i + 1..].trim();
     }
-    base.trim().to_lowercase()
+    base.trim().go_lower()
 }
 
 /// `codexDirectOpenAIImageEndpoint`.
@@ -414,7 +415,7 @@ fn direct_endpoint(path: &str) -> Option<&'static str> {
 
 /// `resolveGPTImage2BaseModel`.
 fn main_model(configured: &str) -> &str {
-    if !configured.is_empty() && configured.to_lowercase().starts_with("gpt-") {
+    if !configured.is_empty() && configured.go_lower().starts_with("gpt-") {
         configured
     } else {
         MAIN_MODEL
@@ -517,7 +518,7 @@ fn form_json_value(key: &str, value: &[u8]) -> String {
     let text = String::from_utf8_lossy(value);
     let text = text.trim();
     if matches!(
-        key.trim().to_lowercase().as_str(),
+        key.trim().go_lower().as_str(),
         "n" | "output_compression" | "partial_images"
     ) && let Ok(n) = go_parse_int(text)
     {
@@ -931,7 +932,7 @@ fn sse_frame(event: &str, data: &str) -> String {
 
 /// `codexMimeTypeFromOutputFormat`.
 fn mime_type(output_format: &str) -> &'static str {
-    match output_format.trim().to_lowercase().as_str() {
+    match output_format.trim().go_lower().as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         _ => "image/png",

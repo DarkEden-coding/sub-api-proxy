@@ -17,6 +17,7 @@
 //! ponytail: no request-scoped proxy override (Go `RequestProxyURL` / `opts.ProxyURL`);
 //! ExecRequest carries none. Add a field to the execution envelope when a route needs it.
 
+use cpa_core::gostr::GoStr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -160,7 +161,7 @@ impl EnvProxy {
             .into();
         let mut all = false;
         for entry in any(["NO_PROXY", "no_proxy"]).unwrap_or_default().split(',') {
-            let entry = entry.trim().to_lowercase();
+            let entry = entry.trim().go_lower();
             if entry.is_empty() {
                 continue;
             }

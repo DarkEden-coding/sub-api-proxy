@@ -9,6 +9,7 @@
 use crate::apply_patch_responses::Bridge;
 use crate::{Error, Registered, RequestCtx, ResponseCtx, StreamTranslator, common, stream};
 use cpa_common::json::{self as gj, Kind};
+use cpa_core::gostr::GoStr;
 
 pub static PAIR: Registered = registered!(
     OpenAIResponse -> Codex,
@@ -44,7 +45,7 @@ pub(crate) fn convert(body: &[u8]) -> Vec<u8> {
     if tier.exists() {
         if tier.kind == Kind::String {
             let value = tier.bytes().into_owned();
-            match tier.str().trim().to_lowercase().as_str() {
+            match tier.str().trim().go_lower().as_str() {
                 "priority" | "fast" => {
                     if value != b"priority" {
                         gj::set_str(&mut raw, "service_tier", "priority");

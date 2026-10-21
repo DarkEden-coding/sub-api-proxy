@@ -7,6 +7,7 @@
 use chrono::{Local, TimeDelta};
 use cpa_core::config::Config;
 use cpa_core::exec::{ExecError, FailureScope};
+use cpa_core::gostr::GoStr;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use url::Url;
@@ -79,7 +80,7 @@ pub fn authorize_url(
         "" => REDIRECT_URI,
         r => r,
     };
-    let host = format!("urn:uuid:{}", device_id.to_lowercase());
+    let host = format!("urn:uuid:{}", device_id.go_lower());
     let mut url = Url::parse(AUTHORIZE_URL).expect("constant URL");
     url.query_pairs_mut().extend_pairs([
         ("agent_name_hint", identifier),

@@ -516,7 +516,7 @@ fn intersect(a: &[String], b: &[String]) -> Vec<String> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
-    let key = |s: &String| s.trim().to_lowercase();
+    let key = |s: &String| s.trim().go_lower();
     let b: HashSet<String> = b.iter().map(key).collect();
     let mut seen = HashSet::new();
     a.iter()
@@ -722,7 +722,7 @@ fn filter_modalities(modalities: &[String]) -> Vec<GoValue> {
     let mut seen = HashSet::new();
     modalities
         .iter()
-        .map(|m| m.trim().to_lowercase())
+        .map(|m| m.trim().go_lower())
         .filter(|m| (m == "text" || m == "image") && seen.insert(m.clone()))
         .map(GoValue::String)
         .collect()
@@ -814,7 +814,7 @@ fn sanitize_reasoning(entry: &mut Map, version: &str) {
 }
 
 fn normalize_level(raw: &str, version: &str) -> String {
-    let level = raw.trim().to_lowercase();
+    let level = raw.trim().go_lower();
     let allowed: &[&str] = if extended_levels(version) {
         &LEVELS
     } else {
@@ -881,7 +881,7 @@ fn apply_devin_display_name(entry: &mut Map, id: &str, model: &Map, registry: &d
     if trimmed.ends_with(" (Devin)") {
         return;
     }
-    let lower = trimmed.to_lowercase();
+    let lower = trimmed.go_lower();
     let renamed = if lower.ends_with(" (devin)") {
         format!("{} (Devin)", &trimmed[..trimmed.len() - " (devin)".len()])
     } else if lower.ends_with("(devin)") {
@@ -895,7 +895,7 @@ fn apply_devin_display_name(entry: &mut Map, id: &str, model: &Map, registry: &d
 /// `isCodexClientDevinModel`.
 fn is_devin(id: &str, model: &Map, entry: &Map, registry: &dyn Registry) -> bool {
     let devin_path = |s: &str| {
-        let s = s.trim().to_lowercase();
+        let s = s.trim().go_lower();
         s.starts_with("devin/") || s.find('/').is_some_and(|i| s[i + 1..].starts_with("devin/"))
     };
     let marked = |m: &Map| {
@@ -907,7 +907,7 @@ fn is_devin(id: &str, model: &Map, entry: &Map, registry: &dyn Registry) -> bool
     let devin_info = |info: &ModelFacts| {
         info.kind.eq_ignore_ascii_case("devin")
             || info.owned_by.eq_ignore_ascii_case("cognition")
-            || info.id.to_lowercase().starts_with("devin/")
+            || info.id.go_lower().starts_with("devin/")
     };
     match registry.lookup(id, None) {
         Some(info) => {
@@ -935,7 +935,7 @@ fn apply_patch_capability(entry: &mut Map, id: &str, capability: Option<&dyn Fn(
     let Some(capability) = capability else {
         return;
     };
-    let lower = id.trim().to_lowercase();
+    let lower = id.trim().go_lower();
     let base = lower.rfind('/').map_or(lower.as_str(), |i| lower[i + 1..].trim());
     if image_or_video(base) {
         return;
@@ -978,7 +978,7 @@ fn apply_non_template_priorities(result: &mut [Map], templates: &Templates, regi
             Some((index, display, slug))
         })
         .collect();
-    pending.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then_with(|| a.2.cmp(&b.2)));
+    pending.sort_by(|a, b| a.1.go_lower().cmp(&b.1.go_lower()).then_with(|| a.2.cmp(&b.2)));
     for (rank, (index, _, _)) in pending.into_iter().enumerate() {
         result[index].insert("priority".into(), number(base + 100 * (rank as i64 + 1)));
     }

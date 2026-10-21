@@ -2,6 +2,7 @@
 //! management caller's behalf, optionally with a credential's token substituted for
 //! `$TOKEN$` and through that credential's proxy.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -225,7 +226,7 @@ pub(crate) async fn api_call(
     let Some(mut req) = decode(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid body");
     };
-    let method = req.method.trim().to_uppercase();
+    let method = req.method.trim().go_upper();
     if method.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "missing method");
     }

@@ -16,6 +16,7 @@
 //! matcher, ported in cpa-server's `lcp` module); these fallbacks apply when that
 //! matcher has nothing to work with.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 
 use cpa_core::format::Format;
@@ -1387,7 +1388,7 @@ struct Part {
 /// Go `normalizedString`: a string value, trimmed and lowercased; empty otherwise.
 fn lower(v: Option<&GoValue>) -> String {
     match v {
-        Some(GoValue::String(s)) => s.trim().to_lowercase(),
+        Some(GoValue::String(s)) => s.trim().go_lower(),
         _ => String::new(),
     }
 }

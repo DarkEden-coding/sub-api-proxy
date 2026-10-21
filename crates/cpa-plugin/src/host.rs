@@ -8,6 +8,7 @@
 //! empties the snapshot but keeps libraries loaded, as Go does. A plugin whose host-side
 //! adapter panicked is fused: skipped until its file changes.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -947,7 +948,7 @@ fn quiesce_unsupported(e: &CallError) -> bool {
     ) {
         return true;
     }
-    let message = e.to_string().trim().to_lowercase();
+    let message = e.to_string().trim().go_lower();
     [
         "unknown method",
         "method not found",
