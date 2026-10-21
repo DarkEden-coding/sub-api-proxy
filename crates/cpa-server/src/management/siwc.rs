@@ -396,6 +396,7 @@ fn commit(state: &Management, sid: &str, flow: &Arc<Flow>, tokens: Option<Tokens
     }
     match write_binding(state, flow, &tokens) {
         Ok(()) => {
+            state.rt.store().recover_unauthorized(&flow.target_id);
             state.oauth.complete(sid);
             settled(state, sid);
         }
@@ -549,7 +550,11 @@ mod tests {
     /// A cancel that aborts the exchange task while its commit runs leaves the commit
     /// holding the preparation lock: an outer refresh cannot read the credential until
     /// the commit returns, so the binding never makes its rotated tokens stale.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    ///
+    /// Single-threaded: the exchange task acquires the lock and spawns its commit in one
+    /// poll, so once the test sees the lock taken the commit is running (on the blocking
+    /// pool, paused on `disk`).
+    #[tokio::test]
     async fn a_cancelled_binding_holds_the_preparation_lock_through_its_commit() {
         let app = axum::Router::new().route(
             "/api/accounts/oauth/token",
@@ -590,11 +595,18 @@ mod tests {
         })
         .await
         .expect("the commit takes the preparation lock");
-        state.oauth.siwc(&sid).unwrap().cancel();
+        let flow = state.oauth.siwc(&sid).unwrap();
+        let task = flow.exchange.lock().unwrap().clone().unwrap();
+        flow.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the cancel aborts the exchange task");
         assert!(
-            tokio::time::timeout(Duration::from_millis(300), lock.clone().lock_owned())
-                .await
-                .is_err(),
+            lock.try_lock().is_err(),
             "the paused commit still holds the preparation lock"
         );
         release.send(()).unwrap();

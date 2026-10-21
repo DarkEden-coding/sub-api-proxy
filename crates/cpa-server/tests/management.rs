@@ -3469,6 +3469,44 @@ async fn siwc_binding_flows_follow_go() {
     assert_eq!(bound_file(), swapped);
     assert!(!swapped.contains("siwc-at"));
 
+    // A successful binding clears the target's unauthorized cooldowns and keeps its
+    // quota blocks (Go `BindCodexSIWC`), and leaves other credentials alone. Recording
+    // a result rewrites the file the way Go's `MarkResult` persist does.
+    let fail = |id: &str, model: &str, status: u16, scope| {
+        use cpa_core::exec::ExecError;
+        let mut selection = cpa_server::runtime::Selection::new("codex", model);
+        selection.exclude = ["codex.json", "no-refresh.json"]
+            .into_iter()
+            .filter(|other| *other != id)
+            .map(str::to_owned)
+            .collect();
+        let lease = f.rt.store().select(selection).unwrap();
+        assert_eq!(lease.credential.id, id);
+        let mut error = ExecError::local(status, scope, "upstream said no");
+        error.retry_after = Some(Duration::from_secs(600));
+        lease.complete(cpa_server::runtime::Outcome::Failure(error));
+    };
+    use cpa_core::exec::FailureScope;
+    fail("codex.json", "m-unauthorized", 401, FailureScope::Credential);
+    fail("codex.json", "m-quota", 429, FailureScope::Model);
+    fail("codex.json", "m-forbidden", 403, FailureScope::Credential);
+    fail("no-refresh.json", "m-unauthorized", 401, FailureScope::Credential);
+    let cooling = |id: &str| {
+        f.rt.store()
+            .cooldowns(id)
+            .into_iter()
+            .map(|c| (c.model, c.status))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cooling("codex.json"),
+        [
+            ("m-forbidden".into(), 403),
+            ("m-quota".into(), 429),
+            ("m-unauthorized".into(), 401)
+        ]
+    );
+
     // A binding never lands under an outer token refresh: one that read the
     // credential first commits its rotated tokens, then the binding follows on top.
     let sid = start().await;
@@ -3495,6 +3533,11 @@ async fn siwc_binding_flows_follow_go() {
     drop(paused);
     assert_eq!(wait_settled(&mut settled).await, sid);
     assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
+    assert_eq!(
+        cooling("codex.json"),
+        [("m-forbidden".into(), 403), ("m-quota".into(), 429)]
+    );
+    assert_eq!(cooling("no-refresh.json"), [("m-unauthorized".into(), 401)]);
     let disk: Value = serde_json::from_str(&bound_file()).unwrap();
     let memory = f.rt.store().get("codex.json").unwrap().metadata.clone();
     for meta in [&disk, &Value::Object(memory)] {
