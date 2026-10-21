@@ -637,27 +637,51 @@ mod config_writes {
     use super::*;
     use cpa_exec::Executors;
     use cpa_exec::claude::ClaudeExecutor;
+    use std::collections::HashSet;
 
     use cpa_server::management::{Management, Options};
     use std::sync::Arc;
 
+    const SECRETS: [&str; 2] = ["/management/secret-key", "/remote-management/secret-key"];
+
     /// The management key, the one bcrypt value in these configs, differs per run; its
     /// presence is compared, not its bytes. Go v8.0.35 saves a plaintext key written
     /// through the v8 API until its post-save reload hashes it, while cliproxy-rs stores
-    /// the hash at once (docs/DIFFERENCES-FROM-GO.md), so a plaintext `fake-*` key in
-    /// Go's recording stands for the hash Rust writes.
-    fn normalize(v: &Value) -> Value {
+    /// the hash at once (docs/DIFFERENCES-FROM-GO.md), so in Go's recording (`go`) a
+    /// plaintext `fake-*` key stands for the hash Rust writes; [`same_key`] checks that
+    /// hash against it. A plaintext key on the Rust side is never normalized.
+    fn normalize(v: &Value, go: bool) -> Value {
         let mut v = v.clone();
-        for at in ["/management/secret-key", "/remote-management/secret-key"] {
+        for at in SECRETS {
             if let Some(key) = v.pointer_mut(at)
                 && key
                     .as_str()
-                    .is_some_and(|k| ["$2a$", "$2b$", "fake-"].iter().any(|p| k.starts_with(p)))
+                    .is_some_and(|k| k.starts_with("$2a$") || k.starts_with("$2b$") || (go && k.starts_with("fake-")))
             {
                 *key = json!("<bcrypt>");
             }
         }
         v
+    }
+
+    /// Where Go's file holds a plaintext key, Rust's file must hold a hash of it.
+    fn same_key(go: &Value, rust: &Value, verified: &mut HashSet<String>) -> Result<(), String> {
+        for at in SECRETS {
+            if let Some(plain) = go
+                .pointer(at)
+                .and_then(Value::as_str)
+                .filter(|k| k.starts_with("fake-"))
+            {
+                let hash = rust.pointer(at).and_then(Value::as_str).unwrap_or_default();
+                if !verified.contains(hash) {
+                    if !bcrypt::verify(plain, hash).unwrap_or(false) {
+                        return Err(format!("{at}: {hash:?} is not a hash of {plain:?}"));
+                    }
+                    verified.insert(hash.to_owned());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A `/config/...` response as the document it is part of, so [`normalize`] sees
@@ -705,6 +729,7 @@ mod config_writes {
         let mut compared = 0;
         let mut bytes_compared = 0;
         let mut failures: Vec<String> = Vec::new();
+        let mut verified = HashSet::new();
         for scenario in fixture()["config_writes"].as_array().unwrap() {
             let name = scenario["name"].as_str().unwrap();
             let dir = std::env::temp_dir().join(format!("cpa-config-{name}-{}", std::process::id()));
@@ -749,8 +774,8 @@ mod config_writes {
                 assert_eq!(status, step["status"], "{at}: {body}");
                 let want = &step["response"];
                 if step["path"] == "/config.yaml" && step["method"] == "GET" && status == 200 {
-                    let got = normalize(&rust_yaml_value(&body));
-                    if let Err(e) = same(&normalize(want), &got, "yaml view") {
+                    let got = normalize(&rust_yaml_value(&body), false);
+                    if let Err(e) = same(&normalize(want, true), &got, "yaml view") {
                         failures.push(format!("{at}: {e}"));
                     }
                     let go_archived = step["raw_response"].as_str().unwrap().contains("# mystery-section");
@@ -788,13 +813,16 @@ mod config_writes {
                         } else {
                             (want.clone(), got)
                         };
-                        if let Err(e) = same(&normalize(&want), &normalize(&got), "response") {
+                        if let Err(e) = same(&normalize(&want, true), &normalize(&got, false), "response") {
                             failures.push(format!("{at}: {e}"));
                         }
                     }
                 }
                 let file = std::fs::read_to_string(&path).unwrap();
-                if let Err(e) = same(&normalize(&step["file"]), &normalize(&rust_yaml_value(&file)), "file") {
+                let rust_file = rust_yaml_value(&file);
+                if let Err(e) = same(&normalize(&step["file"], true), &normalize(&rust_file, false), "file")
+                    .and_then(|()| same_key(&step["file"], &rust_file, &mut verified))
+                {
                     failures.push(format!("{at}: {e}"));
                 }
                 if file.contains("# mystery-section") != step["file_has_archive"].as_bool().unwrap() {
@@ -1167,6 +1195,37 @@ mod creds {
     /// the old behaviour some other way, fails here until the pin is removed.
     fn pin_pending_steps(mut step: Value, name: &str, i: usize, at: &str) -> Value {
         let inventory = name == "credential_inventory_and_edits";
+        // Each pin is keyed by step index; the request it expects keeps a re-record
+        // from shifting it onto another step.
+        let request = |method: &str, path: &str, body_name: Option<&str>| {
+            assert_eq!(
+                (step["method"].as_str(), step["path"].as_str()),
+                (Some(method), Some(path)),
+                "{at}"
+            );
+            if let Some(want) = body_name {
+                let body: Value = serde_json::from_str(step["body"].as_str().unwrap()).unwrap();
+                assert_eq!(body["name"], want, "{at}");
+            }
+        };
+        match (inventory, i) {
+            // The edits that first touch each codex file, and the last step.
+            (true, 19) => request("PATCH", "/credentials/fields", Some("codex-b.json")),
+            (true, 73) => request("PATCH", "/credentials/fields", Some("retype.json")),
+            (true, 88) => request("GET", "/credentials", None),
+            (true, 0) => request("GET", "/credentials", None),
+            (true, 1) => request("GET", "/credentials?name=claude-a.json", None),
+            (true, 28) => request("POST", "/credentials?name=bad.json", None),
+            (true, 49) => request("POST", "/credentials", None),
+            (true, 70 | 71) => request("PATCH", "/credentials/fields", Some("$CFGID")),
+            (true, 82) => request("GET", "/routing/model-definitions/claude", None),
+            _ => {}
+        }
+        match (name, i) {
+            ("runtime_credentials", 4) => request("GET", "/credentials/models?name=aistudio-0123456789abcdef", None),
+            ("runtime_credentials", 6) => request("POST", "/routing/cooldown/reset", None),
+            _ => {}
+        }
         // Go 7b0319fb (Sign in with ChatGPT): codex auth files get an empty
         // `<name>.lock` side file. Credentials owner.
         if let Some(files) = step["files"].as_object_mut() {
