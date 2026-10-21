@@ -50,10 +50,11 @@ fn call(req: Request, entry: Format, model: String, body: Bytes, stream: bool, a
 
 /// Go `handlers.ReadRequestBody`: `Content-Encoding` is decoded (zstd, applied last
 /// first; identity is a no-op) before the JSON is read. A body that fails to decode
-/// but is valid JSON is used as sent; otherwise the handler answers 400.
+/// but is valid JSON is used as sent; otherwise the handler answers 400. A decoded body
+/// over `limit` (`server.max-request-body-bytes`) answers 413 instead.
 // ponytail: decode errors carry the zstd crate's reason, not klauspost/compress's, and
 // the decoded size is bounded by MAX_REQUEST_BYTES (Go reads it unbounded).
-pub(crate) fn read_body(headers: &HeaderMap, raw: Bytes) -> Result<Bytes, Box<Response>> {
+pub(crate) fn read_body(headers: &HeaderMap, raw: Bytes, limit: Option<u64>) -> Result<Bytes, Box<Response>> {
     let encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
         .map(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
@@ -61,38 +62,45 @@ pub(crate) fn read_body(headers: &HeaderMap, raw: Bytes) -> Result<Bytes, Box<Re
     if encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
         return Ok(raw);
     }
-    let decode = || -> Result<Bytes, String> {
+    let decode = || -> Result<Bytes, Option<String>> {
         let mut body = raw.clone();
         for part in encoding.split(',').rev() {
             match part.trim().to_ascii_lowercase().as_str() {
                 "" | "identity" => {}
-                "zstd" => body = decode_zstd(&body)?,
-                other => return Err(format!("unsupported request content encoding: {other}")),
+                "zstd" => body = decode_zstd(&body, limit)?,
+                other => return Err(Some(format!("unsupported request content encoding: {other}"))),
             }
         }
         Ok(body)
     };
+    let invalid = |status, message: &str| {
+        Box::new(respond::error_detail(
+            status,
+            &format!("Invalid request: {message}"),
+            "invalid_request_error",
+        ))
+    };
     match decode() {
         Ok(body) => Ok(body),
+        // Go returns the limit error before its valid-JSON fallback.
+        Err(None) => Err(invalid(413, crate::body_limit::MESSAGE)),
         Err(_) if serde_json::from_slice::<serde::de::IgnoredAny>(&raw).is_ok() => Ok(raw),
-        Err(e) => Err(Box::new(respond::error_detail(
-            400,
-            &format!("Invalid request: {e}"),
-            "invalid_request_error",
-        ))),
+        Err(Some(e)) => Err(invalid(400, &e)),
     }
 }
 
-fn decode_zstd(raw: &[u8]) -> Result<Bytes, String> {
+/// `Err(None)` when the decoded body passes `limit`.
+fn decode_zstd(raw: &[u8], limit: Option<u64>) -> Result<Bytes, Option<String>> {
     use std::io::Read;
-    let fail = |e: std::io::Error| format!("failed to decode zstd request body: {e}");
-    let decoder =
-        zstd::stream::read::Decoder::new(raw).map_err(|e| format!("failed to create zstd request decoder: {e}"))?;
+    let fail = |e: std::io::Error| Some(format!("failed to decode zstd request body: {e}"));
+    let decoder = zstd::stream::read::Decoder::new(raw)
+        .map_err(|e| Some(format!("failed to create zstd request decoder: {e}")))?;
+    let cap = limit.unwrap_or(u64::MAX).min(crate::MAX_REQUEST_BYTES as u64);
     let mut out = Vec::new();
-    decoder
-        .take(crate::MAX_REQUEST_BYTES as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(fail)?;
+    decoder.take(cap + 1).read_to_end(&mut out).map_err(fail)?;
+    if limit.is_some_and(|limit| out.len() as u64 > limit) {
+        return Err(None);
+    }
     if out.len() > crate::MAX_REQUEST_BYTES {
         return Err(fail(std::io::Error::other("decoded body too large")));
     }
@@ -109,7 +117,7 @@ pub async fn chat_completions(
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let mut body = match body {
-        Ok(body) => match read_body(&headers, body) {
+        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -190,7 +198,7 @@ pub async fn completions(
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body) {
+        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -418,7 +426,7 @@ pub async fn responses(
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body) {
+        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -991,7 +999,7 @@ pub async fn compact(
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body) {
+        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
             Ok(body) => body,
             Err(response) => return *response,
         },

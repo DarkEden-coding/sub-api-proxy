@@ -11,6 +11,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
@@ -931,7 +932,7 @@ pub(crate) async fn upload(
     uri: Uri,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -940,6 +941,16 @@ pub(crate) async fn upload(
         .to_owned();
     // Go `UploadAuthFileV8`: v8 writes fail a pending SIWC binding of the file.
     let v8 = uri.path().starts_with("/v8/");
+    let body = match body {
+        Ok(body) => body,
+        // ponytail: Go's multipart parser fails on the bytes it got before the limit
+        // (a truncated header, 400); this reports the read error itself.
+        Err(rejection) if multipart::is_form(&content_type) => {
+            let reason = super::read_reason(&rejection);
+            return fail(StatusCode::BAD_REQUEST, format!("invalid multipart form: {reason}"));
+        }
+        Err(rejection) => return fail(super::read_status(&rejection), "failed to read body"),
+    };
     if multipart::is_form(&content_type) {
         let files = match multipart::form_files(&content_type, &body) {
             Ok(files) => files,
@@ -1096,9 +1107,18 @@ pub(crate) async fn delete(
     State(state): State<Arc<Management>>,
     uri: Uri,
     RawQuery(raw): RawQuery,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let q = Query::parse(raw);
+    // Go reads names from the body only without `all` or `name` in the query.
+    let body = match body {
+        Ok(body) => body,
+        Err(_) if matches!(q.first("all"), "true" | "1" | "*") || !q.first("name").is_empty() => Bytes::new(),
+        Err(rejection) if crate::body_limit::is_too_large(&rejection) => {
+            return fail(StatusCode::PAYLOAD_TOO_LARGE, crate::body_limit::MESSAGE);
+        }
+        Err(_) => return fail(StatusCode::BAD_REQUEST, "failed to read body"),
+    };
     // Go `DeleteAuthFileV8`.
     let v8 = uri.path().starts_with("/v8/");
     tokio::task::spawn_blocking(move || {
@@ -1348,7 +1368,11 @@ fn toggle_config_key(state: &Management, id: &str, disabled: bool) -> Result<boo
     Ok(true)
 }
 
-pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<Bytes, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Req {
@@ -1448,7 +1472,11 @@ fn canonical(key: &str) -> &str {
 
 /// Go `PatchAuthFileFields`: dotted metadata paths, `weight`, `request_retry` and a
 /// merging `headers` field. The canonical spelling wins over a config-style alias.
-pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Result<Bytes, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
     let Ok(req) = serde_json::from_slice::<Map<String, Value>>(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
@@ -1951,7 +1979,14 @@ pub(crate) async fn models(State(state): State<Arc<Management>>, RawQuery(raw): 
     reply(StatusCode::OK, [("models", Value::Array(models))])
 }
 
-pub(crate) async fn cooldown_reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn cooldown_reset(
+    State(state): State<Arc<Management>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Req {
@@ -2005,7 +2040,21 @@ fn auth_json(c: &Credential) -> Value {
     })
 }
 
-pub(crate) async fn refresh(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery, body: Bytes) -> Response {
+pub(crate) async fn refresh(
+    State(state): State<Arc<Management>>,
+    RawQuery(raw): RawQuery,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => {
+            let reason = super::read_reason(&rejection);
+            return fail(
+                super::read_status(&rejection),
+                format!("invalid request body: {reason}"),
+            );
+        }
+    };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Req {
@@ -2196,13 +2245,17 @@ mod tests {
         refresh(&state, "c.json", "fake-new");
         std::fs::write(dir.join("c.json"), r#"{"type":"claude","access_token":"fake-old"}"#).unwrap();
         let token = |state: &Management| state.rt.store().get("c.json").unwrap().metadata["access_token"].clone();
-        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","note":1}"#)).await;
+        let r = fields(State(state.clone()), Ok(Bytes::from(r#"{"name":"a.json","note":1}"#))).await;
         assert_eq!(r.status(), StatusCode::OK);
-        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","type":"codex"}"#)).await;
+        let r = fields(
+            State(state.clone()),
+            Ok(Bytes::from(r#"{"name":"a.json","type":"codex"}"#)),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         let r = status(
             State(state.clone()),
-            Bytes::from(r#"{"name":"a.json","disabled":true}"#),
+            Ok(Bytes::from(r#"{"name":"a.json","disabled":true}"#)),
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);

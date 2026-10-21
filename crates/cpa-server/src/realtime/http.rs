@@ -22,7 +22,9 @@ use crate::runtime::Runtime;
 
 pub(super) enum ReadError {
     TooLarge,
-    Read(String),
+    /// The read failed; the status is 413 at `server.max-request-body-bytes`
+    /// (Go `HTTPStatusFromErrorOr(err, 400)`), else 400.
+    Read(String, u16),
 }
 
 /// [`live::read_limited`] on the pick's attempt context: Home draining the pick ends
@@ -43,7 +45,10 @@ pub(super) async fn read_limited(body: Body, limit: usize) -> Result<Vec<u8>, Re
     let mut stream = body.into_data_stream();
     let mut out = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ReadError::Read(e.to_string()))?;
+        let chunk = chunk.map_err(|e| {
+            let status = if crate::body_limit::is_too_large(&e) { 413 } else { 400 };
+            ReadError::Read(e.to_string(), status)
+        })?;
         if out.len() + chunk.len() > limit {
             return Err(ReadError::TooLarge);
         }
@@ -244,7 +249,7 @@ pub(super) async fn call(
     let body = match read_limited(body, live::MAX_BODY).await {
         Ok(body) => body,
         Err(ReadError::TooLarge) => return fail(413, "Codex live request body too large"),
-        Err(ReadError::Read(e)) => return fail(400, &format!("failed to read Codex live request: {e}")),
+        Err(ReadError::Read(e, status)) => return fail(status, &format!("failed to read Codex live request: {e}")),
     };
     let secret_session = principal
         .secret
@@ -616,9 +621,9 @@ pub(super) async fn hangup(
                 "invalid_request",
             ));
         }
-        Err(ReadError::Read(e)) => {
+        Err(ReadError::Read(e, status)) => {
             return traced(realtime_error(
-                400,
+                status,
                 &format!("failed to read Codex live request: {e}"),
                 "invalid_request_error",
                 "invalid_request",

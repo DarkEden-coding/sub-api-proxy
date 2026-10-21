@@ -64,7 +64,7 @@ pub async fn speech(
         }
         Err(rejection) => return read_failed(&rejection),
     };
-    let body = match crate::openai::read_body(&headers, body) {
+    let body = match crate::openai::read_body(&headers, body, rt.config().max_request_body_bytes()) {
         Ok(body) => body,
         Err(response) => return *response,
     };

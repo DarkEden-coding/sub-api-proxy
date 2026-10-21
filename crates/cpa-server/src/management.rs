@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -397,6 +398,22 @@ pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     json(status, &json!({"error": message}))
 }
 
+/// Go `HTTPStatusFromErrorOr(err, 400)` for a failed body read in the handlers
+/// dd7b4334 changed: 413 at `server.max-request-body-bytes` (and at a route's own
+/// `DefaultBodyLimit`), else 400.
+pub(crate) fn read_status(rejection: &BytesRejection) -> StatusCode {
+    if crate::body_limit::is_too_large(rejection) || rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+/// The text of a failed body read: Go's `err.Error()` at the limit.
+pub(crate) fn read_reason(rejection: &BytesRejection) -> String {
+    crate::claude::read_error(rejection).1
+}
+
 fn error(code: u16, message: &str) -> Response {
     json_error(StatusCode::from_u16(code).unwrap(), message)
 }
@@ -709,8 +726,12 @@ pub(crate) async fn config(
     OriginalUri(uri): OriginalUri,
     method: Method,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return error(read_status(&rejection).as_u16(), "invalid_body"),
+    };
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
     let if_match: Vec<_> = headers

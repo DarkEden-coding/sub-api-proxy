@@ -812,20 +812,17 @@ pub async fn create(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let raw = match content_type(&headers).as_str() {
-        "multipart/form-data" | "application/x-www-form-urlencoded" => match &body {
-            Ok(body) => Ok(create_request_from_form(&headers, body)),
-            Err(rejection) => Err(rejection.body_text()),
-        },
-        _ => match &body {
-            Ok(body) if gj::std_valid(body) => Ok(body.to_vec()),
-            Ok(_) => Err("body must be valid JSON".to_owned()),
-            Err(rejection) => Err(rejection.body_text()),
-        },
+    let raw = match (content_type(&headers).as_str(), &body) {
+        (_, Err(rejection)) => Err(crate::claude::read_error(rejection)),
+        ("multipart/form-data" | "application/x-www-form-urlencoded", Ok(body)) => {
+            Ok(create_request_from_form(&headers, body))
+        }
+        (_, Ok(body)) if gj::std_valid(body) => Ok(body.to_vec()),
+        (_, Ok(_)) => Err((400, "body must be valid JSON".to_owned())),
     };
     let raw = match raw {
         Ok(raw) => raw,
-        Err(e) => return failed(400, XAI_MODEL, &format!("Invalid request: {e}")),
+        Err((status, e)) => return failed(status, XAI_MODEL, &format!("Invalid request: {e}")),
     };
     let mut model = text(&raw, "model").trim().to_owned();
     if model.is_empty() {
