@@ -705,6 +705,100 @@ async fn terminal_error_survives_a_full_queue() {
     server.abort();
 }
 
+/// Go `EmitWebSocketResponseEvent` beside `AppendAPIWebsocketResponse`: every non-empty
+/// upstream frame, trimmed, goes to the attempt's observer with the executor identifier,
+/// the selected credential and the upstream model. The executor awaits each
+/// observation before it handles the frame, as Go calls the observer in its read loop.
+#[tokio::test]
+async fn upstream_frames_reach_the_websocket_observer() {
+    /// (provider, credential ID, model, payload).
+    type Frame = (String, String, String, Vec<u8>);
+    /// The frames observed, and the order observations and client chunks finished in.
+    #[derive(Default)]
+    struct Seen(std::sync::Mutex<Vec<Frame>>, Arc<std::sync::Mutex<Vec<&'static str>>>);
+    impl cpa_core::exec::WebSocketObserver for Seen {
+        fn response<'a>(
+            &'a self,
+            provider: &'a str,
+            credential: &'a Credential,
+            model: &'a str,
+            payload: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                // A slow observer: the frame must not reach the client before it returns.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.0.lock().unwrap().push((
+                    provider.to_owned(),
+                    credential.id.clone(),
+                    model.to_owned(),
+                    payload.to_vec(),
+                ));
+                self.1.lock().unwrap().push("observed");
+            })
+        }
+    }
+    let shared: Shared = Arc::default();
+    let app = axum::Router::new().fallback(handler).with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let created = r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","output":[]}}"#;
+    let done = r#"{"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let turn = serde_json::json!({
+        "auth": "auth-a",
+        "payload": r#"{"model":"grok-4.3","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}"#,
+        "acts": [{"send": [format!("  {created}\n"), "   ".to_owned(), done.to_owned()]}],
+    });
+    shared.lock().unwrap().turn = Some(turn.clone());
+    let attrs = serde_json::json!({"api_key": "sk-fake", "base_url": "http://UPSTREAM/v1", "websockets": "true"});
+    let credential = credential("auth-a", &attrs, &addr);
+    let executor = XaiExecutor::with_client(wreq::Client::new());
+    let session = ExecSession {
+        id: "sess-observe".into(),
+        continuation: false,
+        lease: None,
+    };
+    let seen = Arc::new(Seen::default());
+    let usage = cpa_core::exec::UsageSink::default().with_websocket(Some(seen.clone()));
+    let response = executor
+        .execute_in_session(
+            &credential,
+            request(&turn, "sess-observe", usage),
+            &Config::default(),
+            &session,
+        )
+        .await
+        .unwrap();
+    let ResponseBody::Stream(mut stream) = response.body else {
+        panic!("buffered response");
+    };
+    let order = seen.1.clone();
+    while let Some(item) = stream.next().await {
+        item.unwrap();
+        order.lock().unwrap().push("chunk");
+    }
+    // Each frame's observation finishes before its client chunk.
+    let order = order.lock().unwrap().clone();
+    assert_eq!(order.first(), Some(&"observed"), "{order:?}");
+    assert_eq!(order.iter().filter(|o| **o == "observed").count(), 2, "{order:?}");
+    assert_eq!(order.last(), Some(&"chunk"), "{order:?}");
+    let seen = seen.0.lock().unwrap().clone();
+    let expected: Vec<Frame> = [created, done]
+        .into_iter()
+        .map(|frame| {
+            (
+                "xai".into(),
+                credential.id.clone(),
+                "grok-4.3".into(),
+                frame.as_bytes().to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(seen, expected);
+    executor.close_session("sess-observe");
+    server.abort();
+}
+
 // --- unit-level ports of xai_websockets_executor_test.go -------------------------------
 
 /// The server's `classify::upstream_attempted` (Go `UpstreamAttempted`).
