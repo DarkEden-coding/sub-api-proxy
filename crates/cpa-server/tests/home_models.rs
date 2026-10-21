@@ -31,9 +31,21 @@ impl RemoteDispatch for Catalog {
 }
 
 /// A Home-mode server whose control plane answers `payload`; a local credential is
-/// registered so a local catalog could leak into the answer.
+/// registered so a local catalog could leak into the answer. Its auth dir is private
+/// and empty.
 async fn serve(payload: &'static str) -> String {
-    let cfg = Config::parse("codex-api-key:\n  - api-key: sk-FAKE-codex\n    base-url: http://127.0.0.1:1\n    models:\n      - name: local-only-model\n").unwrap();
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let auth = std::env::temp_dir().join(format!(
+        "home-models-auth-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&auth).unwrap();
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\ncodex-api-key:\n  - api-key: sk-FAKE-codex\n    base-url: http://127.0.0.1:1\n    models:\n      - name: local-only-model\n",
+        auth.display()
+    ))
+    .unwrap();
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
