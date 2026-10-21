@@ -22,6 +22,12 @@ const CREATED: &str = r#"{"type":"response.created","response":{"id":"r1","statu
 const DONE: &str = r#"{"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
 const CREATE: &str = r#"{"type":"response.create","model":"gpt-fixture","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
 
+/// The recorder plugin keeps its record directory and hold files in process-wide state,
+/// so the tests take turns when they run as threads of one process (plain `cargo test`;
+/// nextest runs one per process). Otherwise one test's plugin load redirects the other's
+/// records.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Answers every turn with a rate-limit frame, then the response frames.
 async fn serve_codex() -> String {
     use axum::extract::ws::{Message, WebSocketUpgrade};
@@ -173,6 +179,7 @@ async fn completions(socket: &mut WebSocket, count: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observer_plugins_receive_every_upstream_websocket_frame() {
+    let _serial = SERIAL.lock().await;
     let Some(fx) = Fixture::start("plugin-ws-observer", "websocket_response_observer,request_interceptor").await else {
         return;
     };
@@ -227,6 +234,7 @@ async fn observer_plugins_receive_every_upstream_websocket_frame() {
 /// overtakes its observation, and observations keep the order of the frames.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_observer_is_not_overtaken() {
+    let _serial = SERIAL.lock().await;
     let Some(fx) = Fixture::start("plugin-ws-observer-order", "websocket_response_observer").await else {
         return;
     };
