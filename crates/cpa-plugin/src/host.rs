@@ -759,27 +759,28 @@ impl Host {
     /// Go `UnloadPluginContext`: detach `id` from the runtime, then close every loaded
     /// instance of it, waiting up to `wait` for running calls.
     pub async fn unload_plugin(&self, id: &str, wait: Option<Duration>) -> bool {
-        self.spawn_unload(id, wait, None).await
+        self.spawn_unload(id, wait, None).await.unwrap_or(false)
     }
 
     /// Go `UnloadPluginContext` with a cancellable context: cancelling `cancel` stops
     /// waiting for the apply lock (`false`) or for the plugin to shut down, and releases
     /// the lock; the shutdown itself still completes on its own thread.
     pub async fn unload_plugin_until(&self, id: &str, cancel: &tokio_util::sync::CancellationToken) -> bool {
-        self.spawn_unload(id, None, Some(cancel.clone())).await
+        self.spawn_unload(id, None, Some(cancel.clone())).await.unwrap_or(false)
     }
 
-    async fn spawn_unload(
+    /// Not inlined, so callers in other crates share one instance of the spawned unload
+    /// instead of compiling their own (about 25 KB each in the release binary).
+    #[inline(never)]
+    fn spawn_unload(
         &self,
         id: &str,
         wait: Option<Duration>,
         cancel: Option<tokio_util::sync::CancellationToken>,
-    ) -> bool {
+    ) -> tokio::task::JoinHandle<bool> {
         let host = self.clone();
         let id = id.to_owned();
         tokio::spawn(async move { host.unload_plugin_inner(&id, wait, cancel).await })
-            .await
-            .unwrap_or(false)
     }
 
     async fn unload_plugin_inner(
