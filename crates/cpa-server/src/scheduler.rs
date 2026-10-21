@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
+use cpa_common::gostr::GoStr;
 use cpa_core::credential::Credential;
 use cpa_core::exec::ExecError;
 #[cfg(test)]
@@ -520,7 +521,7 @@ impl Policy {
             metadata(c, "request_scoped_errors").and_then(|v| serde_json::from_value(v.clone()).ok());
         let rules = file_rules.as_ref().filter(|r| !r.is_empty()).or_else(|| {
             oauth(c)
-                .then(|| self.oauth_request_scoped_errors.get(&c.provider))
+                .then(|| self.oauth_request_scoped_errors.get(&c.provider.trim().go_lower()))
                 .flatten()
         });
         if let Some(rules) = rules {
@@ -3774,6 +3775,28 @@ mod tests {
             Some(Duration::from_secs(60)),
             "unlisted statuses ignore hint"
         );
+    }
+
+    /// OAuth request-scoped-error channels and the credential provider they are looked up
+    /// by are both Go `strings.ToLower` (U+0130 becomes a plain `i`): rules keyed `HİGH`
+    /// apply to a `"type":"HİGH"` file credential.
+    #[test]
+    fn oauth_rule_channels_lowercase_like_go() {
+        let cfg = cpa_core::config::Config::parse(
+            "oauth:\n  request-scoped-errors:\n    HİGH:\n      - {status: 503, match: [boom], action: stop}\n",
+        )
+        .unwrap();
+        let c = cpa_core::config::credentials::from_file(
+            &cfg,
+            std::path::Path::new("/auth"),
+            std::path::Path::new("/auth/a.json"),
+            r#"{"type":"HİGH","access_token":"t"}"#.as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        let action =
+            crate::management::policy(&cfg).error_action(&c, &ExecError::local(503, FailureScope::Request, "boom"));
+        assert!(action.matched && action.stop);
     }
 
     /// Go matches rules against a local missing-thread error's structured body, which

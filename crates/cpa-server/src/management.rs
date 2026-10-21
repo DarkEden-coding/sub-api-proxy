@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
+use cpa_common::gostr::GoStr;
 use cpa_core::config::{Config, ConfigDocument, archive_comments, credentials, is_bcrypt};
 use cpa_core::credential::{Credential, Source};
 use serde_json::{Value, json};
@@ -283,7 +284,7 @@ pub fn policy(cfg: &Config) -> Policy {
         .and_then(|o| o.get("request-scoped-errors"))
         .and_then(serde_yaml_ng::Value::as_mapping);
     for (channel, list) in rules.into_iter().flatten() {
-        let channel = channel.as_str().unwrap_or_default().trim().to_lowercase();
+        let channel = channel.as_str().unwrap_or_default().trim().go_lower();
         let clean: Vec<ErrorRule> = list
             .as_sequence()
             .into_iter()
@@ -307,7 +308,7 @@ pub fn policy(cfg: &Config) -> Policy {
                         .and_then(serde_yaml_ng::Value::as_str)
                         .unwrap_or_default()
                         .trim()
-                        .to_lowercase(),
+                        .go_lower(),
                 };
                 (rule.status > 0
                     && !(rule.r#match.is_empty() && rule.match_regex.is_empty())

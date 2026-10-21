@@ -14,6 +14,7 @@ use axum::body::Bytes;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use cpa_common::gostr::GoStr;
 use cpa_core::config::{ConfigDocument, credentials};
 use cpa_core::credential::{Credential, MetadataPatch, Source};
 use serde_json::{Map, Value, json};
@@ -458,7 +459,7 @@ fn note_disabled(state: &Management, id: &str, disabled: Option<bool>) {
 
 /// Go `Auth.AuthKind`: `oauth`, `apikey` or unknown.
 pub(super) fn auth_kind(c: &Credential) -> Option<&'static str> {
-    let normalize = |s: &str| match s.trim().to_lowercase().as_str() {
+    let normalize = |s: &str| match s.trim().go_lower().as_str() {
         "apikey" | "api_key" | "api-key" => Some("apikey"),
         "oauth" | "oauth2" => Some("oauth"),
         _ => None,
@@ -1229,7 +1230,7 @@ fn sync_patched_attributes(c: &mut Credential, roots: &[String]) {
     if touched("excluded_models") {
         // Go `ApplyAuthExcludedModelsMeta`: only the credential's own rules.
         let (rules, _) = credentials::excluded_models_from_metadata(&c.metadata);
-        let mut rules: Vec<String> = rules.iter().map(|r| r.to_lowercase()).collect();
+        let mut rules: Vec<String> = rules.iter().map(|r| r.go_lower()).collect();
         rules.sort();
         rules.dedup();
         if rules.is_empty() {
@@ -1788,7 +1789,7 @@ fn definitions() -> &'static Map<String, Value> {
 
 /// Go `GetStaticModelDefinitionsByChannel`.
 fn channel_models(channel: &str) -> Option<&'static Vec<Value>> {
-    let key = match channel.trim().to_lowercase().as_str() {
+    let key = match channel.trim().go_lower().as_str() {
         "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi".to_owned(),
         "x-ai" | "grok" => "xai".to_owned(),
         "muse" => "meta".to_owned(),
@@ -1820,10 +1821,7 @@ pub(crate) async fn model_definitions(
     }
     reply_ordered(
         StatusCode::OK,
-        [
-            ("channel", channel.to_lowercase().into()),
-            ("models", Value::Array(models)),
-        ],
+        [("channel", channel.go_lower().into()), ("models", Value::Array(models))],
     )
 }
 

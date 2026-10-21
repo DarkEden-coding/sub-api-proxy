@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use bytes::{Bytes, BytesMut};
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::exec::{Caller, ExecError, ExecRequest, ExecStream, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -685,7 +686,7 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
     // executor takes the request whole; a provider decision replaces the registry route.
     use crate::plugins::execution::{self as plugin_execution, Route};
     let query = plugin_execution::query();
-    let forced = call.forced_provider.as_deref().map(|p| p.trim().to_lowercase());
+    let forced = call.forced_provider.as_deref().map(|p| p.trim().go_lower());
     let routed = match (plugin_execution::route(rt, &call, &query, trace).await, forced) {
         (None, _) => None,
         // Go `validateNativeInteractionsExecution` / `providersForExecution`: a forced

@@ -5,6 +5,7 @@
 
 use axum::http::HeaderMap;
 use axum::response::Response;
+use cpa_common::gostr::GoStr;
 use serde_json::{Map, Value, json};
 
 use crate::registry::Spec;
@@ -101,7 +102,7 @@ pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {
     }
     let mut out: Vec<Entry> = Vec::new();
     for (section, models) in checked {
-        let provider = section.trim().to_lowercase();
+        let provider = section.trim().go_lower();
         for model in models {
             let mut id = text(&model, "id");
             if id.is_empty() {

@@ -539,6 +539,11 @@ pub fn split_model_id(clean: &str) -> (String, String) {
 }
 
 /// `cleanDevinDisplayName`: strips effort words from the end, repeatedly.
+/// ponytail: matches suffixes with ASCII lowercasing, a parity limit for non-ASCII
+/// names. Go compares `strings.ToLower` forms, then cuts the original by the suffix's
+/// byte length: it turns "X MİNİMAL" into "X M", and for "X ThİnKİng" it cuts inside
+/// U+0130 and yields invalid UTF-8, which a Rust `String` cannot hold. Upgrade path:
+/// compare `go_lower` forms and reproduce Go's byte cut where it lands on a char boundary.
 fn clean_display_name(name: &str) -> String {
     let mut trimmed = name.trim().to_owned();
     loop {
