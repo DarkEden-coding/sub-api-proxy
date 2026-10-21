@@ -376,6 +376,36 @@ impl Runner {
         self.read_records(args, true)
     }
 
+    /// [`Self::records`] once every `request.complete` of `want` (Go's records for the
+    /// step) has arrived, at most ten seconds: completions run on a task of their own,
+    /// so a fixed pause does not guarantee them.
+    fn records_after(&self, args: &Value, want: &Value) -> Value {
+        let completions = |records: &Value| {
+            let mut labels: Vec<String> = records
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["method"] == "request.complete")
+                .map(|r| r["label"].as_str().unwrap_or_default().to_owned())
+                .collect();
+            labels.sort_unstable();
+            labels
+        };
+        let expected = completions(want);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !expected.is_empty() && Instant::now() < deadline {
+            let got = completions(&self.read_records(args, false));
+            if expected
+                .iter()
+                .all(|l| got.iter().filter(|g| *g == l).count() >= expected.iter().filter(|e| *e == l).count())
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        self.records(args)
+    }
+
     /// The recorded calls of `args["methods"]` in each recorder's order, recorder files
     /// in name order. `drain` removes the files after reading them; a call appended
     /// between the read and the removal is lost, so only a reader that has nothing more
@@ -662,7 +692,7 @@ fn request_path_plugins_match_go() {
                     continue;
                 }
                 "http" => runner.http(&step["args"]).unwrap(),
-                "records" => runner.records(&step["args"]),
+                "records" => runner.records_after(&step["args"], &step["result"]),
                 "upstream" => {
                     let seen = runner.upstream.take();
                     serde_json::from_str(&runner.normalize(&serde_json::to_string(&seen).unwrap())).unwrap()
