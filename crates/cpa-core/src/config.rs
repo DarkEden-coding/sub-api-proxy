@@ -259,14 +259,23 @@ const V8_PARENTS: &[&str] = &[
     "upstream.xai",
 ];
 
-/// Writes `hash` over the plaintext `secret-key`: in place when the key is written
-/// literally, else (inherited through a merge) the merge-expanded tree, as Go's
-/// `SaveConfigPreserveCommentsUpdateNestedScalar` does. ponytail: that fallback
-/// re-emits without comments; Go keeps the node comments.
+/// Writes `hash` over the plaintext `secret-key` (see [`with_secret_hash`]).
 fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()> {
-    let mut root: Value = serde_yaml_ng::from_str(text)?;
-    expand_merges(&mut root)?;
-    let mapping = root.as_mapping().context("config must be a mapping")?;
+    ConfigDocument::write(path, &with_secret_hash(text, hash)?)
+}
+
+/// `text` with `hash` over the effective `secret-key`: in place when the key is written
+/// literally and nothing else shares it, else the merge- and alias-expanded tree, as
+/// Go's `updateNestedScalarYAML` writes it. ponytail: that fallback re-emits without
+/// comments; Go keeps the node comments.
+fn with_secret_hash(text: &str, hash: &str) -> anyhow::Result<String> {
+    let expanded = |t: &str| -> anyhow::Result<Value> {
+        let mut root: Value = serde_yaml_ng::from_str(t)?;
+        expand_merges(&mut root)?;
+        Ok(root)
+    };
+    let mut want = expanded(text)?;
+    let mapping = want.as_mapping().context("config must be a mapping")?;
     let v8 = lookup(mapping, "management.secret-key").is_some();
     let parent = if v8 { "management" } else { "remote-management" };
     let loads_hash = |t: &str| Config::parse(t).is_ok_and(|c| c.management.secret_key == hash);
@@ -280,18 +289,79 @@ fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()
         file.document()?.get_mapping(parent)?.set("secret-key", hash);
         Some(file.to_string())
     });
-    let updated = match in_place.flatten().filter(|t| loads_hash(t)) {
+    want.get_mut(parent)
+        .and_then(Value::as_mapping_mut)
+        .context("management must be a mapping")?
+        .insert(Value::from("secret-key"), Value::from(hash));
+    // An anchored key edited in place would also change every alias of it.
+    let updated = match in_place.flatten().filter(|t| expanded(t).is_ok_and(|v| v == want)) {
         Some(t) => t,
-        None => {
-            root.get_mut(parent)
-                .and_then(Value::as_mapping_mut)
-                .context("management must be a mapping")?
-                .insert(Value::from("secret-key"), Value::from(hash));
-            serde_yaml_ng::to_string(&root)?
-        }
+        None => serde_yaml_ng::to_string(&want)?,
     };
     anyhow::ensure!(loads_hash(&updated), "secret key not updated");
-    ConfigDocument::write(path, &updated)
+    Ok(updated)
+}
+
+/// Go `PrepareConfigFileForUpload` (f9437700): applies the rewrites of a startup load
+/// before the file seeds a remote store, so a plaintext management secret never leaves
+/// the machine. The effective plaintext secret is hashed and the legacy fields a v8
+/// field overrides are dropped. Fails, leaving the file untouched, when the file does
+/// not parse, the secret cannot be hashed or written, or a plaintext secret would still
+/// be in it (a YAML anchor or a copy elsewhere).
+pub fn prepare_for_upload(path: &Path) -> anyhow::Result<()> {
+    let text = String::from_utf8(std::fs::read(path)?).context("failed to parse config file")?;
+    let prepared = prepared_for_upload(&text)?;
+    if prepared != text {
+        ConfigDocument::write(path, &prepared).context("failed to write prepared config file")?;
+    }
+    Ok(())
+}
+
+fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
+    let config = Config::parse(text).context("failed to parse config file")?;
+    let secret = &config.management.secret_key;
+    let mut prepared = text.to_owned();
+    if !secret.is_empty() && !is_bcrypt(secret) {
+        let hash = bcrypt::non_truncating_hash(secret, 10).context("failed to hash remote management key")?;
+        prepared = with_secret_hash(text, &hash).context("failed to update remote management key")?;
+    }
+    if let Some(cleaned) = ConfigDocument::without_conflicts(&prepared)? {
+        prepared = cleaned;
+    }
+    // Go `plaintextManagementSecrets`: the effective secret and the values of both
+    // secret keys, since an overridden legacy key still holds its own.
+    let mut raw: Value = serde_yaml_ng::from_str(text)?;
+    expand_merges(&mut raw)?;
+    let mut plaintexts = vec![secret.clone()];
+    for path in ["remote-management.secret-key", "management.secret-key"] {
+        let scalar = |v: &&Value| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_));
+        if let Some(value) = raw.as_mapping().and_then(|m| lookup(m, path)).filter(scalar) {
+            plaintexts.push(go_string(value));
+        }
+    }
+    plaintexts.retain(|p| !p.is_empty() && !is_bcrypt(p));
+    if !plaintexts.is_empty() {
+        let doc: Value = serde_yaml_ng::from_str(&prepared).context("failed to parse prepared config")?;
+        if plaintexts.iter().any(|p| scalar_exists(&doc, p)) {
+            bail!(
+                "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value"
+            );
+        }
+    }
+    Ok(prepared)
+}
+
+/// Go `yamlScalarExists`: a non-null scalar equal to `value` anywhere below `node`.
+/// Mapping keys only name settings and are skipped. ponytail: Go compares a scalar's
+/// source text; a number written as `0x1F` compares here as `31`.
+fn scalar_exists(node: &Value, value: &str) -> bool {
+    match node {
+        Value::Null => false,
+        Value::Mapping(map) => map.values().any(|v| scalar_exists(v, value)),
+        Value::Sequence(items) => items.iter().any(|v| scalar_exists(v, value)),
+        Value::Tagged(tagged) => scalar_exists(&tagged.value, value),
+        scalar => go_string(scalar) == value,
+    }
 }
 
 impl Config {
@@ -502,6 +572,169 @@ fn resolve_auth_dir(dir: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PLAIN: &str = "upload-plaintext-secret";
+
+    /// Go internal/config/config_load_test.go (f9437700), with `#` cases for
+    /// differences in how the cases are checked.
+    #[test]
+    fn prepare_for_upload_follows_go() {
+        let dir = std::env::temp_dir().join(format!("cpa-prepare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let hashed = bcrypt::hash(PLAIN, 4).unwrap();
+        let prepare = |content: &str| {
+            std::fs::write(&path, content).unwrap();
+            let result = prepare_for_upload(&path);
+            (result, std::fs::read_to_string(&path).unwrap())
+        };
+        let secret = |saved: &str, section: &str| -> Option<String> {
+            let doc: Value = serde_yaml_ng::from_str(saved).unwrap();
+            doc.get(section)?.get("secret-key")?.as_str().map(str::to_owned)
+        };
+        let hashes = |saved: &str, section: &str, plain: &str| {
+            let stored = secret(saved, section).unwrap_or_default();
+            assert!(
+                bcrypt::verify(plain, &stored).unwrap_or(false),
+                "{section}.secret-key {stored:?}:\n{saved}"
+            );
+        };
+
+        // Hashes the effective plaintext secret in place, in either layout.
+        for (section, other) in [("remote-management", "management"), ("management", "remote-management")] {
+            let (result, saved) = prepare(&format!(
+                "# operator note\nport: 8317\n{section}:\n  secret-key: {PLAIN}\n"
+            ));
+            result.unwrap();
+            assert!(
+                !saved.contains(PLAIN) && saved.contains("# operator note") && saved.contains("port: 8317"),
+                "{saved}"
+            );
+            hashes(&saved, section, PLAIN);
+            assert_eq!(secret(&saved, other), None);
+        }
+        // Keys only name settings: a secret spelled like a key does not block.
+        let (result, saved) = prepare("management:\n  secret-key: management\n");
+        result.unwrap();
+        hashes(&saved, "management", "management");
+        let (result, saved) = prepare(&format!(
+            "remote-management:\n  secret-key: management\nmanagement:\n  secret-key: '{hashed}'\n"
+        ));
+        result.unwrap();
+        assert_eq!(secret(&saved, "management").as_deref(), Some(hashed.as_str()));
+        assert_eq!(
+            secret(&saved, "remote-management"),
+            None,
+            "conflicting legacy secret kept:\n{saved}"
+        );
+        // A YAML null elsewhere is not the string secret "null".
+        let (result, saved) = prepare("proxy-url: null\nmanagement:\n  secret-key: 'null'\n");
+        result.unwrap();
+        hashes(&saved, "management", "null");
+        // A conflicting legacy plaintext beside the v8 key is dropped.
+        for v8 in [PLAIN.to_owned(), format!("'{hashed}'")] {
+            let (result, saved) = prepare(&format!(
+                "remote-management:\n  secret-key: {PLAIN}\nmanagement:\n  secret-key: {v8}\n"
+            ));
+            result.unwrap();
+            assert!(!saved.contains(PLAIN), "{saved}");
+            hashes(&saved, "management", PLAIN);
+            assert_eq!(secret(&saved, "remote-management"), None, "{saved}");
+        }
+        // Settled configs are left byte for byte.
+        for content in [
+            format!("# operator note\nremote-management:\n  secret-key: '{hashed}'\n"),
+            format!("# operator note\nmanagement:\n  secret-key: '{hashed}'\n"),
+            "# operator note\nport: 8317\n".to_owned(),
+            "# operator note\nmanagement:\n  secret-key: null\n".to_owned(),
+            "# operator note\nremote-management:\n  secret-key: ~\n".to_owned(),
+            String::new(),
+        ] {
+            let (result, saved) = prepare(&content);
+            result.unwrap();
+            assert_eq!(saved, content);
+        }
+        // Refused and untouched: unparsable, too long for bcrypt, or a plaintext kept by
+        // a reference (twice, so a second attempt does not accept a half-hashed file).
+        let anchored = format!(
+            "defaults: &legacy\n  secret-key: {PLAIN}\nremote-management: *legacy\nmanagement:\n  secret-key: "
+        );
+        for content in [
+            format!("remote-management:\n  secret-key: {PLAIN}\nport: [8317\n"),
+            format!("remote-management:\n  secret-key: {}\n", "s".repeat(73)),
+            format!("defaults: &management\n  secret-key: {PLAIN}\nmanagement: *management\n"),
+            format!("password: &password {PLAIN}\nmanagement:\n  secret-key: *password\n"),
+            format!(
+                "defaults: &management\n  secret-key: {PLAIN}\nmanagement:\n  <<: *management\n  allow-remote: true\n"
+            ),
+            format!("management: &management\n  secret-key: {PLAIN}\nother: *management\n"),
+            format!("{anchored}current-plaintext-secret\n"),
+            format!("{anchored}'{hashed}'\n"),
+        ] {
+            for attempt in 1..=2 {
+                let (result, saved) = prepare(&content);
+                assert!(result.is_err(), "attempt {attempt} accepted:\n{saved}");
+                assert_eq!(saved, content);
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let content = format!("remote-management:\n  secret-key: {PLAIN}\n");
+            std::fs::write(&path, &content).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+                assert!(prepare_for_upload(&path).is_err());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Go `TestV8PresencePrecedenceAndCleanup`: only legacy fields a v8 field overrides
+    /// are dropped; a legacy-only or partially migrated document is not rewritten.
+    #[test]
+    fn layout_cleanup_drops_only_overridden_legacy_fields() {
+        for (raw, cleaned) in [
+            ("request-retry: 4\ndisable-cooling: true\napi-keys: [old]\n", None),
+            (
+                "config-version: 8\nrequest-retry: 4\ndisable-cooling: true\napi-keys: [old]\n",
+                None,
+            ),
+            (
+                "request-retry: 4\ndisable-cooling: true\napi-keys: [old]\nrouting: {retry: {max-retry-credentials: 2}}\n",
+                None,
+            ),
+            (
+                "# keep\nrequest-retry: 4\ndisable-cooling: true\napi-keys: [old]\nrouting:\n  retry: {request-retry: 0}\n  cooldown: {disable-cooling: false}\naccess: {api-keys: []}\n",
+                Some(
+                    "# keep\nrouting:\n  retry: {request-retry: 0}\n  cooldown: {disable-cooling: false}\naccess: {api-keys: []}\n",
+                ),
+            ),
+            // A v8 group beside its legacy family, and a null legacy struct.
+            (
+                "claude-api-key: [{api-key: a}]\napi-keys: {claude: [{keys: [{api-key: b}]}]}\nremote-management: null\nmanagement: {allow-remote: true}\n",
+                Some("api-keys: {claude: [{keys: [{api-key: b}]}]}\nmanagement: {allow-remote: true}\n"),
+            ),
+            // The first PATHS entry covering a leaf claims it: an `oauth.providers.codex`
+            // spelling does not override the legacy `codex.response-steering`.
+            (
+                "codex:\n  response-steering: true\noauth:\n  providers:\n    codex:\n      response-steering: false\n",
+                None,
+            ),
+        ] {
+            let got = ConfigDocument::without_conflicts(raw).unwrap();
+            assert_eq!(got.as_deref(), cleaned, "{raw}");
+            if let Some(got) = got {
+                assert_eq!(
+                    Config::parse(&got).unwrap().document,
+                    Config::parse(raw).unwrap().document,
+                    "{raw}"
+                );
+            }
+        }
+    }
 
     fn home() -> PathBuf {
         PathBuf::from(std::env::var("HOME").unwrap())

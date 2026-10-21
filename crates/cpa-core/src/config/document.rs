@@ -413,6 +413,31 @@ impl ConfigDocument {
         archived
     }
 
+    /// Go `NormalizeConfigLayout(data, false)`, as the startup load runs it: `text`
+    /// without the legacy fields that a v8 field overrides (presence wins), or `None`
+    /// when it has none. A legacy-only document is not migrated.
+    pub fn without_conflicts(text: &str) -> anyhow::Result<Option<String>> {
+        let mut raw: Value = serde_yaml_ng::from_str(text)?;
+        if raw.is_null() {
+            return Ok(None);
+        }
+        super::expand_merges(&mut raw)?;
+        let paths = conflicting(&raw);
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        for path in &paths {
+            let parts: Vec<&str> = path.split('.').collect();
+            let (leaf, parents) = parts.split_last().expect("paths are not empty");
+            // A path below one already removed is gone with it.
+            let parent = parents.iter().try_fold(&mut raw, |node, part| node.get_mut(*part));
+            if let Some(map) = parent.and_then(Value::as_mapping_mut) {
+                map.shift_remove(*leaf);
+            }
+        }
+        Ok(Some(ConfigDocument(raw).render_preserving(text)?))
+    }
+
     /// Preserve unaffected comments, key order and scalar styles. Changes are applied
     /// to a private syntax tree and validated again before the destination is touched.
     /// New or retyped root sections are appended in block style (yaml-edit misindents
@@ -630,6 +655,61 @@ impl ConfigDocument {
         }
         remove(&mut self.0, parts)
     }
+}
+
+/// The legacy paths of `raw` (merges expanded) that Go's non-migrating layout cleanup
+/// deletes: historical v8 aliases, the leaves of the legacy roots (each claimed by the
+/// first entry of [`PATHS`] that covers it), empty or null legacy structs, legacy key
+/// families beside their `api-keys` group, and the private-IP alias.
+fn conflicting(raw: &Value) -> Vec<String> {
+    let Some(root) = raw.as_mapping() else {
+        return Vec::new();
+    };
+    let present = |path: &str| lookup(root, path).is_some();
+    let mut out = Vec::new();
+    for (old, new) in CLIENT_PATHS.iter().chain(SHARED_PATHS) {
+        if present(old) && present(new) {
+            out.push((*old).to_owned());
+        }
+    }
+    fn walk(root: &Mapping, prefix: usize, old: String, new: String, out: &mut Vec<String>) {
+        let claimant = PATHS
+            .iter()
+            .position(|(p, _)| old == *p || old.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')));
+        let Some(value) = lookup(root, &old) else {
+            return;
+        };
+        if claimant != Some(prefix) || lookup(root, &new).is_none() {
+            return;
+        }
+        match value {
+            Value::Mapping(children) if !children.is_empty() && super::schema::is_struct(&new) => {
+                for key in children.keys().filter_map(Value::as_str) {
+                    walk(root, prefix, format!("{old}.{key}"), format!("{new}.{key}"), out);
+                }
+            }
+            _ => out.push(old),
+        }
+    }
+    for (i, (old, new)) in PATHS.iter().enumerate() {
+        walk(root, i, (*old).to_owned(), (*new).to_owned(), &mut out);
+    }
+    // A root `api-keys` list is the legacy client key list; a mapping is v8.
+    if present("access.api-keys") && root.get("api-keys").is_some_and(|v| !v.is_mapping()) {
+        out.push("api-keys".to_owned());
+    }
+    for (old, family) in FAMILIES {
+        if present(old) && present(&format!("api-keys.{family}")) {
+            out.push((*old).to_owned());
+        }
+    }
+    const ALLOW: &str = "codex.live-media-relay.allow-private-remote-ips";
+    if present(ALLOW) && present("oauth.providers.codex.live-media-relay.disable-private-remote-ips") {
+        out.push(ALLOW.to_owned());
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn sync_mapping(dst: &yaml_edit::Mapping, src: &Mapping, before: &Mapping) -> anyhow::Result<()> {
