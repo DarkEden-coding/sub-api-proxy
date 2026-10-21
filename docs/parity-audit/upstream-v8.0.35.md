@@ -28,7 +28,7 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 3 | 19 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
+| Config and Management API | 15 | 3 | 12 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
 | Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **30** | **194** | **0** | **61** | **3** |
+| **All** | **288** | **31** | **193** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -229,7 +229,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`c163bae4`](https://github.com/router-for-me/CLIProxyAPI/commit/c163bae4) | fix(auth): preserve terminal unauthorized state and prevent unsafe refresh retry | yes | to port | M (+132 −26) | terminal unauthorized state and single-use refresh tokens; touches Claude OAuth refresh |
 | [`d4692663`](https://github.com/router-for-me/CLIProxyAPI/commit/d4692663) | fix(auth): snapshot auth before unlocking during registration and update | no | to port | S (+12 −2) | race: snapshot before unlock (check the Rust scheduler for the same window) |
 | [`8a01bc02`](https://github.com/router-for-me/CLIProxyAPI/commit/8a01bc02) | feat(auth): introduce mutation locking and persistence delta merging | no | to port | M (+210 −30) | mutation locking and persistence delta merging |
-| [`50d5fe18`](https://github.com/router-for-me/CLIProxyAPI/commit/50d5fe18) | fix(cliproxy): avoid selecting rejected credentials during refresh and preserve active quota cooldowns | yes | to port | M (+68 −6) | rejected credentials not selected during refresh; quota cooldowns kept |
+| [`50d5fe18`](https://github.com/router-for-me/CLIProxyAPI/commit/50d5fe18) | fix(cliproxy): avoid selecting rejected credentials during refresh and preserve active quota cooldowns | yes | to port | M (+68 −6) | partly ported: a refresh that rotates the tokens clears the credential's unauthorized cooldowns and keeps live quota blocks, and a Codex token rejected with a 401 is refreshed even when not due. Post-replay: keeping concurrent requests off the rejected token while its refresh is pending (it moves a bound Claude session) and refresh-cancel rescheduling |
 | [`6920ed5d`](https://github.com/router-for-me/CLIProxyAPI/commit/6920ed5d) | fix(cliproxy): propagate credential version and registration epoch in execution results | no | to port | M (+80 −18) | credential version and registration epoch in results |
 | [`935aa6e3`](https://github.com/router-for-me/CLIProxyAPI/commit/935aa6e3) | fix(cliproxy): prevent in-flight token refresh from overwriting concurrently updated credentials | yes | ported here | S (+6 −0) | a refresh that lands after the tokens were saved is dropped and answers with them; another edit is merged with it like Go `mergeAuthContent`, with the Codex outer tokens gated as one partition; Go's registration-epoch and credential-version guards are not ported |
 | [`7c2133e2`](https://github.com/router-for-me/CLIProxyAPI/commit/7c2133e2) | fix(cliproxy): reconcile concurrent auth updates during batch model registration | no | to port | S (+39 −8) | concurrent auth updates during batch model registration |
@@ -247,7 +247,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`94d1a9a0`](https://github.com/router-for-me/CLIProxyAPI/commit/94d1a9a0) | Refactor authentication exclusion handling and improve model registration | yes | to port | M (+157 −116) | Refactor authentication exclusion handling and improve model registration |
 | [`1a28c61e`](https://github.com/router-for-me/CLIProxyAPI/commit/1a28c61e) | fix(auth): tolerate invalid excluded models on load | yes | to port | M (+40 −23) | tolerate invalid excluded models on load |
 | [`7484a521`](https://github.com/router-for-me/CLIProxyAPI/commit/7484a521) | feat(watcher): protect credentials from unindexed deletion during incomplete or in-place file writes | yes | to port | L (+288 −70) | partly covered: the scan's own read keeps the credential of an empty or invalid-JSON file (came with #77), and provider-reload buffering has no counterpart, since every reload rebuilds from disk. Gap: Go invalidates cached hashes after an incomplete read; here a file truncated between the watcher's observation and the scan, then completed before the next observation, is recorded as applied, so the old credential stays until another change (fix belongs in the watcher's applied-snapshot bookkeeping, queued with 1631875b) |
-| [`feb63984`](https://github.com/router-for-me/CLIProxyAPI/commit/feb63984) | feat(auth): increase Codex proactive refresh lead to 96 hours and improve rejected token handling | yes | to port | M (+52 −18) | increase Codex proactive refresh lead to 96 hours and improve rejected token handling |
+| [`feb63984`](https://github.com/router-for-me/CLIProxyAPI/commit/feb63984) | feat(auth): increase Codex proactive refresh lead to 96 hours and improve rejected token handling | yes | to port | M (+52 −18) | partly ported: the 96-hour Codex lead, and a 401 that cools a Codex credential schedules a background refresh at once, or `refreshFailureBackoff` after a refresh that just rotated it. Post-replay: the background refresh after a 401 for other providers (Claude's included), the selection block for unauthorized and expired tokens and the credential-wide scheduler upsert |
 
 ## Model registry and catalogs
 

@@ -843,9 +843,9 @@ mod config_writes {
             let _ = std::fs::remove_dir_all(&dir);
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
-        assert_eq!(compared, 99);
+        assert_eq!(compared, 111);
         eprintln!("config writes: {bytes_compared} of {compared} steps compared byte for byte");
-        assert_eq!(bytes_compared, 73, "steps compared byte for byte");
+        assert_eq!(bytes_compared, 82, "steps compared byte for byte");
     }
 }
 

@@ -420,7 +420,7 @@ async fn prepare_refreshes_when_due_and_keeps_a_valid_token_on_failure() {
     assert_eq!(patch.set["access_token"], "at-new");
     assert_eq!(patch.set["refresh_token"], "rt-new");
     assert!(!executor.needs_prepare(
-        &cred("rt-4", &(Utc::now() + chrono::TimeDelta::days(3)).to_rfc3339()),
+        &cred("rt-4", &(Utc::now() + chrono::TimeDelta::days(5)).to_rfc3339()),
         &cfg
     ));
 }
