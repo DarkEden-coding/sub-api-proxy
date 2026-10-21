@@ -378,6 +378,14 @@ impl Config {
         })
     }
 
+    /// `server.max-request-body-bytes` (legacy root `max-request-body-bytes`), Go
+    /// `SDKConfig.MaxRequestBodyBytes`: the request body limit in bytes. `None` when
+    /// omitted or not positive, which disables it (Go's default 0).
+    pub fn max_request_body_bytes(&self) -> Option<u64> {
+        let value = self.document.get("server")?.get("max-request-body-bytes")?;
+        u64::try_from(go_int(value)?).ok().filter(|&n| n > 0)
+    }
+
     /// Go `Config.ForAPIKey`: the view an API-key credential sees, with the v8
     /// OAuth-only provider settings set to their typed zero. Borrowed when there are
     /// none.

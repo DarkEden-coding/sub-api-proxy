@@ -189,6 +189,14 @@ async fn authenticate(
                 let body = crate::gojson::Obj::new().str("error", denied.message).finish();
                 return crate::respond::gin_json(denied.status, body);
             }
+            Err(denied) if denied.status == 413 => {
+                return realtime_error(
+                    denied.status,
+                    denied.message,
+                    "invalid_request_error",
+                    "request_body_too_large",
+                );
+            }
             Err(denied) if denied.status >= 500 => {
                 return realtime_error(
                     denied.status,

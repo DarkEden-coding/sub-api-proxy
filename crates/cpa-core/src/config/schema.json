@@ -117,7 +117,8 @@
             },
             "advertise-management": "bool"
           }
-        }
+        },
+        "max-request-body-bytes": "int"
       }
     },
     "management": {
