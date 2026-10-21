@@ -393,7 +393,10 @@ mod tests {
         /// The pushed reports, decoded.
         fn statuses(&self) -> Vec<SyncReport> {
             let statuses = self.statuses.lock().unwrap();
-            statuses.iter().map(|s| gojson::from_slice(s.as_bytes()).unwrap()).collect()
+            statuses
+                .iter()
+                .map(|s| gojson::from_slice(s.as_bytes()).unwrap())
+                .collect()
         }
 
         fn pushes(&self) -> usize {
@@ -448,7 +451,10 @@ mod tests {
         let mut work = plugins.stage(&cfg, &client).await.unwrap();
         assert_eq!(work.statuses.len(), 1);
         assert!(work.statuses[0].needs_load_marking && work.statuses[0].report.ok);
-        plugins.finalize(&CancellationToken::new(), &client, &mut work).await.unwrap();
+        plugins
+            .finalize(&CancellationToken::new(), &client, &mut work)
+            .await
+            .unwrap();
         assert_eq!(synced(&plugins), Some(sync_key(&cfg)));
 
         let work = plugins.stage(&cfg, &client).await.unwrap();
@@ -485,7 +491,10 @@ mod tests {
     async fn sync_home_plugins_skips_fetch_when_plugins_disabled() {
         let home = PluginHome::start("-ERR fetch should not be called\r\n", "", 0).await;
         let plugins = plugins();
-        let work = plugins.stage(&sync_cfg(false, &tempdir(), " {}"), &home.client()).await.unwrap();
+        let work = plugins
+            .stage(&sync_cfg(false, &tempdir(), " {}"), &home.client())
+            .await
+            .unwrap();
         assert_eq!(home.home.count("get"), 1, "only the plugin tasks are read");
         assert_eq!(work.statuses.len(), 1);
         assert!(!work.statuses[0].needs_load_marking);
@@ -499,7 +508,10 @@ mod tests {
         let home = PluginHome::start("-ERR fetch should not be called\r\n", "", 0).await;
         let (plugins, client, cfg) = (plugins(), home.client(), sync_cfg(false, &tempdir(), " {}"));
         let mut work = plugins.stage(&cfg, &client).await.unwrap();
-        plugins.finalize(&CancellationToken::new(), &client, &mut work).await.unwrap();
+        plugins
+            .finalize(&CancellationToken::new(), &client, &mut work)
+            .await
+            .unwrap();
         let work = plugins.stage(&cfg, &client).await.unwrap();
         assert!(work.statuses.is_empty());
         assert_eq!(home.statuses().len(), 1);
@@ -534,11 +546,17 @@ mod tests {
         assert_eq!(work.tasks.len(), 1);
         assert_eq!(work.tasks[0].task.id, 7);
         assert!(path.exists(), "staging deleted the plugin");
-        plugins.finalize(&CancellationToken::new(), &client, &mut work).await.unwrap();
+        plugins
+            .finalize(&CancellationToken::new(), &client, &mut work)
+            .await
+            .unwrap();
         assert!(!path.exists());
         let statuses = home.statuses();
         let delete = statuses.last().unwrap();
-        assert_eq!((delete.task.as_str(), delete.task_id, delete.node_id.as_str()), ("plugin-delete", 7, "node-1"));
+        assert_eq!(
+            (delete.task.as_str(), delete.task_id, delete.node_id.as_str()),
+            ("plugin-delete", 7, "node-1")
+        );
         assert_eq!(delete.plugins.0[0].install_status, "deleted");
     }
 
@@ -603,7 +621,10 @@ mod tests {
         let mut work = plugins.stage(&cfg, &client).await.unwrap();
         assert_eq!(work.statuses.len(), 1);
         assert!(work.needs_applied_plugins());
-        plugins.finalize(&CancellationToken::new(), &client, &mut work).await.unwrap();
+        plugins
+            .finalize(&CancellationToken::new(), &client, &mut work)
+            .await
+            .unwrap();
         assert_eq!(home.pushes(), 1);
         assert!(!work.statuses[0].needs_load_marking);
         let report = &work.statuses[0].report;
@@ -634,7 +655,10 @@ mod tests {
     async fn shutdown_cancels_blocked_home_plugin_finalization() {
         let home = hanging_home().await;
         let (plugins, client) = (plugins(), home.client());
-        let mut work = plugins.stage(&sync_cfg(false, &tempdir(), " {}"), &client).await.unwrap();
+        let mut work = plugins
+            .stage(&sync_cfg(false, &tempdir(), " {}"), &client)
+            .await
+            .unwrap();
         let cancel = CancellationToken::new();
         let blocked = plugins.finalize(&cancel, &client, &mut work);
         let finalized = tokio::time::timeout(Duration::from_millis(200), blocked).await;

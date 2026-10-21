@@ -94,7 +94,12 @@ impl PluginRuntime {
 /// so far (Go applies plugin config synchronously while it applies a config).
 pub async fn applied(rt: &Runtime) {
     let seq = rt.plugin_runtime().published_seq();
-    let _ = rt.plugin_runtime().applied.subscribe().wait_for(|applied| *applied >= seq).await;
+    let _ = rt
+        .plugin_runtime()
+        .applied
+        .subscribe()
+        .wait_for(|applied| *applied >= seq)
+        .await;
 }
 
 /// Go's startup and reload sequence (`syncPluginRuntimeConfigForConfig` and

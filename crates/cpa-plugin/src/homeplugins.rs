@@ -745,9 +745,8 @@ mod tests {
 
     use super::*;
     use crate::store::{
-        Artifact, DoerResponse, Headers, INSTALL_TYPE_DIRECT,
-        INSTALL_TYPE_GITHUB_RELEASE, InstallPlan, Plugin, REQUEST_KIND_ARTIFACT, ResolvedAuthConfig,
-        Secret, StoreError,
+        Artifact, DoerResponse, Headers, INSTALL_TYPE_DIRECT, INSTALL_TYPE_GITHUB_RELEASE, InstallPlan, Plugin,
+        REQUEST_KIND_ARTIFACT, ResolvedAuthConfig, Secret, StoreError,
     };
 
     /// Go `mapHTTPDoer`: fixed bodies by exact URL, 404 otherwise. `bearer` makes every
@@ -896,7 +895,10 @@ mod tests {
     }
 
     fn config_yaml(root: &Path, configs: &str) -> SyncConfig {
-        let text = format!("plugins:\n  enabled: true\n  dir: {}\n  configs:\n{configs}", root.display());
+        let text = format!(
+            "plugins:\n  enabled: true\n  dir: {}\n  configs:\n{configs}",
+            root.display()
+        );
         SyncConfig::from_document(&serde_yaml_ng::from_str(&text).unwrap())
     }
 
@@ -954,7 +956,9 @@ mod tests {
     }
 
     fn in_a_minute() -> GoTime {
-        GoTime(Some((chrono::Utc::now() + chrono::Duration::seconds(60)).fixed_offset()))
+        GoTime(Some(
+            (chrono::Utc::now() + chrono::Duration::seconds(60)).fixed_offset(),
+        ))
     }
 
     #[tokio::test]
@@ -1044,7 +1048,10 @@ mod tests {
         assert_eq!(error, None);
         assert_eq!(report.plugins.0.len(), 1);
         let status = &report.plugins.0[0];
-        assert_eq!((status.id.as_str(), status.install_status.as_str()), ("sample", SKIPPED));
+        assert_eq!(
+            (status.id.as_str(), status.install_status.as_str()),
+            ("sample", SKIPPED)
+        );
         assert_eq!(status.path, target.to_string_lossy());
         assert_eq!(status.release_tag, "v1.0.0");
         assert_eq!(status.repository, "https://github.com/owner/sample-plugin");
@@ -1079,9 +1086,16 @@ mod tests {
         assert_eq!(error, None);
         assert_eq!(report.plugins.0.len(), 1);
         let status = &report.plugins.0[0];
-        assert_eq!((status.version.as_str(), status.path.as_str()), ("1.0.0", &*target.to_string_lossy()));
         assert_eq!(
-            (status.release_tag.as_str(), status.repository.as_str(), status.install_type.as_str()),
+            (status.version.as_str(), status.path.as_str()),
+            ("1.0.0", &*target.to_string_lossy())
+        );
+        assert_eq!(
+            (
+                status.release_tag.as_str(),
+                status.repository.as_str(),
+                status.install_type.as_str()
+            ),
             ("", "", "")
         );
     }
@@ -1103,11 +1117,18 @@ mod tests {
             sync_platform_with_report(&sync_test_config(&root), &release_doer(), None, &windows()).await;
         assert_eq!(error, None);
         assert!(report.ok);
-        assert_eq!((report.status.as_str(), report.phase.as_str()), (STATUS_OK, PHASE_INSTALL));
+        assert_eq!(
+            (report.status.as_str(), report.phase.as_str()),
+            (STATUS_OK, PHASE_INSTALL)
+        );
         assert_eq!(report.plugins.0.len(), 1);
         let plugin = &report.plugins.0[0];
         assert_eq!(
-            (plugin.id.as_str(), plugin.install_status.as_str(), plugin.version.as_str()),
+            (
+                plugin.id.as_str(),
+                plugin.install_status.as_str(),
+                plugin.version.as_str()
+            ),
             ("sample", INSTALLED, "0.2.0")
         );
         let want = plugin_test_path(&root, "windows", "amd64", "sample", "0.2.0");
@@ -1125,7 +1146,10 @@ mod tests {
         assert!(report.ok);
         assert_eq!(report.plugins.0.len(), 1);
         let plugin = &report.plugins.0[0];
-        assert_eq!((plugin.id.as_str(), plugin.install_status.as_str()), ("sample", SKIPPED));
+        assert_eq!(
+            (plugin.id.as_str(), plugin.install_status.as_str()),
+            ("sample", SKIPPED)
+        );
         assert!(plugin.skipped);
         assert_eq!(plugin.path, target.to_string_lossy());
     }
@@ -1161,7 +1185,10 @@ mod tests {
     #[tokio::test]
     async fn sync_platform_rejects_invalid_manifest() {
         let root = tempdir();
-        let cfg = config_yaml(&root, "    sample:\n      enabled: true\n      store:\n        id: sample\n");
+        let cfg = config_yaml(
+            &root,
+            "    sample:\n      enabled: true\n      store:\n        id: sample\n",
+        );
         let http: Arc<dyn Doer> = Arc::new(MapDoer::default());
         assert!(sync_platform_with_report(&cfg, &http, None, &linux()).await.1.is_some());
     }
@@ -1169,7 +1196,10 @@ mod tests {
     #[tokio::test]
     async fn sync_platform_with_report_records_invalid_manifest() {
         let root = tempdir();
-        let cfg = config_yaml(&root, "    sample:\n      enabled: true\n      store:\n        id: sample\n");
+        let cfg = config_yaml(
+            &root,
+            "    sample:\n      enabled: true\n      store:\n        id: sample\n",
+        );
         let http: Arc<dyn Doer> = Arc::new(MapDoer::default());
         let (report, error) = sync_platform_with_report(&cfg, &http, None, &linux()).await;
         assert!(error.is_some());
@@ -1201,7 +1231,10 @@ mod tests {
         let mut report = installed_report("sample", INSTALLED, "");
         assert!(mark_load_results(&mut report, Some(&FakeRuntime::default())).is_some());
         assert!(!report.ok);
-        assert_eq!((report.status.as_str(), report.phase.as_str()), (STATUS_ERROR, PHASE_LOAD));
+        assert_eq!(
+            (report.status.as_str(), report.phase.as_str()),
+            (STATUS_ERROR, PHASE_LOAD)
+        );
         assert_eq!(report.plugins.0[0].load_status, FAILED);
         assert!(report.plugins.0[0].error.contains("installed but not loaded"));
     }
@@ -1237,7 +1270,10 @@ mod tests {
         let error = mark_load_results(&mut report, Some(&runtime)).unwrap();
         assert!(error.contains("plugin sync response expired"));
         assert!(!report.ok);
-        assert_eq!((report.status.as_str(), report.phase.as_str()), (STATUS_ERROR, PHASE_LOAD));
+        assert_eq!(
+            (report.status.as_str(), report.phase.as_str()),
+            (STATUS_ERROR, PHASE_LOAD)
+        );
         assert!(report.error.contains("plugin sync response expired"));
         assert_eq!(report.plugins.0[0].load_status, LOADED);
     }
@@ -1291,7 +1327,10 @@ mod tests {
         .await;
         assert!(report.ok);
         assert_eq!(report.task_id, 42);
-        assert_eq!((report.task.as_str(), report.phase.as_str()), (TASK_DELETE, PHASE_DELETE));
+        assert_eq!(
+            (report.task.as_str(), report.phase.as_str()),
+            (TASK_DELETE, PHASE_DELETE)
+        );
         assert_eq!(*runtime.unloaded.lock().unwrap(), ["sample"]);
         assert_eq!(report.plugins.0.len(), 1);
         assert_eq!(report.plugins.0[0].install_status, DELETED);
@@ -1373,7 +1412,14 @@ mod tests {
     #[tokio::test]
     async fn delete_with_report_missing_plugin_is_success() {
         let root = tempdir();
-        let report = delete_with_report(&CancellationToken::new(), Some(&sync_test_config(&root)), None, 7, "missing").await;
+        let report = delete_with_report(
+            &CancellationToken::new(),
+            Some(&sync_test_config(&root)),
+            None,
+            7,
+            "missing",
+        )
+        .await;
         assert!(report.ok);
         assert_eq!(report.status, STATUS_OK);
         assert_eq!(report.plugins.0.len(), 1);
@@ -1406,7 +1452,10 @@ mod tests {
         seed.network_scope = proxy_url.into();
         seed.resolved_auth = resolved.clone();
         seed.resolved_auth_expires_at = Some(expires);
-        assert!(matches!(seed.fetch_latest_release(&plugin).await, Err(StoreError::RateLimited(_))));
+        assert!(matches!(
+            seed.fetch_latest_release(&plugin).await,
+            Err(StoreError::RateLimited(_))
+        ));
 
         let document: Value = serde_yaml_ng::from_str(&format!(
             "requests:\n  proxy-url: \" {proxy_url} \"\nplugins:\n  store-auth:\n    - match: https://api.github.com/\n      type: github-token\n      token-env: {token_env}\n"

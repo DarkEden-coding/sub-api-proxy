@@ -131,8 +131,7 @@ pub async fn bootstrap(
     let parsed = raw
         .map_err(|e| format!("failed to fetch config from home: {e}"))
         .and_then(|raw| {
-            let config =
-                overlay(&raw, None).map_err(|e| format!("failed to parse config payload from home: {e:#}"))?;
+            let config = overlay(&raw, None).map_err(|e| format!("failed to parse config payload from home: {e:#}"))?;
             Ok((crate::home_plugins::sync_config(&raw, &config), config))
         });
     let (sync, config) = match parsed {
@@ -878,7 +877,11 @@ async fn run_lifetimes(
                                 publisher.clone(),
                                 lifetime.clone(),
                             )));
-                            helpers.push(tokio::spawn(forward_usage(rt.clone(), client.clone(), lifetime.clone())));
+                            helpers.push(tokio::spawn(forward_usage(
+                                rt.clone(),
+                                client.clone(),
+                                lifetime.clone(),
+                            )));
                         }
                     }
                     tokio::select! {
@@ -992,13 +995,13 @@ mod tests {
     /// A fake Home in front of `handler` that has no plugin tasks and accepts plugin
     /// status reports, so a node's Home plugin finalization succeeds.
     async fn fake_home(handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static) -> FakeHome {
-        FakeHome::start(move |args| {
-            match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+        FakeHome::start(
+            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some(cpa_home::client::KEY_PLUGIN_TASKS)) => fake::raw("$-1\r\n"),
                 ("rpush", Some(cpa_home::client::KEY_PLUGIN_STATUS)) => fake::raw(":1\r\n"),
                 _ => handler(args),
-            }
-        })
+            },
+        )
         .await
     }
 
@@ -5415,16 +5418,16 @@ mod tests {
         status: impl Fn(usize) -> Reply + Send + Sync + 'static,
     ) -> FakeHome {
         let pushes = std::sync::atomic::AtomicUsize::new(0);
-        FakeHome::start(move |args| {
-            match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+        FakeHome::start(
+            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some("config")) => fake::bulk(config),
                 ("get", _) => fake::raw("$-1\r\n"),
                 ("subscribe", _) => fake::raw(ACK),
                 ("ping", _) => fake::raw("+PONG\r\n"),
                 ("rpush", Some("plugin-status")) => status(pushes.fetch_add(1, Ordering::SeqCst)),
                 _ => fake::raw("+OK\r\n"),
-            }
-        })
+            },
+        )
         .await
     }
 
@@ -5454,7 +5457,8 @@ mod tests {
         assert!(stopped.is_ok(), "shutdown waited for the blocked status push");
     }
 
-    /// Go `TestStageHomeOverlayDoesNotApplyConfigAfterStageFailure` and
+    /// Go `TestStageHomeOverlayDoesNotApplyConfigAfterStageFailure`,
+    /// `TestApplyHomeOverlayReturnsRuntimePluginSyncFailureWithoutApplyingConfig` and
     /// `TestHomeConfigWorkerPreemptsFailingConfigWithNewerPayload_Issue6225`: a payload
     /// whose plugin sync fails is not applied and is retried until a newer payload
     /// replaces it.
@@ -5471,7 +5475,11 @@ mod tests {
         );
         assert_eq!(home.count("rpush"), 0, "a failed stage reported its plugins");
         assert_ne!(
-            node._rt.config().document.get("routing").and_then(|r| r.get("strategy")),
+            node._rt
+                .config()
+                .document
+                .get("routing")
+                .and_then(|r| r.get("strategy")),
             Some(&Yaml::from("fill-first")),
             "a config whose plugin sync failed was applied"
         );
@@ -5481,7 +5489,11 @@ mod tests {
         ));
         node.published().await;
         assert_eq!(
-            node._rt.config().document.get("routing").and_then(|r| r.get("strategy")),
+            node._rt
+                .config()
+                .document
+                .get("routing")
+                .and_then(|r| r.get("strategy")),
             Some(&Yaml::from("fill-first"))
         );
         node.stop().await;
