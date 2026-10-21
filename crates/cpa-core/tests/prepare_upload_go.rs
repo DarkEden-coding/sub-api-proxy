@@ -18,7 +18,12 @@ fn masked(v: Json) -> Json {
     }
 }
 
-const REWRITE_REFUSED: &[&str] = &["aliased hex secret", "merge key beside a hex value"];
+const REWRITE_REFUSED: &[&str] = &[
+    "aliased hex secret",
+    "merge key beside a hex value",
+    "binary host beside a merged secret",
+    "hex key beside a merged secret",
+];
 const REWRITE_REFUSAL: &str =
     "failed to update remote management key: rewriting the config file would change the text of another setting";
 
@@ -33,6 +38,14 @@ fn prepare_for_upload_matches_go() {
         let name = case["name"].as_str().unwrap();
         let yaml = case["yaml"].as_str().unwrap();
         let plain = case["plain"].as_str().unwrap_or_default();
+        // A plaintext that is not UTF-8 is recorded as base64.
+        let plain_bytes = match case["plain_bytes"].as_str() {
+            Some(b) => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.decode(b).unwrap()
+            }
+            None => plain.as_bytes().to_vec(),
+        };
         let go_error = case["error"].as_str().unwrap();
         std::fs::write(&path, yaml).unwrap();
         let result = cpa_core::config::prepare_for_upload(&path);
@@ -89,7 +102,7 @@ fn prepare_for_upload_matches_go() {
                 .find_map(|s| doc.get(*s)?.get("secret-key"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let verifies = !plain.is_empty() && bcrypt::verify(plain, secret).unwrap_or(false);
+            let verifies = !plain_bytes.is_empty() && bcrypt::verify(&plain_bytes, secret).unwrap_or(false);
             if verifies != case["verifies"].as_bool().unwrap() {
                 fail(format!(
                     "secret {secret:?} verifies {verifies}, Go {}",

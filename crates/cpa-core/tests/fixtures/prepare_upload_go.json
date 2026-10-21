@@ -45,7 +45,7 @@
   },
   {
     "name": "overridden legacy secret spelled like the v8 section",
-    "yaml": "remote-management:\n  secret-key: management\nmanagement:\n  secret-key: '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\n",
+    "yaml": "remote-management:\n  secret-key: management\nmanagement:\n  secret-key: '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\n",
     "error": "",
     "unchanged": false,
     "result": {
@@ -87,7 +87,7 @@
   },
   {
     "name": "stale legacy beside hashed v8",
-    "yaml": "remote-management:\n  secret-key: upload-plaintext-secret\nmanagement:\n  secret-key: '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\n",
+    "yaml": "remote-management:\n  secret-key: upload-plaintext-secret\nmanagement:\n  secret-key: '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\n",
     "plain": "upload-plaintext-secret",
     "error": "",
     "unchanged": false,
@@ -101,7 +101,7 @@
   },
   {
     "name": "hashed legacy secret",
-    "yaml": "# operator note\nremote-management:\n  secret-key: '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\n",
+    "yaml": "# operator note\nremote-management:\n  secret-key: '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\n",
     "plain": "upload-plaintext-secret",
     "error": "",
     "unchanged": true,
@@ -115,7 +115,7 @@
   },
   {
     "name": "hashed v8 secret",
-    "yaml": "# operator note\nmanagement:\n  secret-key: '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\n",
+    "yaml": "# operator note\nmanagement:\n  secret-key: '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\n",
     "plain": "upload-plaintext-secret",
     "error": "",
     "unchanged": true,
@@ -286,7 +286,7 @@
   },
   {
     "name": "anchored legacy beside hashed v8",
-    "yaml": "defaults: \u0026legacy\n  secret-key: upload-plaintext-secret\nremote-management: *legacy\nmanagement:\n  secret-key: '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\n",
+    "yaml": "defaults: \u0026legacy\n  secret-key: upload-plaintext-secret\nremote-management: *legacy\nmanagement:\n  secret-key: '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\n",
     "plain": "upload-plaintext-secret",
     "error": "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value",
     "unchanged": true,
@@ -464,6 +464,158 @@
     "effective_same": null
   },
   {
+    "name": "binary secret with a space",
+    "yaml": "management:\n  secret-key: !!binary 'c2Vj cmV0'\n",
+    "error": "failed to parse config file: yaml: !!binary value contains invalid base64 data",
+    "unchanged": true,
+    "result": null,
+    "verifies": false,
+    "effective_same": null
+  },
+  {
+    "name": "binary secret without padding",
+    "yaml": "management:\n  secret-key: !!binary YQ\n",
+    "error": "failed to parse config file: yaml: !!binary value contains invalid base64 data",
+    "unchanged": true,
+    "result": null,
+    "verifies": false,
+    "effective_same": null
+  },
+  {
+    "name": "binary secret with unused bits",
+    "yaml": "management:\n  secret-key: !!binary YR==\n",
+    "plain": "a",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "binary secret that is not UTF-8",
+    "yaml": "management:\n  secret-key: !!binary /w==\n",
+    "plain": "\ufffd",
+    "plain_bytes": "/w==",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "verbatim binary secret beside its decoded copy",
+    "yaml": "management:\n  secret-key: !\u003ctag:yaml.org,2002:binary\u003e c2VjcmV0\ncopy: secret\n",
+    "plain": "secret",
+    "error": "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value",
+    "unchanged": true,
+    "result": {
+      "copy": "secret",
+      "management": {
+        "secret-key": "secret"
+      }
+    },
+    "verifies": false,
+    "effective_same": true
+  },
+  {
+    "name": "verbatim binary secret",
+    "yaml": "management:\n  secret-key: !\u003ctag:yaml.org,2002:binary\u003e c2VjcmV0\n",
+    "plain": "secret",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "tagged null copy",
+    "yaml": "management:\n  secret-key: 'null'\ncopy: !keep null\n",
+    "plain": "null",
+    "error": "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value",
+    "unchanged": true,
+    "result": {
+      "copy": "null",
+      "management": {
+        "secret-key": "null"
+      }
+    },
+    "verifies": false,
+    "effective_same": true
+  },
+  {
+    "name": "tagged tilde copy",
+    "yaml": "management:\n  secret-key: '~'\ncopy: !keep ~\n",
+    "plain": "~",
+    "error": "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value",
+    "unchanged": true,
+    "result": {
+      "copy": "~",
+      "management": {
+        "secret-key": "~"
+      }
+    },
+    "verifies": false,
+    "effective_same": true
+  },
+  {
+    "name": "tagged NULL copy",
+    "yaml": "management:\n  secret-key: 'NULL'\ncopy: [!keep NULL]\n",
+    "plain": "NULL",
+    "error": "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value",
+    "unchanged": true,
+    "result": {
+      "copy": [
+        "NULL"
+      ],
+      "management": {
+        "secret-key": "NULL"
+      }
+    },
+    "verifies": false,
+    "effective_same": true
+  },
+  {
+    "name": "tagged null secret",
+    "yaml": "management:\n  secret-key: !keep null\n",
+    "plain": "null",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "core null tag copy",
+    "yaml": "management:\n  secret-key: 'null'\ncopy: !!null null\n",
+    "plain": "null",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "copy": null,
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
     "name": "aliased hex secret",
     "yaml": "management:\n  secret-key: \u0026key 0x1F\ncopy: *key\n",
     "plain": "0x1F",
@@ -476,6 +628,55 @@
       }
     },
     "verifies": false,
+    "effective_same": true
+  },
+  {
+    "name": "binary host beside a merged secret",
+    "yaml": "management:\n  \u003c\u003c: {secret-key: secret}\nserver:\n  host: !!binary bG9jYWxob3N0\n",
+    "plain": "secret",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      },
+      "server": {
+        "host": "localhost"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "hex key beside a merged secret",
+    "yaml": "management:\n  \u003c\u003c: {secret-key: secret}\nextra: {0x1F: unchanged}\n",
+    "plain": "secret",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "extra": {
+        "31": "unchanged"
+      },
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      }
+    },
+    "verifies": true,
+    "effective_same": true
+  },
+  {
+    "name": "merged secret",
+    "yaml": "management:\n  \u003c\u003c: {secret-key: secret}\nport: 8317\n",
+    "plain": "secret",
+    "error": "",
+    "unchanged": false,
+    "result": {
+      "management": {
+        "secret-key": "\u003cbcrypt\u003e"
+      },
+      "port": 8317
+    },
+    "verifies": true,
     "effective_same": true
   },
   {
@@ -641,7 +842,7 @@
   },
   {
     "name": "hash aliased into trusted-proxies",
-    "yaml": "management:\n  secret-key: \u0026key '$2a$04$kIpWmji61mvQUF362lyI..7kSw0GyTY3LyhEMiw5kghZ2CH2VQyxu'\ntrusted-proxies: [*key]\n",
+    "yaml": "management:\n  secret-key: \u0026key '$2a$04$UvmMMS5AYNt.dJHK8zNc1OpFiLffU6uxQjx22nK.FnWR2q7kY.m3y'\ntrusted-proxies: [*key]\n",
     "plain": "upload-plaintext-secret",
     "error": "",
     "unchanged": true,

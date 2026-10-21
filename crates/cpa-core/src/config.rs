@@ -297,8 +297,25 @@ fn with_secret_hash(text: &str, hash: &str) -> anyhow::Result<String> {
         Some(t) => t,
         None => {
             let t = serde_yaml_ng::to_string(&want)?;
-            // The re-emitted tree writes parsed values (`0x1F` becomes `31`); Go keeps
-            // each node's text. Refuse rather than change another setting.
+            // The re-emitted tree writes parsed values (`0x1F` becomes `31`) and drops
+            // tags; Go keeps each node's text and tag. Refuse rather than change
+            // another setting: on any explicit tag, any key that is not a string, or
+            // any other scalar whose text would change.
+            fn plain_keys(v: &Value) -> bool {
+                match v {
+                    Value::Mapping(m) => m.iter().all(|(k, v)| k.is_string() && plain_keys(v)),
+                    Value::Sequence(items) => items.iter().all(plain_keys),
+                    Value::Tagged(_) => false,
+                    _ => true,
+                }
+            }
+            let tagged = yaml_edit::lex(text)
+                .iter()
+                .any(|(kind, _)| *kind == yaml_edit::SyntaxKind::TAG);
+            anyhow::ensure!(
+                !tagged && plain_keys(&want),
+                "rewriting the config file would change the text of another setting"
+            );
             let others = |t: &str| -> anyhow::Result<Value> {
                 let mut tree = scalar_texts(t)?;
                 expand_merges(&mut tree)?;
@@ -342,20 +359,26 @@ fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     decode(text).context("failed to parse config file")?;
     let mut tree = scalar_texts(text).context("failed to parse config file")?;
     expand_merges(&mut tree).context("failed to parse config file")?;
-    let mut secret = effective_secret(&tree);
+    let mut secret = effective_secret(&tree).into_bytes();
     if binary_secret(text, &tree) {
-        // yaml.v3 decodes a `!!binary` scalar into a string field; Go's StdEncoding
-        // skips line breaks.
-        use base64::Engine as _;
-        let payload: String = secret.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
-        secret = base64::engine::general_purpose::STANDARD
+        // yaml.v3 decodes a `!!binary` scalar into a string field, any bytes, with Go's
+        // StdEncoding: padding required, unused bits ignored, line breaks skipped.
+        use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+        use base64::{Engine as _, alphabet};
+        let engine = GeneralPurpose::new(
+            &alphabet::STANDARD,
+            GeneralPurposeConfig::new()
+                .with_decode_allow_trailing_bits(true)
+                .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
+        );
+        let payload: Vec<u8> = secret.into_iter().filter(|b| !matches!(b, b'\r' | b'\n')).collect();
+        secret = engine
             .decode(payload)
             .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .context("failed to parse config file: !!binary value contains invalid base64 data")?;
+            .context("failed to parse config file: yaml: !!binary value contains invalid base64 data")?;
     }
     let mut prepared = text.to_owned();
-    if !secret.is_empty() && !is_bcrypt(&secret) {
+    if !secret.is_empty() && !looks_like_bcrypt(&secret) {
         // bcrypt 0.19's non-truncating hash also refuses exactly 72 bytes; Go does not.
         anyhow::ensure!(
             secret.len() <= 72,
@@ -369,7 +392,7 @@ fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     }
     // Go `plaintextManagementSecrets`: the effective secret and the values of both
     // secret keys, since an overridden legacy key still holds its own.
-    let mut plaintexts = vec![secret];
+    let mut plaintexts: Vec<String> = String::from_utf8(secret).into_iter().collect();
     for path in ["remote-management.secret-key", "management.secret-key"] {
         if let Some(Value::String(value)) = tree.as_mapping().and_then(|m| lookup(m, path)) {
             plaintexts.push(value.clone());
@@ -412,7 +435,8 @@ fn binary_secret(text: &str, tree: &Value) -> bool {
         return false;
     };
     let node = file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key"));
-    matches!(node, Some(yaml_edit::YamlNode::TaggedNode(t)) if t.tag().as_deref() == Some("!!binary"))
+    matches!(node, Some(yaml_edit::YamlNode::TaggedNode(t))
+        if matches!(t.tag().as_deref(), Some("!!binary" | "!<tag:yaml.org,2002:binary>")))
 }
 
 /// `text` as a tree whose scalars are their decoded text, as yaml.v3's `Node.Value`
@@ -446,7 +470,11 @@ fn scalar_texts(text: &str) -> anyhow::Result<Value> {
         fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<Value, A::Error> {
             use serde::de::VariantAccess as _;
             let (IgnoredAny, variant) = access.variant()?;
-            variant.newtype_variant_seed(Shaped(self.0))
+            match self.0 {
+                Value::Mapping(_) | Value::Sequence(_) => variant.newtype_variant_seed(Shaped(self.0)),
+                // Text even when spelled `null` or `~`: only a `!!null` node is null.
+                _ => variant.newtype_variant::<String>().map(Value::String),
+            }
         }
     }
     impl<'de> Visitor<'de> for Entries<'_> {
@@ -610,7 +638,11 @@ impl Config {
 
 /// Go `looksLikeBcrypt`.
 pub fn is_bcrypt(key: &str) -> bool {
-    key.len() > 4 && (key.starts_with("$2a$") || key.starts_with("$2b$") || key.starts_with("$2y$"))
+    looks_like_bcrypt(key.as_bytes())
+}
+
+fn looks_like_bcrypt(key: &[u8]) -> bool {
+    key.len() > 4 && [b"$2a$", b"$2b$", b"$2y$"].iter().any(|p| key.starts_with(*p))
 }
 
 fn decode_section<T: serde::de::DeserializeOwned + Default>(root: &Mapping, name: &str) -> anyhow::Result<T> {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -24,6 +25,8 @@ type result struct {
 	Name  string `json:"name"`
 	YAML  string `json:"yaml"`
 	Plain string `json:"plain,omitempty"`
+	// PlainBytes is Plain as base64 when it is not UTF-8, which JSON cannot hold.
+	PlainBytes []byte `json:"plain_bytes,omitempty"`
 	// Error is Go's error text, empty on success.
 	Error     string `json:"error"`
 	Unchanged bool   `json:"unchanged"`
@@ -52,6 +55,13 @@ func masked(v any) any {
 		for k, x := range t {
 			t[k] = masked(x)
 		}
+	case map[any]any:
+		// A non-string key: JSON object keys are its Go formatting.
+		out := map[string]any{}
+		for k, x := range t {
+			out[fmt.Sprint(k)] = masked(x)
+		}
+		return out
 	case []any:
 		for i, x := range t {
 			t[i] = masked(x)
@@ -125,8 +135,23 @@ func main() {
 		{"binary secret beside its base64 copy", "management:\n  secret-key: !!binary c2VjcmV0\ncopy: c2VjcmV0\n", "secret"},
 		{"binary secret beside its decoded copy", "management:\n  secret-key: !!binary c2VjcmV0\ncopy: secret\n", "secret"},
 		{"invalid binary secret", "management:\n  secret-key: !!binary 'c2VjcmV0!'\n", ""},
+		{"binary secret with a space", "management:\n  secret-key: !!binary 'c2Vj cmV0'\n", ""},
+		{"binary secret without padding", "management:\n  secret-key: !!binary YQ\n", ""},
+		{"binary secret with unused bits", "management:\n  secret-key: !!binary YR==\n", "a"},
+		{"binary secret that is not UTF-8", "management:\n  secret-key: !!binary /w==\n", "\xff"},
+		{"verbatim binary secret beside its decoded copy", "management:\n  secret-key: !<tag:yaml.org,2002:binary> c2VjcmV0\ncopy: secret\n", "secret"},
+		{"verbatim binary secret", "management:\n  secret-key: !<tag:yaml.org,2002:binary> c2VjcmV0\n", "secret"},
+		// A custom-tagged null spelling is text; only !!null is null.
+		{"tagged null copy", "management:\n  secret-key: 'null'\ncopy: !keep null\n", "null"},
+		{"tagged tilde copy", "management:\n  secret-key: '~'\ncopy: !keep ~\n", "~"},
+		{"tagged NULL copy", "management:\n  secret-key: 'NULL'\ncopy: [!keep NULL]\n", "NULL"},
+		{"tagged null secret", "management:\n  secret-key: !keep null\n", "null"},
+		{"core null tag copy", "management:\n  secret-key: 'null'\ncopy: !!null null\n", "null"},
 		// The re-emitted tree must keep every other scalar's text.
 		{"aliased hex secret", "management:\n  secret-key: &key 0x1F\ncopy: *key\n", "0x1F"},
+		{"binary host beside a merged secret", "management:\n  <<: {secret-key: secret}\nserver:\n  host: !!binary bG9jYWxob3N0\n", "secret"},
+		{"hex key beside a merged secret", "management:\n  <<: {secret-key: secret}\nextra: {0x1F: unchanged}\n", "secret"},
+		{"merged secret", "management:\n  <<: {secret-key: secret}\nport: 8317\n", "secret"},
 		{"merge key beside a hex value", "defaults: &management\n  secret-key: " + plain + "\nmanagement:\n  <<: *management\nport: 0x1F9D\n", plain},
 		// bcrypt's 72-byte limit and Go's looksLikeBcrypt.
 		{"71 bytes", "management:\n  secret-key: " + strings.Repeat("a", 71) + "\n", strings.Repeat("a", 71)},
@@ -175,6 +200,9 @@ func main() {
 		path := filepath.Join(dir, fmt.Sprintf("%d.yaml", i))
 		must(os.WriteFile(path, []byte(c.yaml), 0o600))
 		r := result{Name: c.name, YAML: c.yaml, Plain: c.plain}
+		if !utf8.ValidString(c.plain) {
+			r.PlainBytes = []byte(c.plain)
+		}
 		if errPrepare := config.PrepareConfigFileForUpload(path); errPrepare != nil {
 			r.Error = errPrepare.Error()
 		}
