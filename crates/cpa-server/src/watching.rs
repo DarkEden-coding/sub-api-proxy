@@ -535,6 +535,32 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Go 5fc580b1 (TestAuthDeleteFileRemovalClassification, the service delete recheck):
+    /// a removal is decided from the folder when the reload reads it, so a file removed
+    /// and re-created before the reload keeps its credential, and one re-created after a
+    /// reload that dropped it comes back.
+    #[tokio::test]
+    async fn a_removed_and_recreated_file_keeps_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let good = r#"{"type":"codex","email":"a@example.com"}"#;
+        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
+        std::fs::write(&file, good).unwrap();
+        reload(&state).unwrap();
+        assert!(loaded(&state));
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, good).unwrap();
+        reload(&state).unwrap();
+        assert!(loaded(&state), "re-created before the reload");
+        std::fs::remove_file(&file).unwrap();
+        reload(&state).unwrap();
+        assert!(!loaded(&state), "removed");
+        std::fs::write(&file, good).unwrap();
+        reload(&state).unwrap();
+        assert!(loaded(&state), "re-created after the reload");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The editor finishes the file after the scan read it half-written and before the
     /// reload publishes: the old credential is kept (a second read would see valid JSON,
     /// keep nothing and drop the credential until the next reload).
