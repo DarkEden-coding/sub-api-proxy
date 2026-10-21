@@ -28,7 +28,7 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 9 | 11 | 0 | 2 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 8 | 7 | 0 | 0 | 0 |
+| Config and Management API | 15 | 10 | 5 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 2 | 10 | 0 | 0 | 0 |
 | Usage and logging | 3 | 1 | 2 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **45** | **177** | **0** | **63** | **3** |
+| **All** | **288** | **47** | **175** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -274,8 +274,8 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | ported here | L (+503 −8) | auth indexes in v8 `api-keys`, replayed from a Go-recorded fixture (M5-0307, tests/management.rs v8_api_keys_carry_auth_indexes_and_writes_drop_them) |
 | [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |
 | [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | ported here | S (+20 −7) | values written through the v8 API render as block collections with plain keys, and empty lists stay `[]` (tests/management.rs config_writes_render_json_values_as_block_yaml). Untouched text keeps its style, an approved difference (DIFFERENCES-FROM-GO.md, config writes) |
-| [`0c708401`](https://github.com/router-for-me/CLIProxyAPI/commit/0c708401) | fix(management): resolve v8 plugin quota contract gaps | yes | to port | M (+64 −41) | v8 plugin quota contract |
-| [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | to port | S (+3 −1) | `quota_plugin_id` on v8 auth files |
+| [`0c708401`](https://github.com/router-for-me/CLIProxyAPI/commit/0c708401) | fix(management): resolve v8 plugin quota contract gaps | yes | ported here | M (+64 −41) | credential lists name the quota plugin the host selects per provider (two-pass precedence, fused plugins skipped); v8 lists no longer advertise a declarative `quota_probe` |
+| [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | ported here | S (+3 −1) | `quota_plugin_id` only on v8 credential lists |
 | [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | ported here | M (+48 −43) | root `requests.tls-handshake-timeout-seconds` with the flat legacy spelling |
 | [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
 | [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |

@@ -1236,24 +1236,6 @@ mod creds {
         let mut response = step["response"].take();
         let response = &mut response;
         match (name, i) {
-            // Go 0c708401: auth-file lists drop `quota_probe` and `supports_quota`.
-            // Plugin worker.
-            ("credential_inventory_and_edits", 0 | 1) => {
-                let file = response["files"]
-                    .as_array_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|f| f["name"] == "claude-a.json")
-                    .unwrap();
-                let file = file.as_object_mut().unwrap();
-                assert!(
-                    !file.contains_key("quota_probe") && !file.contains_key("supports_quota"),
-                    "{at}"
-                );
-                file.insert("quota_probe".into(), json!({"kind": "fake"}));
-                file.insert("supports_quota".into(), json!(true));
-                step.as_object_mut().unwrap().remove("raw_json");
-            }
             // Go f62d4d28 and a19a8ecd: the Claude catalog adds claude-haiku-5-5 and
             // changes six models' thinking metadata. Models catalog owner.
             ("credential_inventory_and_edits", 82) => {
