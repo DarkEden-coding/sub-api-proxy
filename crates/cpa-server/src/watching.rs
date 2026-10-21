@@ -805,7 +805,9 @@ mod tests {
     /// the scan's paths are relative and the fallback's absolute).
     #[tokio::test]
     async fn a_reload_does_not_undo_a_write_to_an_upload_fallback() {
-        for relative in [false, true] {
+        // The relative form climbs from the working directory to `/`; on Windows the
+        // temp folder can be on another drive, which no relative path reaches.
+        for relative in [false, true].into_iter().filter(|r| !r || cfg!(unix)) {
             let (state, dir) = state();
             if relative {
                 let up = "../".repeat(std::env::current_dir().unwrap().components().count() - 1);
