@@ -263,7 +263,7 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 let state = state.clone();
                 let current = current.clone();
                 move || {
-                    let loaded = catch_unwind(AssertUnwindSafe(|| reload_config(&state, read_config)));
+                    let loaded = catch_unwind(AssertUnwindSafe(|| reload_config(&state, read_config, &current)));
                     let _ = catch_unwind(AssertUnwindSafe(|| {
                         events.retarget(&targets(&state, Some(&current)));
                     }));
@@ -271,14 +271,17 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 }
             })
             .await;
-            let loaded = match reloaded {
+            let (loaded, read) = match reloaded {
                 Ok((loaded, returned)) => {
                     events = returned;
-                    loaded
+                    match loaded {
+                        Ok((loaded, read)) => (Ok(loaded), Some(read)),
+                        Err(()) => (Err(()), None),
+                    }
                 }
                 Err(_) => {
                     events = Events::default();
-                    Err(())
+                    (Err(()), None)
                 }
             };
             if loaded.is_err() {
@@ -308,9 +311,12 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 },
                 _ => {}
             }
-            // Applied once either way: a failed config load retries on its next change,
-            // as Go retries on its next file event, rather than every tick.
-            applied = Some(current);
+            // What the reload read, not what was observed before it: a write landing in
+            // between is reloaded when it is next observed (Go records the parsed config's
+            // `SourceHash` and forgets the hash of an incomplete auth read). Applied once
+            // either way: a failed config load retries on its next change, as Go retries
+            // on its next file event, rather than every tick.
+            applied = Some(read.unwrap_or(current));
         }
     })
 }
@@ -416,32 +422,66 @@ impl std::error::Error for ReloadError {}
 /// directory is reconciled against it anyway: Go handles auth events independently
 /// of the config file.
 pub fn reload(state: &Management) -> Result<(), ReloadError> {
-    reload_config(state, true).map(|_| ())
+    reload_config(state, true, &Snapshot::default()).0.map(|_| ())
 }
 
 /// Return the config actually accepted under the disk lock, not a later runtime
-/// snapshot possibly replaced by management. None is an auth-only/empty reload.
-fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>, ReloadError> {
+/// snapshot possibly replaced by management (None is an auth-only or empty reload), and
+/// the hashes of what this reload read. Entries it did not read are as `observed`.
+fn reload_config(
+    state: &Management,
+    read_config: bool,
+    observed: &Snapshot,
+) -> (Result<Option<Config>, ReloadError>, Snapshot) {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut read = Snapshot {
+        config: observed.config,
+        auth: BTreeMap::new(),
+    };
     let (mut config, config_error, accepted) = match read_config.then(|| std::fs::metadata(&state.path)) {
         None => ((*state.rt.config()).clone(), None, false),
-        Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Missing(error)), false),
+        Some(Err(error)) => {
+            read.config = None;
+            ((*state.rt.config()).clone(), Some(ReloadError::Missing(error)), false)
+        }
         // Go ignores an empty config write.
-        Some(Ok(meta)) if meta.len() == 0 => ((*state.rt.config()).clone(), None, false),
-        Some(Ok(_)) => match Config::load(&state.path) {
-            Ok(config) => (config, None, true),
-            Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
-        },
+        Some(Ok(meta)) if meta.len() == 0 => {
+            read.config = Some(Sha256::digest(b"").into());
+            ((*state.rt.config()).clone(), None, false)
+        }
+        Some(Ok(_)) => {
+            read.config = None;
+            let loaded = std::fs::read(&state.path)
+                .map_err(anyhow::Error::from)
+                .and_then(|data| {
+                    read.config = Some(Sha256::digest(&data).into());
+                    Config::load_text(&state.path, std::str::from_utf8(&data)?)
+                });
+            match loaded {
+                Ok(config) => (config, None, true),
+                Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
+            }
+        }
     };
     state.lock_auth_dir(&mut config);
-    let (mut files, incomplete) = credentials::scan_auth_dir(&config);
-    keep_incomplete(state, &mut files, &incomplete);
+    let scan = credentials::scan_auth_dir(&config);
+    let mut files = scan.credentials;
+    keep_incomplete(state, &mut files, &scan.incomplete);
+    read.auth = scan.read;
+    // A file neither could read stays as observed; recording it as missing would
+    // reload it on every tick.
+    for (path, hash) in &observed.auth {
+        if *hash == Hash::default() {
+            read.auth.entry(path.clone()).or_insert(*hash);
+        }
+    }
     let result = accepted.then(|| config.clone());
     state.publish(config, Some(files));
-    match config_error {
+    let result = match config_error {
         Some(error) => Err(error),
         None => Ok(result),
-    }
+    };
+    (result, read)
 }
 
 /// An empty or half-written file is not a deletion (Go 7484a521): keep the
@@ -491,15 +531,65 @@ mod tests {
         let (state, dir) = state();
         let config = |port| format!("port: {port}\noauth: {{auth-dir: {}}}\n", dir.display());
         std::fs::write(&state.path, config(9001)).unwrap();
-        let accepted = reload_config(&state, true).unwrap().unwrap();
+        let accepted = reload_config(&state, true, &Snapshot::default()).0.unwrap().unwrap();
         state.rt.publish_config(Config::parse(&config(9002)).unwrap());
         assert_eq!(accepted.port, 9001); // Not the later management publication.
         std::fs::write(&state.path, "").unwrap();
-        assert!(reload_config(&state, true).unwrap().is_none());
+        assert!(reload_config(&state, true, &Snapshot::default()).0.unwrap().is_none());
         assert_eq!(state.rt.config().port, 9002);
         std::fs::write(&state.path, config(9003)).unwrap();
-        assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
+        assert!(reload_config(&state, false, &Snapshot::default()).0.unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The watcher records what its reload read, not what it observed before: a write
+    /// landing after the read is reloaded when next observed, even when it restores
+    /// bytes observed earlier (Go 1631875b
+    /// `TestReloadConfigIfChangedReloadsWriteLandingDuringReload_Issue6631` and
+    /// `TestReloadConfigIfChangedReloadsAfterWriteBetweenHashAndLoad_Issue6631`), and an
+    /// auth file truncated before the scan and finished after it is reloaded (Go
+    /// 7484a521 forgets the hash of an incomplete read). Go
+    /// `TestReloadConfigIfChangedSerializesConcurrentReloads_Issue6631` has no Rust
+    /// interleaving: one watcher task reloads, under the disk lock.
+    #[tokio::test]
+    async fn the_watcher_records_what_its_reload_read_not_what_it_observed() {
+        let (state, dir) = state();
+        let look = |state: &Management| observe(state, &mut HashCache::default());
+        let config = |port| format!("port: {port}\noauth: {{auth-dir: {}}}\n", dir.display());
+        std::fs::write(&state.path, config(9001)).unwrap();
+        let observed = look(&state);
+        std::fs::write(&state.path, config(9002)).unwrap(); // Lands before the reload reads.
+        let (result, applied) = reload_config(&state, true, &observed);
+        assert_eq!(result.unwrap().unwrap().port, 9002);
+        std::fs::write(&state.path, config(9001)).unwrap(); // Restores the observed bytes.
+        assert!(look(&state) != applied, "the restore must be reloaded");
+        reload(&state).unwrap();
+        assert_eq!(state.rt.config().port, 9001);
+
+        let file = dir.join("a.json");
+        let account = |email: &str| format!(r#"{{"type":"codex","email":"{email}"}}"#);
+        let email = |state: &Management| {
+            let creds = state.rt.store().snapshot();
+            let cred = creds.iter().find(|c| c.id == "a.json").expect("a.json is loaded");
+            cred.str("email").unwrap_or_default().to_owned()
+        };
+        std::fs::write(&file, account("a@example.com")).unwrap();
+        reload(&state).unwrap();
+        std::fs::write(&file, account("b@example.com")).unwrap();
+        let observed = look(&state);
+        std::fs::write(&file, "").unwrap(); // Truncated before the scan.
+        let (_, applied) = reload_config(&state, false, &observed);
+        assert_eq!(email(&state), "a@example.com"); // Kept while incomplete.
+        std::fs::write(&file, account("b@example.com")).unwrap(); // Finished after it.
+        let finished = look(&state);
+        assert!(
+            finished == observed && finished != applied,
+            "the finished write must be reloaded"
+        );
+        let (_, applied) = reload_config(&state, false, &finished);
+        assert_eq!(email(&state), "b@example.com");
+        assert!(look(&state) == applied, "nothing left to reload");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -546,10 +636,11 @@ mod tests {
         std::fs::write(&file, good).unwrap();
         reload(&state).unwrap();
         std::fs::write(&file, r#"{"type":"codex""#).unwrap();
-        let (mut files, incomplete) = credentials::scan_auth_dir(&state.rt.config());
-        assert!(incomplete.contains(&file) && files.is_empty());
+        let scan = credentials::scan_auth_dir(&state.rt.config());
+        let mut files = scan.credentials;
+        assert!(scan.incomplete.contains(&file) && files.is_empty());
         std::fs::write(&file, good).unwrap();
-        keep_incomplete(&state, &mut files, &incomplete);
+        keep_incomplete(&state, &mut files, &scan.incomplete);
         assert_eq!(files.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["a.json"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
