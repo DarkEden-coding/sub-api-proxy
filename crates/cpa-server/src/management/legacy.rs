@@ -307,7 +307,8 @@ pub(super) async fn locked(state: Arc<Management>, f: impl FnOnce(Value) -> Chan
             StatusCode::NOT_FOUND if delete => ok(),
             _ => save_error(res).await,
         },
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        // A failed save task fails as Go's `persistLocked` does.
+        Err(_) => save_error(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")).await,
     }
 }
 
@@ -980,6 +981,37 @@ mod tests {
         );
         assert_eq!(current(&state)["api-keys"], json!(["a", "b", "c"]));
         assert!(std::fs::read_to_string(&path).unwrap().contains("- c"));
+
+        // The other order: a writer holds the lock and publishes [a, b, c, d]; a v0 PATCH
+        // queued behind it reads after the publish (a read before taking the lock would
+        // see [a, b, c] and drop d).
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let (state, path) = (state.clone(), path.clone());
+            std::thread::spawn(move || {
+                let _disk = state.disk.lock().unwrap();
+                held_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                let text = std::fs::read_to_string(&path).unwrap().replace("- c", "- c\n    - d");
+                std::fs::write(&path, text).unwrap();
+                state.publish(cpa_core::config::Config::load(&path).unwrap(), None);
+            })
+        };
+        held_rx.recv().unwrap();
+        let patch = tokio::spawn(api_keys(
+            State(state.clone()),
+            Method::PATCH,
+            RawQuery(None),
+            Bytes::from(r#"{"old":"b","new":"b2"}"#),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await; // Queued on the lock.
+        go_tx.send(()).unwrap();
+        assert_eq!(patch.await.unwrap().status(), StatusCode::OK);
+        tokio::task::spawn_blocking(move || writer.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(current(&state)["api-keys"], json!(["a", "b2", "c", "d"]));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
