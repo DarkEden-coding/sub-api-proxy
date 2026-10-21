@@ -565,10 +565,10 @@ fn codex_channel(name: &str) -> Vec<Spec> {
     models
 }
 
-/// Go `WithXAIBuiltins` (`upsertModelInfos`): the hard-coded image and video models,
-/// appended after the channel's models and replacing any with the same ID.
+/// Go `WithXAIBuiltins` (`upsertModelInfos`): the hard-coded image, video and speech
+/// models, appended after the channel's models and replacing any with the same ID.
 fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
-    const BUILTINS: [(&str, i64, &str, &str); 6] = [
+    const BUILTINS: [(&str, i64, &str, &str); 8] = [
         (
             "grok-imagine-image",
             1735689600,
@@ -604,6 +604,18 @@ fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
             1735689600,
             "Grok Imagine Video 1.5 Preview",
             "Compatibility alias for the xAI Grok video generation model.",
+        ),
+        (
+            "grok-tts",
+            1773619200,
+            "Grok TTS",
+            "xAI Grok unary text-to-speech model.",
+        ),
+        (
+            "grok-voice-tts-1.0",
+            1773619200,
+            "Grok Voice TTS 1.0",
+            "xAI Grok unary text-to-speech model.",
         ),
     ];
     let mut out: Vec<Spec> = models

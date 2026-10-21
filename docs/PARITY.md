@@ -7,7 +7,7 @@ Most existing fixtures were recorded from the previous reference, `6fecc6e` (v8.
 ## What works today
 
 - Client APIs: `POST /v1/messages` and `/v1/messages/count_tokens` (Anthropic), `POST /v1/chat/completions`, `/v1/completions`, `/v1/responses` and `/v1/responses/compact` (OpenAI), `/v1beta/models/...` and `/v1beta/interactions` (Gemini), `GET /v1/models`, and the Codex paths under `/backend-api/codex/`. Streaming (SSE) and non-streaming, with format translation between the three protocols.
-- Images and video: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, and the `/v1/videos` and `/openai/v1/videos` routes for xAI video.
+- Images, video and speech: `POST /v1/images/generations` and `/v1/images/edits` through Codex accounts, xAI and OpenAI-compatible upstreams, the `/v1/videos` and `/openai/v1/videos` routes for xAI video, and `POST /v1/audio/speech` and `/v1/tts` for xAI text-to-speech (Grok TTS).
 - WebSocket: the Responses WebSocket on `GET /v1/responses` and `GET /backend-api/codex/responses`, used by Codex clients, including response steering (`oauth.providers.codex.response-steering`).
 - Realtime and live through a Codex account: `/v1/realtime` (WebSocket and WebRTC calls), `/v1/live`, call sidebands and local ephemeral keys (`/v1/realtime/client_secrets`). The WebRTC media relay is an optional build feature (`cargo build --release -p cliproxy --features cpa-server/media-relay`) and is not in the release binaries.
 - Providers: Claude (OAuth and API keys), Codex (OAuth and API keys), Kimi, Meta, xAI, Devin, Google Antigravity, Gemini API keys and Gemini Interactions, Vertex AI (service accounts imported with `-vertex-import` or from the dashboard, and API keys), AI Studio (through the `/v1/ws` browser relay), and OpenAI-compatible upstreams such as OpenRouter.
@@ -32,11 +32,11 @@ Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 |---|---:|---:|---:|---:|
 | M1 | 151 | 54 | 84 | 13 |
 | M2 | 189 | 71 | 114 | 4 |
-| M3 | 424 | 188 | 217 | 19 |
-| M4 | 589 | 244 | 330 | 15 |
-| M5 | 331 | 213 | 112 | 6 |
+| M3 | 424 | 191 | 217 | 16 |
+| M4 | 589 | 244 | 331 | 14 |
+| M5 | 331 | 215 | 113 | 3 |
 | M6 | 267 | 124 | 127 | 16 |
-| All | 1951 | 894 | 984 | 73 |
+| All | 1951 | 899 | 986 | 66 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
@@ -52,7 +52,7 @@ An item is covered when it is implemented and a Rust test or a fixture recorded 
 | M5 | The Management API, WebSockets, realtime and live voice, and access control |
 | M6 | Plugins, the terminal UI, LAN discovery and Home (cluster) mode |
 
-Missing items now also include v8.0.35 speech routes, requests through Sign in with ChatGPT (SIWC) tokens, tool search, model catalog sources, new configuration and plugin contracts. Most v8.0.35 Management API changes are in: ETag and If-Match on v8 config, auth indexes in v8 api-keys, model definitions by channel, credential patches applied to the current record and the stale-reload guard. So are `GET /v1/models/{model}` and the watcher's handling of half-written credential files. So is binding SIWC tokens to a Codex credential from the v8 Management API, without Go's registration-epoch check and post-binding 401 recovery; the Codex executor does not use the bound tokens yet. The historical v8 config aliases are not in. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
+Missing items now also include requests through Sign in with ChatGPT (SIWC) tokens, tool search, model catalog sources, new configuration and plugin contracts. Most v8.0.35 Management API changes are in: ETag and If-Match on v8 config, auth indexes in v8 api-keys, model definitions by channel, credential patches applied to the current record and the stale-reload guard. So are `GET /v1/models/{model}` and the watcher's handling of half-written credential files. So is binding SIWC tokens to a Codex credential from the v8 Management API, without Go's registration-epoch check and post-binding 401 recovery; the Codex executor does not use the bound tokens yet. The historical v8 config aliases are not in. Plugin runtime integration and parts of Home remain incomplete. The plugin store and terminal UI exist, though some Go cases remain unported.
 
 Antigravity (M3) is implemented: sign-in from the command line, the dashboard and the Management API, the executor, AI credits, connection pool settings, reasoning replay and the web-search capability probe. The executor features have Go-recorded tests with local mock upstreams; sign-in is tested against local mock endpoints. Selected v8.0.27 changes add Claude 5.5 models, CAQS thinking signatures and backend errors inside streams. This is not full v8.0.35 parity: model entitlements, session continuation, newer schema and usage fixes, and several suites remain unported. [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md#antigravity) and the upstream inventory list them. No live Antigravity account has been used in these tests.
 

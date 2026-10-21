@@ -81,6 +81,7 @@ pub(crate) fn handler_type(call: &Call) -> &'static str {
     match call.media.as_ref().map(|m| m.kind) {
         Some(crate::dispatch::MediaKind::Images) => "openai-image",
         Some(crate::dispatch::MediaKind::Videos) => "openai-video",
+        Some(crate::dispatch::MediaKind::Speech) => "openai-speech",
         None => call.entry.as_str(),
     }
 }
