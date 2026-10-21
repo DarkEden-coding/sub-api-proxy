@@ -1456,6 +1456,18 @@ func configScenarios() []configScenario {
 			put("/config.yaml", "config-version: 8\nmanagement:\n  secret-key: fake-secret\nrouting:\n  <<: 5\n"),
 			get("/config"),
 		}},
+		// JSON keys are quoted, so `<<` in a JSON body is a plain key until Go parses its
+		// own save, which writes it plain: a map then merges and a scalar is a 422 at any
+		// depth (a YAML upload's scalar merge is a 400 above).
+		{Name: "merge_keys_in_json_bodies", YAML: "config-version: 8\nmanagement:\n  secret-key: '$HASH'\n", Steps: []configStep{
+			put("/config/plugins/configs/x", `{"<<":5}`),
+			put("/config/plugins/configs/x", `{"<<":{"a":1},"b":2}`),
+			get("/config/plugins"),
+			patch("/config", `{"<<":{"server":{"port":3}}}`),
+			patch("/config", `{"<<":5}`),
+			put("/config", `{"management":{"secret-key":"fake-secret"},"<<":{"server":{"port":4}}}`),
+			get("/config"),
+		}},
 	}
 }
 

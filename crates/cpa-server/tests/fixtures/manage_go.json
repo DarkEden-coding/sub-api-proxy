@@ -30155,6 +30155,189 @@
      "file_has_archive": false
     }
    ]
+  },
+  {
+   "name": "merge_keys_in_json_bodies",
+   "yaml": "config-version: 8\nmanagement:\n  secret-key: '$HASH'\n",
+   "steps": [
+    {
+     "method": "PUT",
+     "path": "/config/plugins/configs/x",
+     "body": "{\"\u003c\u003c\":5}",
+     "status": 422,
+     "response": {
+      "error": "invalid_config",
+      "message": "yaml: map merge requires map or sequence of maps as the value"
+     },
+     "raw_json": "{\"error\":\"invalid_config\",\"message\":\"yaml: map merge requires map or sequence of maps as the value\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config/plugins/configs/x",
+     "body": "{\"\u003c\u003c\":{\"a\":1},\"b\":2}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "b": 2
+        }
+       }
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config/plugins",
+     "status": 200,
+     "response": {
+      "configs": {
+       "x": {
+        "a": 1,
+        "b": 2
+       }
+      }
+     },
+     "raw_json": "{\"configs\":{\"x\":{\"a\":1,\"b\":2}}}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "b": 2
+        }
+       }
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config",
+     "body": "{\"\u003c\u003c\":{\"server\":{\"port\":3}}}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "b": 2
+        }
+       }
+      },
+      "server": {
+       "port": 3
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config",
+     "body": "{\"\u003c\u003c\":5}",
+     "status": 422,
+     "response": {
+      "error": "invalid_config",
+      "message": "yaml: map merge requires map or sequence of maps as the value"
+     },
+     "raw_json": "{\"error\":\"invalid_config\",\"message\":\"yaml: map merge requires map or sequence of maps as the value\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "b": 2
+        }
+       }
+      },
+      "server": {
+       "port": 3
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config",
+     "body": "{\"management\":{\"secret-key\":\"fake-secret\"},\"\u003c\u003c\":{\"server\":{\"port\":4}}}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "raw_json": "{\"config-version\":8,\"management\":{\"secret-key\":\"fake-secret\"},\"server\":{\"port\":4}}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    }
+   ]
   }
  ],
  "client_ip_bytes": [

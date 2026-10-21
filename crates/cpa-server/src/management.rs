@@ -913,12 +913,12 @@ fn config_sync_locked(
             Ok(v) if has_document => v,
             _ => return error(400, "invalid_body"),
         };
-        // A whole-config body is alias-normalized first, where a scalar merge fails
-        // (Go `NormalizeV8ConfigAliases`, 400). ponytail: below the root this answers
-        // 422, but in a JSON body Go reads `<<` as a plain key (opaque plugin data
-        // keeps it); telling JSON bodies apart here is the upgrade path.
+        // A YAML upload is alias-normalized first, where a scalar merge fails (Go
+        // `NormalizeV8ConfigAliases`, 400). JSON keys are quoted, so Go keeps `<<` as a
+        // plain key until it parses its own save, which writes it plain: there a map
+        // merges and a scalar fails as an invalid config (422).
         if let Err(e) = cpa_core::config::expand_merges(&mut value) {
-            let status = if parts.is_empty() {
+            let status = if yaml {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY

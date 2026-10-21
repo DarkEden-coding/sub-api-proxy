@@ -29,6 +29,12 @@ pub use schema::{coerce_typed_scalars, go_bool, go_int};
 /// (nested merges first); explicit keys win, then earlier merged mappings. A merge
 /// value that is not a mapping or a list of mappings is yaml.v3's decode error.
 /// (Aliases are already expanded by the parser.)
+///
+/// ponytail: the parsed value no longer says whether a key was quoted, so a quoted
+/// `"<<"` key in config.yaml merges here, where yaml.v3 loads it as a plain key (Go's
+/// next save writes it plain and then fails the same way). A JSON body is unaffected:
+/// Go merges its `<<` when it parses the save. Telling quoted keys apart needs the
+/// yaml-edit syntax tree walked alongside the value.
 pub fn expand_merges(value: &mut Value) -> anyhow::Result<()> {
     const NOT_MAPS: &str = "map merge requires map or sequence of maps as the value";
     match value {
