@@ -606,10 +606,32 @@ pub(crate) struct Cooldown {
     pub credential: bool,
     /// Bounded trust of a stated quota reset (cliproxy-rs only); `level` stays Go's.
     pub trust: Trust,
-    /// A live quota block (its end and status) that this non-quota failure answered:
-    /// Go keeps `ModelState.Quota` when it records a 401, and a recovery that clears the
-    /// 401 keeps the block. Not saved: a restored record has none.
-    pub quota_under: Option<(Instant, u16)>,
+    /// What the quota is when `quota` is set: the status that set it and its reason as
+    /// `records` names it (a Cloudflare challenge can answer 429).
+    pub quota_kind: Option<QuotaKind>,
+    /// A live quota block (its end and kind) that this non-quota failure answered: Go
+    /// keeps `ModelState.Quota` when it records a 401, and a recovery that clears the 401
+    /// keeps the block. Not saved: a record saved meanwhile is the failure's alone, and
+    /// a restore keeps a live block from the entry it merges with.
+    pub quota_under: Option<(Instant, QuotaKind)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuotaKind {
+    pub status: u16,
+    pub reason: &'static str,
+}
+
+impl Cooldown {
+    /// The live quota block this entry is or carries.
+    fn quota_block(&self, now: Instant) -> Option<(Instant, QuotaKind)> {
+        let block = if self.quota {
+            self.quota_kind.map(|k| (self.deadline, k))
+        } else {
+            self.quota_under
+        };
+        block.filter(|(end, _)| *end > now || self.trust.stated.is_some_and(|r| r > now))
+    }
 }
 
 /// Bounded trust of one cooldown (`max-trusted-cooldown`, docs/DIFFERENCES-FROM-GO.md).
@@ -1352,15 +1374,7 @@ impl Scheduler {
         let prev_live = prev.filter(|s| s.deadline > now).map(|s| s.deadline);
         let prev_trust = prev.map(|s| s.trust).unwrap_or_default();
         // A live quota block this failure answers, if it is not a quota failure itself.
-        let quota_under = prev
-            .and_then(|p| {
-                if p.quota {
-                    Some((p.deadline, p.status))
-                } else {
-                    p.quota_under
-                }
-            })
-            .filter(|(end, _)| *end > now);
+        let quota_under = prev.and_then(|p| p.quota_block(now));
         let mut level = prev.filter(|s| s.quota).map(|s| s.level).unwrap_or(0);
         // Causes other than a cut reset keep the trust count: nothing recovered.
         let mut trust = Trust {
@@ -1369,10 +1383,12 @@ impl Scheduler {
         };
         let hint = error.retry_after.filter(|d| !d.is_zero());
         let mut quota = false;
+        let mut cloudflare = false;
         let duration = if crate::classify::is_model_support(status, &text) {
             (!disabled).then(|| hint.unwrap_or(Duration::from_secs(43200)))
         } else if crate::classify::is_cloudflare(status, &text) {
             quota = true;
+            cloudflare = true;
             (!disabled).then(|| {
                 let (d, next) = quota_backoff(level);
                 level = next;
@@ -1503,7 +1519,14 @@ impl Scheduler {
                 }
             }
         };
-        let state = |deadline| Cooldown {
+        let kind = |reason| {
+            quota.then_some(QuotaKind {
+                status: error.status,
+                reason,
+            })
+        };
+        let own_reason = if cloudflare { "cloudflare challenge" } else { "quota" };
+        let state = |deadline, reason| Cooldown {
             deadline,
             level,
             status: error.status,
@@ -1512,9 +1535,15 @@ impl Scheduler {
             since: SystemTime::now(),
             credential: false,
             trust: provenance(deadline),
+            quota_kind: kind(reason),
             quota_under: quota_under.filter(|_| !quota),
         };
-        self.cooldowns.insert(key, state(deadline));
+        let reason = if credential_quota {
+            "credential_quota"
+        } else {
+            own_reason
+        };
+        self.cooldowns.insert(key, state(deadline, reason));
         if credential_quota {
             self.extend_siblings(c, deadline, prev_deadline, now);
             // Go also records the failing model's own quota state (reason `quota`).
@@ -1530,7 +1559,7 @@ impl Scheduler {
                     .map_or(deadline, |s| s.deadline);
                 let own_trust = self.cooldowns.get(&own).map(|s| s.trust).unwrap_or_default();
                 let own_window = own_trust.window;
-                let mut own_state = state(own_deadline);
+                let mut own_state = state(own_deadline, own_reason);
                 if own_deadline != deadline {
                     // The model's own window (longer, or bounded) wins: its provenance
                     // goes with it.
@@ -1557,10 +1586,10 @@ impl Scheduler {
     /// window this one `renews` (the credential's previous deadline) move onto it even
     /// when they ended, so no copy outlives the account's recovery.
     fn extend_siblings(&mut self, c: &Credential, deadline: Instant, renews: Option<Instant>, now: Instant) {
-        let (level, trust) = self
+        let (level, trust, status) = self
             .cooldowns
             .get(&(c.id.clone(), String::new()))
-            .map_or((0, Trust::default()), |s| (s.level, s.trust));
+            .map_or((0, Trust::default(), 429), |s| (s.level, s.trust, s.status));
         for ((id, model), state) in &mut self.cooldowns {
             if *id != c.id || model.is_empty() {
                 continue;
@@ -1579,6 +1608,10 @@ impl Scheduler {
                 state.quota = true;
                 state.credential = true;
                 state.level = level;
+                state.quota_kind = Some(QuotaKind {
+                    status,
+                    reason: "credential_quota",
+                });
             }
         }
     }
@@ -1739,6 +1772,15 @@ impl Scheduler {
             status,
             !model.is_empty() && record.quota.reason == "credential_quota",
         );
+        let reason = match record.quota.reason.as_str() {
+            "credential_quota" => "credential_quota",
+            "cloudflare challenge" => "cloudflare challenge",
+            _ => "quota",
+        };
+        let mut quota_kind = record.quota.exceeded.then_some(QuotaKind { status, reason });
+        // A live quota block under the entry this merges with stays: a record saved while
+        // a 401 answered a quota is the 401's alone.
+        let quota_under = prev.and_then(|p| p.quota_block(now));
         let mut trust = trust;
         // With bounded trust on either side, provenance and the quota classification come
         // from the entry that supplies the deadline, and the counts merge. Without it the
@@ -1751,6 +1793,7 @@ impl Scheduler {
                     ..prev.trust
                 };
                 quota = (prev.quota, prev.status, prev.credential);
+                quota_kind = prev.quota_kind;
             }
             trust.window = window;
         }
@@ -1777,7 +1820,8 @@ impl Scheduler {
                 since: record.updated_at.unwrap_or(wall),
                 credential,
                 trust,
-                quota_under: None,
+                quota_kind: quota_kind.filter(|_| quota),
+                quota_under: quota_under.filter(|_| !quota),
             },
         );
         true
@@ -1885,20 +1929,19 @@ impl Scheduler {
                 return true;
             }
             changed = true;
-            let under = if c.quota {
-                Some((c.deadline, c.status))
-            } else {
-                c.quota_under
-            };
-            let Some((end, status)) = under.filter(|(end, _)| *end > now || c.trust.stated.is_some_and(|r| r > now))
-            else {
+            let Some((end, kind)) = c.quota_block(now) else {
                 return false;
             };
             c.quota = true;
+            c.quota_kind = Some(kind);
             c.quota_under = None;
             c.deadline = c.deadline.max(end);
-            c.error = if status == 429 { "quota" } else { "cloudflare challenge" }.into();
-            c.status = status;
+            c.status = kind.status;
+            // Go clears `LastError` and puts the quota reason in a status message that
+            // names the failure.
+            if error.contains("unauthorized") {
+                c.error = kind.reason.into();
+            }
             true
         });
         changed
@@ -1909,6 +1952,68 @@ impl Scheduler {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The quota a recovery keeps under a 401 survives a restore while serving (a saved
+    /// record is the 401's alone) and keeps its own kind: a Cloudflare challenge that
+    /// answered 429 stays one, and a credential-wide quota that reached a model's 401
+    /// keeps the quota's status. Error text that does not name the 401 stays.
+    #[test]
+    fn a_quota_under_a_401_keeps_its_kind_through_restore_and_recovery() {
+        let (c, d) = (cred("a", serde_json::json!({})), cred("b", serde_json::json!({})));
+        let p = Policy {
+            max_trusted_cooldown: Duration::ZERO,
+            ..Policy::default()
+        };
+        let (start, wall) = (Instant::now(), SystemTime::now());
+        let unauthorized = |text: &str| Outcome::Failure(ExecError::local(401, FailureScope::Credential, text));
+        let mut challenge = ExecError::local(429, FailureScope::Model, "<title>Just a moment...</title> cloudflare");
+        challenge.retry_after = Some(secs(2 * H));
+        let mut s = Scheduler::default();
+        s.record(&c, "restored", &hinted(FailureScope::Model, secs(2 * H)), &p, start);
+        s.record(&c, "cloudflare", &Outcome::Failure(challenge), &p, start);
+        s.record(&c, "plain", &hinted(FailureScope::Model, secs(2 * H)), &p, start);
+        s.record(&d, "sibling", &unauthorized("unauthorized"), &p, start);
+        // Inside the challenge's 10s cooldown.
+        let answered = start + secs(2);
+        for model in ["restored", "cloudflare"] {
+            s.record(&c, model, &unauthorized("unauthorized"), &p, answered);
+        }
+        s.record(&c, "plain", &unauthorized("status 401"), &p, answered);
+        s.record(
+            &d,
+            "other",
+            &hinted(FailureScope::Credential, secs(2 * H)),
+            &p,
+            answered,
+        );
+        assert!(
+            entry(&s, &d, "sibling").quota,
+            "the credential-wide quota reached the 401"
+        );
+        let restored = s
+            .records(&c, answered, wall)
+            .into_iter()
+            .find(|r| r.model == "restored")
+            .unwrap();
+        assert!(!restored.quota.exceeded, "the saved record is the 401's");
+        assert!(s.restore(&c, &restored, true, Duration::ZERO, answered, wall));
+        let cases = [
+            (&c, "restored", "quota"),
+            (&c, "cloudflare", "cloudflare challenge"),
+            (&c, "plain", "status 401"),
+            (&d, "sibling", "credential_quota"),
+        ];
+        let blocked: Vec<_> = cases.iter().map(|(x, m, _)| s.wait(x, m, answered)).collect();
+        assert!(s.clear_unauthorized("a", answered));
+        assert!(s.clear_unauthorized("b", answered));
+        for (x, model, error) in cases {
+            let e = entry(&s, x, model);
+            assert_eq!((e.quota, e.status, e.error.as_str()), (true, 429, error), "{model}");
+        }
+        let after: Vec<_> = cases.iter().map(|(x, m, _)| s.wait(x, m, answered)).collect();
+        assert_eq!(after, blocked, "each stays blocked until the same time");
+        assert!(after.iter().all(Option::is_some));
+    }
 
     /// Which cooldowns the SIWC recovery clears: model keys match a 401 or
     /// "unauthorized" in the error (Go's status-message check), the credential-wide key
@@ -1925,6 +2030,7 @@ mod tests {
             since: SystemTime::now(),
             credential: false,
             trust: Trust::default(),
+            quota_kind: None,
             quota_under: None,
         };
         let mut s = Scheduler::default();
