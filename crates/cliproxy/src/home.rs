@@ -110,8 +110,13 @@ pub fn overlay(raw: &[u8], base: Option<&Config>) -> anyhow::Result<Config> {
     Config::parse(&serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Go main's Home bootstrap. The error is the line Go logs before exiting.
-pub async fn bootstrap(jwt: &str, disable_discovery: bool) -> Result<(HomeConfig, Config), String> {
+/// Go main's Home bootstrap: Home's config, with its plugins synced and reported. The
+/// error is the line Go logs before exiting.
+pub async fn bootstrap(
+    jwt: &str,
+    disable_discovery: bool,
+    plugins: &cpa_plugin::Host,
+) -> Result<(HomeConfig, Config, crate::home_plugins::Bootstrap), String> {
     let mut home = tokio::time::timeout(BOOTSTRAP_TIMEOUT, cpa_home::cert::config_from_jwt(jwt))
         .await
         .unwrap_or(Err(cpa_home::Error::Timeout))
@@ -123,13 +128,24 @@ pub async fn bootstrap(jwt: &str, disable_discovery: bool) -> Result<(HomeConfig
     let raw = tokio::time::timeout(BOOTSTRAP_TIMEOUT, client.get_config())
         .await
         .unwrap_or(Err(cpa_home::Error::Timeout));
-    // Go closes the bootstrap client once startup is done; the service opens its own.
-    client.close();
-    let raw = raw.map_err(|e| format!("failed to fetch config from home: {e}"))?;
-    // ponytail: Home plugin sync and its status report are not ported; plugins load
-    // from the local configuration only.
-    let config = overlay(&raw, None).map_err(|e| format!("failed to parse config payload from home: {e:#}"))?;
-    Ok((home, config))
+    let parsed = raw
+        .map_err(|e| format!("failed to fetch config from home: {e}"))
+        .and_then(|raw| {
+            let config =
+                overlay(&raw, None).map_err(|e| format!("failed to parse config payload from home: {e:#}"))?;
+            Ok((crate::home_plugins::sync_config(&raw, &config), config))
+        });
+    let (sync, config) = match parsed {
+        Ok(parsed) => parsed,
+        Err(line) => {
+            client.close();
+            return Err(line);
+        }
+    };
+    // Go closes the bootstrap client after the plugin load report; the service opens its
+    // own.
+    let plugins = crate::home_plugins::bootstrap(client, &home.node_id, &sync, plugins).await?;
+    Ok((home, config, plugins))
 }
 
 /// The client and registry of the live Home lifetime (Go `HomeDispatchBundle`).
@@ -754,6 +770,11 @@ async fn run_lifetimes(
     let bound = || CredentialConcurrency::default().with_defaults().cancel_bound();
     // Go keeps the publisher settings on the auth manager, across lifetimes.
     let publisher = cpa_home::inflight::PublisherSettings::default();
+    // Go keeps the plugin sync key on the service, across lifetimes.
+    let plugins = Arc::new(crate::home_plugins::HomePlugins::new(
+        &home.node_id,
+        Some(rt.plugins().clone()),
+    ));
     while !shutdown.is_cancelled() {
         let client = match &previous {
             Some(client) => client.new_lifetime(),
@@ -780,6 +801,7 @@ async fn run_lifetimes(
                 app_log.clone(),
             );
             let (lifetime, published, publisher) = (lifetime.clone(), published.clone(), publisher.clone());
+            let plugins = plugins.clone();
             async move {
                 // Go `runHomeConfigWorkerWithSupervisor`: the lifetime's in-flight
                 // publisher and usage forwarder, awaited before it is torn down.
@@ -789,35 +811,74 @@ async fn run_lifetimes(
                     ready = ready_rx => if ready.is_err() { return helpers },
                 }
                 loop {
-                    let raw = latest.borrow_and_update().clone();
-                    if let Some(raw) = raw {
-                        let base = rt.config();
-                        match overlay(&raw, Some(base.as_ref())) {
-                            Ok(cfg) => {
-                                // Go `redisqueue.SetEnabled(... || cfg.Home.Enabled)`.
-                                rt.usage_queue().configure(true, &cfg);
-                                rt.publish_config(cfg);
-                                if !published.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                    // The KV client goes first: an attempt that
-                                    // receives a Home credential must also see
-                                    // Home KV for its identities and caches.
-                                    cpa_home::set_current(Some(client.clone()));
-                                    dispatcher.install(client.clone(), registry.clone());
-                                    app_log.bind(&client);
-                                    helpers.push(tokio::spawn(cpa_home::inflight::run_publisher(
-                                        client.clone(),
-                                        registry.clone(),
-                                        publisher.clone(),
-                                        lifetime.clone(),
-                                    )));
-                                    helpers.push(tokio::spawn(forward_usage(
-                                        rt.clone(),
-                                        client.clone(),
-                                        lifetime.clone(),
-                                    )));
-                                }
+                    let mut raw = latest.borrow_and_update().clone();
+                    if raw.is_some() {
+                        // Go `runHomeConfigWorker`: stage (overlay, plugin sync, plugin
+                        // tasks) until it succeeds, every 100ms with the newest payload;
+                        // then apply, then finalize until it succeeds.
+                        let (cfg, mut work) = loop {
+                            let payload = raw.as_deref().unwrap_or_default();
+                            let staged = async {
+                                let cfg = overlay(payload, Some(rt.config().as_ref()))?;
+                                let sync = crate::home_plugins::sync_config(payload, &cfg);
+                                let work = plugins.stage(&sync, &client).await.map_err(anyhow::Error::msg)?;
+                                anyhow::Ok((cfg, work))
+                            };
+                            let staged = tokio::select! {
+                                _ = lifetime.cancelled() => return helpers,
+                                staged = staged => staged,
+                            };
+                            match staged {
+                                Ok(staged) => break staged,
+                                Err(error) => tracing::warn!("failed to stage home config; retrying: {error:#}"),
                             }
-                            Err(error) => tracing::warn!("failed to stage home config; retrying: {error:#}"),
+                            tokio::select! {
+                                _ = lifetime.cancelled() => return helpers,
+                                _ = tokio::time::sleep(PRE_ACK_RETRY) => {}
+                            }
+                            if latest.has_changed().unwrap_or(false) {
+                                raw = latest.borrow_and_update().clone();
+                            }
+                        };
+                        // Go `redisqueue.SetEnabled(... || cfg.Home.Enabled)`.
+                        rt.usage_queue().configure(true, &cfg);
+                        rt.publish_config(cfg);
+                        // Go applies the plugin config with the rest; the load report
+                        // waits for the plugin worker.
+                        if work.needs_applied_plugins() {
+                            tokio::select! {
+                                _ = lifetime.cancelled() => return helpers,
+                                _ = cpa_server::plugins::applied(&rt) => {}
+                            }
+                        }
+                        loop {
+                            let finalized = tokio::select! {
+                                _ = lifetime.cancelled() => return helpers,
+                                finalized = plugins.finalize(&lifetime, &client, &mut work) => finalized,
+                            };
+                            match finalized {
+                                Ok(()) => break,
+                                Err(error) => tracing::warn!("failed to finalize home plugins; retrying: {error}"),
+                            }
+                            tokio::select! {
+                                _ = lifetime.cancelled() => return helpers,
+                                _ = tokio::time::sleep(PRE_ACK_RETRY) => {}
+                            }
+                        }
+                        if !published.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            // The KV client goes first: an attempt that receives a Home
+                            // credential must also see Home KV for its identities and
+                            // caches.
+                            cpa_home::set_current(Some(client.clone()));
+                            dispatcher.install(client.clone(), registry.clone());
+                            app_log.bind(&client);
+                            helpers.push(tokio::spawn(cpa_home::inflight::run_publisher(
+                                client.clone(),
+                                registry.clone(),
+                                publisher.clone(),
+                                lifetime.clone(),
+                            )));
+                            helpers.push(tokio::spawn(forward_usage(rt.clone(), client.clone(), lifetime.clone())));
                         }
                     }
                     tokio::select! {
@@ -928,6 +989,19 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
+    /// A fake Home in front of `handler` that has no plugin tasks and accepts plugin
+    /// status reports, so a node's Home plugin finalization succeeds.
+    async fn fake_home(handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static) -> FakeHome {
+        FakeHome::start(move |args| {
+            match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+                ("get", Some(cpa_home::client::KEY_PLUGIN_TASKS)) => fake::raw("$-1\r\n"),
+                ("rpush", Some(cpa_home::client::KEY_PLUGIN_STATUS)) => fake::raw(":1\r\n"),
+                _ => handler(args),
+            }
+        })
+        .await
+    }
+
     const ACK: &str = "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n";
 
     /// A Claude upstream on loopback that records what reached it.
@@ -1020,7 +1094,7 @@ mod tests {
         kv: std::collections::HashMap<String, String>,
     ) -> FakeHome {
         let replies = Mutex::new(std::collections::VecDeque::from(replies));
-        FakeHome::start(with_kv(kv, move |args| match args[0].to_lowercase().as_str() {
+        fake_home(with_kv(kv, move |args| match args[0].to_lowercase().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1331,7 +1405,7 @@ mod tests {
         let reply = format!(
             r#"{{"model":"claude-upstream","auth_index":"cred-1","concurrency":{{"accounted":true,"credential_id":"cred-1","model":"claude-upstream"}},"auth":{{"id":"cred-1","provider":"claude","attributes":{{"api_key":"sk-home-fake","base_url":"{upstream}"}}}}}}"#
         );
-        let home = FakeHome::start(with_kv(Default::default(), move |args| {
+        let home = fake_home(with_kv(Default::default(), move |args| {
             match args[0].to_lowercase().as_str() {
                 "get" => fake::bulk("port: 0\ncredentials:\n  concurrency:\n    cpa-flush-interval: 20ms\n"),
                 "subscribe" => fake::raw(ACK),
@@ -1395,7 +1469,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn home_errors_reach_the_client_and_the_gate_closes_without_home() {
-        let home = FakeHome::start(|args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(|args| match args[0].to_lowercase().as_str() {
             "get" => fake::bulk("port: 0\n"),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1432,7 +1506,7 @@ mod tests {
             )
         };
         let replies = Mutex::new(vec![auth("cred-2", "sk-good"), auth("cred-1", "sk-bad")]);
-        let home = FakeHome::start(with_kv(Default::default(), move |args| {
+        let home = fake_home(with_kv(Default::default(), move |args| {
             match args[0].to_lowercase().as_str() {
                 "get" => fake::bulk("port: 0\n"),
                 "subscribe" => fake::raw(ACK),
@@ -1636,7 +1710,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn model_routes_serve_the_home_catalog() {
         let catalog = r#"{"xai":[{"id":"grok-4","display_name":"Grok 4","context_length":256000,"owned_by":"xai"}],"claude":[{"id":"claude-x","owned_by":"anthropic","created":1700000000}]}"#;
-        let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
             "get" if args[1] == "config" => fake::bulk("port: 0\n"),
             "get" if args[1].contains("x-bad") => {
                 fake::bulk(r#"{"error":{"type":"no_credentials","message":"who are you"}}"#)
@@ -1928,7 +2002,7 @@ mod tests {
         // cancelled.
         let (release, held) = std::sync::mpsc::channel::<()>();
         let held = Mutex::new(held);
-        let home = FakeHome::start({
+        let home = fake_home({
             let first = first.clone();
             move |args| match args[0].to_ascii_lowercase().as_str() {
                 "lpush" => {
@@ -3303,7 +3377,7 @@ mod tests {
             Reply::Bytes(bytes) => bytes,
             _ => unreachable!(),
         }));
-        FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+        fake_home(move |args| match args[0].to_lowercase().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -3711,7 +3785,7 @@ mod tests {
             let upstream = ContractUpstream::start(vec![("home-retry-a", rate_limited(1))]).await;
             let calls = Arc::new(AtomicUsize::new(0));
             let base_url = upstream.base.clone();
-            let home = FakeHome::start({
+            let home = fake_home({
                 let calls = calls.clone();
                 move |args| match args[0].to_lowercase().as_str() {
                     "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\nmax-retry-credentials: 1\n"),
@@ -3866,7 +3940,7 @@ mod tests {
         ] {
             let upstream = ContractUpstream::start(vec![("home-retry-a", bad_gateway())]).await;
             let pick = contract_pick("home-retry-a", &upstream.base, None, &Value::Null);
-            let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
                 "get" => fake::bulk(config),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -3935,7 +4009,7 @@ mod tests {
             let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let done_by_home = done.clone();
             // The Claude executor keeps its session IDs in Home KV.
-            let home = FakeHome::start(with_kv(Default::default(), move |args| {
+            let home = fake_home(with_kv(Default::default(), move |args| {
                 match args[0].to_lowercase().as_str() {
                     "get" => fake::bulk(config),
                     "subscribe" => fake::raw(ACK),
@@ -4054,7 +4128,7 @@ mod tests {
                     .to_string()
                 }
             };
-            let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -4270,7 +4344,7 @@ mod tests {
             let pick = pick.clone();
             let minted = refreshed.to_string().contains("sk-meta-home-fake");
             let refreshed = refreshed.to_string();
-            let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
                 "get" if args[1].starts_with('{') => fake::bulk(&refreshed),
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\n"),
                 "subscribe" => fake::raw(ACK),
@@ -4932,7 +5006,7 @@ mod tests {
     async fn home_busy_skips_outer_retries() {
         for stream in [false, true] {
             let busy = r#"{"error":{"type":"credential_concurrency_exceeded","message":"busy","retryable":true,"retry_after_ms":20000}}"#;
-            let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 1\nmax-retry-interval: 30\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -5250,7 +5324,7 @@ mod tests {
             let allow_second = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let beating = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let home = Arc::new(
-                FakeHome::start({
+                fake_home({
                     let (subscriptions, allow_second) = (subscriptions.clone(), allow_second.clone());
                     move |args| match args[0].to_lowercase().as_str() {
                         "get" if args[1] == "config" => fake::bulk(Self::CONFIG),
@@ -5330,6 +5404,87 @@ mod tests {
             self.shutdown.cancel();
             self.task.await.unwrap();
         }
+    }
+
+    // ---- Go home_plugins_test.go: the config worker's plugin stage and finalization ----
+
+    /// A Home serving `config` whose `plugin-status` pushes go to `status`. Every other
+    /// GET is empty: no plugin tasks, and no plugin sync plan (a fetch fails).
+    async fn plugin_status_home(
+        config: &'static str,
+        status: impl Fn(usize) -> Reply + Send + Sync + 'static,
+    ) -> FakeHome {
+        let pushes = std::sync::atomic::AtomicUsize::new(0);
+        FakeHome::start(move |args| {
+            match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+                ("get", Some("config")) => fake::bulk(config),
+                ("get", _) => fake::raw("$-1\r\n"),
+                ("subscribe", _) => fake::raw(ACK),
+                ("ping", _) => fake::raw("+PONG\r\n"),
+                ("rpush", Some("plugin-status")) => status(pushes.fetch_add(1, Ordering::SeqCst)),
+                _ => fake::raw("+OK\r\n"),
+            }
+        })
+        .await
+    }
+
+    /// Go `TestReadyHomePluginFinalizationRetriesUntilStatusSucceeds`: a failed status
+    /// push is retried, and the lifetime publishes only once it succeeded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ready_home_plugin_finalization_retries_until_status_succeeds() {
+        let home = plugin_status_home("port: 0\n", |n| {
+            fake::raw(if n == 0 { "-ERR blocked\r\n" } else { ":1\r\n" })
+        })
+        .await;
+        let node = Bare::start(&home).await;
+        node.published().await;
+        assert_eq!(home.count("rpush"), 2);
+        node.stop().await;
+    }
+
+    /// Go `TestShutdownCancelsBlockedHomePluginFinalization`: shutdown ends a lifetime
+    /// whose status push hangs, and it never publishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_cancels_blocked_home_plugin_finalization() {
+        let home = plugin_status_home("port: 0\n", |_| Reply::Hang).await;
+        let node = Bare::start(&home).await;
+        eventually("the status push", || home.count("rpush") >= 1).await;
+        assert!(node.dispatcher.current().is_none());
+        let stopped = tokio::time::timeout(Duration::from_secs(5), node.stop()).await;
+        assert!(stopped.is_ok(), "shutdown waited for the blocked status push");
+    }
+
+    /// Go `TestStageHomeOverlayDoesNotApplyConfigAfterStageFailure` and
+    /// `TestHomeConfigWorkerPreemptsFailingConfigWithNewerPayload_Issue6225`: a payload
+    /// whose plugin sync fails is not applied and is retried until a newer payload
+    /// replaces it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn home_config_worker_preempts_failing_config_with_newer_payload_issue6225() {
+        // Plugins are enabled, and Home sends no plugin sync plan.
+        let broken = "port: 0\nrouting:\n  strategy: fill-first\nplugins:\n  enabled: true\n  configs:\n    broken:\n      enabled: true\n      store:\n        id: broken\n";
+        let home = plugin_status_home(broken, |_| fake::raw(":1\r\n")).await;
+        let node = Bare::start(&home).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            node.dispatcher.current().is_none(),
+            "a config whose plugin sync failed was published"
+        );
+        assert_eq!(home.count("rpush"), 0, "a failed stage reported its plugins");
+        assert_ne!(
+            node._rt.config().document.get("routing").and_then(|r| r.get("strategy")),
+            Some(&Yaml::from("fill-first")),
+            "a config whose plugin sync failed was applied"
+        );
+        home.push(fake::message(
+            "config",
+            b"port: 0\nrouting:\n  strategy: fill-first\nplugins:\n  enabled: false\n",
+        ));
+        node.published().await;
+        assert_eq!(
+            node._rt.config().document.get("routing").and_then(|r| r.get("strategy")),
+            Some(&Yaml::from("fill-first"))
+        );
+        node.stop().await;
     }
 
     /// Go `TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK`: a
@@ -5427,7 +5582,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pre_ack_failures_back_off_and_stop_on_shutdown() {
         let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
-        let home = FakeHome::start(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
             "get" if args[1] == "config" => {
                 let _ = attempt_tx.send(std::time::Instant::now());
                 fake::raw("-ERR unavailable\r\n")
