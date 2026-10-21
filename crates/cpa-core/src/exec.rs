@@ -210,7 +210,27 @@ pub enum UpstreamStage {
 
 /// A handle executors report usage through; cloning shares the observer.
 #[derive(Clone, Default)]
-pub struct UsageSink(Option<std::sync::Arc<dyn UsageObserver>>, CaptureSink);
+pub struct UsageSink(
+    Option<std::sync::Arc<dyn UsageObserver>>,
+    CaptureSink,
+    Option<std::sync::Arc<dyn WebSocketObserver>>,
+);
+
+/// Receives the upstream WebSocket frames Go's executors pass to
+/// `helps.EmitWebSocketResponseEvent` (the Codex and xAI WebSockets).
+pub trait WebSocketObserver: Send + Sync {
+    /// One non-empty upstream frame as the executor read it, on `credential` for the
+    /// upstream `model`; `provider` is the executor identifier. The executor awaits the
+    /// returned future before it handles the frame, as Go calls the observer inside its
+    /// read loop.
+    fn response<'a>(
+        &'a self,
+        provider: &'a str,
+        credential: &'a crate::credential::Credential,
+        model: &'a str,
+        payload: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, ()>;
+}
 
 /// No payloads or credentials: keyed fingerprints and serialized byte lengths only.
 /// Replay estimates token positions offline from returned aggregate usage.
@@ -260,7 +280,18 @@ pub struct ClaudeCacheTelemetry {
 
 impl UsageSink {
     pub fn new(observer: std::sync::Arc<dyn UsageObserver>) -> Self {
-        Self(Some(observer), CaptureSink::default())
+        Self(Some(observer), CaptureSink::default(), None)
+    }
+
+    /// Attach the attempt's WebSocket response observer.
+    pub fn with_websocket(mut self, observer: Option<std::sync::Arc<dyn WebSocketObserver>>) -> Self {
+        self.2 = observer;
+        self
+    }
+
+    /// The attached WebSocket response observer, if any.
+    pub fn websocket(&self) -> Option<std::sync::Arc<dyn WebSocketObserver>> {
+        self.2.clone()
     }
 
     /// Attach request capture without changing ExecRequest construction sites.
@@ -389,6 +420,42 @@ impl ExecRequest {
     /// the handle before spawning a stream task; clones retain the same observer.
     pub fn capture(&self) -> &CaptureSink {
         &self.usage.1
+    }
+
+    /// The attempt's WebSocket response observer bound to the executor `provider`, the
+    /// selected credential and this request's upstream model; `None` without one.
+    pub fn websocket_emitter(
+        &self,
+        provider: &'static str,
+        credential: &crate::credential::Credential,
+    ) -> Option<WebSocketEmitter> {
+        self.usage.2.clone().map(|observer| WebSocketEmitter {
+            observer,
+            provider,
+            credential: std::sync::Arc::new(credential.clone()),
+            model: self.model.clone(),
+        })
+    }
+}
+
+/// Go `helps.EmitWebSocketResponseEvent` for one attempt.
+#[derive(Clone)]
+pub struct WebSocketEmitter {
+    observer: std::sync::Arc<dyn WebSocketObserver>,
+    provider: &'static str,
+    credential: std::sync::Arc<crate::credential::Credential>,
+    model: String,
+}
+
+impl WebSocketEmitter {
+    /// One upstream frame, delivered before the executor goes on; empty frames are not
+    /// reported, as in Go.
+    pub async fn emit(&self, payload: &[u8]) {
+        if !payload.is_empty() {
+            self.observer
+                .response(self.provider, &self.credential, &self.model, payload)
+                .await;
+        }
     }
 }
 
