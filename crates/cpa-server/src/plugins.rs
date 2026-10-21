@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock, Weak};
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::HeaderMap;
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::exec::Caller;
 use tokio::sync::watch;
@@ -65,7 +66,7 @@ impl PluginRuntime {
     ) -> Option<cpa_plugin::executor::Adapter> {
         let adapter = {
             let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            executors.get(&credential.provider.trim().to_lowercase()).cloned()?
+            executors.get(&credential.provider.trim().go_lower()).cloned()?
         };
         let compat_names = cpa_core::config::credentials::openai_compat_names(cfg);
         (!binds_native(credential, &compat_names)).then_some(adapter)
@@ -74,7 +75,7 @@ impl PluginRuntime {
     /// Whether a plugin executor is registered for `provider`.
     pub(crate) fn has_executor(&self, provider: &str) -> bool {
         let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        executors.contains_key(&provider.trim().to_lowercase())
+        executors.contains_key(&provider.trim().go_lower())
     }
 
     /// Records a published config; the worker started by [`start`] applies it.
@@ -197,7 +198,7 @@ const BUILTIN: [&str; 14] = [
 /// candidate keeps the provider.
 fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -> bool {
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let provider = c.provider.trim().to_lowercase();
+    let provider = c.provider.trim().go_lower();
     if !attr("compat_name").is_empty() || provider == "openai-compatibility" || BUILTIN.contains(&provider.as_str()) {
         return true;
     }
@@ -207,7 +208,7 @@ fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -
         provider.as_str()
     };
     !attr("base_url").is_empty()
-        || [key, &attr("provider_key").to_lowercase(), &provider]
+        || [key, &attr("provider_key").go_lower(), &provider]
             .iter()
             .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate))
 }
@@ -225,7 +226,7 @@ async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
     let host = rt.plugins();
     let mut native = HashSet::new();
     for c in rt.store().snapshot().iter().filter(|c| !c.disabled) {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let key = if !c.attributes.get("compat_name").is_none_or(|v| v.trim().is_empty())
             || provider == "openai-compatibility"
         {
@@ -308,7 +309,7 @@ pub(crate) fn scheduler_request(
     let candidates = rt.store().scheduler_candidates(selection, policy, admit, across)?;
     let mut providers: Vec<String> = Vec::new();
     for p in selection.provider_keys() {
-        let p = p.trim().to_lowercase();
+        let p = p.trim().go_lower();
         if !p.is_empty() && p != "mixed" && !providers.contains(&p) {
             providers.push(p);
         }
@@ -319,7 +320,7 @@ pub(crate) fn scheduler_request(
         // Provider empty; Codex realtime and Alpha Search select one provider (Go
         // `pickNextLegacy`), which names it.
         provider: if selection.providers.is_empty() {
-            selection.provider.trim().to_lowercase()
+            selection.provider.trim().go_lower()
         } else {
             String::new()
         },
@@ -331,7 +332,7 @@ pub(crate) fn scheduler_request(
             .iter()
             .map(|c| cpa_plugin::api::SchedulerAuthCandidate {
                 id: c.id.clone(),
-                provider: c.provider.trim().to_lowercase(),
+                provider: c.provider.trim().go_lower(),
                 priority: crate::scheduler::priority(c),
                 // ponytail: candidates are ready, which Go reports as `active` unless an
                 // earlier failure left the credential in `error`; that status is not

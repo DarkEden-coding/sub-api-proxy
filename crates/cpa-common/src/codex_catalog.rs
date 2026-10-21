@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use cpa_core::registry::ThinkingSupport;
 
+use crate::gostr::GoStr;
 use crate::json::GoValue;
 
 type Map = BTreeMap<String, GoValue>;
@@ -443,7 +444,7 @@ fn apply_capabilities(
         return;
     }
     let providers = providers(id, registry);
-    let alias = !metadata_id.is_empty() && !id.eq_ignore_ascii_case(metadata_id);
+    let alias = !metadata_id.is_empty() && !id.go_eq_fold(metadata_id);
     let provider_info = |provider: &str| {
         registry
             .lookup(id, Some(provider))

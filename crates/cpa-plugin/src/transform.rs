@@ -2,6 +2,7 @@
 //! (internal/pluginhost/adapters_usage_translation.go, sdk/translator/plugin_hooks.go).
 
 use bytes::Bytes;
+use cpa_common::gostr::GoStr;
 
 use crate::abi::method;
 use crate::api::{
@@ -161,7 +162,7 @@ impl Host {
         for record in self.hook_records(|r| r.plugin.caps.thinking_applier) {
             let identifier = crate::rpc::identifier(&record.client, method::THINKING_IDENTIFIER)
                 .await
-                .to_lowercase();
+                .go_lower();
             if identifier.is_empty() || NATIVE_THINKING_PROVIDERS.contains(&identifier.as_str()) {
                 continue;
             }
@@ -182,7 +183,7 @@ impl Host {
     pub fn thinking_provider(&self, provider: &str) -> Option<String> {
         self.state()
             .thinking_providers
-            .get(&provider.trim().to_lowercase())
+            .get(&provider.trim().go_lower())
             .cloned()
     }
 
@@ -202,7 +203,7 @@ impl Host {
             return body;
         };
         let req = ThinkingApplyRequest {
-            provider: provider.trim().to_lowercase(),
+            provider: provider.trim().go_lower(),
             model,
             config,
             body: body.clone(),

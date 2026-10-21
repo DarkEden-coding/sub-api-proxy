@@ -34,7 +34,6 @@ pub mod codex_catalog;
 pub mod codex_client;
 pub mod gemini_schema;
 pub mod gostr;
-mod gostr_tables;
 pub mod headers;
 pub mod idle;
 pub mod json;

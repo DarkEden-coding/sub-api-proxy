@@ -21,6 +21,7 @@ use cpa_core::config::Config;
 use http::HeaderMap;
 use serde_yaml_ng::Value as Yaml;
 
+use crate::gostr::GoStr;
 use crate::json::{self, GoValue, Kind, Res};
 
 /// One request's context for payload rules (Go's parameters to
@@ -626,12 +627,14 @@ fn headers_match(headers: Option<&HeaderMap>, rules: &[(String, String)]) -> boo
 }
 
 /// Go `payloadModelCandidates`: the upstream model, the client's suffix-free model and,
-/// when it has a thinking suffix, the client's model as written (case-insensitive dedup).
+/// when it has a thinking suffix, the client's model as written, deduplicated by
+/// `strings.ToLower` key (σ and ς stay distinct; `İ` and `i` collapse).
 fn model_candidates(model: &str, requested: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut add = |v: &str| {
         let v = v.trim();
-        if !v.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(v)) {
+        if !v.is_empty() && seen.insert(v.go_lower()) {
             out.push(v.to_owned());
         }
     };
