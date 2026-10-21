@@ -1140,6 +1140,12 @@ pub struct CredentialStore {
     attempts: AtomicU64,
     stats: [AtomicU64; 3],
     prepare_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Go 8a01bc02: a credential file is written with `inner` unlocked. Each
+    /// credential's lock serializes its own writes, and the reload gate (shared by
+    /// writes, exclusive for a set replacement) keeps a reload from landing between a
+    /// write and its publication.
+    write_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    reload: RwLock<()>,
     /// `auth-dir` while `save-cooldown-status` is on (Go `cooldownStore`).
     cooldown_dir: RwLock<Option<std::path::PathBuf>>,
     /// Replaces the `.cds` files while set (Go's token-store cooldown provider).
@@ -1179,6 +1185,8 @@ impl CredentialStore {
             attempts: AtomicU64::new(0),
             stats: Default::default(),
             prepare_locks: Mutex::default(),
+            write_locks: Mutex::default(),
+            reload: RwLock::default(),
             cooldown_dir: RwLock::default(),
             cooldown_backend: RwLock::default(),
             cooldown_write: Mutex::default(),
@@ -1312,41 +1320,44 @@ impl CredentialStore {
                 return;
             }
         }
-        // The store write lock serializes this with `apply_patch`: a refresh committed
+        // Written only while the credential is still at this revision: a refresh committed
         // after this request started must not be overwritten with the older token.
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let Some(slot) = inner
-            .creds
-            .iter_mut()
-            .find(|c| c.id == credential.id && c.revision == credential.revision)
-        else {
-            return;
-        };
-        let mut metadata = slot.metadata.clone();
-        metadata.insert("disabled".into(), Value::Bool(slot.disabled));
-        let go = |bytes: &[u8]| cpa_common::json::GoValue::parse_f64(bytes);
-        let Some(target) = serde_json::to_vec(&metadata).ok().and_then(|b| go(&b)) else {
-            return;
-        };
-        let Ok(existing) = std::fs::read(path) else {
-            return;
-        };
-        if go(&existing).as_ref() != Some(&target) {
-            let bytes = target.marshal();
-            if let Err(error) = write_bytes_atomic(path, &bytes) {
+        let written = self.write_unlocked(
+            &credential.id,
+            credential.revision,
+            |current| {
+                let mut metadata = current.metadata.clone();
+                metadata.insert("disabled".into(), Value::Bool(current.disabled));
+                let go = |bytes: &[u8]| cpa_common::json::GoValue::parse_f64(bytes);
+                // An unreadable file or metadata is skipped (`NotFound`), not reported.
+                let Some(target) = serde_json::to_vec(&metadata).ok().and_then(|b| go(&b)) else {
+                    return Err(PatchError::NotFound);
+                };
+                let existing = std::fs::read(path).map_err(|_| PatchError::NotFound)?;
+                if go(&existing).as_ref() == Some(&target) {
+                    return Ok(None);
+                }
+                Ok(Some((path.clone(), target.marshal(), ())))
+            },
+            |inner, index, bytes, ()| {
+                // Same revision: the file now says what memory already meant (absent
+                // `disabled` is false, numbers are float64), so memory takes the written
+                // form and the watcher's reload finds nothing changed.
+                if let Ok(written) = serde_json::from_slice::<Map<String, Value>>(bytes) {
+                    let mut next = Credential::clone(&inner.creds[index]);
+                    next.metadata = written;
+                    inner.creds[index] = Arc::new(next);
+                }
+            },
+        );
+        match written {
+            Ok(_) => {}
+            Err(PatchError::Io(error)) => {
                 tracing::warn!(id = %credential.id, %error, "failed to persist credential");
                 return;
             }
-            // Same revision: the file now says what memory already meant (absent
-            // `disabled` is false, numbers are float64), so memory takes the written
-            // form and the watcher's reload finds nothing changed.
-            if let Ok(written) = serde_json::from_slice::<Map<String, Value>>(&bytes) {
-                let mut next = Credential::clone(slot);
-                next.metadata = written;
-                *slot = Arc::new(next);
-            }
+            Err(_) => return,
         }
-        drop(inner);
         self.persisted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1784,40 +1795,87 @@ impl CredentialStore {
         expected_revision: u64,
         patch: &MetadataPatch,
     ) -> Result<Arc<Credential>, PatchError> {
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let generation = inner.generation + 1;
-        let slot = inner
-            .creds
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or(PatchError::NotFound)?;
-        if slot.revision != expected_revision {
-            return Err(PatchError::Stale { current: slot.revision });
-        }
-        if patch.remove.iter().any(|k| k == "type")
-            || patch
-                .set
-                .get("type")
-                .is_some_and(|t| t.as_str() != Some(slot.provider.as_str()))
-        {
-            return Err(PatchError::TypeIsImmutable);
-        }
-        let Source::File(path) = &slot.source else {
-            return Err(PatchError::ConfigBacked);
+        let committed = self.write_unlocked(
+            id,
+            expected_revision,
+            |current| {
+                if patch.remove.iter().any(|k| k == "type")
+                    || patch
+                        .set
+                        .get("type")
+                        .is_some_and(|t| t.as_str() != Some(current.provider.as_str()))
+                {
+                    return Err(PatchError::TypeIsImmutable);
+                }
+                let Source::File(path) = &current.source else {
+                    return Err(PatchError::ConfigBacked);
+                };
+                let mut next = Credential::clone(current);
+                patch.apply(&mut next.metadata);
+                next.refresh_derived();
+                // Go `FileTokenStore.Save` always records the disabled state.
+                next.metadata.insert("disabled".into(), Value::Bool(next.disabled));
+                // Go's `json.NewEncoder(f).Encode`: compact JSON and a newline.
+                let mut bytes = serde_json::to_vec(&next.metadata).map_err(|e| PatchError::Io(e.to_string()))?;
+                bytes.push(b'\n');
+                Ok(Some((path.clone(), bytes, next)))
+            },
+            |inner, index, _, mut next| {
+                inner.generation += 1;
+                next.revision = inner.generation;
+                inner.creds[index] = Arc::new(next);
+                inner.epoch += 1;
+                self.changed.send_replace(());
+                inner.creds[index].clone()
+            },
+        )?;
+        Ok(committed.expect("apply_patch always writes"))
+    }
+
+    /// Go 8a01bc02 (`persistLocked`): writes a file-backed credential with `inner`
+    /// unlocked, so a slow disk never stalls selection or reads of other credentials.
+    /// `prepare` sees the credential at `expected_revision` (`Stale` otherwise) and
+    /// returns the file and bytes to write, or `None` for nothing to do; `publish` then
+    /// puts the result in place under the write lock. The credential's write lock and
+    /// the reload gate are held throughout, so neither another write of it nor a set
+    /// replacement can land between the write and its publication.
+    fn write_unlocked<T, R>(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        prepare: impl FnOnce(&Arc<Credential>) -> Result<Option<(std::path::PathBuf, Vec<u8>, T)>, PatchError>,
+        publish: impl FnOnce(&mut Inner, usize, &[u8], T) -> R,
+    ) -> Result<Option<R>, PatchError> {
+        let _reload = self.reload.read().unwrap_or_else(PoisonError::into_inner);
+        let lock = {
+            let mut locks = self.write_locks.lock().unwrap_or_else(PoisonError::into_inner);
+            locks.entry(id.to_owned()).or_default().clone()
         };
-        let mut next = Credential::clone(slot);
-        patch.apply(&mut next.metadata);
-        next.refresh_derived();
-        next.revision = generation;
-        // Go `FileTokenStore.Save` always records the disabled state.
-        next.metadata.insert("disabled".into(), Value::Bool(next.disabled));
-        write_atomic(path, &next.metadata).map_err(|e| PatchError::Io(e.to_string()))?;
-        *slot = Arc::new(next);
-        let committed = slot.clone();
-        inner.generation = generation;
-        inner.epoch += 1;
-        self.changed.send_replace(());
-        Ok(committed)
+        let _own = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = self
+            .read()
+            .creds
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or(PatchError::NotFound)?;
+        if current.revision != expected_revision {
+            return Err(PatchError::Stale {
+                current: current.revision,
+            });
+        }
+        let Some((path, bytes, value)) = prepare(&current)? else {
+            return Ok(None);
+        };
+        write_bytes_atomic(&path, &bytes).map_err(|e| PatchError::Io(e.to_string()))?;
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        // Every other change to this credential waits on one of the two locks held here.
+        let index = inner
+            .creds
+            .iter()
+            .position(|c| c.id == id && c.revision == expected_revision)
+            .ok_or(PatchError::NotFound)?;
+        Ok(Some(publish(&mut inner, index, &bytes, value)))
     }
 
     /// Replaces a config-backed or runtime-only credential in memory if it is still at
@@ -1869,35 +1927,32 @@ impl CredentialStore {
         bytes: &[u8],
         next: Option<Credential>,
     ) -> Result<(), PatchError> {
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let index = inner
-            .creds
-            .iter()
-            .position(|c| c.id == id)
-            .ok_or(PatchError::NotFound)?;
-        let slot = &inner.creds[index];
-        if slot.revision != expected_revision {
-            return Err(PatchError::Stale { current: slot.revision });
-        }
-        let Source::File(path) = &slot.source else {
-            return Err(PatchError::ConfigBacked);
-        };
-        write_bytes_atomic(path, bytes).map_err(|e| PatchError::Io(e.to_string()))?;
-        inner.creds.remove(index);
-        if let Some(mut next) = next {
-            inner.generation += 1;
-            next.revision = inner.generation;
-            inner.creds.retain(|c| c.id != next.id);
-            let at = index.min(inner.creds.len());
-            inner.creds.insert(at, Arc::new(next));
-        }
-        inner.epoch += 1;
-        self.changed.send_replace(());
-        self.scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reconcile(&inner.creds);
-        drop(inner);
+        self.write_unlocked(
+            id,
+            expected_revision,
+            |current| {
+                let Source::File(path) = &current.source else {
+                    return Err(PatchError::ConfigBacked);
+                };
+                Ok(Some((path.clone(), bytes.to_vec(), next)))
+            },
+            |inner, index, _, next| {
+                inner.creds.remove(index);
+                if let Some(mut next) = next {
+                    inner.generation += 1;
+                    next.revision = inner.generation;
+                    inner.creds.retain(|c| c.id != next.id);
+                    let at = index.min(inner.creds.len());
+                    inner.creds.insert(at, Arc::new(next));
+                }
+                inner.epoch += 1;
+                self.changed.send_replace(());
+                self.scheduler
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .reconcile(&inner.creds);
+            },
+        )?;
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
         Ok(())
@@ -1906,6 +1961,7 @@ impl CredentialStore {
     /// Replaces the credential set (watcher reload, management import/delete). Unchanged
     /// credentials keep their revision; new and changed ones get fresh revisions.
     pub fn reconcile(&self, credentials: Vec<Credential>) {
+        let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let mut next = Vec::with_capacity(credentials.len());
         for mut cred in credentials {
@@ -1935,6 +1991,7 @@ impl CredentialStore {
             .unwrap_or_else(PoisonError::into_inner)
             .reconcile(&inner.creds);
         drop(inner);
+        drop(reload);
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
     }
@@ -1944,6 +2001,7 @@ impl CredentialStore {
     /// the way a snapshot followed by [`Self::reconcile`] could undo it. An unchanged
     /// credential keeps its revision, as in `reconcile`.
     pub fn upsert(&self, mut credential: Credential) {
+        let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let slot = inner.creds.iter().position(|c| c.id == credential.id);
         if slot.is_some_and(|i| unchanged(&inner.creds[i], &credential)) {
@@ -1963,6 +2021,7 @@ impl CredentialStore {
             .unwrap_or_else(PoisonError::into_inner)
             .reconcile(&inner.creds);
         drop(inner);
+        drop(reload);
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
     }
@@ -2273,16 +2332,9 @@ fn credentials_changed(a: &Credential, b: &Credential) -> bool {
         || use_siwc(a) != use_siwc(b)
 }
 
-/// Writes `metadata` the way Go's `json.NewEncoder(f).Encode` does (compact JSON and a
-/// newline) via an exclusively created, uniquely named 0600 sibling and a rename. The
-/// temp name does not end in `.json`, so a crash never leaves a loadable credential.
-fn write_atomic(path: &Path, metadata: &Map<String, Value>) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec(metadata)?;
-    bytes.push(b'\n');
-    write_bytes_atomic(path, &bytes)
-}
-
-/// Replaces `path` with `bytes` through an exclusively created 0600 sibling.
+/// Replaces `path` with `bytes` through an exclusively created, uniquely named 0600
+/// sibling and a rename. The temp name does not end in `.json`, so a crash never leaves
+/// a loadable credential.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -2711,6 +2763,132 @@ mod tests {
         assert_eq!(refreshed.metadata["refresh_token"], "r500");
         assert_eq!(store.get("saved.json").unwrap().metadata["n"], 499);
         assert_eq!(store.snapshot().len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Go 8a01bc02 (`TestManagerBlockedSaveAllowsUnrelatedCredential`,
+    /// `TestManagerBlockedSaveSerializesLoad`): while one credential's file write is
+    /// stalled, other credentials stay readable, selectable and writable, and a reload
+    /// waits until the stalled write is published instead of replacing the credential
+    /// between its write and its publication. (A reload whose scan read the file before
+    /// the write is Go c4c1d43e's stale-snapshot check, not ported here.)
+    #[test]
+    fn a_stalled_credential_write_blocks_only_its_reload() {
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join(format!("cpa-stalled-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.json", "b.json"] {
+            std::fs::write(dir.join(name), r#"{"type":"claude","access_token":"old"}"#).unwrap();
+        }
+        let mut cfg = cpa_core::config::Config::parse("").unwrap();
+        cfg.auth_dir = dir.clone();
+        let store = Arc::new(CredentialStore::new(cpa_core::config::credentials::from_auth_dir(&cfg)));
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn({
+            let store = store.clone();
+            let revision = store.get("a.json").unwrap().revision;
+            move || {
+                store.write_unlocked(
+                    "a.json",
+                    revision,
+                    |current| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        let Source::File(path) = &current.source else {
+                            unreachable!()
+                        };
+                        Ok(Some((
+                            path.clone(),
+                            br#"{"type":"claude","access_token":"new"}"#.to_vec(),
+                            (),
+                        )))
+                    },
+                    |inner, index, _, ()| {
+                        let mut next = Credential::clone(&inner.creds[index]);
+                        next.metadata.insert("access_token".into(), "new".into());
+                        inner.generation += 1;
+                        next.revision = inner.generation;
+                        inner.creds[index] = Arc::new(next);
+                    },
+                )
+            }
+        });
+        entered.recv().unwrap();
+        // Bounded: each check runs on a thread and must finish while the write stalls.
+        let within = |what: &str, f: Box<dyn FnOnce() + Send>| {
+            let (done_tx, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                f();
+                done_tx.send(()).unwrap();
+            });
+            assert!(
+                done.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "{what} waited for the stalled write"
+            );
+        };
+        within(
+            "a read",
+            Box::new({
+                let store = store.clone();
+                move || assert_eq!(store.snapshot().len(), 2)
+            }),
+        );
+        within(
+            "a selection",
+            Box::new({
+                let store = store.clone();
+                move || {
+                    // Not a.json itself: recording its result persists it, which waits.
+                    let selection = Selection {
+                        exclude: vec!["a.json".into()],
+                        ..sel("claude")
+                    };
+                    drop(store.select(selection).expect("b.json"));
+                }
+            }),
+        );
+        within(
+            "another credential's write",
+            Box::new({
+                let store = store.clone();
+                move || {
+                    let mut patch = MetadataPatch::default();
+                    patch.set.insert("access_token".into(), "b2".into());
+                    let revision = store.get("b.json").unwrap().revision;
+                    store.apply_patch("b.json", revision, &patch).unwrap();
+                }
+            }),
+        );
+        // A reload whose scan already holds the new file: published in between, it would
+        // replace the credential the stalled write is about to publish.
+        let rescan = {
+            let mut set = cpa_core::config::credentials::from_auth_dir(&cfg);
+            let a = set.iter_mut().find(|c| c.id == "a.json").unwrap();
+            a.metadata.insert("access_token".into(), "new".into());
+            set
+        };
+        let (reloaded_tx, reloaded) = mpsc::channel();
+        let reload = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.reconcile(rescan);
+                reloaded_tx.send(()).unwrap();
+            }
+        });
+        assert!(
+            reloaded.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the reload overtook the stalled write"
+        );
+        release.send(()).unwrap();
+        writer.join().unwrap().expect("the stalled write is published");
+        reload.join().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.json")).unwrap(),
+            r#"{"type":"claude","access_token":"new"}"#
+        );
+        assert_eq!(store.get("a.json").unwrap().metadata["access_token"], "new");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
