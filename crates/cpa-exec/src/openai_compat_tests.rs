@@ -590,7 +590,13 @@ fn go_primitive_vectors() {
                 .collect();
             MediaType::Ok(media.to_owned(), params)
         } else if media.is_empty() {
-            MediaType::Invalid
+            match parse_media_type(input) {
+                MediaType::Invalid(reason) => {
+                    assert_eq!(reason, error, "mime.ParseMediaType({input:?})");
+                    MediaType::Invalid(reason)
+                }
+                _ => MediaType::Invalid("<expected invalid>"),
+            }
         } else {
             MediaType::BadParams(media.to_owned())
         };
