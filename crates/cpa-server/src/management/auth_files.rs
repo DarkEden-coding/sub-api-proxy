@@ -564,7 +564,10 @@ fn entry(state: &Management, c: &Credential, v8: bool, quota: &QuotaPlugins) -> 
     if !model_quotas.is_empty() {
         e.insert("model_quotas", Value::Object(model_quotas));
     }
-    if let Some(plugin_id) = quota.get(&c.provider.trim().to_lowercase()).filter(|id| !id.is_empty()) {
+    if let Some(plugin_id) = quota
+        .get(&cpa_plugin::host::normalize_provider(&c.provider))
+        .filter(|id| !id.is_empty())
+    {
         e.insert("supports_quota", true.into());
         e.insert("quota_provider", c.provider.clone().into());
         if v8 {

@@ -4875,6 +4875,7 @@ async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
                     r#"{"supported_providers":["foo","bar"]}"#,
                 ),
             ),
+            ("m-high-quota", quota(r#"{"identifier":"high"}"#, "{}")),
             ("z-foo-quota", quota(r#"{"identifier":"foo"}"#, "{}")),
         ]
         .into(),
@@ -4885,6 +4886,7 @@ async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
     for (name, body) in [
         ("foo.json", r#"{"type":"foo"}"#),
         ("bar.json", r#"{"type":"bar"}"#),
+        ("upper.json", r#"{"type":"high"}"#),
         (
             "probe.json",
             r#"{"type":"custom","quota_probe":{"url":"https://api.example.invalid/quota"}}"#,
@@ -4903,10 +4905,15 @@ async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
     )
     .unwrap();
     let cfg = Config::load(&path).unwrap();
+    let mut credentials = cpa_core::config::credentials::load(&cfg);
+    // A provider that isn't lowercased yet: Go's strings.ToLower maps U+0130 to a plain
+    // "i", so the lookup finds the plugin keyed "high"; full Unicode lowercasing doesn't.
+    let upper = credentials.iter_mut().find(|c| c.id == "upper.json").unwrap();
+    upper.provider = "H\u{130}GH".to_owned();
     let rt = Arc::new(
         cpa_server::testing::runtime(
             cfg.clone(),
-            cpa_core::config::credentials::load(&cfg),
+            credentials,
             Executors {
                 claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
                 codex: Default::default(),
@@ -4949,6 +4956,8 @@ async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
     assert_eq!(v8("bar.json")["quota_plugin_id"], "a-multi-quota");
     assert_eq!(v8("bar.json")["supports_quota"], true);
     assert_eq!(v8("bar.json")["quota_provider"], "bar");
+    assert_eq!(v8("upper.json")["quota_plugin_id"], "m-high-quota");
+    assert_eq!(v8("upper.json")["quota_provider"], "H\u{130}GH");
     let probe = v8("probe.json");
     assert!(probe.get("supports_quota").is_none(), "{probe}");
     assert!(probe.get("quota_probe").is_none(), "{probe}");

@@ -274,3 +274,30 @@ async fn quota_provider_plugin_ids_skips_plugins_fused_during_describe() {
         assert_selects(&host, &got).await;
     }
 }
+
+/// Provider keys use Go's `strings.ToLower` (simple, rune-wise), so U+0130 folds to a
+/// plain "i": the earlier plugin keeps "high", where full Unicode lowercasing would file
+/// it under "hi\u{307}gh" and give "high" to the later one.
+#[tokio::test]
+async fn quota_provider_plugin_ids_lowercase_like_go() {
+    let (host, _) = host_with(
+        "quota-go-lower",
+        [
+            ("a-upper", quota(r#"{"identifier":"H\u0130GH"}"#, "{}")),
+            ("b-lower", quota(r#"{"identifier":"high"}"#, "{}")),
+        ]
+        .into(),
+    )
+    .await;
+    let got = host.quota_provider_plugin_ids().await;
+    let want: std::collections::HashMap<String, String> =
+        [("high", "a-upper"), ("a-upper", "a-upper"), ("b-lower", "b-lower")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        host.quota_provider_record("high").await.map(|r| r.id).as_deref(),
+        Some("a-upper")
+    );
+}
