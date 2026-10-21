@@ -1118,7 +1118,7 @@ impl ResponseModel {
 
 /// Go `normalizeModelName`: lower case without the thinking suffix.
 fn normalize_model_name(model: &str) -> String {
-    let lower = model.trim().to_lowercase();
+    let lower = model.trim().go_lower();
     cpa_common::thinking::parse_suffix(&lower).model_name.trim().to_owned()
 }
 
@@ -1695,7 +1695,7 @@ pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
 // ponytail: Codex attempts over the upstream WebSocket report `CodexExecutor`; Go
 // names them `CodexWebsocketsExecutor`.
 fn executor_identity(c: &cpa_core::credential::Credential) -> (String, &'static str) {
-    let provider = c.provider.trim().to_lowercase();
+    let provider = c.provider.trim().go_lower();
     let executor = match provider.as_str() {
         "claude" => "ClaudeExecutor",
         "codex" => "CodexExecutor",
@@ -2415,7 +2415,7 @@ pub fn access_token_sha256(c: &cpa_core::credential::Credential) -> String {
 /// `FileName`, never reaches a Home auth: Go's auth JSON omits it.
 fn auth_source_kind(c: &cpa_core::credential::Credential) -> &'static str {
     let attr = |k: &str| c.attributes.get(k).map_or("", |v| v.trim());
-    let normalize = |s: &str| match s.trim().to_lowercase().as_str() {
+    let normalize = |s: &str| match s.trim().go_lower().as_str() {
         "config" => Some("config"),
         "file" | "filesystem" => Some("file"),
         "git" => Some("git"),
@@ -2432,7 +2432,7 @@ fn auth_source_kind(c: &cpa_core::credential::Credential) -> &'static str {
     }
     let source = attr("source");
     if !source.is_empty() {
-        if source.to_lowercase().starts_with("config:") {
+        if source.go_lower().starts_with("config:") {
             return "config";
         }
         return normalize(source).unwrap_or("file");
@@ -3131,7 +3131,7 @@ mod tests {
             }
             let credential = cpa_core::credential::Credential {
                 id: s(&case["id"]),
-                provider: s(&case["auth_provider"]).to_lowercase(),
+                provider: s(&case["auth_provider"]).go_lower(),
                 source: cpa_core::credential::Source::File(s(&case["id"]).into()),
                 disabled: false,
                 label: String::new(),

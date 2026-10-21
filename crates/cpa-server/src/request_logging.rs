@@ -2,6 +2,7 @@
 //! Request bodies in these files are intentionally unredacted, as in Go. Headers
 //! and URL queries are masked before writing; management routes are never captured.
 
+use cpa_core::gostr::GoStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -119,7 +120,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
     let enabled = setting(&config, "request-log").and_then(serde_yaml_ng::Value::as_bool) == Some(true);
     let multipart = request.headers().get("content-type").is_some_and(|v| {
         String::from_utf8_lossy(trim(v.as_bytes()))
-            .to_lowercase()
+            .go_lower()
             .starts_with("multipart/form-data")
     });
     let length = request
@@ -1149,7 +1150,7 @@ impl Record {
         let config = self.state.rt.config();
         let enabled = setting(&config, "request-log").and_then(serde_yaml_ng::Value::as_bool) == Some(true);
         let error = self.api_errors.iter().any(|(status, message)| {
-            let lower = message.to_lowercase();
+            let lower = message.go_lower();
             *status != 499 && !lower.contains("context canceled") && !lower.contains("client closed request")
         }) || (self.status >= 400 && self.status != 499);
         let forced = !self.enabled && error && !enabled;

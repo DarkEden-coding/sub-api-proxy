@@ -5,6 +5,7 @@
 use super::*;
 use crate::codex_testkit::{Captured, GO, Mock, Reply, Tap, Wiretap};
 use cpa_core::exec::Caller;
+use cpa_core::gostr::GoStr;
 use serde_json::Value;
 use std::path::Path;
 
@@ -939,7 +940,7 @@ async fn capture_records_each_attempt_as_go_does() {
         );
         assert_eq!(body.as_bytes(), sent.body.as_ref(), "{name}: request body");
         assert_eq!(*account, go_account(&credential), "{name}: account");
-        let mut recorded: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
+        let mut recorded: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.go_lower(), v.clone())).collect();
         recorded.sort();
         let mut wire: Vec<(String, String)> = sent
             .headers

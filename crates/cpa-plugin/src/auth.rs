@@ -5,6 +5,7 @@
 //! its storage (`pluginTokenStorage`) as raw JSON merged with metadata on save. The
 //! server maps it onto its credential store.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
@@ -92,7 +93,7 @@ pub fn auth_id_for_path(path: &str, auth_dir: &str) -> String {
         .into_owned();
     // Go `filepath.ToSlash` only rewrites the OS separator.
     if cfg!(windows) {
-        id.replace('\\', "/").to_lowercase()
+        id.replace('\\', "/").go_lower()
     } else {
         id
     }
@@ -291,7 +292,7 @@ impl PluginAuth {
 /// Go `IsAuthTokenPayloadKey`.
 fn is_auth_token_payload_key(key: &str) -> bool {
     matches!(
-        key.trim().to_lowercase().as_str(),
+        key.trim().go_lower().as_str(),
         "access_token"
             | "refresh_token"
             | "id_token"

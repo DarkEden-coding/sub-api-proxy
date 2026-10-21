@@ -1010,6 +1010,7 @@ dependencies = [
  "btls",
  "bytes",
  "chrono",
+ "cpa-core",
  "cpa-server",
  "futures-util",
  "serde",

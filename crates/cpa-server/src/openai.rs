@@ -1,6 +1,7 @@
 //! OpenAI routes: Chat Completions, legacy Completions, Responses and compact
 //! (sdk/api/handlers/openai/openai_handlers.go, openai_responses_handlers.go).
 
+use cpa_core::gostr::GoStr;
 use std::sync::Arc;
 
 use axum::Extension;
@@ -554,7 +555,7 @@ fn codex_client(headers: &HeaderMap) -> bool {
     {
         return true;
     }
-    let originator = get("originator").to_lowercase();
+    let originator = get("originator").go_lower();
     matches!(originator.as_str(), "codex desktop" | "codex-tui" | "codex_cli_rs")
         || ["codex desktop/", "codex-tui/", "codex_cli_rs/"]
             .iter()
@@ -590,7 +591,7 @@ pub(crate) fn sanitize_error_text(status: u16, text: &str) -> String {
 }
 
 fn sensitive_key(key: &str) -> bool {
-    let k = key.trim().to_lowercase().replace('-', "_");
+    let k = key.trim().go_lower().replace('-', "_");
     if ["tokens", "token_count", "token_limit", "token_usage"]
         .iter()
         .any(|s| k.contains(s))

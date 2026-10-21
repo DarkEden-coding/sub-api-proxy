@@ -1,5 +1,6 @@
 //! Disposable local server only: no provider endpoints or credential exchanges.
 use cpa_core::config::Config;
+use cpa_core::gostr::GoStr;
 use cpa_exec::Executors;
 use cpa_exec::claude::ClaudeExecutor;
 use cpa_server::management::Management;
@@ -1194,7 +1195,7 @@ async fn credential_excluded_models_take_priority_over_the_global_list() {
             .send()
     };
     available("global fallback", false, true);
-    assert_eq!(patch(json!([own.to_uppercase()])).await.unwrap().status(), 200);
+    assert_eq!(patch(json!([own.go_upper()])).await.unwrap().status(), 200);
     available("credential override", true, false);
     assert_eq!(patch(json!([])).await.unwrap().status(), 200);
     available("empty falls back to the global list", false, true);

@@ -2,6 +2,7 @@
 //! of internal/util. Strings are bytes, as in Go.
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::gostr::GoStr;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
@@ -37,7 +38,7 @@ pub fn trim_space(s: &[u8]) -> &[u8] {
 
 /// Trimmed, lowercased text for comparisons (strings.ToLower(strings.TrimSpace(x))).
 pub fn norm(r: &Res<'_>) -> String {
-    r.str().trim().to_lowercase()
+    r.str().trim().go_lower()
 }
 
 pub fn now_unix() -> i64 {

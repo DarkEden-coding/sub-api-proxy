@@ -9,6 +9,7 @@ use crate::{
     thinking,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::gostr::GoStr;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -300,7 +301,7 @@ fn max_completion_tokens(model: &str) -> i64 {
 }
 
 fn default_max_tokens(model: &str) -> i64 {
-    let base = if model.trim().to_lowercase().contains("fable") {
+    let base = if model.trim().go_lower().contains("fable") {
         64000
     } else {
         32000
@@ -318,7 +319,7 @@ fn is_role(message: &[u8], role: &str) -> bool {
 }
 
 fn rejects_assistant_prefill(model: &str) -> bool {
-    let model = model.trim().to_lowercase();
+    let model = model.trim().go_lower();
     ["fable", "opus-5", "sonnet-4-6"].iter().any(|f| model.contains(f))
 }
 

@@ -7,6 +7,7 @@
 //! JSON and per SSE event. Server tools and names already shaped like MCP tools are
 //! never renamed.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -36,7 +37,7 @@ pub(crate) fn is_mcp_name(name: &str) -> bool {
 }
 
 pub(crate) fn is_server_tool_type(kind: &str) -> bool {
-    let kind = kind.trim().to_lowercase();
+    let kind = kind.trim().go_lower();
     [
         "advisor_",
         "agent_toolset_",

@@ -3,6 +3,7 @@
 //! mirrored into `<root>/config` and `<root>/auths`. Path-style requests signed with
 //! SigV4; the region comes from the bucket location like minio-go.
 
+use cpa_core::gostr::GoStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +41,7 @@ impl ObjectConfig {
         if raw.contains("://") {
             let parsed =
                 url::Url::parse(raw).map_err(|e| anyhow!("failed to parse object store endpoint {raw:?}: {e}"))?;
-            use_ssl = match parsed.scheme().to_lowercase().as_str() {
+            use_ssl = match parsed.scheme().go_lower().as_str() {
                 "http" => false,
                 "https" => true,
                 other => bail!("unsupported object store scheme {other:?} (only http and https are allowed)"),

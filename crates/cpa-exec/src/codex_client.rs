@@ -6,6 +6,7 @@
 use cpa_common::codex_client::{self as cc, Settings};
 use cpa_core::config::Config;
 use cpa_core::format::Format;
+use cpa_core::gostr::GoStr;
 use cpa_translate::RequestCtx;
 use http::HeaderMap;
 
@@ -35,7 +36,7 @@ impl<'a> Client<'a> {
 /// `isCodexTargetExecutor`.
 fn codex_target(executor: &str) -> bool {
     matches!(
-        executor.trim().to_lowercase().as_str(),
+        executor.trim().go_lower().as_str(),
         "codex" | "codex-websockets" | "codex_websockets"
     )
 }

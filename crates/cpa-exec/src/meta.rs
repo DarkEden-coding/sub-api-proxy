@@ -15,6 +15,7 @@
 //! custom `apply_patch` tool goes upstream as a JSON function and its calls come back as
 //! the custom tool.
 
+use cpa_core::gostr::GoStr;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -543,8 +544,8 @@ fn subscription_quota(body: &[u8]) -> bool {
     if body.is_empty() {
         return false;
     }
-    let message = gj::get(body, "error.message").str().to_lowercase();
-    let code = gj::get(body, "error.code").str().to_lowercase();
+    let message = gj::get(body, "error.message").str().go_lower();
+    let code = gj::get(body, "error.code").str().go_lower();
     if message.contains("subscription quota") || message.contains("quota exhausted") {
         return true;
     }
