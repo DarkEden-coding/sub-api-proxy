@@ -809,10 +809,10 @@ impl WsCapture {
     }
 
     /// `AppendAPIWebsocketResponse`.
-    fn response(&self, payload: &[u8]) {
+    async fn response(&self, payload: &[u8]) {
         self.sink.record(CaptureEvent::WebsocketResponse(payload));
         if let Some(websocket) = &self.websocket {
-            websocket.emit(payload);
+            websocket.emit(payload).await;
         }
     }
 }
@@ -902,13 +902,13 @@ impl Turn {
     }
 
     /// One upstream text message.
-    fn message(&mut self, message: &str) {
+    async fn message(&mut self, message: &str) {
         let payload = cpa_common::gostr::trim_space(message.as_bytes());
         if payload.is_empty() {
             return;
         }
         self.usage.first_byte();
-        self.capture.response(payload);
+        self.capture.response(payload).await;
         if let Some(error) = ws_error(payload) {
             self.capture.error("upstream_error", &error);
             crate::openai_compat_http::publish_failure(&self.usage, &error);
@@ -1004,7 +1004,7 @@ impl Turn {
                 return None;
             }
             match self.rx.recv().await {
-                Some(Read::Text(message)) => self.message(&message),
+                Some(Read::Text(message)) => self.message(&message).await,
                 Some(Read::Failed(error)) => self.read_failed(error),
                 // The reader's terminal error did not fit a full queue (Go's
                 // `sendTerminalWebsocketRead` waits for room); it is kept on the socket.

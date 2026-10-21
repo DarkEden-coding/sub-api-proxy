@@ -198,10 +198,10 @@ impl Wire {
     }
 
     /// `AppendCodexAPIWebsocketResponse`.
-    pub(crate) fn ws_response(&self, payload: &[u8]) {
+    pub(crate) async fn ws_response(&self, payload: &[u8]) {
         self.sink.record(CaptureEvent::WebsocketResponse(payload));
         if let Some(websocket) = &self.websocket {
-            websocket.emit(payload);
+            websocket.emit(payload).await;
         }
     }
 

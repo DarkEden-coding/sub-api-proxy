@@ -326,7 +326,7 @@ impl Duplex {
                 _ = self.writes.reserve(), if await_room => continue,
             };
             match step {
-                Step::Upstream(read) => self.upstream(read),
+                Step::Upstream(read) => self.upstream(read).await,
                 Step::Client(frame) => self.client(frame).await,
                 Step::Writer(ended) => self.fail(match ended {
                     Ok(Err(error)) => error,
@@ -548,7 +548,7 @@ impl Duplex {
     }
 
     /// One upstream frame (the reader goroutine).
-    fn upstream(&mut self, read: Option<Read>) {
+    async fn upstream(&mut self, read: Option<Read>) {
         let text = match read {
             Some(Read::Text(text)) => text,
             // Go's duplex wraps the raw read error, not `mapCodexWebsocketReadError`'s 413.
@@ -574,7 +574,7 @@ impl Duplex {
             return;
         }
         self.turn.observe(payload);
-        self.turn.wire.ws_response(payload.as_bytes());
+        self.turn.wire.ws_response(payload.as_bytes()).await;
         // Steering acknowledgements, pending notices and failures are opaque: IDs, input,
         // sequence numbers and event types reach the client byte for byte.
         if kind.starts_with("response.steer.") {

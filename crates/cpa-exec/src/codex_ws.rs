@@ -707,7 +707,7 @@ impl Turn {
             return Frame::Skip;
         }
         self.observe(payload);
-        self.wire.ws_response(payload.as_bytes());
+        self.wire.ws_response(payload.as_bytes()).await;
         let raw_len = payload.len();
         let payload = response::restore(payload, self.restore);
         let payload = payload.as_ref();

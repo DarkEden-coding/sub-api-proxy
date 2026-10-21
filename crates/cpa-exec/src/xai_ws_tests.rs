@@ -707,21 +707,34 @@ async fn terminal_error_survives_a_full_queue() {
 
 /// Go `EmitWebSocketResponseEvent` beside `AppendAPIWebsocketResponse`: every non-empty
 /// upstream frame, trimmed, goes to the attempt's observer with the executor identifier,
-/// the selected credential and the upstream model.
+/// the selected credential and the upstream model. The executor awaits each
+/// observation before it handles the frame, as Go calls the observer in its read loop.
 #[tokio::test]
 async fn upstream_frames_reach_the_websocket_observer() {
     /// (provider, credential ID, model, payload).
     type Frame = (String, String, String, Vec<u8>);
+    /// The frames observed, and the order observations and client chunks finished in.
     #[derive(Default)]
-    struct Seen(std::sync::Mutex<Vec<Frame>>);
+    struct Seen(std::sync::Mutex<Vec<Frame>>, Arc<std::sync::Mutex<Vec<&'static str>>>);
     impl cpa_core::exec::WebSocketObserver for Seen {
-        fn response(&self, provider: &str, credential: &Credential, model: &str, payload: &[u8]) {
-            self.0.lock().unwrap().push((
-                provider.to_owned(),
-                credential.id.clone(),
-                model.to_owned(),
-                payload.to_vec(),
-            ));
+        fn response<'a>(
+            &'a self,
+            provider: &'a str,
+            credential: &'a Credential,
+            model: &'a str,
+            payload: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                // A slow observer: the frame must not reach the client before it returns.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.0.lock().unwrap().push((
+                    provider.to_owned(),
+                    credential.id.clone(),
+                    model.to_owned(),
+                    payload.to_vec(),
+                ));
+                self.1.lock().unwrap().push("observed");
+            })
         }
     }
     let shared: Shared = Arc::default();
@@ -759,9 +772,16 @@ async fn upstream_frames_reach_the_websocket_observer() {
     let ResponseBody::Stream(mut stream) = response.body else {
         panic!("buffered response");
     };
+    let order = seen.1.clone();
     while let Some(item) = stream.next().await {
         item.unwrap();
+        order.lock().unwrap().push("chunk");
     }
+    // Each frame's observation finishes before its client chunk.
+    let order = order.lock().unwrap().clone();
+    assert_eq!(order.first(), Some(&"observed"), "{order:?}");
+    assert_eq!(order.iter().filter(|o| **o == "observed").count(), 2, "{order:?}");
+    assert_eq!(order.last(), Some(&"chunk"), "{order:?}");
     let seen = seen.0.lock().unwrap().clone();
     let expected: Vec<Frame> = [created, done]
         .into_iter()
