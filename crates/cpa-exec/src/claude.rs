@@ -242,16 +242,22 @@ impl ClaudeExecutor {
         // upstream unauthenticated and gets its answer.
         let mut req = req;
         if req.operation == Operation::Generate {
-            crate::antigravity_compaction::expand_request(&mut req, "claude")
-                .map_err(|e| crate::gemini::status_err(400, e))?;
+            if let Err(e) = crate::antigravity_compaction::expand_request(&mut req, "claude") {
+                // Go rejects the capsule before it creates the usage reporter.
+                req.usage.discard();
+                return Err(crate::gemini::status_err(400, e));
+            }
             if req.alt.as_deref() == Some("responses/compact")
                 || crate::antigravity_compaction::has_trigger(&req.body)
                 || crate::antigravity_compaction::has_trigger(&req.original_body)
             {
-                return self.compact(credential, req, cfg, delegation).await;
+                return Box::pin(self.compact(credential, req, cfg, delegation)).await;
             }
         }
-        self.run(credential, req, cfg, delegation, false).await
+        // Both paths are boxed: a request future of about 10 KB inline in every caller's
+        // state (the dispatch loop, Home, the WebSocket session) overflowed a 2 MiB
+        // worker stack in debug builds once the summary turn added a second one.
+        Box::pin(self.run(credential, req, cfg, delegation, false)).await
     }
 
     /// `executeClaudeCompaction` / `executeClaudeCompactionStream`: a non-stream Claude
@@ -277,14 +283,14 @@ impl ClaudeExecutor {
         req.response_format = Format::Claude;
         let answer = self.run(credential, req, cfg, delegation, true).await?;
         let ResponseBody::Buffered(payload) = answer.body else {
-            return Err(plain_error(
+            return Err(crate::antigravity_compaction::statusless(
                 "extract summary: no summary text found in upstream response",
             ));
         };
         let text = crate::antigravity_compaction::summary_text(&payload)
-            .map_err(|e| plain_error(format!("extract summary: {e}")))?;
+            .map_err(|e| crate::antigravity_compaction::statusless(format!("extract summary: {e}")))?;
         let sealed = crate::antigravity_compaction::seal(&text, &model)
-            .map_err(|e| plain_error(format!("seal compaction capsule: {e}")))?;
+            .map_err(|e| crate::antigravity_compaction::statusless(format!("seal compaction capsule: {e}")))?;
         let usage = compaction::Usage::of(&payload);
         let mut headers = answer.headers;
         if !stream {

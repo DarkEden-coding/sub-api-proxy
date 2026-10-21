@@ -31,6 +31,12 @@ pub(crate) fn has_item(payload: &[u8]) -> bool {
     has_input_type(payload, b"compaction")
 }
 
+/// The `fmt.Errorf` of a failed summary extraction or seal: no status and not a
+/// transport fault, so the scheduler classifies it like any statusless model failure.
+pub(crate) fn statusless(message: impl Into<String>) -> cpa_core::exec::ExecError {
+    cpa_core::exec::ExecError::local(0, cpa_core::exec::FailureScope::Model, message)
+}
+
 /// `ResponsesCompactionSourcePayload`: the body, unless only the original request
 /// carries the trigger or the body is empty.
 pub(crate) fn source_payload<'a>(body: &'a [u8], original: &'a [u8]) -> &'a [u8] {

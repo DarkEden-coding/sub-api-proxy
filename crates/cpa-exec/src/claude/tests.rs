@@ -1953,9 +1953,11 @@ async fn responses_compaction_matches_go() {
                     return ([(http::header::CONTENT_TYPE, "text/event-stream")], events).into_response();
                 }
                 let usage = reply.lock().unwrap().clone();
-                let usage = if usage.is_empty() { r#"{"input_tokens":11,"output_tokens":7}"#.to_owned() } else { usage };
+                // "empty": a 200 without any text block.
+                let content = if usage == "empty" { String::new() } else { format!(r#"{{"type":"text","text":"{SUMMARY}"}}"#) };
+                let usage = if usage.is_empty() || usage == "empty" { r#"{"input_tokens":11,"output_tokens":7}"#.to_owned() } else { usage };
                 let body = format!(
-                    r#"{{"id":"msg_compact","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{{"type":"text","text":"{SUMMARY}"}}],"stop_reason":"end_turn","usage":{usage}}}"#
+                    r#"{{"id":"msg_compact","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{content}],"stop_reason":"end_turn","usage":{usage}}}"#
                 );
                 ([(http::header::CONTENT_TYPE, "application/json")], body).into_response()
             }
@@ -1973,8 +1975,9 @@ async fn responses_compaction_matches_go() {
     .unwrap();
     credential.attributes.insert("api_key".into(), "key-compaction".into());
     credential.attributes.insert("base_url".into(), base);
-    let run = |payload: String, stream: bool, alt: Option<&str>, cfg: Config| {
+    let run = |payload: String, original: Option<&str>, stream: bool, alt: Option<&str>, cfg: Config| {
         let body = Bytes::from(payload);
+        let usage = Arc::new(Usage::default());
         let req = ExecRequest {
             operation: Operation::Generate,
             source_format: Format::OpenAIResponse,
@@ -1982,7 +1985,7 @@ async fn responses_compaction_matches_go() {
             stream_payloads: false,
             requested_model: "claude-haiku-4-5-20251001".into(),
             model: "claude-haiku-4-5-20251001".into(),
-            original_body: body.clone(),
+            original_body: original.map_or_else(|| body.clone(), |o| Bytes::from(o.to_owned())),
             body,
             stream,
             alt: alt.map(str::to_owned),
@@ -1990,7 +1993,7 @@ async fn responses_compaction_matches_go() {
             execution_session: None,
             derived_session: None,
             resolved_model: None,
-            usage: Default::default(),
+            usage: cpa_core::exec::UsageSink::new(usage.clone()),
             request_path: String::new(),
             headers: Default::default(),
             caller: Caller {
@@ -2020,7 +2023,7 @@ async fn responses_compaction_matches_go() {
                 Err(e) => Err(e),
             };
             let upstream = seen.lock().unwrap().clone();
-            (body, upstream)
+            (body, upstream, usage.kinds())
         }
     };
     let none = || Config::parse("").unwrap();
@@ -2072,13 +2075,20 @@ async fn responses_compaction_matches_go() {
         } else {
             format!("{user},{assistant},{trigger}")
         };
-        let (body, upstream) = run(input(&items, ""), false, alt, none()).await;
+        let (body, upstream, _) = run(input(&items, ""), None, false, alt, none()).await;
         compaction(&body.unwrap(), (11, 7, 18, 0));
         summary_request(&upstream);
     }
     // CompactionTriggerStreamReturnsSingleCompactionItem: the summary turn stays
     // non-stream; the client gets the five Responses events.
-    let (body, upstream) = run(input(&format!("{user},{assistant},{trigger}"), ""), true, None, none()).await;
+    let (body, upstream, _) = run(
+        input(&format!("{user},{assistant},{trigger}"), ""),
+        None,
+        true,
+        None,
+        none(),
+    )
+    .await;
     let body = body.unwrap();
     assert_eq!(body.matches("event: ").count(), 5, "{body}");
     let completed = body
@@ -2092,8 +2102,9 @@ async fn responses_compaction_matches_go() {
     summary_request(&upstream);
     // ReplayedCompactionCapsuleIsExpanded: an ordinary turn, with the summary as context.
     let continue_ = r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}"#;
-    let (body, upstream) = run(
+    let (body, upstream, _) = run(
         input(&format!("{},{continue_}", capsule(SUMMARY)), ""),
+        None,
         false,
         None,
         none(),
@@ -2107,7 +2118,14 @@ async fn responses_compaction_matches_go() {
     );
     assert!(!upstream[0].contains(PROMPT));
     // CompactionTriggerKeepsToolsForToolHistory.
-    let (body, upstream) = run(input(&format!("{user},{calls},{trigger}"), tools), false, None, none()).await;
+    let (body, upstream, _) = run(
+        input(&format!("{user},{calls},{trigger}"), tools),
+        None,
+        false,
+        None,
+        none(),
+    )
+    .await;
     compaction(&body.unwrap(), (11, 7, 18, 0));
     let sent = summary_request(&upstream);
     assert!(
@@ -2118,7 +2136,14 @@ async fn responses_compaction_matches_go() {
     );
     assert_eq!(gjson::get(&sent, "tool_choice.type").str(), "none", "{sent}");
     // CompactionTriggerFlattensToolHistoryWithoutTools.
-    let (_, upstream) = run(input(&format!("{user},{calls},{trigger}"), ""), false, None, none()).await;
+    let (_, upstream, _) = run(
+        input(&format!("{user},{calls},{trigger}"), ""),
+        None,
+        false,
+        None,
+        none(),
+    )
+    .await;
     let sent = summary_request(&upstream);
     assert!(
         !sent.contains(r#""type":"tool_use""#) && !sent.contains(r#""type":"tool_result""#),
@@ -2135,14 +2160,22 @@ async fn responses_compaction_matches_go() {
         "payload:\n  override:\n    - models: [{name: claude-haiku-4-5-20251001}]\n      params: {max_tokens: 1234, tool_choice: {type: auto}}\n",
     )
     .unwrap();
-    let (_, upstream) = run(input(&format!("{user},{calls},{trigger}"), tools), false, None, ruled).await;
+    let (_, upstream, _) = run(
+        input(&format!("{user},{calls},{trigger}"), tools),
+        None,
+        false,
+        None,
+        ruled,
+    )
+    .await;
     let sent = summary_request(&upstream);
     assert_eq!(gjson::get(&sent, "max_tokens").i64(), 1234, "{sent}");
     assert_eq!(gjson::get(&sent, "tool_choice.type").str(), "auto", "{sent}");
     // CompactionTriggerIncludesPreviousCapsule.
     let earlier = capsule("Earlier sealed summary.");
-    let (body, upstream) = run(
+    let (body, upstream, _) = run(
         input(&format!("{earlier},{continue_},{assistant},{trigger}"), ""),
+        None,
         false,
         None,
         none(),
@@ -2152,8 +2185,9 @@ async fn responses_compaction_matches_go() {
     assert!(summary_request(&upstream).contains("Earlier sealed summary."));
     // ForeignCompactionCapsuleIsDropped.
     let foreign = r#"{"type":"compaction","encrypted_content":"gAAAAA-openai-native"}"#;
-    let (body, upstream) = run(
+    let (body, upstream, _) = run(
         input(&format!("{foreign},{continue_},{trigger}"), ""),
+        None,
         false,
         None,
         none(),
@@ -2164,12 +2198,41 @@ async fn responses_compaction_matches_go() {
     // CompactionUsageMatchesResponsesAccounting: cache writes and reads count as input.
     *reply.lock().unwrap() =
         r#"{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":100}"#.into();
-    let (body, _) = run(input(&format!("{user},{trigger}"), ""), false, None, none()).await;
+    let (body, _, _) = run(input(&format!("{user},{trigger}"), ""), None, false, None, none()).await;
     compaction(&body.unwrap(), (114, 7, 121, 100));
     reply.lock().unwrap().clear();
     // InvalidCompactionCapsuleReturns400, before any upstream call.
     let broken = r#"{"type":"compaction","encrypted_content":"cpa-ag-compact-v1:not-valid-base64"}"#;
-    let (body, upstream) = run(input(&format!("{broken},{continue_}"), ""), false, None, none()).await;
-    assert_eq!(body.unwrap_err().status, 400);
-    assert!(upstream.is_empty());
+    // Go rejects it before its usage reporter exists, so no record is published, also
+    // when only the original request carries the capsule.
+    let plain = input(continue_, "");
+    let broken = input(&format!("{broken},{continue_}"), "");
+    for (body, original) in [(broken.clone(), None), (plain, Some(broken.as_str()))] {
+        let (body, upstream, usage) = run(body, original, false, None, none()).await;
+        let error = body.unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(String::from_utf8_lossy(&error.body).starts_with("invalid compaction capsule: "));
+        assert!(upstream.is_empty());
+        assert_eq!(usage, ["discard"]);
+    }
+    // A summary answer without text fails like Go's fmt.Errorf: no status and no
+    // transport fault, so it cools the model on the trigger path and is neutral on the
+    // compact alt, without a retry round (cpa-server classify tests); the summary turn
+    // itself published its usage.
+    *reply.lock().unwrap() = "empty".into();
+    for (items, alt) in [
+        (format!("{user},{trigger}"), None),
+        (user.to_owned(), Some("responses/compact")),
+    ] {
+        let (body, upstream, usage) = run(input(&items, ""), None, false, alt, none()).await;
+        let error = body.unwrap_err();
+        assert_eq!((error.status, error.scope), (0, FailureScope::Model), "{alt:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&error.body),
+            "extract summary: no summary text found in upstream response"
+        );
+        summary_request(&upstream);
+        assert!(usage.contains(&"publish"), "{usage:?}");
+    }
+    reply.lock().unwrap().clear();
 }
