@@ -35,8 +35,8 @@ Audit of 2026-10-20 (v0.2.6, d1261f2) against CLIProxyAPI v8.0.35 (`ae3ee3be`).
 | M3 | 424 | 197 | 211 | 16 |
 | M4 | 589 | 248 | 329 | 12 |
 | M5 | 331 | 217 | 111 | 3 |
-| M6 | 267 | 126 | 125 | 16 |
-| All | 1951 | 924 | 963 | 64 |
+| M6 | 267 | 125 | 126 | 16 |
+| All | 1951 | 923 | 964 | 64 |
 <!-- parity-summary:end -->
 
 An item is covered when it is implemented and a Rust test or a fixture recorded from the Go server checks it. Partial means it works but not every case is pinned by a test, or only part of it is implemented; most partial items are Go test files whose behaviour other tests cover without porting each case. Missing means it is not implemented. A deliberate difference from Go, listed in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md), counts as covered.
