@@ -502,6 +502,7 @@ where
     Fut: std::future::Future<Output = axum::response::Response> + Send + 'static,
 {
     let sse = call.media.as_ref().is_some_and(|m| m.sse);
+    let speech = call.media.as_ref().is_some_and(|m| m.kind == MediaKind::Speech);
     let interval = if sse {
         crate::respond::keepalive(&rt.config())
     } else {
@@ -513,7 +514,25 @@ where
         let (rt, trace) = (rt.clone(), trace.clone());
         async move {
             let result = run_with_bootstrap_retries(&rt, call, &trace).await;
-            let upstream = upstream_headers(&rt.config(), &result);
+            let cfg = rt.config();
+            let upstream = upstream_headers(&cfg, &result, speech);
+            let result = match result {
+                // Go's speech handler reads the downstream headers the execution hands
+                // back (`downstreamHeadersAfterInterceptors`): the final filtered headers
+                // under passthrough, else what interceptors changed.
+                Ok(Done::Buffered { headers, body }) if speech => {
+                    let headers = if respond::passthrough_headers(&cfg) {
+                        respond::filter_upstream_headers(&headers)
+                    } else {
+                        // Read, not taken: the rendered response still gets them below.
+                        let intercepted = trace.intercepted_headers();
+                        trace.set_intercepted_headers(intercepted.clone());
+                        respond::filter_upstream_headers(&intercepted)
+                    };
+                    Ok(Done::Buffered { headers, body })
+                }
+                result => result,
+            };
             (result, upstream)
         }
     }));
@@ -612,7 +631,10 @@ enum Upstream {
     Error(HeaderMap),
 }
 
-fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upstream> {
+/// `speech`: Go's speech errors (`statusErr`, `xaiSpeechRequestError`) have no
+/// `Headers()`, so no upstream header reaches the client; the executor keeps them on the
+/// error for classification.
+fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>, speech: bool) -> Option<Upstream> {
     if !respond::passthrough_headers(cfg) {
         return None;
     }
@@ -620,7 +642,7 @@ fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upst
         Ok(Done::Buffered { headers, .. } | Done::Stream { headers, .. }) => {
             Some(Upstream::Success(respond::filter_upstream_headers(headers)))
         }
-        Err(Failure::Exec(error)) if !error.direct => Some(Upstream::Error((*error.headers).clone())),
+        Err(Failure::Exec(error)) if !error.direct && !speech => Some(Upstream::Error((*error.headers).clone())),
         Err(_) => None,
     }
 }

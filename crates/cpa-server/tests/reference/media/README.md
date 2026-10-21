@@ -32,8 +32,11 @@ are not valid UTF-8 are stored in `body_b64`.
 
 `fixtures/speech_go.json` holds the `/v1/audio/speech` and `/v1/tts` scenarios from
 `speech.go`, recorded from the unmodified Go server at CLIProxyAPI v8.0.35
-(`ae3ee3be`) with the same driver and its own config (`SpeechConfig`: two xAI keys and a
-payload rule for the voice model):
+(`ae3ee3be`) with the same driver and its own config (`SpeechConfig`: two xAI keys, a
+payload rule for the voice model and `passthrough-headers: true`, so upstream audio types
+and would-be error headers show). The zstd request bodies in `speech.go` were made with
+the zstd CLI. The replay compares the six kept response headers, not all of them, and the
+audio bodies are short ASCII stand-ins:
 
 ```sh
 # in the CLIProxyAPI tree at ae3ee3be

@@ -10,22 +10,24 @@ use axum::extract::rejection::BytesRejection;
 use axum::extract::{MatchedPath, OriginalUri, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
-use cpa_common::gostr::GoStr;
+use cpa_common::gostr::{GoStr, trim_space};
 use cpa_common::json::{self as gj, Kind};
 use cpa_core::exec::{Caller, Operation};
 use cpa_core::format::Format;
 
 use crate::claude::read_failed;
 use crate::dispatch::{self, Call, Done, Media, MediaKind};
-use crate::gojson::{Obj, trim};
+use crate::gojson::trim;
 use crate::images::{bad_request, text};
-use crate::{Runtime, errors, respond};
+use crate::{Runtime, errors};
 
 const DEFAULT_MODEL: &str = "grok-tts";
 const VOICE_MODEL: &str = "grok-voice-tts-1.0";
 const DEFAULT_VOICE: &str = "eve";
 const MAX_RUNES: usize = 60_000;
 const MAX_BODY: usize = 1 << 20;
+/// The speech routes' raw body limit: zstd cannot shrink a larger body to [`MAX_BODY`].
+pub(crate) const BODY_LIMIT: usize = 2 * MAX_BODY;
 const DEFAULT_SAMPLE_RATE: i64 = 24_000;
 
 /// `openAISpeechVoices`: OpenAI voice names on Grok voices. Other names pass through, so
@@ -57,7 +59,15 @@ pub async fn speech(
 ) -> Response {
     let body = match body {
         Ok(body) => body,
+        // The route's own limit ([`BODY_LIMIT`]): no body this large decodes to 1 MiB.
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return bad_request("request body is larger than 1MB");
+        }
         Err(rejection) => return read_failed(&rejection),
+    };
+    let body = match crate::openai::read_body(&headers, body) {
+        Ok(body) => body,
+        Err(response) => return *response,
     };
     if body.len() > MAX_BODY {
         return bad_request("request body is larger than 1MB");
@@ -96,23 +106,11 @@ pub async fn speech(
             disallow_free: false,
         })),
     };
-    // Go reads the upstream Content-Type from the headers the executor call hands back,
-    // which exist only under `requests.passthrough-headers`.
-    // ponytail: a response interceptor's header change outside passthrough is not
-    // consulted here; serve still writes it to the response.
-    let passthrough = respond::passthrough_headers(&rt.config());
+    // A speech call's headers are the downstream ones Go hands its handler: the final
+    // filtered headers under passthrough, else what interceptors changed.
     dispatch::serve(&rt, call, move |result| async move {
         match result {
-            Ok(Done::Buffered { headers, body }) => {
-                let upstream = passthrough
-                    .then(|| {
-                        respond::filter_upstream_headers(&headers)
-                            .get(header::CONTENT_TYPE)
-                            .cloned()
-                    })
-                    .flatten();
-                audio(format, upstream, body)
-            }
+            Ok(Done::Buffered { headers, body }) => audio(format, headers.get(header::CONTENT_TYPE).cloned(), body),
             Ok(Done::Stream { .. }) => unreachable!("a non-stream call is buffered"),
             Err(failure) => errors::openai(&failure),
         }
@@ -173,29 +171,36 @@ fn model_base(model: &str) -> String {
 }
 
 /// `buildXAISpeechPayload`: the xAI `/tts` body (`json.Marshal` of a map, so keys sorted)
-/// and the audio format the client asked for.
+/// and the audio format the client asked for. Strings stay Go byte strings: an invalid
+/// UTF-8 byte counts as one rune and marshals as one `\ufffd`.
 fn build_payload(raw: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
     if !gj::valid(raw) {
         return Err("body must be valid JSON".into());
     }
-    let mut input = trim(&text(raw, "input")).to_owned();
+    let string = |path: &str| gj::get(raw, path).bytes().into_owned();
+    let mut input = trim_space(&string("input")).to_vec();
     if input.is_empty() {
-        input = trim(&text(raw, "text")).to_owned();
+        input = trim_space(&string("text")).to_vec();
     }
     if input.is_empty() {
         return Err("input is required".into());
     }
-    if input.chars().count() > MAX_RUNES {
+    let runes: usize = input
+        .utf8_chunks()
+        .map(|c| c.valid().chars().count() + c.invalid().len())
+        .sum();
+    if runes > MAX_RUNES {
         return Err("input is longer than 60000 characters".into());
     }
-    let mut voice = trim(&text(raw, "voice")).to_owned();
+    let mut voice = trim_space(&string("voice")).to_vec();
     if voice.is_empty() {
-        voice = text(raw, "voice_id");
+        voice = string("voice_id");
     }
-    let mut language = trim(&text(raw, "language")).to_owned();
+    let mut language = trim_space(&string("language")).to_vec();
     if language.is_empty() {
-        language = "auto".into();
+        language = b"auto".to_vec();
     }
+    let (format, output) = output_format(raw)?;
     let speed = gj::get(raw, "speed");
     let speed = if speed.kind == Kind::Number && speed.float() > 0.0 {
         let value = speed.float();
@@ -204,25 +209,34 @@ fn build_payload(raw: &[u8]) -> Result<(Vec<u8>, &'static str), String> {
     } else {
         None
     };
-    let (format, output) = output_format(raw)?;
-    let mut body = Obj::new().str("language", &language);
+    let mut body = br#"{"language":"#.to_vec();
+    body.extend(gj::quote(&language));
     if let Some((codec, rate)) = output {
-        let output = Obj::new()
-            .str("codec", codec)
-            .raw("sample_rate", &rate.to_string())
-            .finish();
-        body = body.raw("output_format", &output);
+        body.extend(format!(r#","output_format":{{"codec":"{codec}","sample_rate":{rate}}}"#).bytes());
     }
     if let Some(speed) = &speed {
-        body = body.raw("speed", speed);
+        body.extend(format!(r#","speed":{speed}"#).bytes());
     }
-    let body = body.str("text", &input).str("voice_id", &map_voice(&voice)).finish();
-    Ok((body.into_bytes(), format))
+    body.extend(br#","text":"#);
+    body.extend(gj::quote(&input));
+    body.extend(br#","voice_id":"#);
+    body.extend(gj::quote(map_voice(&voice)));
+    body.push(b'}');
+    Ok((body, format))
 }
 
-/// `mapXAISpeechVoice`: lower case, OpenAI names mapped.
-fn map_voice(voice: &str) -> String {
-    let voice = trim(voice).go_lower();
+/// `mapXAISpeechVoice`: lower case (Go's `strings.ToLower` turns each invalid byte into
+/// U+FFFD), OpenAI names mapped.
+fn map_voice(voice: &[u8]) -> String {
+    let voice: String = trim_space(voice)
+        .utf8_chunks()
+        .flat_map(|c| {
+            c.valid()
+                .chars()
+                .chain(std::iter::repeat_n('\u{FFFD}', c.invalid().len()))
+        })
+        .collect::<String>()
+        .go_lower();
     if voice.is_empty() {
         return DEFAULT_VOICE.into();
     }

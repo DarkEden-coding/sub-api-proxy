@@ -771,8 +771,9 @@ impl XaiExecutor {
         Ok((status, headers, data?))
     }
 
-    /// `executeSpeech`: the speech handler's JSON to `/tts` on the official API, which the
-    /// chat proxy does not serve (`xaiSpeechRequestURL`), with payload rules for the
+    /// `executeSpeech`: the speech handler's JSON to `/tts` on the compact base URL (the
+    /// official API unless a custom non-chat-proxy base URL is set; the chat proxy does
+    /// not serve `/tts`, `xaiSpeechRequestURL`), with payload rules for the
     /// `openai` protocol. The raw audio comes back with the upstream headers.
     pub async fn speech(
         &self,
@@ -829,6 +830,8 @@ impl XaiExecutor {
             }
             return Err(error);
         }
+        // `EnsurePublished`: one record without usage; the audio is never parsed.
+        req.usage.publish();
         Ok(ExecResponse {
             status: 200,
             headers,

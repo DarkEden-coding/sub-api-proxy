@@ -3,7 +3,8 @@ package main
 import "strings"
 
 // SpeechConfig is the speech run's config (CLIProxyAPI v8.0.35): two xAI API keys on the
-// capture server and a payload rule for the voice model.
+// capture server, a payload rule for the voice model, and passthrough headers, so the
+// upstream Content-Type takes part in the audio type and error headers would show.
 const SpeechConfig = `config-version: 8
 server:
   host: 127.0.0.1
@@ -12,6 +13,7 @@ management:
   disable-control-panel: true
 requests:
   nonstream-keepalive-interval: 1
+  passthrough-headers: true
   payload:
     override:
       - models:
@@ -36,13 +38,27 @@ func audio(contentType, body string) upstream {
 	return upstream{Status: 200, Headers: [][2]string{{"Content-Type", contentType}}, Body: body}
 }
 
+// zstd frames (made with the zstd CLI): a speech body, a body whose decoded form is over
+// 1 MiB, and a body compressed twice ("zstd, zstd").
+const (
+	zstdHello    = "\x28\xb5\x2f\xfd\x00\x68\x21\x01\x00\x7b\x22\x69\x6e\x70\x75\x74\x22\x3a\x22\x7a\x73\x74\x64\x20\x68\x65\x6c\x6c\x6f\x22\x2c\x22\x76\x6f\x69\x63\x65\x22\x3a\x22\x61\x73\x68\x22\x7d"
+	zstdTooLarge = "\x28\xb5\x2f\xfd\x00\x68\x9c\x00\x00\x58\x7b\x22\x69\x6e\x70\x75\x74\x22\x3a\x22\x61\x01\x00\xf2\xff\x39\xf0\x02\x02\x00\x10\x61\x02\x00\x10\x61\x02\x00\x10\x61\x02\x00\x10\x61\x02\x00\x10\x61\x02\x00\x10\x61\x02\x00\x10\x61\x45\x00\x00\x10\x22\x7d\x01\x00\x1b\x00\x02"
+	zstdStacked  = "\x28\xb5\x2f\xfd\x00\x68\x99\x01\x00\x28\xb5\x2f\xfd\x00\x68\x51\x01\x00\x7b\x22\x74\x65\x78\x74\x22\x3a\x22\x73\x74\x61\x63\x6b\x65\x64\x22\x2c\x22\x72\x65\x73\x70\x6f\x6e\x73\x65\x5f\x66\x6f\x72\x6d\x61\x74\x22\x3a\x22\x77\x61\x76\x22\x7d"
+)
+
+func zstdPost(name, path, body string, encoding string, replies ...upstream) scenario {
+	s := post(name, path, jsonType, body, replies...)
+	s.Headers = map[string]string{"Content-Encoding": encoding}
+	return s
+}
+
 func speechScenarios() []scenario {
 	const speech = "/v1/audio/speech"
 	const tts = "/v1/tts"
 	return []scenario{
 		post("speech_defaults", speech, jsonType,
 			`{"input":"  Hello <world> & you  ","voice":" Nova "}`,
-			audio("audio/mpeg", "ID3-mp3-bytes")),
+			upstream{Status: 200, Headers: [][2]string{{"Content-Type", "audio/mpeg"}, {"Cache-Control", "no-store"}}, Body: "ID3-mp3-bytes"}),
 		post("speech_wav_speed", speech, jsonType,
 			`{"model":"TTS-1-HD","input":"wave","voice":"alloy","language":" en ","response_format":" WAV ","speed":1.25}`,
 			audio("application/octet-stream", "RIFF-wav-bytes")),
@@ -61,11 +77,15 @@ func speechScenarios() []scenario {
 			`{"model":"gpt-4o","input":"x"}`),
 		post("speech_unknown_model_prefixed", speech, jsonType,
 			`{"model":" xai/grok-4 ","input":"x"}`),
+		// Each invalid UTF-8 byte is one rune and one \ufffd.
+		post("speech_invalid_utf8", speech, jsonType,
+			"{\"input\":\"a\xe2\x82b\",\"voice\":\" X\xffY \"}",
+			audio("audio/mpeg", "utf8")),
 		post("speech_missing_input", speech, jsonType,
 			`{"input":"   ","text":""}`),
 		post("speech_invalid_json", speech, jsonType, `{"input":"x"`),
 		post("speech_bad_response_format", speech, jsonType,
-			`{"input":"x","response_format":"flac"}`),
+			`{"input":"x","response_format":"flac","speed":1e400}`),
 		post("speech_bad_codec", tts, jsonType,
 			`{"input":"x","output_format":{"codec":"opus"}}`),
 		post("speech_output_format_not_object", tts, jsonType,
@@ -79,6 +99,16 @@ func speechScenarios() []scenario {
 		post("speech_upstream_400", speech, jsonType,
 			`{"input":"x","language":"zz"}`,
 			status(400, `{"error":"invalid language"}`)),
+		// Speech errors carry no upstream headers, even with passthrough on.
+		post("speech_upstream_400_headers", speech, jsonType,
+			`{"input":"x","language":"yy"}`,
+			upstream{Status: 400, Headers: [][2]string{{"Content-Type", "text/plain"}, {"Cache-Control", "max-age=60"}, {"Retry-After", "7"}}, Body: "bad language"}),
+		// Content-Encoding is decoded before the size check and the JSON parse.
+		zstdPost("speech_zstd", speech, zstdHello, "zstd",
+			audio("audio/mpeg", "zstd-audio")),
+		zstdPost("tts_zstd_stacked", tts, zstdStacked, "zstd, zstd",
+			audio("audio/wav", "stacked-audio")),
+		zstdPost("speech_zstd_decoded_too_large", speech, zstdTooLarge, "zstd"),
 		post("speech_unknown_voice_404", speech, jsonType,
 			`{"input":"x","voice":"nope"}`,
 			status(404, `{"error":"voice not found"}`),
