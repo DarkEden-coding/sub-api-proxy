@@ -777,11 +777,20 @@ pub(crate) fn config_sync(
     body: &[u8],
 ) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-    config_sync_locked(state, path, method, if_match, body)
+    config_sync_locked(state, path, method, if_match, body, false)
 }
 
-/// [`config_sync`] for a caller already holding `state.disk`.
-fn config_sync_locked(state: &Management, path: &str, method: Method, if_match: &[String], body: &[u8]) -> Response {
+/// [`config_sync`] for a caller already holding `state.disk`. `typed` saves the written
+/// values as Go's typed v0 saver does (`SaveConfigPreserveComments`); a v8 write saves
+/// the validated tree as written (Go v8.0.35).
+fn config_sync_locked(
+    state: &Management,
+    path: &str,
+    method: Method,
+    if_match: &[String],
+    body: &[u8],
+    typed: bool,
+) -> Response {
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
@@ -888,9 +897,16 @@ fn config_sync_locked(state: &Management, path: &str, method: Method, if_match: 
             Ok(v) if has_document => v,
             _ => return error(400, "invalid_body"),
         };
-        // Go's typed saver flattens merges in an upload; a scalar merge fails to decode.
+        // A whole-config body is alias-normalized first, where a scalar merge fails
+        // (Go `NormalizeV8ConfigAliases`, 400); below the root it fails the config
+        // parse (422).
         if let Err(e) = cpa_core::config::expand_merges(&mut value) {
-            return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e);
+            let status = if parts.is_empty() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            return invalid_config(status, e);
         }
         if parts.is_empty() && !value.is_mapping() {
             return error(400, "config_must_be_object");
@@ -939,23 +955,9 @@ fn config_sync_locked(state: &Management, path: &str, method: Method, if_match: 
     if let Err(e) = cpa_core::config::validate_config_fields(doc.value(), true) {
         return invalid_config(StatusCode::BAD_REQUEST, e);
     }
-    // Go's typed saver re-encodes a JSON string in a bool field (accepted above as
-    // a YAML 1.1 spelling) as `!!str <bool>` and fails to decode its own output; the
-    // file is left unchanged. ponytail: YAML uploads are not checked, since quoted
-    // and plain scalars are indistinguishable here and Go only fails on quoted ones.
-    if !yaml
-        && let Some(value) = written
-            .as_ref()
-            .and_then(|w| cpa_core::config::written_bool_spelling(&parts, w))
-    {
-        return json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &json!({"error": "write_failed", "message": format!("decode migrated config: yaml: unmarshal errors:\n  cannot unmarshal !!str `{value}` into bool")}),
-        );
-    }
-    // Go validates the raw candidate, then its saver persists typed values; projecting
-    // only after validation keeps malformed input from being sanitized into success.
-    if let Some(written) = &written {
+    // Go's v0 saver persists typed values; projecting only after validation keeps
+    // malformed input from being sanitized into success.
+    if typed && let Some(written) = &written {
         doc.typed_projection(&parts, written, method == Method::PATCH);
     }
     if let Some(secret) = doc
@@ -1071,8 +1073,8 @@ pub(crate) fn v0_save(state: &Management, legacy: &[&str], edit: LegacyEdit, v8:
             }
         }
         return match v8.value {
-            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes()),
-            None => config_sync_locked(state, v8.path, Method::DELETE, &[], b""),
+            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes(), true),
+            None => config_sync_locked(state, v8.path, Method::DELETE, &[], b"", true),
         };
     }
     let mut doc = ConfigDocument::unmigrated(root);

@@ -820,9 +820,9 @@ async fn unreadable_auth_dir_never_blocks_secret_rotation_or_removal() {
     server.abort();
 }
 
-/// Deliberate difference from Go, whose saver re-normalizes every OAuth map and
-/// rewrites every typed value on any write: only what the request wrote is
-/// normalized, so untouched keys stay byte-stable.
+/// A v8 write saves what it wrote, as Go v8.0.35 does (the runtime config still
+/// sanitizes OAuth maps). Deliberate difference: Go re-encodes the whole file, while
+/// untouched keys here stay byte-stable.
 #[tokio::test]
 async fn writes_normalize_only_what_they_touch() {
     let f = Fixture::new("scoped");
@@ -858,7 +858,7 @@ async fn writes_normalize_only_what_they_touch() {
         .json()
         .await
         .unwrap();
-    assert_eq!(config["oauth"]["excluded-models"]["gemini"], json!(["b", "c"]));
+    assert_eq!(config["oauth"]["excluded-models"]["gemini"], json!([" B ", "b", "c"]));
     let r = send(
         wreq::Method::PATCH,
         "/config",
@@ -3917,14 +3917,27 @@ async fn config_v8_historical_field_paths() {
             200,
             "{historical}"
         );
-        // ponytail: an explicit null keeps here only because the 6fecc6e typed-saver
-        // emulation (typed_projection) does not see historical request paths; a null
-        // through the canonical path still takes Go's old default. v8.0.35 saves the
-        // validated tree directly, keeping both; that lands with the direct-save PR.
+        // v8.0.35 saves the validated tree directly: an explicit null keeps through
+        // either path.
         assert_eq!(
             call(&base, wreq::Method::GET, &at(current), "").await,
             (200, "null".to_owned()),
             "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::PUT, &at(current), value).await.0,
+            200,
+            "{current}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::PUT, &at(current), "null").await.0,
+            200,
+            "{current}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::GET, &at(current), "").await,
+            (200, "null".to_owned()),
+            "{current}"
         );
         assert_eq!(
             call(&base, wreq::Method::DELETE, &at(historical), "").await.0,
