@@ -207,7 +207,7 @@ def test_texts():
             out[rel] = "\n".join(f'{s["args"]["method"]} "{s["args"]["path"]}"'
                                   for s in steps if s["op"] == "http")
             continue
-        if rel.endswith("cpa-server/tests/fixtures/media_go.json"):
+        if rel.endswith(("cpa-server/tests/fixtures/media_go.json", "cpa-server/tests/fixtures/speech_go.json")):
             # media_go.rs requests each scenario's path and compares its response.
             out[rel] = "\n".join(f'{s["method"]} "{s["path"]}"' for s in json.loads(text)["scenarios"])
             continue
