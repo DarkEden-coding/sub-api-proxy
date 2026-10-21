@@ -13,6 +13,7 @@ mod postgres;
 mod private_fs;
 mod sigv4;
 
+use cpa_core::gostr::GoStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,7 +101,7 @@ pub fn select(env: &dyn Fn(&str) -> Option<String>, wd: &Path, home: bool) -> Op
     if home {
         return None;
     }
-    let get = |upper: &str| lookup(env, &[upper, &upper.to_lowercase()]);
+    let get = |upper: &str| lookup(env, &[upper, &upper.go_lower()]);
     let local = |key: &str| {
         get(key)
             .map(PathBuf::from)

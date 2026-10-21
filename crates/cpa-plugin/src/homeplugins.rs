@@ -6,6 +6,7 @@
 //! `store` manifests in its plugin configs. Every outcome becomes a [`SyncReport`] that
 //! the node pushes to Home's `plugin-status` list.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -161,11 +162,11 @@ pub fn current_platform() -> Platform {
 
 /// Go `NormalizePlatform`.
 pub fn normalize_platform(platform: &Platform) -> Platform {
-    let goos = match platform.goos.trim().to_lowercase().as_str() {
+    let goos = match platform.goos.trim().go_lower().as_str() {
         "mac" | "macos" | "osx" => "darwin".to_owned(),
         other => other.to_owned(),
     };
-    let goarch = match platform.goarch.trim().to_lowercase().as_str() {
+    let goarch = match platform.goarch.trim().go_lower().as_str() {
         "x64" | "x86_64" => "amd64".to_owned(),
         "aarch64" => "arm64".to_owned(),
         other => other.to_owned(),
@@ -645,7 +646,7 @@ fn plugin_files(root: &Path, id: &str) -> std::io::Result<Vec<PluginFile>> {
         for entry in entries {
             let entry = entry?;
             // Go's DirEntry type is lstat-based: symlinks are not regular files.
-            if entry.file_type()?.is_file() && entry.file_name().to_string_lossy().to_lowercase().ends_with(extension) {
+            if entry.file_type()?.is_file() && entry.file_name().to_string_lossy().go_lower().ends_with(extension) {
                 names.push(dir.join(entry.file_name()));
             }
         }
@@ -675,7 +676,7 @@ fn plugin_files(root: &Path, id: &str) -> std::io::Result<Vec<PluginFile>> {
 /// Go `pluginFileFromPath`: `(id, version)` of `<id>[-v<version>]<extension>`.
 fn split_file_name(path: &Path, extension: &str) -> Option<(String, String)> {
     let base = path.file_name()?.to_string_lossy().into_owned();
-    if !base.to_lowercase().ends_with(extension) {
+    if !base.go_lower().ends_with(extension) {
         return None;
     }
     let name = &base[..base.len() - extension.len()];

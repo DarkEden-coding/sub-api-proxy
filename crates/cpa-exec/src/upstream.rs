@@ -1,5 +1,6 @@
 //! Turning a wreq response into the execution envelope. Shared by provider executors.
 
+use cpa_core::gostr::GoStr;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::time::Duration;
@@ -182,7 +183,7 @@ where
         return Ok(ReaderStream::new(reader).map(|r| r.map_err(read_error)).boxed());
     }
     for coding in encoding.split(',').rev() {
-        reader = match coding.trim().to_lowercase().as_str() {
+        reader = match coding.trim().go_lower().as_str() {
             "" | "identity" => continue,
             "gzip" => gzip_reader(reader)
                 .await

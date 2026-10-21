@@ -5,6 +5,7 @@
 //! target, PKCE verifier, device ID and redirect; a callback only supplies the code and
 //! the issued client ID, through the v8 callback route alone.
 
+use cpa_core::gostr::GoStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -165,7 +166,7 @@ fn start(state: &Management, name: &str) -> Response {
         .and_then(|s| s.get("device_id"))
         .and_then(Value::as_str)
         .filter(|id| codex_siwc::is_valid_uuid(id))
-        .map_or_else(|| uuid::Uuid::new_v4().to_string(), |id| id.trim().to_lowercase());
+        .map_or_else(|| uuid::Uuid::new_v4().to_string(), |id| id.trim().go_lower());
     let (Ok((verifier, challenge)), Ok(sid), Ok(nonce)) = (
         cpa_exec::oauth::pkce(),
         codex_siwc::random_base64url(),

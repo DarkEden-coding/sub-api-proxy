@@ -4,6 +4,7 @@
 //! `cpa-home`; this module wires it to the runtime through
 //! [`cpa_server::remote::RemoteDispatch`].
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -377,8 +378,13 @@ impl Dispatcher {
                 kind,
             });
         }
-        let response = match DispatchResponse::parse(&raw) {
-            Ok(response) => response,
+        // Go decodes the auth's runtime state with the reply: a mistyped field or an
+        // unparsable time fails it.
+        let (response, availability) = match DispatchResponse::parse(&raw).and_then(|response| {
+            let availability = auth_availability(&raw).map_err(str::to_owned)?;
+            Ok((response, availability))
+        }) {
+            Ok(decoded) => decoded,
             Err(message) => {
                 end_scope(&scope);
                 return Err(reject(502, "invalid_auth", message));
@@ -475,12 +481,17 @@ impl Dispatcher {
         });
         // Go: Home's request-retry limit applies unless the request is pinned.
         let request_retry = response.request_retry.filter(|r| *r >= 0 && pinned.is_empty());
+        let private = cpa_server::remote::Private {
+            availability: Arc::new(availability),
+            attributes: dispatcher_attributes(&response.auth, &credential),
+        };
         Ok(RemoteGrant {
             credential,
             end,
             cancel: Some(cancel),
             request_retry,
             user_api_key: response.user_api_key.trim().to_owned(),
+            private,
         })
     }
 }
@@ -544,11 +555,57 @@ fn executor_key(provider: &str, label: &str, attributes: &BTreeMap<String, Strin
     if provider.trim().eq_ignore_ascii_case("openai-compatibility") {
         return cpa_core::config::credentials::openai_compat_provider(label.trim());
     }
-    match provider.trim().to_lowercase().as_str() {
+    match provider.trim().go_lower().as_str() {
         "kimi.com" => "kimi".into(),
         "kimi.ai" => "kimi-ai".into(),
         other => other.to_owned(),
     }
+}
+
+/// Go's typed decoding of the dispatched auth's runtime state, on the reply as written:
+/// the nested `auth` first (Go's first `json.Unmarshal`), then, when it has no ID and Go
+/// decodes the whole reply as the auth (older Homes), the reply itself.
+fn auth_availability(raw: &[u8]) -> Result<cpa_server::remote::Availability, &'static str> {
+    use serde_json::value::RawValue;
+    const INVALID: &str = "home returned invalid auth payload";
+    let reply: std::collections::HashMap<String, &RawValue> = serde_json::from_slice(raw).map_err(|_| INVALID)?;
+    let nested = reply.get("auth").map(|auth| auth.get()).filter(|auth| *auth != "null");
+    let decoded = nested.map(cpa_server::remote::Availability::decode).transpose()?;
+    // The same rule `DispatchResponse::parse` applies.
+    let nested_id = nested
+        .and_then(|auth| serde_json::from_str::<Map<String, Value>>(auth).ok())
+        .and_then(|auth| auth.get("id").and_then(Value::as_str).map(|id| !id.trim().is_empty()))
+        .unwrap_or(false);
+    match decoded {
+        Some(decoded) if nested_id => Ok(decoded),
+        _ => cpa_server::remote::Availability::decode(std::str::from_utf8(raw).map_err(|_| INVALID)?),
+    }
+}
+
+/// The attribute names this node set on a dispatched credential, which Go keeps outside
+/// `Auth.Attributes` (the auth's own provider, Home's auth index, the selection's model
+/// info, sessions and model options): any whose value is not what Home sent itself.
+/// ponytail: where Home sent one of these names, the decoder's own value replaces it
+/// (and model info or options it does not set are removed), as before.
+fn dispatcher_attributes(auth: &Map<String, Value>, credential: &Credential) -> Vec<String> {
+    let sent = auth.get("attributes").and_then(Value::as_object);
+    [
+        cpa_server::remote::PROVIDER,
+        cpa_core::config::credentials::HOME_AUTH_INDEX,
+        cpa_server::remote::MODEL_INFO,
+        cpa_core::config::credentials::HOME_MODEL_OPTIONS,
+        cpa_server::remote::SESSION,
+        cpa_server::remote::PARENT_SESSION,
+    ]
+    .into_iter()
+    .filter(|key| {
+        credential
+            .attributes
+            .get(*key)
+            .is_some_and(|value| sent.and_then(|sent| sent.get(*key)).and_then(Value::as_str) != Some(value.as_str()))
+    })
+    .map(str::to_owned)
+    .collect()
 }
 
 /// The dispatched Go `coreauth.Auth` as a runtime credential. It lives for one lease:
@@ -576,7 +633,7 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let provider = text("provider").to_lowercase();
+    let provider = text("provider").go_lower();
     let label = text("label");
     let key = executor_key(&provider, &label, &attributes);
     if provider.is_empty() || key.is_empty() {
@@ -995,7 +1052,7 @@ mod tests {
     /// status reports, so a node's Home plugin finalization succeeds.
     async fn fake_home(handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static) -> FakeHome {
         FakeHome::start(
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some(cpa_home::client::KEY_PLUGIN_TASKS)) => fake::raw("$-1\r\n"),
                 ("rpush", Some(cpa_home::client::KEY_PLUGIN_STATUS)) => fake::raw(":1\r\n"),
                 _ => handler(args),
@@ -1096,7 +1153,7 @@ mod tests {
         kv: std::collections::HashMap<String, String>,
     ) -> FakeHome {
         let replies = Mutex::new(std::collections::VecDeque::from(replies));
-        fake_home(with_kv(kv, move |args| match args[0].to_lowercase().as_str() {
+        fake_home(with_kv(kv, move |args| match args[0].go_lower().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1119,7 +1176,7 @@ mod tests {
         handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static,
     ) -> impl Fn(&[String]) -> Reply + Send + Sync + 'static {
         let kv = Mutex::new(kv);
-        move |args| match args[0].to_lowercase().as_str() {
+        move |args| match args[0].go_lower().as_str() {
             "get" if args[1].starts_with("cpa:") => kv
                 .lock()
                 .unwrap()
@@ -1410,7 +1467,7 @@ mod tests {
             r#"{{"model":"claude-upstream","auth_index":"cred-1","concurrency":{{"accounted":true,"credential_id":"cred-1","model":"claude-upstream"}},"auth":{{"id":"cred-1","provider":"claude","attributes":{{"api_key":"sk-home-fake","base_url":"{upstream}"}}}}}}"#
         );
         let home = fake_home(with_kv(Default::default(), move |args| {
-            match args[0].to_lowercase().as_str() {
+            match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\ncredentials:\n  concurrency:\n    cpa-flush-interval: 20ms\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -1473,7 +1530,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn home_errors_reach_the_client_and_the_gate_closes_without_home() {
-        let home = fake_home(|args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(|args| match args[0].go_lower().as_str() {
             "get" => fake::bulk("port: 0\n"),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1511,7 +1568,7 @@ mod tests {
         };
         let replies = Mutex::new(vec![auth("cred-2", "sk-good"), auth("cred-1", "sk-bad")]);
         let home = fake_home(with_kv(Default::default(), move |args| {
-            match args[0].to_lowercase().as_str() {
+            match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -1714,7 +1771,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn model_routes_serve_the_home_catalog() {
         let catalog = r#"{"xai":[{"id":"grok-4","display_name":"Grok 4","context_length":256000,"owned_by":"xai"}],"claude":[{"id":"claude-x","owned_by":"anthropic","created":1700000000}]}"#;
-        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].go_lower().as_str() {
             "get" if args[1] == "config" => fake::bulk("port: 0\n"),
             "get" if args[1].contains("x-bad") => {
                 fake::bulk(r#"{"error":{"type":"no_credentials","message":"who are you"}}"#)
@@ -1870,7 +1927,7 @@ mod tests {
                             return;
                         }
                         seen.extend_from_slice(&buf[..n]);
-                        let text = String::from_utf8_lossy(&seen).to_lowercase();
+                        let text = String::from_utf8_lossy(&seen).go_lower();
                         if let Some(end) = text.find("\r\n\r\n") {
                             let length = text
                                 .lines()
@@ -3011,31 +3068,49 @@ mod tests {
         (base, counts)
     }
 
-    /// Go `bindExecutionLifecycle` and `retainedHomeSessionSelection`: a Responses
-    /// WebSocket turn on a Home Codex key with upstream WebSockets leaves its pick with
-    /// the pooled socket. The pick outlives the response, the next turn runs on it
-    /// without another pick, and Home draining it closes the socket before the release.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_pooled_codex_socket_keeps_its_home_pick() {
-        use futures_util::StreamExt;
-        use wreq::ws::message::Message;
-        let (upstream, counts) = responses_ws_upstream().await;
-        let pick = |id: &str| {
-            format!(
-                r#"{{"model":"gpt-5-codex","auth_index":"{id}","concurrency":{{"accounted":true,"credential_id":"{id}","model":"gpt-5-codex"}},"auth":{{"id":"{id}","provider":"codex","attributes":{{"api_key":"sk-fake-{id}","base_url":"{upstream}","websockets":"true"}}}}}}"#
-            )
-        };
-        let home = scripted(
-            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\n",
-            vec![pick("cred-ws"), pick("cred-spare")],
+    const CODEX_TURN: &str =
+        r#"{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+    /// Continues upstream state: only a native passthrough on the pinned credential's
+    /// socket serves it; otherwise the client must replay over HTTP (1012).
+    const CODEX_CONTINUATION: &str = r#"{"type":"response.create","model":"gpt-5-codex","previous_response_id":"r1","input":[{"type":"message","role":"user","content":"more"}]}"#;
+
+    /// A Home Codex pick for `gpt-5-codex` on the Responses WebSocket upstream; `state`
+    /// adds runtime-state fields to the auth.
+    fn codex_ws_pick(id: &str, upstream: &str, state: &str) -> String {
+        format!(
+            r#"{{"model":"gpt-5-codex","auth_index":"{id}","concurrency":{{"accounted":true,"credential_id":"{id}","model":"gpt-5-codex"}},"auth":{{"id":"{id}","provider":"codex"{state},"attributes":{{"api_key":"sk-fake-{id}","base_url":"{upstream}","websockets":"true"}}}}}}"#
         )
-        .await;
-        let (base, rt, shutdown, task) = node_with(&home, cpa_exec::codex::CodexExecutor::new().unwrap()).await;
+    }
+
+    /// A Home node whose registry knows `gpt-5-codex` for Codex through a local key (Go
+    /// synthesizes one from a key in Home's config), so a Responses WebSocket session
+    /// can keep its pin on a Home credential (Go `responsesWebsocketPinnedAuthMatchesModel`
+    /// with a Home runtime auth). Without the model in the registry Go and cliproxy-rs
+    /// both drop the pin.
+    async fn codex_ws_node(home: &FakeHome) -> (String, Arc<Runtime>, CancellationToken, tokio::task::JoinHandle<()>) {
+        let keys = overlay(
+            b"codex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n",
+            None,
+        )
+        .unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+            codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let local = cpa_core::config::credentials::from_config(&keys);
+        let (base, rt, shutdown, task) = node_full(home, executors, local).await;
         eventually("dispatch published", || {
             rt.remote_dispatch().is_some_and(|d| d.available())
         })
         .await;
-        let mut socket = wreq::Client::new()
+        (base, rt, shutdown, task)
+    }
+
+    async fn ws_connect(base: &str) -> wreq::ws::WebSocket {
+        wreq::Client::new()
             .websocket(format!("ws{}/v1/responses", base.trim_start_matches("http")))
             .header("authorization", "Bearer client-key")
             .send()
@@ -3043,21 +3118,153 @@ mod tests {
             .unwrap()
             .into_websocket()
             .await
-            .unwrap();
-        let turn = r#"{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
-        for round in 0..2 {
-            socket.send(Message::text(turn)).await.unwrap();
-            loop {
-                let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                    .await
-                    .expect("turn completes");
-                let Some(Ok(Message::Text(text))) = next else {
-                    panic!("turn {round}: {next:?}");
-                };
-                if text.as_str().contains("response.completed") {
-                    break;
+            .unwrap()
+    }
+
+    /// Sends one turn and reads to its `response.completed`; any other end is the error.
+    async fn ws_turn(socket: &mut wreq::ws::WebSocket, frame: &str) -> Result<(), String> {
+        use futures_util::StreamExt;
+        use wreq::ws::message::Message;
+        socket.send(Message::text(frame)).await.map_err(|e| e.to_string())?;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .map_err(|_| "no answer".to_owned())?;
+            match next {
+                Some(Ok(Message::Text(text))) if text.as_str().contains("response.completed") => return Ok(()),
+                Some(Ok(Message::Text(_))) => {}
+                other => return Err(format!("{other:?}")),
+            }
+        }
+    }
+
+    /// Go `responsesWebsocketAuthAvailableForModel` on a kept Home auth: a snapshot that
+    /// is disabled by status, cooling for the model, or cooling as a whole drops the
+    /// pin, so the continuation must replay over HTTP; a cooldown already over keeps it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_kept_home_pin_follows_its_snapshot_availability() {
+        let (upstream, _) = responses_ws_upstream().await;
+        let cases = [
+            (r#","status":"disabled""#, false),
+            (
+                r#","model_states":{"gpt-5-codex":{"unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z"}}"#,
+                false,
+            ),
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z""#,
+                false,
+            ),
+            // Go's time decoding takes a comma before the fraction.
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00,1Z""#,
+                false,
+            ),
+            (r#","unavailable":true,"next_retry_after":"2001-01-01T00:00:00Z""#, true),
+            // The model's own state decides over the auth-wide one.
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z","model_states":{"gpt-5-codex":{"status":"active"}}"#,
+                true,
+            ),
+        ];
+        for (state, native) in cases {
+            let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, state)]).await;
+            let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+            let mut socket = ws_connect(&base).await;
+            ws_turn(&mut socket, CODEX_TURN)
+                .await
+                .unwrap_or_else(|e| panic!("{state}: {e}"));
+            match ws_turn(&mut socket, CODEX_CONTINUATION).await {
+                Ok(()) => assert!(native, "{state}: the pin was kept"),
+                Err(close) => {
+                    assert!(!native, "{state}: {close}");
+                    assert!(
+                        close.contains("1012") && close.contains("upstream requires HTTP replay"),
+                        "{state}: {close}"
+                    );
                 }
             }
+            assert_eq!(rpops(&home).len(), 1, "{state}");
+            drop(socket);
+            shutdown.cancel();
+            task.await.unwrap();
+        }
+    }
+
+    /// Go `responsesWebsocketProviderSetForModel` trims the base after splitting off the
+    /// thinking suffix, so `gpt-5-codex(high) ` (trailing space) has no suffix, no
+    /// provider and keeps no pin: its continuation must replay over HTTP.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_model_with_a_spaced_suffix_keeps_no_home_pin() {
+        let (upstream, _) = responses_ws_upstream().await;
+        let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, "")]).await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        let spaced = |frame: &str| frame.replace(r#""gpt-5-codex""#, r#""gpt-5-codex(high) ""#);
+        ws_turn(&mut socket, &spaced(CODEX_TURN)).await.unwrap();
+        let close = ws_turn(&mut socket, &spaced(CODEX_CONTINUATION)).await.unwrap_err();
+        assert!(close.contains("upstream requires HTTP replay"), "{close}");
+        drop(socket);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    /// Go `forgetHomeRuntimeAuth` when a selection ends: after a turn on another provider
+    /// ended the kept Codex pick, a turn back on the Codex model asks Home afresh instead
+    /// of pinning the forgotten credential.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_back_after_a_provider_switch_does_not_pin_the_ended_pick() {
+        let (upstream, counts) = responses_ws_upstream().await;
+        let contract = ContractUpstream::start(vec![]).await;
+        let home = scripted(
+            "port: 0\n",
+            vec![
+                codex_ws_pick("cred-a", &upstream, ""),
+                contract_pick("cred-b", &contract.base, None, &Value::Null),
+                codex_ws_pick("cred-c", &upstream, ""),
+            ],
+        )
+        .await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        let other =
+            r#"{"type":"response.create","model":"gpt","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+        ws_turn(&mut socket, other).await.unwrap();
+        eventually("the switch ended the kept pick", || {
+            releases(&home).iter().any(|f| f["credential_id"] == "cred-a")
+        })
+        .await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        let picks = rpops(&home);
+        assert_eq!(picks.len(), 3, "{picks:?}");
+        assert!(picks[2].get("pinned_auth_id").is_none(), "{:?}", picks[2]);
+        assert_eq!(contract.calls(), ["cred-b"]);
+        assert_eq!(counts.lock().unwrap().0, 2, "a new socket for cred-c");
+        drop(socket);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    /// Go `bindExecutionLifecycle` and `retainedHomeSessionSelection`: a Responses
+    /// WebSocket turn on a Home Codex key with upstream WebSockets leaves its pick with
+    /// the pooled socket. The pick outlives the response, the next turn runs on it
+    /// without another pick (natively, as a continuation), and Home draining it closes the
+    /// socket before the release.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pooled_codex_socket_keeps_its_home_pick() {
+        let (upstream, counts) = responses_ws_upstream().await;
+        let pick = |id: &str| codex_ws_pick(id, &upstream, "");
+        let home = scripted(
+            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\n",
+            vec![pick("cred-ws"), pick("cred-spare")],
+        )
+        .await;
+        let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
+        let mut socket = ws_connect(&base).await;
+        for (round, frame) in [CODEX_TURN, CODEX_CONTINUATION].into_iter().enumerate() {
+            ws_turn(&mut socket, frame)
+                .await
+                .unwrap_or_else(|e| panic!("turn {round}: {e}"));
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(releases(&home).is_empty(), "turn {round}: the socket keeps the pick");
         }
@@ -3387,7 +3594,7 @@ mod tests {
             Reply::Bytes(bytes) => bytes,
             _ => unreachable!(),
         }));
-        fake_home(move |args| match args[0].to_lowercase().as_str() {
+        fake_home(move |args| match args[0].go_lower().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -3797,7 +4004,7 @@ mod tests {
             let base_url = upstream.base.clone();
             let home = fake_home({
                 let calls = calls.clone();
-                move |args| match args[0].to_lowercase().as_str() {
+                move |args| match args[0].go_lower().as_str() {
                     "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\nmax-retry-credentials: 1\n"),
                     "subscribe" => fake::raw(ACK),
                     "ping" => fake::raw("+PONG\r\n"),
@@ -3950,7 +4157,7 @@ mod tests {
         ] {
             let upstream = ContractUpstream::start(vec![("home-retry-a", bad_gateway())]).await;
             let pick = contract_pick("home-retry-a", &upstream.base, None, &Value::Null);
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk(config),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -4020,7 +4227,7 @@ mod tests {
             let done_by_home = done.clone();
             // The Claude executor keeps its session IDs in Home KV.
             let home = fake_home(with_kv(Default::default(), move |args| {
-                match args[0].to_lowercase().as_str() {
+                match args[0].go_lower().as_str() {
                     "get" => fake::bulk(config),
                     "subscribe" => fake::raw(ACK),
                     "ping" => fake::raw("+PONG\r\n"),
@@ -4138,7 +4345,7 @@ mod tests {
                     .to_string()
                 }
             };
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -4354,7 +4561,7 @@ mod tests {
             let pick = pick.clone();
             let minted = refreshed.to_string().contains("sk-meta-home-fake");
             let refreshed = refreshed.to_string();
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" if args[1].starts_with('{') => fake::bulk(&refreshed),
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\n"),
                 "subscribe" => fake::raw(ACK),
@@ -4863,6 +5070,10 @@ mod tests {
                 false,
             ),
             (r#"{"error":"busy","auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
+            // Go decodes the auth's runtime state with the reply.
+            (r#"{"auth":{"id":"cred-1","provider":"codex","unavailable":"true"}}"#.into(), "invalid_auth", false),
+            (r#"{"auth":{"id":"cred-1","provider":"codex","next_retry_after":""}}"#.into(), "invalid_auth", false),
+            (tupled(r#""auth_index":"cred-1","auth":{"id":"cred-1","provider":"codex","model_states":{"gpt":1}}"#), "invalid_auth", false),
             (r#"{"error":{},"auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
             (r#"{"error":null,"auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
             (
@@ -4911,6 +5122,96 @@ mod tests {
             assert_eq!(picker.fenced(), fenced, "{reply}");
             assert_eq!(picker.in_flight(), 0, "the scope ended: {reply}");
         }
+    }
+
+    /// Go `TestPickNextViaHomeClassifiesTransportErrorsAsHomeUnavailable`,
+    /// `TestPickNextViaHomeDoesNotAbortDeterministicDispatchFailure` and
+    /// `TestPickNextViaHomeAbortsAmbiguousTransport`: a failed RPOP is `home_unavailable`
+    /// (503). Only a connection lost after the command was sent fences the client; the
+    /// pending dispatch ends and the registry drains. (The client fences inside the RPOP,
+    /// so before the pending dispatch ends, as Go's abort-first ordering requires.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_rpops_are_home_unavailable_and_fence_only_when_ambiguous() {
+        for (reply, fenced) in [
+            (Reply::Close, true),
+            (fake::raw("-ERR Home transport failed\r\n"), false),
+        ] {
+            let home = sequenced("port: 0\n", vec![reply], Default::default()).await;
+            let picker = Picker::new(&home).await;
+            let error = match picker.pick().await {
+                Ok(_) => panic!("the pick succeeded"),
+                Err(error) => error,
+            };
+            assert_eq!((&*error.code, error.error.status), ("home_unavailable", 503));
+            assert_eq!(picker.fenced(), fenced);
+            assert_eq!(picker.in_flight(), 0, "the pending dispatch ended");
+            picker.registry.drain(Duration::from_secs(1)).await.unwrap();
+        }
+    }
+
+    /// Go's first `json.Unmarshal` of the reply decodes the nested auth: its malformed
+    /// runtime state answers `invalid_auth` before the model check that would fence, and
+    /// releases the accounted lease. Only when Go falls back to the whole reply as the
+    /// auth (no nested ID) does the outer object's state count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_auth_state_is_invalid_auth_before_the_fallback() {
+        let mismatched = format!(r#"{{"model":"other",{TUPLE},"auth":{{"unavailable":"true"}}}}"#);
+        let home = sequenced("port: 0\n", vec![fake::bulk(&mismatched)], Default::default()).await;
+        let picker = Picker::new(&home).await;
+        let Err(error) = picker.pick().await else {
+            panic!("accepted");
+        };
+        assert_eq!((&*error.code, error.error.status), ("invalid_auth", 502));
+        assert_eq!(
+            String::from_utf8_lossy(&error.error.body),
+            "invalid_auth: home returned invalid auth payload"
+        );
+        assert!(!picker.fenced());
+        assert_eq!(picker.in_flight(), 0);
+        assert_eq!(picker.releases(), vec![("cred-1/gpt".to_owned(), 1)]);
+
+        for (reply, accepted) in [
+            // An older Home's reply is the auth itself.
+            (r#"{"id":"cred-1","provider":"codex","unavailable":"true"}"#, false),
+            // With a nested ID the outer object is not an auth.
+            (
+                r#"{"auth":{"id":"cred-1","provider":"codex"},"unavailable":"true"}"#,
+                true,
+            ),
+        ] {
+            let home = sequenced("port: 0\n", vec![fake::bulk(reply)], Default::default()).await;
+            let picker = Picker::new(&home).await;
+            match picker.pick().await {
+                Ok(grant) => {
+                    assert!(accepted, "{reply}");
+                    (grant.end)();
+                }
+                Err(error) => {
+                    assert!(!accepted, "{reply}");
+                    assert_eq!(&*error.code, "invalid_auth", "{reply}");
+                }
+            }
+        }
+    }
+
+    /// Attributes this node sets on a pick, which Go keeps outside `Auth.Attributes`,
+    /// are marked private so plugins never see them; an attribute Home sent under such
+    /// a name, which the node did not replace, stays Home's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_node_set_attributes_are_private() {
+        let reply = r#"{"auth_index":"idx-1","auth":{"id":"cred-1","provider":"codex","attributes":{"home_session_id":"plugin-owned"}}}"#;
+        let home = sequenced("port: 0\n", vec![fake::bulk(reply)], Default::default()).await;
+        let picker = Picker::new(&home).await;
+        let grant = picker.pick().await.unwrap();
+        assert_eq!(grant.credential.attributes[cpa_server::remote::SESSION], "plugin-owned");
+        assert_eq!(
+            grant.private.attributes,
+            [
+                cpa_server::remote::PROVIDER,
+                cpa_core::config::credentials::HOME_AUTH_INDEX
+            ]
+        );
+        (grant.end)();
     }
 
     /// Go `TestPickHomeDispatchSelectionValidAccountedLocalValidationReleasesAndKeepsHomeHealthy`:
@@ -5016,7 +5317,7 @@ mod tests {
     async fn home_busy_skips_outer_retries() {
         for stream in [false, true] {
             let busy = r#"{"error":{"type":"credential_concurrency_exceeded","message":"busy","retryable":true,"retry_after_ms":20000}}"#;
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 1\nmax-retry-interval: 30\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -5336,7 +5637,7 @@ mod tests {
             let home = Arc::new(
                 fake_home({
                     let (subscriptions, allow_second) = (subscriptions.clone(), allow_second.clone());
-                    move |args| match args[0].to_lowercase().as_str() {
+                    move |args| match args[0].go_lower().as_str() {
                         "get" if args[1] == "config" => fake::bulk(Self::CONFIG),
                         "subscribe" => {
                             let n = subscriptions.fetch_add(1, Ordering::SeqCst) + 1;
@@ -5433,7 +5734,7 @@ mod tests {
     ) -> FakeHome {
         let pushes = std::sync::atomic::AtomicUsize::new(0);
         FakeHome::start(
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some("config")) => fake::bulk(config),
                 ("get", _) => fake::raw("$-1\r\n"),
                 ("subscribe", _) => fake::raw(ACK),
@@ -5621,7 +5922,7 @@ mod tests {
         ));
         let home = FakeHome::start({
             let (config, tasks) = (disabled.clone(), tasks.clone());
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some("config")) => fake::bulk(&config),
                 ("get", Some("plugin-tasks")) => fake::bulk(tasks.lock().unwrap().as_str()),
                 ("get", _) => fake::raw("$-1\r\n"),
@@ -5771,7 +6072,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pre_ack_failures_back_off_and_stop_on_shutdown() {
         let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
-        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].go_lower().as_str() {
             "get" if args[1] == "config" => {
                 let _ = attempt_tx.send(std::time::Instant::now());
                 fake::raw("-ERR unavailable\r\n")

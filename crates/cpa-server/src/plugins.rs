@@ -393,7 +393,7 @@ pub(crate) async fn scheduler_pick(
 
 /// Go `schedulerAttributeSensitive`: credential attributes a scheduler never sees.
 fn scheduler_attribute_sensitive(key: &str) -> bool {
-    let key = key.trim().to_lowercase();
+    let key = key.trim().go_lower();
     let normalized: String = key
         .chars()
         .map(|c| if matches!(c, '-' | '.' | ' ') { '_' } else { c })

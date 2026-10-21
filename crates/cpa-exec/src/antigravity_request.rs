@@ -7,6 +7,7 @@
 //! Every edit is byte-level through `cpa_common::json`, so key order, escaping and
 //! malformed input behave like Go's gjson/sjson.
 
+use cpa_core::gostr::GoStr;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -30,12 +31,12 @@ const SHORT_COOLDOWN_THRESHOLD: Duration = Duration::from_secs(300);
 const INSTANT_RETRY_THRESHOLD: Duration = Duration::from_secs(3);
 
 fn lower_contains(model: &str, needle: &str) -> bool {
-    model.to_lowercase().contains(needle)
+    model.go_lower().contains(needle)
 }
 
 /// `antigravityUsesReasoningReplayCache`: Gemini-family models (not Claude).
 pub(crate) fn uses_reasoning_replay(model: &str) -> bool {
-    let model = model.to_lowercase();
+    let model = model.go_lower();
     !model.contains("claude") && (model.contains("gemini") || model.contains("flash") || model.contains("agent"))
 }
 
@@ -1217,7 +1218,7 @@ pub(crate) fn decide_429(body: &[u8]) -> (RateLimit, Option<Duration>) {
             }
         }
     }
-    let lower = String::from_utf8_lossy(body).to_lowercase();
+    let lower = String::from_utf8_lossy(body).go_lower();
     if ["quota_exhausted", "quota exhausted"].iter().any(|k| lower.contains(k)) {
         return (RateLimit::FullQuotaExhausted, retry);
     }

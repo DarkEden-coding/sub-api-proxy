@@ -250,7 +250,7 @@ impl Rules {
             .collect();
         let image_generation = match doc.get("multimedia").and_then(|m| m.get("disable-image-generation")) {
             Some(Yaml::Bool(true)) => ImageGeneration::All,
-            Some(Yaml::String(s)) => match s.trim().to_lowercase().as_str() {
+            Some(Yaml::String(s)) => match s.trim().go_lower().as_str() {
                 "true" | "1" | "on" | "yes" => ImageGeneration::All,
                 "chat" => ImageGeneration::Chat,
                 "passthrough" => ImageGeneration::Passthrough,
@@ -343,7 +343,7 @@ pub fn apply_tracked(
     if let Some(headers) = req.headers
         && is_codex_user_agent(headers)
         && !matches!(
-            req.target_executor.trim().to_lowercase().as_str(),
+            req.target_executor.trim().go_lower().as_str(),
             "codex" | "codex-websockets" | "codex_websockets"
         )
     {
@@ -551,7 +551,7 @@ fn rules_match(models: &[ModelRule], req: &Request<'_>, payload: &[u8], candidat
                 return false;
             }
             let protocol = entry.protocol.trim();
-            if !protocol.is_empty() && !req.protocol.is_empty() && !protocol.eq_ignore_ascii_case(req.protocol) {
+            if !protocol.is_empty() && !req.protocol.is_empty() && !protocol.go_eq_fold(req.protocol) {
                 return false;
             }
             from_protocol_matches(&entry.from_protocol, req.from_protocol)
@@ -597,7 +597,7 @@ fn path_exists(payload: &[u8], path: &str) -> bool {
 }
 
 fn normalize_from_protocol(p: &str) -> String {
-    match p.trim().to_lowercase().as_str() {
+    match p.trim().go_lower().as_str() {
         "openai-response" | "openai-responses" | "response" => "responses".into(),
         other => other.to_owned(),
     }
@@ -609,7 +609,7 @@ fn from_protocol_matches(pattern: &str, from: &str) -> bool {
         return true;
     }
     let from = normalize_from_protocol(from);
-    !from.is_empty() && pattern.eq_ignore_ascii_case(&from)
+    !from.is_empty() && pattern.go_eq_fold(&from)
 }
 
 fn headers_match(headers: Option<&HeaderMap>, rules: &[(String, String)]) -> bool {
@@ -853,12 +853,11 @@ fn remove_tool_type(payload: &[u8], tools_path: &str, tool_type: &str) -> Vec<u8
 fn remove_tool_choice(payload: &[u8], path: &str, tool_type: &str) -> Vec<u8> {
     let choice = json::get(payload, path);
     let delete = match choice.kind {
-        Kind::String => choice.str().trim().eq_ignore_ascii_case(tool_type),
+        Kind::String => choice.str().trim().go_eq_fold(tool_type),
         Kind::Json => {
             let kind = choice.get("type").str().trim().to_owned();
-            kind.eq_ignore_ascii_case(tool_type)
-                || (kind.eq_ignore_ascii_case("tool")
-                    && choice.get("name").str().trim().eq_ignore_ascii_case(tool_type))
+            kind.go_eq_fold(tool_type)
+                || (kind.go_eq_fold("tool") && choice.get("name").str().trim().go_eq_fold(tool_type))
         }
         _ => false,
     };
@@ -908,7 +907,7 @@ pub fn is_codex_user_agent(headers: &HeaderMap) -> bool {
         .iter()
         .map(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
         .find(|v| !v.is_empty())
-        .is_some_and(|ua| ua.to_lowercase().contains("codex"))
+        .is_some_and(|ua| ua.go_lower().contains("codex"))
 }
 
 /// Codex client tools whose `number` parameters Codex deserializes as integers.

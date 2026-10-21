@@ -3,6 +3,7 @@
 //! [`super::v0_save`], which keeps a legacy-layout file in its layout and sends a v8
 //! file to the v8 config writer, and through the v8 OAuth and logs handlers, so v0 and
 //! v8 share one implementation as they do in Go.
+use cpa_core::gostr::GoStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -208,7 +209,7 @@ pub(crate) async fn config(State(state): State<Arc<Management>>) -> Response {
 
 /// Go `normalizeRoutingStrategy`.
 fn routing_strategy(s: &str) -> Option<&'static str> {
-    match go_trim(s).to_lowercase().as_str() {
+    match go_trim(s).go_lower().as_str() {
         "" | "round-robin" | "roundrobin" | "rr" => Some("round-robin"),
         "weighted-round-robin" | "weightedroundrobin" | "wrr" => Some("weighted-round-robin"),
         "fill-first" | "fillfirst" | "ff" => Some("fill-first"),

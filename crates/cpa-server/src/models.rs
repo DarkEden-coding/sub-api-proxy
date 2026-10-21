@@ -66,7 +66,7 @@ async fn list(
             Ok(entries) => entries,
             Err(response) => return *response,
         };
-        let grok_shell = header("user-agent").is_some_and(|ua| ua.to_lowercase().contains("grok-shell"));
+        let grok_shell = header("user-agent").is_some_and(|ua| ua.go_lower().contains("grok-shell"));
         // ponytail: Go builds the Codex client catalog (`client_version`) from Home's
         // model IDs with its template metadata; here such clients get the OpenAI list.
         let (source, body) = if grok_shell {

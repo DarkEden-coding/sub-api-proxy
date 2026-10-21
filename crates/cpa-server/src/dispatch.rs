@@ -362,11 +362,7 @@ pub fn upstream_summary(raw: &str) -> String {
             message = s(v.get("message"));
         }
         let summary = match (code.is_empty(), message.is_empty()) {
-            (false, false)
-                if code.eq_ignore_ascii_case(&message) || message.to_lowercase().contains(&code.to_lowercase()) =>
-            {
-                message
-            }
+            (false, false) if code.go_eq_fold(&message) || message.go_lower().contains(&code.go_lower()) => message,
             (false, false) => format!("{code}: {message}"),
             (true, false) => message,
             (false, true) => code,
@@ -394,7 +390,7 @@ fn route_base_name(model: &str) -> &str {
 /// image-only models serve only the image routes, speech-only models only the speech
 /// routes.
 fn check_route_only(base: &str, call: &Call) -> Result<(), RunError> {
-    let name = route_base_name(base).to_lowercase();
+    let name = route_base_name(base).go_lower();
     let kind = call.media.as_ref().map(|m| m.kind);
     if IMAGE_ONLY.contains(&name.as_str()) && kind != Some(MediaKind::Images) {
         return Err(Failure::ImageOnly(base.to_owned()).into());
@@ -1145,9 +1141,9 @@ async fn run_routed(
                 // Go `nextModelPoolOffset`: rotate the alias pool once per selection.
                 let key = format!(
                     "{}|{}|{}",
-                    lease.credential.id.trim().to_lowercase(),
+                    lease.credential.id.trim().go_lower(),
                     registry::provider_key(&lease.credential),
-                    canonical_model(registry::strip_prefix(&selection.model, &lease.credential)).to_lowercase()
+                    canonical_model(registry::strip_prefix(&selection.model, &lease.credential)).go_lower()
                 );
                 let offset = rt.next_pool_offset(&key, models.len());
                 models.rotate_left(offset);
@@ -1674,7 +1670,7 @@ async fn remote_round(
                     }
                     // Go `shouldReturnLastErrorOnPickFailure` in Home mode.
                     if matches!(
-                        code.to_lowercase().as_str(),
+                        code.go_lower().as_str(),
                         "auth_not_found" | "auth_unavailable" | "request_retry_exceeded"
                     ) {
                         return Err(
@@ -1890,7 +1886,7 @@ fn lifecycle(e: &ExecError) -> bool {
     if classify::go_status(e) != 0 {
         return false;
     }
-    let lower = classify::error_text(e).trim().to_lowercase();
+    let lower = classify::error_text(e).trim().go_lower();
     matches!(
         lower.as_str(),
         "context canceled" | "context deadline exceeded" | "eof" | "unexpected eof"
@@ -2026,7 +2022,7 @@ impl Credits<'_> {
         // Go's ExecuteCount has no credits fallback; Execute and ExecuteStream do.
         if request.operation == Operation::CountTokens
             || !self.wanted(cfg, &error)
-            || !self.model.to_lowercase().contains("claude")
+            || !self.model.go_lower().contains("claude")
         {
             return Err(error);
         }
@@ -2191,6 +2187,8 @@ async fn attempt(
         let mut tracker = start(&lease.credential, &mut req);
         observe(&lease.credential, &mut req);
         let session = session.as_ref();
+        let private = lease.home_private().map(|p| p.attributes.clone()).unwrap_or_default();
+        let private = &private;
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
             let credential = match crate::plugins::model_callbacks::context().filter(|c| !c.proxy_url.is_empty()) {
                 Some(context) => {
@@ -2202,7 +2200,8 @@ async fn attempt(
             };
             let credential = rt.for_executor(&credential);
             if let Some(adapter) = rt.plugin_runtime().executor(&credential, cfg) {
-                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, req).await;
+                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, private, req)
+                    .await;
             }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
@@ -2358,10 +2357,11 @@ fn keep_home(
         return Some(lease);
     };
     let pick = guard.defuse()?;
-    let (credential, route) = (lease.credential.id.clone(), lease.selection.model.clone());
+    let (credential, route) = (lease.credential.clone(), lease.selection.model.clone());
+    let availability = lease.home_private().map(|p| p.availability.clone()).unwrap_or_default();
     match pick.keep(lease) {
         None => {
-            home.keep(pick, &credential, &route, user_key.to_owned());
+            home.keep(pick, &credential, availability, &route, user_key.to_owned());
             None
         }
         Some(lease) => {

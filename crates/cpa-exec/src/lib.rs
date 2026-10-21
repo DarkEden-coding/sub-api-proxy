@@ -107,6 +107,7 @@ use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecSession, FailureS
 /// Go `helps.EnsureResponsesUsageDetails`, for paths outside the executors (plugin
 /// executors' Responses payloads and stream chunks).
 pub use openai_compat_payload::ensure_responses_usage_details;
+pub use xai_ws::websockets_enabled;
 
 /// What a credential needs before or around use. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

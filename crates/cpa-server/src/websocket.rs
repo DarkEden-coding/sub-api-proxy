@@ -37,6 +37,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_core::exec::{Caller, ExecError, ExecSession, ExecStream, Operation};
@@ -48,7 +49,6 @@ use tokio::sync::{mpsc, watch};
 
 use crate::registry::provider_key;
 use crate::runtime::Runtime;
-use crate::scheduler::canonical_model;
 use crate::websocket_requests::{
     self as requests, APPEND, CREATE, Turn, WsError, delete, error_payload, field, payloads_from_chunk,
 };
@@ -764,10 +764,22 @@ impl Connection {
     }
 
     fn credential(&self, id: &str) -> Option<Arc<Credential>> {
+        self.session_credential(id).map(|(credential, _)| credential)
+    }
+
+    /// Go `sessionAuthByIDWithSource`: the store's current view first, then a Home
+    /// credential this session kept (the flag).
+    fn session_credential(&self, id: &str) -> Option<(Arc<Credential>, Option<Arc<crate::remote::Availability>>)> {
         if id.is_empty() {
             return None;
         }
-        self.rt.store().get(id)
+        match self.rt.store().get(id) {
+            Some(credential) => Some((credential, None)),
+            None => self
+                .home
+                .auth(id)
+                .map(|(credential, availability)| (credential, Some(availability))),
+        }
     }
 
     /// `responsesWebsocketProviderSetForModel`: providers that registered the model
@@ -775,7 +787,11 @@ impl Connection {
     fn providers(&self, model: &str) -> (Vec<String>, String) {
         let registry = self.rt.registry();
         let resolved = resolve_auto(&self.rt, &registry, model);
-        let key = canonical_model(&resolved).to_owned();
+        // Go trims the base after splitting off the suffix: `gpt-5(high) ` has no suffix.
+        let key = cpa_common::thinking::parse_suffix(&resolved)
+            .model_name
+            .trim()
+            .to_owned();
         let mut providers = registry.providers(&key);
         if providers.is_empty() && key != resolved {
             providers = registry.providers(&resolved);
@@ -832,26 +848,41 @@ impl Connection {
         !available.is_empty() && available.iter().all(|c| self.rt.executors.session_upstream(c))
     }
 
-    /// `responsesWebsocketPinnedAuthMatchesModel` for credentials the store still holds.
-    fn pin_matches(&self, credential: &Credential, model: &str) -> bool {
+    /// `responsesWebsocketPinnedAuthMatchesModel`. A Home credential (`home` holds the
+    /// model key it was pinned for) is in no local registry or scheduler: its snapshot
+    /// decides availability, and it matches while pinned for the same model key.
+    /// ponytail: provider membership reads `provider_key`, which honours a `provider_key`
+    /// attribute; Go lower-cases `auth.Provider`. They agree for Codex and xAI snapshots.
+    fn pin_matches(
+        &self,
+        credential: &Credential,
+        model: &str,
+        home: Option<(&str, &crate::remote::Availability)>,
+    ) -> bool {
         let (providers, key) = self.providers(model);
-        providers.contains(&provider_key(credential))
-            && self.usable(credential, &key)
-            && self.rt.registry().client_supports(&credential.id, &key)
+        if !providers.contains(&provider_key(credential)) {
+            return false;
+        }
+        match home {
+            Some((pinned_key, snapshot)) => {
+                crate::remote::available_for_model(credential, snapshot, &key, SystemTime::now())
+                    && pinned_key.trim().go_eq_fold(key.trim())
+            }
+            None => self.usable(credential, &key) && self.rt.registry().client_supports(&credential.id, &key),
+        }
     }
 
     /// Drops a pin whose credential no longer serves the model, or restores the pin
     /// remembered for the model's only provider.
     fn revalidate_pin(&mut self, model: &str) {
-        if let Some(pinned) = self.credential(&self.pinned) {
-            let current = self
-                .pinned_by_provider
+        let keep = self.session_credential(&self.pinned).is_some_and(|(pinned, home)| {
+            self.pinned_by_provider
                 .get(&provider_key(&pinned))
-                .is_some_and(|(id, _)| *id == self.pinned);
-            if !current || !self.pin_matches(&pinned, model) {
-                self.pinned.clear();
-            }
-        } else {
+                .is_some_and(|(id, key)| {
+                    *id == self.pinned && self.pin_matches(&pinned, model, home.as_deref().map(|a| (key.as_str(), a)))
+                })
+        });
+        if !keep {
             self.pinned.clear();
         }
         if !self.pinned.is_empty() {
@@ -859,8 +890,12 @@ impl Connection {
         }
         if let [provider] = self.providers(model).0.as_slice() {
             let remembered = self.pinned_by_provider.get(provider).cloned();
-            match remembered.and_then(|(id, _)| self.credential(&id).map(|c| (id, c))) {
-                Some((id, c)) if self.pin_matches(&c, model) => self.pinned = id,
+            match remembered.and_then(|(id, key)| self.session_credential(&id).map(|c| (id, key, c))) {
+                Some((id, key, (c, home)))
+                    if self.pin_matches(&c, model, home.as_deref().map(|a| (key.as_str(), a))) =>
+                {
+                    self.pinned = id
+                }
                 _ => {
                     self.pinned_by_provider.remove(provider);
                 }

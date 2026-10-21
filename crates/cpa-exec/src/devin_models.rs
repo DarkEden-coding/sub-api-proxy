@@ -186,11 +186,11 @@ pub(crate) fn resolve_in(catalog: &devin::Store, raw_model: &str, thinking_level
     match canonical.replace('-', "_").as_str() {
         "model_gpt_5_2" => {
             let e = clamp_effort(&effort, &levels(&["none", "low", "medium", "high", "xhigh"]), "low");
-            return format!("MODEL_GPT_5_2_{}", e.to_uppercase());
+            return format!("MODEL_GPT_5_2_{}", e.go_upper());
         }
         "model_google_gemini_3_0_flash" => {
             let e = clamp_effort(&effort, &levels(&["minimal", "low", "medium", "high"]), "high");
-            return format!("MODEL_GOOGLE_GEMINI_3_0_FLASH_{}", e.to_uppercase());
+            return format!("MODEL_GOOGLE_GEMINI_3_0_FLASH_{}", e.go_upper());
         }
         "model_claude_4_5_opus" => {
             return if thinking_on {

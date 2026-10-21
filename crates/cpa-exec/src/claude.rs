@@ -45,6 +45,7 @@ mod stream;
 mod telemetry;
 mod thread;
 
+use cpa_core::gostr::GoStr;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -914,7 +915,7 @@ struct Prepared {
 
 /// `config.NormalizeClaudeFingerprintProfile`: unknown values are the default ("").
 fn normalize_fingerprint_profile(raw: &str) -> &'static str {
-    match raw.trim().to_lowercase().as_str() {
+    match raw.trim().go_lower().as_str() {
         "claude-code-cli" | "oauth-cli" => "claude-code-cli",
         _ => "",
     }
@@ -942,7 +943,7 @@ fn set_string_if_different(body: String, path: &str, value: &str) -> String {
 
 /// `isKimiMessagesUpstream`: a Kimi credential, or Kimi's API host.
 fn kimi_upstream(provider: &str, base_url: &str) -> bool {
-    let provider = provider.trim().to_lowercase();
+    let provider = provider.trim().go_lower();
     if matches!(provider.as_str(), "kimi" | "kimi-ai" | "kimi.ai" | "kimi.com") {
         return true;
     }
@@ -1214,7 +1215,7 @@ impl<'a> Ctx<'a> {
             key_cloak.is_some() || !attr_mode.is_empty() || attr_strict || !attr_words.is_empty() || attr_cache;
         let mut cloak = (self.cli_profile || configured) && !confirmed;
         if !confirmed {
-            match mode.trim().to_lowercase().as_str() {
+            match mode.trim().go_lower().as_str() {
                 "always" => cloak = true,
                 "never" => cloak = false,
                 _ => {}
@@ -1314,7 +1315,7 @@ impl<'a> Ctx<'a> {
                     explicit,
                 },
             );
-            let model = rawjson::string(&body, "model").trim().to_lowercase();
+            let model = rawjson::string(&body, "model").trim().go_lower();
             if cloak::is_opus55(&model) && !probe_before && !rawjson::get(&body, "fallbacks").exists() {
                 body = rawjson::set_raw(&body, "fallbacks", r#"[{"model":"claude-opus-4-8"}]"#);
             }
@@ -1872,7 +1873,7 @@ fn cloak_thinking_display(body: String) -> String {
     if rawjson::get(&body, "thinking.display").exists() || !betas::progress_display(&rawjson::string(&body, "model")) {
         return body;
     }
-    match rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str() {
+    match rawjson::string(&body, "thinking.type").trim().go_lower().as_str() {
         "adaptive" | "enabled" => rawjson::set_str(&body, "thinking.display", "updates"),
         _ => body,
     }
@@ -1928,7 +1929,7 @@ fn disable_thinking_if_tool_choice_forced(body: String) -> String {
 /// `normalizeClaudeSamplingForUpstream`.
 fn normalize_sampling(mut body: String, native: bool) -> String {
     let thinking = matches!(
-        rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str(),
+        rawjson::string(&body, "thinking.type").trim().go_lower().as_str(),
         "enabled" | "adaptive" | "auto"
     );
     if !native {

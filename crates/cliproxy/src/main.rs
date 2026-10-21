@@ -5,6 +5,7 @@ mod home_plugins;
 mod plugin_cli;
 mod tui;
 
+use cpa_core::gostr::GoStr;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -1109,7 +1110,7 @@ fn auth_files(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().to_lowercase().ends_with(".json"))
+        .filter(|e| e.file_name().to_string_lossy().go_lower().ends_with(".json"))
         .filter_map(|e| Some((e.path(), std::fs::read(e.path()).ok()?)))
         .collect()
 }
