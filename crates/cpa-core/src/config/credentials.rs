@@ -1388,7 +1388,7 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
 /// watcher observes by, so a credential is never kept for an entry the watcher cannot
 /// see go away (a link to `/dev/null`, a FIFO, a folder). The type is checked before
 /// opening (a FIFO would block) and again on the opened file, which is the one read.
-fn read_regular(path: &Path) -> Option<Vec<u8>> {
+pub fn read_regular(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;

@@ -14,7 +14,7 @@ use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
 use cpa_common::gostr::GoStr;
 use cpa_core::config::{Config, ConfigDocument, archive_comments, credentials, is_bcrypt};
-use cpa_core::credential::{Credential, Source};
+use cpa_core::credential::Source;
 use serde_json::{Value, json};
 
 use crate::Runtime;
@@ -234,27 +234,38 @@ impl Management {
     /// Publishes a config and everything Go derives from it on reload: scheduler
     /// policy, management availability, and the credential set (auth-dir files plus
     /// config API keys). `files` replaces the auth-dir scan when the caller already
-    /// has a reconciled list. Callers hold `disk`. Infallible on purpose: access
-    /// settings of a valid config (a rotated or removed secret) always take effect.
-    pub(crate) fn publish(&self, cfg: Config, files: Option<Vec<Credential>>) {
+    /// has one; its file hashes keep a stale scan from undoing a later write (Go
+    /// c4c1d43e). Callers hold `disk`. Infallible on purpose: access settings of a
+    /// valid config (a rotated or removed secret) always take effect.
+    pub(crate) fn publish(&self, cfg: Config, files: Option<credentials::AuthScan>) {
         let mut cfg = cfg;
         self.lock_auth_dir(&mut cfg);
-        let mut all = files.unwrap_or_else(|| credentials::from_auth_dir(&cfg));
+        use sha2::{Digest, Sha256};
+        let scan = files.unwrap_or_else(|| credentials::scan_auth_dir(&cfg));
+        let mut all = scan.credentials;
+        let mut read = scan.read;
+        // Uploads record absolute paths; a relative auth-dir scans relative ones.
+        let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
         // Fallbacks follow their file: gone with it, replaced once a synthesizer
         // claims it, otherwise rebuilt from its current content.
+        let mut claimed = Vec::new();
         let mut fallbacks = self.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
         fallbacks.retain(|path| {
             let Ok(data) = std::fs::read(path) else { return false };
-            // Uploads record absolute paths; a relative auth-dir scans relative ones.
-            let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
             if all
                 .iter()
                 .any(|c| matches!(&c.source, Source::File(p) if absolute(p) == absolute(path)))
             {
+                claimed.push(path.clone());
                 return false;
             }
             match credentials::upload_fallback(&cfg.auth_dir, path, &data) {
                 Some(c) => {
+                    // Bound to the bytes it was built from, under its own path, so the
+                    // freshness check compares this read, not the scan's.
+                    if let Source::File(p) = &c.source {
+                        read.insert(p.clone(), Sha256::digest(&data).into());
+                    }
                     all.push(c);
                     true
                 }
@@ -262,13 +273,37 @@ impl Management {
             }
         });
         drop(fallbacks);
+        #[cfg(test)]
+        {
+            let mut hooks = BEFORE_RECONCILE.lock().unwrap();
+            let hook = hooks
+                .iter()
+                .position(|(dir, _)| *dir == cfg.auth_dir)
+                .map(|i| hooks.remove(i).1);
+            drop(hooks);
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         all.extend(credentials::from_config(&cfg));
         self.access.config_published(&cfg);
         crate::logging::configure(&cfg);
         self.rt.usage_queue().configure(self.access.available(), &cfg);
         let policy = policy(&cfg);
         self.rt.publish_config_and_policy(cfg, policy);
-        self.rt.store().reconcile(all);
+        let rejected = self.rt.store().reconcile_scanned(all, &read);
+        // A synthesizer claimed the file but its credential was rejected as stale, so the
+        // fallback stays live: keep tracking it, or the next reload would drop it.
+        let kept: Vec<PathBuf> = claimed
+            .into_iter()
+            .filter(|path| rejected.iter().any(|r| absolute(r) == absolute(path)))
+            .collect();
+        if !kept.is_empty() {
+            self.fallbacks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(kept);
+        }
         // Go's watcher calls redisqueue.NotifyUsageRefresh after every client reload.
         self.rt.usage_queue().notify_usage_refresh();
     }
@@ -1032,6 +1067,11 @@ pub(crate) struct V8Edit<'a> {
     pub path: &'a str,
     pub value: Option<Value>,
 }
+
+/// Test hook run once by the next [`Management::publish`] for the auth folder it names,
+/// after it has built its fallback credentials and before it reconciles them.
+#[cfg(test)]
+pub(crate) static BEFORE_RECONCILE: Mutex<Vec<(PathBuf, LayoutHook)>> = Mutex::new(Vec::new());
 
 /// Test hook run once, for the config file it names, when [`v0_save`] has chosen the v8
 /// writer and not yet written: the boundary where an unlocked save would let another
