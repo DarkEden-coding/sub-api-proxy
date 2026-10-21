@@ -652,6 +652,13 @@ mod tests {
             access_line(404, Duration::ZERO, "127.0.0.1", "GET", "/x\n200 forged")
                 .ends_with(r#"GET     "/x\n200 forged""#)
         );
+        // Go v8.0.35 `TestGinLogrusLoggerKeepsMaskedQueryReadable`: the masked query is
+        // quoted with the path, its `...` and `&` left readable.
+        let query = logged_query("/v1/models", "key=sk-0123456789cdef&limit=5");
+        assert!(
+            access_line(200, Duration::ZERO, "127.0.0.1", "GET", &format!("/v1/models?{query}"))
+                .ends_with(r#"GET     "/v1/models?key=sk-0...cdef&limit=5""#)
+        );
         for path in [
             "/v1",
             "/v1/images/edits",
