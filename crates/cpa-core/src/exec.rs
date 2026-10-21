@@ -568,7 +568,7 @@ pub struct ExecError {
     /// Headers this error hands the client under `requests.passthrough-headers` (Go
     /// `ErrorMessage.Addon`, filled only from errors with `Headers()`: Codex and xAI
     /// WebSocket error frames and stream bootstrap failures). `headers` stays the
-    /// classification copy and is never sent.
+    /// classification copy and is never sent, except as a `direct` response's headers.
     pub addon: Option<Box<HeaderMap>>,
 }
 
