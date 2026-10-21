@@ -15,7 +15,7 @@ use cpa_core::format::Format;
 use cpa_plugin::api::{
     COMPLETION_CANCELED, COMPLETION_FAILED, COMPLETION_REJECTED, COMPLETION_SUCCEEDED, RequestCompletion,
     RequestInterceptRequest, RequestInterceptResponse, ResponseInterceptRequest, STREAM_CHUNK_HEADER_INIT_INDEX,
-    StreamChunkInterceptRequest,
+    StreamChunkInterceptRequest, WebSocketResponseEvent,
 };
 use cpa_plugin::callbacks::RequestScope;
 use cpa_plugin::gojson::{GoTime, Header, Metadata};
@@ -116,6 +116,120 @@ fn scope(trace: &Trace, headers: Header, metadata: &Metadata) -> RequestScope {
         pinned_auth_id: value("pinned_auth_id"),
         execution_session: value("execution_session_id"),
         request_path: value("request_path").unwrap_or_default(),
+    }
+}
+
+/// Go `EmitWebSocketResponseEvent` and the handler's observer closure: what an event
+/// carries besides the frame.
+#[derive(Clone, Default)]
+struct WebSocketEventBase {
+    /// The handler's lifecycle request ID and trace ID; a non-empty `request_id` or
+    /// `trace_id` string in the metadata takes their place.
+    request_id: String,
+    trace_id: String,
+    source_format: String,
+    metadata: Metadata,
+}
+
+impl WebSocketEventBase {
+    fn event(
+        &self,
+        provider: &str,
+        credential: &cpa_core::credential::Credential,
+        model: &str,
+        payload: &[u8],
+    ) -> WebSocketResponseEvent {
+        let text = |key: &str, fallback: &str| match self.metadata.get(key) {
+            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+            _ => fallback.to_owned(),
+        };
+        // Go `PayloadRequestedModel`: the metadata's requested model, else the upstream one.
+        let requested_model = match self.metadata.get("requested_model") {
+            Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+            _ => model.trim().to_owned(),
+        };
+        WebSocketResponseEvent {
+            request_id: text("request_id", &self.request_id),
+            trace_id: text("trace_id", &self.trace_id),
+            source_format: self.source_format.clone(),
+            model: model.to_owned(),
+            requested_model,
+            provider: provider.to_owned(),
+            auth_id: credential.id.clone(),
+            auth_label: credential.label.clone(),
+            auth_type: cpa_core::registry::dynamic::account_info(credential).0.to_owned(),
+            event_type: cpa_common::json::get(payload, "type").str().into_owned(),
+            payload: Bytes::copy_from_slice(payload),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+/// The attempt's `Options.WebSocketResponseObserver`.
+struct WebSocketObserver {
+    base: WebSocketEventBase,
+    host: cpa_plugin::Host,
+    skip: String,
+    /// The request's scope with its own cancellation (Go `context.WithoutCancel`).
+    scope: RequestScope,
+}
+
+impl cpa_core::exec::WebSocketObserver for WebSocketObserver {
+    fn response<'a>(
+        &'a self,
+        provider: &'a str,
+        credential: &'a cpa_core::credential::Credential,
+        model: &'a str,
+        payload: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, ()> {
+        let event = self.base.event(provider, credential, model, payload);
+        let (host, skip, scope) = (self.host.clone(), self.skip.clone(), self.scope.clone());
+        // The executor awaits the observation before it handles the frame, as Go calls the
+        // observers in its read loop. The call runs in its own task so that it, and the
+        // callback context its plugin uses, finish even when the attempt is dropped
+        // meanwhile; Go's executor waits for the observer the same way.
+        let observed = tokio::spawn(async move { host.observe_websocket_response_event(event, &skip, &scope).await });
+        Box::pin(async move {
+            let _ = observed.await;
+        })
+    }
+}
+
+/// The session part of Go `applyRequestAfterAuthInterceptor`: a rewritten body or
+/// cleared headers resolve the canonical and parent session again from the executed
+/// request; rewritten headers alone can only set them.
+fn resolve_session(metadata: &mut Metadata, req: &ExecRequest, resp: &RequestInterceptResponse) {
+    let execution = match metadata.get("execution_session_id") {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let rewrote_body = !resp.clear_headers.is_empty() || !resp.body.is_empty();
+    if !rewrote_body && resp.headers.is_empty() {
+        return;
+    }
+    let payload: &[u8] = match (rewrote_body, req.original_body.is_empty()) {
+        (false, _) => &[],
+        (true, false) => &req.original_body,
+        (true, true) => &req.body,
+    };
+    let info = cpa_common::session::extract_session_info(&req.headers, payload, execution.as_deref())
+        .filter(|info| !info.session_id.is_empty());
+    let bound = |s: &str| Value::String(cpa_common::session::bound_session_identity(s));
+    match info {
+        Some(info) => {
+            metadata.insert("canonical_session_id".into(), bound(&info.session_id));
+            if !info.parent_session_id.is_empty() && info.parent_session_id != info.session_id {
+                metadata.insert("parent_session_id".into(), bound(&info.parent_session_id));
+            } else if rewrote_body {
+                metadata.remove("parent_session_id");
+            }
+        }
+        None if rewrote_body => {
+            for key in ["canonical_session_id", "parent_session_id", "lcp_affinity_session_id"] {
+                metadata.remove(key);
+            }
+        }
+        None => {}
     }
 }
 
@@ -262,6 +376,9 @@ pub(crate) struct Hooks {
     /// The client's body after the before-auth interceptors (Go `opts.OriginalRequest`).
     body: Bytes,
     after: Mutex<Option<AfterAuth>>,
+    /// The current attempt's executor metadata after its after-auth interceptors (Go's
+    /// `opts.Metadata` once `applyRequestAfterAuthInterceptor` returns); `None` when none ran.
+    executed_metadata: Mutex<Option<Metadata>>,
     /// The lifecycle error of a plugin termination: Go's after-auth termination is an
     /// error ("request terminated by plugin"); a plugin-executor-route one has none.
     terminated: Mutex<Option<&'static str>>,
@@ -325,6 +442,7 @@ impl Hooks {
             metadata,
             body: before.body.clone().unwrap_or_else(|| req.body.clone()),
             after: Mutex::new(None),
+            executed_metadata: Mutex::new(None),
             terminated: Mutex::new(None),
         });
         Ok((hooks, before))
@@ -339,30 +457,13 @@ impl Hooks {
         route_model: &str,
         media: Option<crate::dispatch::MediaKind>,
     ) -> Result<(), ExecError> {
+        *self.executed_metadata.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if !self.host.has_request_interceptors() {
             return Ok(());
         }
         let provider = crate::registry::provider_key(credential);
-        let mut metadata = self.metadata.clone();
-        if let Some(session) = req.session.as_deref().filter(|s| !s.is_empty()) {
-            metadata.insert("canonical_session_id".into(), Value::String(session.to_owned()));
-        }
-        if let Some(derived) = req.derived_session.as_deref().filter(|s| !s.is_empty()) {
-            metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
-        }
-        if !credential.id.trim().is_empty() {
-            metadata.insert(
-                "selected_auth_id".into(),
-                Value::String(credential.id.trim().to_owned()),
-            );
-        }
-        let index = cpa_core::config::credentials::auth_index(credential);
-        if !index.trim().is_empty() {
-            metadata.insert("selected_auth_index".into(), Value::String(index.trim().to_owned()));
-        }
-        // Go's mixed-provider pick writes its scope into the shared metadata.
-        metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
-        metadata.insert("session_affinity_model".into(), Value::String(route_model.to_owned()));
+        let metadata = self.attempt_metadata(req, credential, route_model);
+        let mut executed = metadata.clone();
         let requested = match metadata.get("requested_model") {
             Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
             _ => route_model.trim().to_owned(),
@@ -395,7 +496,10 @@ impl Hooks {
         let path = Some(resp.path.trim().to_owned()).filter(|p| !p.is_empty());
         if let Some(path) = &path {
             req.request_path = path.clone();
+            executed.insert("request_path".into(), Value::String(path.clone()));
         }
+        resolve_session(&mut executed, req, &resp);
+        *self.executed_metadata.lock().unwrap_or_else(|e| e.into_inner()) = Some(executed);
         *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(AfterAuth { headers, body, path });
         if resp.terminate {
             *self.terminated.lock().unwrap_or_else(|e| e.into_inner()) = Some("request terminated by plugin");
@@ -405,6 +509,71 @@ impl Hooks {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Go's executor `opts.Metadata` for one attempt on `credential`: the handler's,
+    /// plus what the conductor adds before the after-auth interceptors run.
+    fn attempt_metadata(
+        &self,
+        req: &ExecRequest,
+        credential: &cpa_core::credential::Credential,
+        route_model: &str,
+    ) -> Metadata {
+        let mut metadata = self.metadata.clone();
+        if let Some(session) = req.session.as_deref().filter(|s| !s.is_empty()) {
+            metadata.insert("canonical_session_id".into(), Value::String(session.to_owned()));
+        }
+        if let Some(derived) = req.derived_session.as_deref().filter(|s| !s.is_empty()) {
+            metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
+        }
+        if !credential.id.trim().is_empty() {
+            metadata.insert(
+                "selected_auth_id".into(),
+                Value::String(credential.id.trim().to_owned()),
+            );
+        }
+        let index = cpa_core::config::credentials::auth_index(credential);
+        if !index.trim().is_empty() {
+            metadata.insert("selected_auth_index".into(), Value::String(index.trim().to_owned()));
+        }
+        // Go's mixed-provider pick writes its scope into the shared metadata.
+        metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
+        metadata.insert("session_affinity_model".into(), Value::String(route_model.to_owned()));
+        metadata
+    }
+
+    /// Go `webSocketResponseObserver` for one attempt: `None` without observer plugins.
+    /// The event metadata is the attempt's executor metadata after its after-auth
+    /// interceptors.
+    pub(crate) fn websocket_observer(
+        &self,
+        req: &ExecRequest,
+        credential: &cpa_core::credential::Credential,
+        route_model: &str,
+    ) -> Option<Arc<dyn cpa_core::exec::WebSocketObserver>> {
+        if !self.host.has_websocket_response_observers() {
+            return None;
+        }
+        let metadata = self
+            .executed_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.attempt_metadata(req, credential, route_model));
+        Some(Arc::new(WebSocketObserver {
+            base: WebSocketEventBase {
+                request_id: self.lifecycle.request_id.clone(),
+                trace_id: self.lifecycle.scope.request_id.clone(),
+                source_format: self.source_format.clone(),
+                metadata,
+            },
+            host: self.host.clone(),
+            skip: self.lifecycle.skip_plugin.clone(),
+            scope: RequestScope {
+                cancel: Default::default(),
+                ..self.lifecycle.scope.clone()
+            },
+        }))
     }
 
     /// Go `afterAuthCapture.apply`: the executed request's headers, bodies and metadata.
@@ -777,7 +946,8 @@ fn model_detail(body: bytes::Bytes, id: &str) -> (u16, bytes::Bytes) {
 
 /// Starts the request's lifecycle and runs the before-auth interceptors, rewriting
 /// `call` (Go's handlers before `AuthManager.Execute*` or a plugin executor). `None`
-/// when no plugin intercepts requests or observes their lifecycle: the request runs
+/// when no plugin intercepts requests, observes their lifecycle or watches upstream
+/// WebSocket frames: the request runs
 /// untouched, as in Go where every hook is then a no-op.
 pub(crate) async fn start(
     rt: &Runtime,
@@ -789,7 +959,8 @@ pub(crate) async fn start(
     let needed = host.has_request_interceptors()
         || host.has_response_interceptors()
         || host.has_stream_interceptors()
-        || host.has_request_lifecycle_plugins();
+        || host.has_request_lifecycle_plugins()
+        || host.has_websocket_response_observers();
     if !needed {
         return Ok(None);
     }
@@ -914,5 +1085,228 @@ fn request_to_format(
         "vertex" | "aistudio" => format(Format::Gemini),
         "antigravity" => format(Format::Antigravity),
         _ => format(Format::OpenAI),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpa_core::credential::{Credential, Source};
+    use cpa_core::exec::{Caller, Operation, UsageSink};
+    use serde_json::json;
+
+    fn credential(metadata: Value, attributes: &[(&str, &str)]) -> Credential {
+        Credential {
+            id: "codex-user.json".into(),
+            provider: "codex".into(),
+            source: Source::Runtime,
+            disabled: false,
+            label: "user@example.com".into(),
+            attributes: attributes.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+            metadata: metadata.as_object().unwrap().clone(),
+            revision: 0,
+        }
+    }
+
+    fn request(usage: UsageSink) -> ExecRequest {
+        ExecRequest {
+            operation: Operation::Generate,
+            source_format: Format::OpenAIResponse,
+            response_format: Format::OpenAIResponse,
+            stream_payloads: false,
+            requested_model: "alias".into(),
+            model: "gpt-upstream".into(),
+            original_body: Bytes::new(),
+            body: Bytes::new(),
+            stream: true,
+            alt: None,
+            session: None,
+            execution_session: None,
+            derived_session: None,
+            resolved_model: None,
+            usage,
+            request_path: "/v1/responses".into(),
+            headers: HeaderMap::new(),
+            caller: Caller {
+                principal: String::new(),
+                source: "authorization",
+            },
+        }
+    }
+
+    /// Go `EmitWebSocketResponseEvent` and the handler's observer closure: the request and
+    /// trace IDs (a metadata string overrides the handler's), the metadata's requested
+    /// model, the credential's ID, label and account type, and the frame's `type`.
+    #[test]
+    fn websocket_events_carry_the_attempt_and_its_credential() {
+        let oauth = credential(
+            json!({"type": "codex", "email": "user@example.com", "access_token": "t"}),
+            &[],
+        );
+        let mut base = WebSocketEventBase {
+            request_id: "lifecycle-req".into(),
+            trace_id: "trace-1".into(),
+            source_format: "openai-response".into(),
+            metadata: Metadata::new(),
+        };
+        let frame = br#"{"type":"response.created","response":{}}"#;
+        let event = base.event("codex", &oauth, "gpt-upstream", frame);
+        let ids = |e: &WebSocketResponseEvent| (e.request_id.clone(), e.trace_id.clone(), e.requested_model.clone());
+        assert_eq!(
+            ids(&event),
+            ("lifecycle-req".into(), "trace-1".into(), "gpt-upstream".into())
+        );
+        assert_eq!(
+            (
+                event.auth_id.as_str(),
+                event.auth_label.as_str(),
+                event.auth_type.as_str()
+            ),
+            ("codex-user.json", "user@example.com", "oauth")
+        );
+        assert_eq!(
+            (event.provider.as_str(), event.event_type.as_str()),
+            ("codex", "response.created")
+        );
+        assert_eq!(event.payload.as_ref(), frame);
+
+        for (key, value) in [
+            ("request_id", "meta-req"),
+            ("trace_id", "meta-trace"),
+            ("requested_model", " requested "),
+        ] {
+            base.metadata.insert(key.into(), Value::String(value.into()));
+        }
+        let api_key = credential(json!({"type": "codex"}), &[("api_key", "sk-fake")]);
+        let event = base.event("codex", &api_key, "gpt-upstream", b"not json");
+        assert_eq!(
+            ids(&event),
+            ("meta-req".into(), "meta-trace".into(), "requested".into())
+        );
+        assert_eq!((event.auth_type.as_str(), event.event_type.as_str()), ("api_key", ""));
+        assert_eq!(event.metadata, base.metadata);
+    }
+
+    /// Without an observer an attempt has no emitter; an empty frame is not reported.
+    #[tokio::test]
+    async fn websocket_emitters_skip_empty_frames_and_absent_observers() {
+        #[derive(Default)]
+        struct Count(std::sync::atomic::AtomicUsize);
+        impl cpa_core::exec::WebSocketObserver for Count {
+            fn response<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a Credential,
+                _: &'a str,
+                _: &'a [u8],
+            ) -> futures_util::future::BoxFuture<'a, ()> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {})
+            }
+        }
+        let cred = credential(json!({"type": "codex"}), &[("api_key", "sk-fake")]);
+        assert!(
+            request(UsageSink::default())
+                .websocket_emitter("codex", &cred)
+                .is_none()
+        );
+        let count = Arc::new(Count::default());
+        let req = request(UsageSink::default().with_websocket(Some(count.clone())));
+        let emitter = req.websocket_emitter("codex", &cred).unwrap();
+        emitter.emit(b"").await;
+        assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        emitter.emit(b"{}").await;
+        assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Go detaches the observer from the request (`context.WithoutCancel`): an observer
+    /// that calls `host.http.do` after its request was canceled still gets through.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Only CI's media relay job enables the feature, and it has no Go toolchain; the
+    // workspace test job runs this test, where CPA_TEST_NO_SKIP fails a missing one.
+    #[cfg_attr(feature = "media-relay", ignore = "needs the Go plugin toolchain")]
+    async fn websocket_observers_outlive_the_request_cancellation() {
+        let tmp = std::env::temp_dir();
+        let Some(built) = cpa_plugin::testing::built_plugins(&tmp, "websocket_observers_outlive") else {
+            return;
+        };
+        let dir = cpa_plugin::testing::scratch(&tmp, "ws-observer-cancel");
+        let (auths, plugins, records) = (dir.join("auths"), dir.join("plugins"), dir.join("records"));
+        for d in [&auths, &plugins, &records.join("respond/watcher")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::copy(built.join("recorder.so"), plugins.join("watcher.so")).unwrap();
+        let ping = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/ping", listener.local_addr().unwrap());
+            let app = axum::Router::new().route("/ping", axum::routing::get(|| async { "pong" }));
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            url
+        };
+        let respond = json!({"ok": true, "result": {}, "host_calls": [
+            {"method": "host.http.do", "request": {"method": "GET", "url": ping}}
+        ]});
+        std::fs::write(
+            records.join("respond/watcher/websocket.response_event.json"),
+            respond.to_string(),
+        )
+        .unwrap();
+        let yaml = format!(
+            "auth-dir: {}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    watcher:\n      enabled: true\n      label: watcher\n      record: {}\n      caps: websocket_response_observer\n",
+            auths.display(),
+            plugins.display(),
+            records.display()
+        );
+        let rt = Arc::new(crate::testing::runtime(
+            cpa_core::config::Config::parse(&yaml).unwrap(),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        crate::plugins::start(&rt).await;
+        let body = Bytes::from_static(b"{}");
+        let Ok((hooks, _)) = Hooks::start(
+            &rt,
+            &Trace::default(),
+            Request {
+                source_format: "openai-response",
+                response_format: "openai-response",
+                model: "gpt-upstream",
+                requested_model: "gpt-upstream",
+                stream: true,
+                headers: Header::new(),
+                body: &body,
+                metadata: Metadata::new(),
+            },
+        )
+        .await
+        else {
+            panic!("hooks did not start");
+        };
+        let cred = credential(json!({"type": "codex"}), &[("api_key", "sk-fake")]);
+        let observer = hooks
+            .websocket_observer(&request(UsageSink::default()), &cred, "gpt-upstream")
+            .expect("an observer plugin is loaded");
+        // The request ends (its lifecycle cancels its scope) before the frame arrives.
+        hooks.lifecycle.scope.cancel.cancel();
+        observer
+            .response("codex", &cred, "gpt-upstream", br#"{"type":"response.created"}"#)
+            .await;
+        let log = std::fs::read_to_string(records.join("watcher.jsonl")).unwrap();
+        let callback: Value = log
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|r| r["method"] == "host_callback")
+            .map(|r| serde_json::from_str(r["request"].as_str().unwrap()).unwrap())
+            .expect("the observer made its host.http.do call");
+        assert_eq!(callback["ok"], true, "{callback}");
+        assert_eq!(callback["result"]["StatusCode"], 200, "{callback}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
