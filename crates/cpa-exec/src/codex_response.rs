@@ -248,6 +248,7 @@ pub(crate) fn status_error_raw(code: u16, message: &str, headers: HeaderMap, mod
         headers: Box::new(headers),
         retry_after,
         direct: false,
+        addon: None,
     }
 }
 

@@ -520,7 +520,7 @@ where
         async move {
             let result = run_with_bootstrap_retries(&rt, call, &trace).await;
             let cfg = rt.config();
-            let upstream = upstream_headers(&cfg, &result, speech);
+            let upstream = upstream_headers(&cfg, &result);
             let result = match result {
                 // Go's speech handler reads the downstream headers the execution hands
                 // back (`downstreamHeadersAfterInterceptors`): the final filtered headers
@@ -634,10 +634,9 @@ enum Upstream {
     Error(HeaderMap),
 }
 
-/// `speech`: Go's speech errors (`statusErr`, `xaiSpeechRequestError`) have no
-/// `Headers()`, so no upstream header reaches the client; the executor keeps them on the
-/// error for classification.
-fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>, speech: bool) -> Option<Upstream> {
+/// An error contributes only its [`ExecError::addon`] (Go `executionErrorMessage` reads
+/// `Headers()`); speech errors, like most, carry none.
+fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upstream> {
     if !respond::passthrough_headers(cfg) {
         return None;
     }
@@ -645,7 +644,7 @@ fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>, speech: bool) 
         Ok(Done::Buffered { headers, .. } | Done::Stream { headers, .. }) => {
             Some(Upstream::Success(respond::filter_upstream_headers(headers)))
         }
-        Err(Failure::Exec(error)) if !error.direct && !speech => Some(Upstream::Error((*error.headers).clone())),
+        Err(Failure::Exec(error)) if !error.direct => error.addon.as_deref().cloned().map(Upstream::Error),
         Err(_) => None,
     }
 }
@@ -945,14 +944,16 @@ impl From<Failure> for RunError {
 #[derive(Clone)]
 struct Fault {
     error: ExecError,
-    bootstrap: bool,
+    /// The stream's headers, when it failed before its first payload (Go
+    /// `streamBootstrapError`).
+    bootstrap: Option<Box<HeaderMap>>,
 }
 
 impl Fault {
     fn into_run_error(self) -> RunError {
         RunError {
             failure: Failure::Exec(self.error),
-            bootstrap: self.bootstrap,
+            bootstrap: self.bootstrap.is_some(),
         }
     }
 }
@@ -1101,10 +1102,7 @@ async fn run_routed(
                 Err(AcquireError::Prepare { id, error }) => {
                     attempted.push(id.clone());
                     selection.exclude.push(id);
-                    last = Some(Fault {
-                        error,
-                        bootstrap: false,
-                    });
+                    last = Some(Fault { error, bootstrap: None });
                     continue;
                 }
                 Err(AcquireError::Cooldown { wait, cause }) => {
@@ -1321,7 +1319,7 @@ impl RemoteFault {
             upstream: classify::upstream_attempted(&fault.error),
             invalid: classify::is_request_invalid(&fault.error),
             failure: Failure::Exec(fault.error),
-            bootstrap: fault.bootstrap,
+            bootstrap: fault.bootstrap.is_some(),
             stop,
             kind: crate::remote::RemoteErrorKind::Plain,
             exhausted: None,
@@ -1822,13 +1820,7 @@ async fn remote_round(
                     ),
                     Err(error) => {
                         lease.complete(Outcome::Failure(error.clone()));
-                        (
-                            Attempt::Next(Fault {
-                                error,
-                                bootstrap: false,
-                            }),
-                            true,
-                        )
+                        (Attempt::Next(Fault { error, bootstrap: None }), true)
                     }
                 }
             };
@@ -1838,7 +1830,7 @@ async fn remote_round(
                 _ = cancelled => (
                     Attempt::Next(Fault {
                         error: crate::remote::cancelled_error(),
-                        bootstrap: false,
+                        bootstrap: None,
                     }),
                     false,
                 ),
@@ -2168,10 +2160,7 @@ async fn attempt(
                 .await
         {
             lease.complete(Outcome::Neutral(error.clone()));
-            return Attempt::Stop(Fault {
-                error,
-                bootstrap: false,
-            });
+            return Attempt::Stop(Fault { error, bootstrap: None });
         }
         let start = |credential: &cpa_core::credential::Credential, req: &mut ExecRequest| {
             usage.map(|facts| {
@@ -2276,10 +2265,7 @@ async fn attempt(
                 if let Some(t) = tracker.take() {
                     t.fail(&error);
                 }
-                Fault {
-                    error,
-                    bootstrap: false,
-                }
+                Fault { error, bootstrap: None }
             }
         };
         let error = &fault.error;
@@ -2311,7 +2297,14 @@ async fn attempt(
             (target.compact && classify::is_compact_fault(error)) || classify::is_request_invalid(error)
         };
         // A credential-wide quota ends this credential's model pool.
-        if stop || i + 1 == target.models.len() || classify::credential_scoped(error) {
+        let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
+        // Go returns a stopping bootstrap failure as is; any other one goes on as a
+        // `streamBootstrapError`, whose `Headers()` are the stream's.
+        let mut fault = fault;
+        if !stop && let Some(headers) = &fault.bootstrap {
+            fault.error.addon = Some(headers.clone());
+        }
+        if last_here {
             // Go `End`: the socket that retained the pick closes before the release.
             drop(guard.take());
             lease.complete(outcome);
@@ -2509,20 +2502,23 @@ fn attempt_request(
 
 /// Bootstraps a stream (first event before committing) or buffers a body.
 async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<Done, Fault> {
-    let fault = |error| Fault { error, bootstrap: true };
     match response.body {
         ResponseBody::Buffered(body) => Ok(Done::Buffered {
             headers: response.headers,
             body,
         }),
         ResponseBody::Stream(mut stream) if call.stream => {
+            let bootstrap = |error| Fault {
+                error,
+                bootstrap: Some(Box::new(response.headers.clone())),
+            };
             let first = loop {
                 match stream.next().await {
                     Some(Ok(bytes)) if bytes.is_empty() => continue,
                     Some(Ok(bytes)) => break bytes,
-                    Some(Err(error)) => return Err(fault(error)),
+                    Some(Err(error)) => return Err(bootstrap(error)),
                     // Go conductor_stream.go: an empty stream is a failed attempt.
-                    None => return Err(fault(classify::empty_stream())),
+                    None => return Err(bootstrap(classify::empty_stream())),
                 }
             };
             Ok(Done::Stream {
@@ -2534,10 +2530,7 @@ async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<D
         ResponseBody::Stream(mut stream) => {
             let mut body = BytesMut::new();
             while let Some(event) = stream.next().await {
-                body.extend_from_slice(&event.map_err(|error| Fault {
-                    error,
-                    bootstrap: false,
-                })?);
+                body.extend_from_slice(&event.map_err(|error| Fault { error, bootstrap: None })?);
             }
             Ok(Done::Buffered {
                 headers: response.headers,
