@@ -142,6 +142,8 @@ func TestRSFixClaudeRateLimit(t *testing.T) {
 		{"substring message", short, perMinute("This request would exceed the requests per minute rate limit. Please try again later. Your weekly quota is exhausted.")},
 		{"negated message", short, perMinute("This request would not exceed the requests per minute rate limit. Please try again later.")},
 		{"uppercase json keys", short, `{"ERROR":{"Type":"rate_limit_error","MESSAGE":"This request would exceed the requests per minute rate limit. Please try again later."}}`},
+		// cliproxy-rs keeps only the last of two byte-identical keys (DIFFERENCES-FROM-GO.md).
+		{"later null keeps the error", short, `{"error":{"type":"rate_limit_error","message":"This request would exceed the requests per minute rate limit. Please try again later."},"error":null}`},
 		{"long s and kelvin fold", short, `{"error":{"type":"rate_limit_error","meſſage":"This request would exceed the requests per minute rate limit. Please try again later."}}`},
 		{"duplicate error objects merge", short, `{"error":{"type":"rate_limit_error"},"Error":{"message":"This request would exceed the requests per minute rate limit. Please try again later."}}`},
 		{"null message", short, `{"error":{"type":"rate_limit_error","message":null}}`},
@@ -158,6 +160,23 @@ func TestRSFixClaudeRateLimit(t *testing.T) {
 			[2]string{"Anthropic-Ratelimit-Unified-Overage-Status", "rejected"},
 		), rsfixPerMinute},
 		{"fast mode credits", [][2]string{{"Retry-After", "30"}}, `{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for fast mode"}}`},
+		{"empty headers", [][2]string{}, rsfixPerMinute},
+		{"repeated status, later value non-empty", with([2]string{"Anthropic-Ratelimit-Unified-Status", ""}, [2]string{"Anthropic-Ratelimit-Unified-Status", "rejected"}), rsfixPerMinute},
+		{"repeated unified resets", with([2]string{"Anthropic-Ratelimit-Unified-Reset", "{now+7200}"}), rsfixPerMinute},
+		{"repeated unified resets, ordinary body", with([2]string{"Anthropic-Ratelimit-Unified-Reset", "{now+7200}"}), `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`},
+		{"7d rejection", with([2]string{"Anthropic-Ratelimit-Unified-7d-Status", "rejected"}, [2]string{"Anthropic-Ratelimit-Unified-7d-Reset", "{now+86400}"}), rsfixPerMinute},
+		{"competing 5h and 7d rejections", with(
+			[2]string{"Anthropic-Ratelimit-Unified-5h-Status", "rejected"},
+			[2]string{"Anthropic-Ratelimit-Unified-5h-Reset", "{now+7200}"},
+			[2]string{"Anthropic-Ratelimit-Unified-7d-Status", "rejected"},
+			[2]string{"Anthropic-Ratelimit-Unified-7d-Reset", "{now+172800}"},
+		), rsfixPerMinute},
+		{"competing rejections, later 5h", with(
+			[2]string{"Anthropic-Ratelimit-Unified-5h-Status", "rejected"},
+			[2]string{"Anthropic-Ratelimit-Unified-5h-Reset", "{now+90000}"},
+			[2]string{"Anthropic-Ratelimit-Unified-7d-Status", "rejected"},
+			[2]string{"Anthropic-Ratelimit-Unified-7d-Reset", "{now+86400}"},
+		), rsfixPerMinute},
 		{"lowercase header names", [][2]string{{"retry-after", "30"}, {"anthropic-ratelimit-unified-reset", "{now+18000}"}}, rsfixPerMinute},
 	}
 	records := make([]rsfixRecord, 0, len(cases))

@@ -516,6 +516,27 @@
       "fast_retry": true
     },
     {
+      "name": "later null keeps the error",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ]
+      ],
+      "body": "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"},\"error\":null}",
+      "reset_ms": 30000,
+      "header_only_ms": 18000000,
+      "shared": false,
+      "scope": "model",
+      "classify_retry": true,
+      "fast_scope": "request",
+      "fast_retry": true
+    },
+    {
       "name": "long s and kelvin fold",
       "headers": [
         [
@@ -756,6 +777,200 @@
       "scope": "request",
       "classify_retry": true,
       "fast_scope": "request",
+      "fast_retry": true
+    },
+    {
+      "name": "empty headers",
+      "headers": [],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": null,
+      "header_only_ms": null,
+      "shared": false,
+      "scope": "model",
+      "classify_retry": false,
+      "fast_scope": "request",
+      "fast_retry": false
+    },
+    {
+      "name": "repeated status, later value non-empty",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Status",
+          ""
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Status",
+          "rejected"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": 18000000,
+      "header_only_ms": 18000000,
+      "shared": false,
+      "scope": "model",
+      "classify_retry": true,
+      "fast_scope": "request",
+      "fast_retry": true
+    },
+    {
+      "name": "repeated unified resets",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+7200}"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": 30000,
+      "header_only_ms": 18000000,
+      "shared": false,
+      "scope": "model",
+      "classify_retry": true,
+      "fast_scope": "request",
+      "fast_retry": true
+    },
+    {
+      "name": "repeated unified resets, ordinary body",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+7200}"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}",
+      "reset_ms": 18000000,
+      "header_only_ms": 18000000,
+      "shared": false,
+      "scope": "model",
+      "classify_retry": true,
+      "fast_scope": "request",
+      "fast_retry": true
+    },
+    {
+      "name": "7d rejection",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Status",
+          "rejected"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Reset",
+          "{now+86400}"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": 86400000,
+      "header_only_ms": 86400000,
+      "shared": true,
+      "scope": "credential",
+      "classify_retry": true,
+      "fast_scope": "credential",
+      "fast_retry": true
+    },
+    {
+      "name": "competing 5h and 7d rejections",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-5h-Status",
+          "rejected"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-5h-Reset",
+          "{now+7200}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Status",
+          "rejected"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Reset",
+          "{now+172800}"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": 172800000,
+      "header_only_ms": 172800000,
+      "shared": true,
+      "scope": "credential",
+      "classify_retry": true,
+      "fast_scope": "credential",
+      "fast_retry": true
+    },
+    {
+      "name": "competing rejections, later 5h",
+      "headers": [
+        [
+          "Retry-After",
+          "30"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-Reset",
+          "{now+18000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-5h-Status",
+          "rejected"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-5h-Reset",
+          "{now+90000}"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Status",
+          "rejected"
+        ],
+        [
+          "Anthropic-Ratelimit-Unified-7d-Reset",
+          "{now+86400}"
+        ]
+      ],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed the requests per minute rate limit. Please try again later.\"}}",
+      "reset_ms": 90000000,
+      "header_only_ms": 90000000,
+      "shared": true,
+      "scope": "credential",
+      "classify_retry": true,
+      "fast_scope": "credential",
       "fast_retry": true
     },
     {

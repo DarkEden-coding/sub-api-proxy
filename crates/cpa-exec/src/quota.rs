@@ -155,9 +155,8 @@ fn per_minute_body(body: &[u8]) -> bool {
     };
     // encoding/json decodes every key that folds to a field name in order, merging
     // nested objects; null leaves a field unchanged and any other type fails the decode.
-    // ponytail: serde_json keeps only the last of two byte-identical keys (`"error":{..},
-    // "error":null` reads as null where Go keeps the object). Anthropic never repeats a
-    // key; walking the raw tokens would close the gap if one ever did.
+    // serde_json keeps only the last of two byte-identical keys, so `"error":{..},
+    // "error":null` reads as null where Go keeps the object (DIFFERENCES-FROM-GO.md).
     let (mut kind, mut message) = ("", "");
     for error in go_fields(&root, "error") {
         let serde_json::Value::Object(error) = error else {

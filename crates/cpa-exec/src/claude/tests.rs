@@ -1877,9 +1877,16 @@ fn claude_rate_limit_cooldown_and_scope_match_go() {
         let name = case["name"].as_str().unwrap();
         let body = Bytes::from(case["body"].as_str().unwrap().to_owned());
         let at_fixed = headers(case, fixed);
+        // DIFFERENCES-FROM-GO.md: of two byte-identical keys only the last counts, so a
+        // later `"error":null` hides the per-minute error and the header-only result stays.
+        let reset_ms = if name == "later null keeps the error" {
+            case["header_only_ms"].as_u64()
+        } else {
+            case["reset_ms"].as_u64()
+        };
         assert_eq!(
             millis(crate::quota::reset_for_error(&at_fixed, &body, fixed, Duration::ZERO)),
-            case["reset_ms"].as_u64(),
+            reset_ms,
             "{name}: cooldown"
         );
         assert_eq!(
@@ -1903,13 +1910,16 @@ fn claude_rate_limit_cooldown_and_scope_match_go() {
         let fast = upstream_error(429, live, body, true, false);
         assert_eq!(scope(fast.scope), case["fast_scope"], "{name}: fast scope");
         assert_eq!(fast.retry_after.is_some(), case["fast_retry"], "{name}: fast retry");
-        // Live cooldowns carry the 1-30 s fuzz on top of the fixed-clock base.
-        if let (Some(retry), Some(base)) = (classified.retry_after, case["reset_ms"].as_u64()) {
-            let ms = retry.as_millis() as u64;
-            assert!(
-                ms > base.saturating_sub(2000) && ms <= base + 30_000,
-                "{name}: live cooldown {ms} vs {base}"
-            );
+        // Live cooldowns carry the 1-30 s fuzz on top of the fixed-clock base; the
+        // offsets are whole seconds from a clock that has a fraction.
+        for (path, retry) in [("classified", classified.retry_after), ("fast", fast.retry_after)] {
+            if let (Some(retry), Some(base)) = (retry, reset_ms) {
+                let ms = retry.as_millis() as u64;
+                assert!(
+                    ms > base.saturating_sub(2000) && ms <= base + 30_000,
+                    "{name}: {path} live cooldown {ms} vs {base}"
+                );
+            }
         }
     }
 }

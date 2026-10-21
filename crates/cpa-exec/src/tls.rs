@@ -43,10 +43,11 @@ pub(crate) fn handshake_timeout(cfg: &Config) -> Option<Duration> {
         .get("requests")?
         .get("tls-handshake-timeout-seconds")?
         .as_i64()?;
-    u64::try_from(seconds)
-        .ok()
-        .filter(|s| *s > 0)
-        .map(|s| Duration::from_secs(s.min(i64::MAX as u64 / 1_000_000_000)))
+    u64::try_from(seconds).ok().filter(|s| *s > 0).map(|s| match s {
+        // Past time.Duration's range Go saturates at math.MaxInt64 nanoseconds.
+        s if s > i64::MAX as u64 / 1_000_000_000 => Duration::from_nanos(i64::MAX as u64),
+        s => Duration::from_secs(s),
+    })
 }
 
 /// Bounds TLS establishment with `handshake`.
@@ -358,7 +359,15 @@ mod tests {
         // Go saturates at the largest time.Duration (math.MaxInt64 nanoseconds).
         assert_eq!(
             read("requests:\n  tls-handshake-timeout-seconds: 9223372036854775807\n"),
-            Some(Duration::from_secs(i64::MAX as u64 / 1_000_000_000))
+            Some(Duration::from_nanos(i64::MAX as u64))
+        );
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 9223372037\n"),
+            Some(Duration::from_nanos(i64::MAX as u64))
+        );
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 9223372036\n"),
+            Some(Duration::from_secs(9_223_372_036))
         );
     }
 
