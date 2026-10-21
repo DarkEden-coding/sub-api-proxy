@@ -30,6 +30,8 @@ pub(crate) struct Flow {
     /// The credential file, symlinks resolved, as checked at start.
     pub(super) path: PathBuf,
     device_id: String,
+    /// The file's `account_id` at start: a binding never lands on another account.
+    account: Option<String>,
     verifier: String,
     deadline: Instant,
     exchange: Mutex<Option<tokio::task::AbortHandle>>,
@@ -122,10 +124,22 @@ pub(crate) async fn bind(State(state): State<Arc<Management>>, body: Bytes) -> R
             _ => return fail(StatusCode::BAD_REQUEST, "invalid request body"),
         }
     }
-    let name = name.trim();
+    let name = name.trim().to_owned();
     if name.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "name is required");
     }
+    // Go holds its commit gate from the lookup through registration: a v8 upload or
+    // delete lands before (and is the target) or after (and fails the binding).
+    tokio::task::spawn_blocking(move || {
+        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        start(&state, &name)
+    })
+    .await
+    .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+}
+
+/// [`bind`] after the request is read; callers hold `disk`.
+fn start(state: &Management, name: &str) -> Response {
     let all = state.rt.store().snapshot();
     let Some(target) = all
         .iter()
@@ -173,6 +187,11 @@ pub(crate) async fn bind(State(state): State<Arc<Management>>, body: Bytes) -> R
         target_id: target.id.clone(),
         path,
         device_id,
+        account: meta
+            .get("account_id")
+            .and_then(Value::as_str)
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned),
         verifier,
         deadline: Instant::now() + TTL,
         exchange: Mutex::default(),
@@ -202,6 +221,8 @@ fn status_error(status: StatusCode, message: &str) -> Response {
 /// The scheme, host and path of an already-parsed callback URL, as Go compares them,
 /// or `None` when it carries user info.
 fn callback_target(raw: &str) -> Option<(String, String, String)> {
+    // Go `URL.Path`: escapes decoded (Go's parser has rejected bad ones), `+`, `&` and
+    // `;` literal, nothing normalized.
     let parsed = cpa_core::config::go_url::parse(raw)?;
     let before_query = raw.split('#').next()?.split('?').next()?;
     let (_, rest) = before_query.split_once("://")?;
@@ -209,9 +230,7 @@ fn callback_target(raw: &str) -> Option<(String, String, String)> {
     if authority.contains('@') {
         return None;
     }
-    let path = Query::parse(Some(format!("p={}", path.replace('+', "%2B"))))
-        .first("p")
-        .to_owned();
+    let path = super::percent_decode(path);
     let host = parsed.host().to_owned();
     Some((parsed.scheme, host, path))
 }
@@ -319,6 +338,14 @@ pub(super) fn callback(state: &Arc<Management>, req: &CallbackRequest, query: Op
         let Ok(tokens) = tokio::time::timeout_at(task_flow.deadline.into(), exchange).await else {
             return;
         };
+        // The credential's preparation lock, which every outer token refresh holds from
+        // its read to its commit: the binding lands before or after a refresh, so it
+        // never makes a rotated outer token stale (Go keeps both through its mutation
+        // gate). Held across the commit.
+        let lock = worker.rt.store().prepare_lock(&task_flow.target_id);
+        let Ok(_prepared) = tokio::time::timeout_at(task_flow.deadline.into(), lock.lock()).await else {
+            return;
+        };
         let w = worker.clone();
         let _ = tokio::task::spawn_blocking(move || commit(&w, &sid, &task_flow, tokens.ok())).await;
     });
@@ -385,8 +412,9 @@ fn commit(state: &Management, sid: &str, flow: &Arc<Flow>, tokens: Option<Tokens
 /// publishes nothing.
 ///
 /// ponytail: Go also rejects a target re-registered since the start (its registration
-/// epoch, not reproduced here, M5-0247); this checks the same file, provider and
-/// account instead, and v8 uploads and deletes fail the binding explicitly.
+/// epoch, not reproduced here, M5-0247); this checks the same file and provider and
+/// the account the binding started with, and v8 uploads and deletes fail the binding
+/// explicitly.
 fn write_binding(state: &Management, flow: &Flow, tokens: &Tokens) -> Result<(), String> {
     for _ in 0..8 {
         let current = state
@@ -414,9 +442,9 @@ fn write_binding(state: &Management, flow: &Flow, tokens: &Tokens) -> Result<(),
         if !codex || !has_outer(&meta) {
             return Err("invalid Codex OAuth file".into());
         }
-        if let Some(account) = current.str("account_id").filter(|a| !a.is_empty())
-            && meta.get("account_id").and_then(Value::as_str) != Some(account)
-        {
+        let disk_account = meta.get("account_id").and_then(Value::as_str);
+        let changed = |account: Option<&str>| account.is_some_and(|a| disk_account != Some(a));
+        if changed(current.str("account_id").filter(|a| !a.is_empty())) || changed(flow.account.as_deref()) {
             return Err("backing account changed".into());
         }
         let bytes = codex_siwc::bind_file(&disk, tokens).ok_or("invalid Codex OAuth file")?;
@@ -464,5 +492,70 @@ pub(super) fn summary(c: &Credential, entry: &mut std::collections::BTreeMap<&'s
             "siwc_expires_at",
             utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true).into(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go `StartSIWCBind` holds its commit gate from the lookup through registration: a
+    /// bind waiting on `disk` has read nothing yet, so a replacement made under the lock
+    /// (what a v8 upload does) is the target it registers, never the file it replaced.
+    #[tokio::test]
+    async fn a_bind_reads_its_target_only_under_the_disk_lock() {
+        let dir = std::env::temp_dir().join(format!("cpa-siwc-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("codex.json");
+        let codex = |account: &str| {
+            format!(r#"{{"type":"codex","account_id":"{account}","access_token":"a","refresh_token":"r"}}"#)
+        };
+        std::fs::write(&file, codex("old")).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            cpa_core::config::credentials::from_auth_dir(&cfg),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::new(rt, path);
+        // A writer holds `disk` until told to replace the target and publish it.
+        let (locked_tx, locked) = tokio::sync::oneshot::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let writer = tokio::task::spawn_blocking({
+            let (state, file, new) = (state.clone(), file.clone(), codex("new"));
+            move || {
+                let _held = state.disk.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                std::fs::write(&file, new).unwrap();
+                state.publish((*state.rt.config()).clone(), None);
+            }
+        });
+        locked.await.unwrap();
+        let started = tokio::spawn(bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !started.is_finished(),
+            "the bind waits for disk before reading its target"
+        );
+        go.send(()).unwrap();
+        writer.await.unwrap();
+        let response = started.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let sid = serde_json::from_slice::<Value>(&body).unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(state.oauth.siwc(&sid).unwrap().account.as_deref(), Some("new"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -31,11 +31,11 @@ pub fn identifier(cfg: &Config) -> String {
     ["oauth", "providers", "codex", "signin-with-chatgpt-identifier"]
         .iter()
         .try_fold(&cfg.document, |node, key| node.get(*key))
-        .and_then(serde_yaml_ng::Value::as_str)
-        .map(str::trim)
+        // A Go string field: yaml.v3 takes a number or bool as its text.
+        .map(cpa_core::config::go_string)
+        .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
-        .unwrap_or(DEFAULT_IDENTIFIER)
-        .to_owned()
+        .unwrap_or_else(|| DEFAULT_IDENTIFIER.to_owned())
 }
 
 /// Go `IsValidUUID`: a canonical 36-character UUID, any case, surrounding space ignored.

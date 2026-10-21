@@ -34,6 +34,19 @@ fn authorize_url_matches_go() {
 }
 
 #[test]
+fn identifier_reads_scalars_as_go_strings() {
+    let id = |yaml: &str| identifier(&Config::parse(yaml).unwrap());
+    let v8 = |v: &str| format!("oauth:\n  providers:\n    codex:\n      signin-with-chatgpt-identifier: {v}\n");
+    assert_eq!(id(&v8("'  Agent X  '")), "Agent X");
+    assert_eq!(id(&v8("123")), "123");
+    assert_eq!(id(&v8("true")), "true");
+    assert_eq!(id(&v8("'  '")), "CLIProxyAPI");
+    assert_eq!(id(&v8("null")), "CLIProxyAPI");
+    assert_eq!(id("port: 1\n"), "CLIProxyAPI");
+    assert_eq!(id("codex:\n  signin-with-chatgpt-identifier: Legacy\n"), "Legacy");
+}
+
+#[test]
 fn bind_file_keeps_disk_values_and_encodes_like_go() {
     let disk = "{\n  \"type\": \"codex\",\n  \"access_token\": \"outer\", \"refresh_token\": \"r\",\n  \"big\": 123456789012345678901234567890,\n  \"html\": \"<a&b>\u{2028}\",\n  \"nested\": { \"k\" : [1, 2.50, \"x \\\" y\"] },\n  \"siwc\": {\"device_id\": \"old\"},\n  \"dup\": 1, \"dup\": 2,\n  \"use_siwc\": false\n}";
     let tokens = Tokens {

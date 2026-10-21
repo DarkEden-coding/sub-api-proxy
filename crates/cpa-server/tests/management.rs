@@ -3077,7 +3077,8 @@ async fn siwc_binding_flows_follow_go() {
                 }
                 if code == "hold" {
                     exchanging.notify_one();
-                    let _ = resume.acquire().await.unwrap();
+                    // Consumed: a dropped permit would release the next hold too.
+                    resume.acquire().await.unwrap().forget();
                 }
                 (
                     axum::http::StatusCode::OK,
@@ -3257,6 +3258,21 @@ async fn siwc_binding_flows_follow_go() {
         let (status, text) = callback(body.clone()).await;
         assert_eq!(status, 400, "{body}: {text}");
     }
+    // Go compares the decoded `URL.Path`: `&`, `;` and `+` are literal path bytes.
+    for path in [
+        "/auth/callback&junk",
+        "/auth/callback;junk",
+        "/auth/call+back",
+        "/auth/callback/",
+    ] {
+        let url = redirect(&sid, "c").replace("/auth/callback", path);
+        let (status, text) = callback(json!({"redirect_url": url})).await;
+        assert_eq!(
+            (status, parsed(&text)),
+            (400, json!({"status": "error", "error": "unexpected SIWC callback URL"})),
+            "{path}"
+        );
+    }
     let (status, _) = send(
         wreq::Method::GET,
         format!("/v8/management/oauth/callback?state={sid}&code=c&client_id=a&client_id=b"),
@@ -3267,7 +3283,9 @@ async fn siwc_binding_flows_follow_go() {
     assert!(forms.lock().unwrap().is_empty());
 
     // The pasted loopback URL completes it with the issued client ID.
-    let (status, text) = callback(json!({"provider": "openai", "redirect_url": redirect(&sid, "issued-code")})).await;
+    // An escaped path is the same path to Go.
+    let encoded = redirect(&sid, "issued-code").replace("/auth/callback", "/auth/%63allback");
+    let (status, text) = callback(json!({"provider": "openai", "redirect_url": encoded})).await;
     assert_eq!((status, parsed(&text)), (200, json!({"status": "ok"})));
     assert_eq!(wait_settled(&mut settled).await, sid);
     assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
@@ -3424,6 +3442,78 @@ async fn siwc_binding_flows_follow_go() {
     resume.add_permits(1);
     assert_eq!(wait_settled(&mut settled).await, sid);
     assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
+
+    // A v0 upload that swaps in another account does not fail the binding, but the
+    // tokens never land on that account.
+    let sid = start().await;
+    assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hold")})).await.0, 200);
+    tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+        .await
+        .unwrap();
+    let other = original.replace(r#""account_id":"acct""#, r#""account_id":"other""#);
+    let (status, _) = send(
+        wreq::Method::POST,
+        "/v0/management/auth-files?name=codex.json".into(),
+        other.clone(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let swapped = bound_file();
+    assert!(swapped.contains(r#""account_id":"other""#));
+    resume.add_permits(1);
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(
+        final_status(&base, &sid, 5).await,
+        json!({"status": "error", "error": "Failed to save SIWC binding; the target may have changed"})
+    );
+    assert_eq!(bound_file(), swapped);
+    assert!(!swapped.contains("siwc-at"));
+
+    // A binding never lands under an outer token refresh: one that read the
+    // credential first commits its rotated tokens, then the binding follows on top.
+    let sid = start().await;
+    let refreshing = f.rt.store().prepare_lock("codex.json");
+    let paused = refreshing.lock().await;
+    let read = f.rt.store().get("codex.json").unwrap();
+    assert_eq!(
+        callback(json!({"redirect_url": redirect(&sid, "issued-code")})).await.0,
+        200
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        oauth_get(&base, &format!("/oauth/status?state={sid}")).await,
+        json!({"status": "wait"})
+    );
+    let rotated = cpa_core::credential::MetadataPatch {
+        set: serde_json::Map::from_iter([
+            ("access_token".into(), "rotated-outer".into()),
+            ("refresh_token".into(), "rotated-outer-rt".into()),
+        ]),
+        remove: vec![],
+    };
+    f.rt.store().apply_patch("codex.json", read.revision, &rotated).unwrap();
+    drop(paused);
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
+    let disk: Value = serde_json::from_str(&bound_file()).unwrap();
+    let memory = f.rt.store().get("codex.json").unwrap().metadata.clone();
+    for meta in [&disk, &Value::Object(memory)] {
+        assert_eq!(
+            (
+                &meta["access_token"],
+                &meta["refresh_token"],
+                &meta["use_siwc"],
+                &meta["siwc"]["access_token"]
+            ),
+            (
+                &json!("rotated-outer"),
+                &json!("rotated-outer-rt"),
+                &json!(true),
+                &json!("siwc-at")
+            ),
+            "{meta}"
+        );
+    }
 
     // So does a v8 delete; the file is then gone.
     let sid = start().await;
