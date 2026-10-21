@@ -1223,12 +1223,10 @@ mod tests {
     /// that calls `host.http.do` after its request was canceled still gets through.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Only CI's media relay job enables the feature, and it has no Go toolchain; the
+    // workspace test job runs this test, where CPA_TEST_NO_SKIP fails a missing one.
+    #[cfg_attr(feature = "media-relay", ignore = "needs the Go plugin toolchain")]
     async fn websocket_observers_outlive_the_request_cancellation() {
-        // The media relay job also runs these unit tests, without a Go toolchain; the
-        // workspace test job builds the plugin and runs this test.
-        if cpa_plugin::testing::go_binary().is_none() {
-            return;
-        }
         let tmp = std::env::temp_dir();
         let Some(built) = cpa_plugin::testing::built_plugins(&tmp, "websocket_observers_outlive") else {
             return;

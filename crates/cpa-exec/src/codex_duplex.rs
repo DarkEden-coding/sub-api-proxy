@@ -136,6 +136,10 @@ pub(super) struct Duplex {
     /// While set, no further upstream message is read; client input and the writer
     /// keep going, as Go's writer goroutine does while the reader waits.
     observing: Option<Observing>,
+    /// A writer-side failure raised while a message was observed. Go's writer only
+    /// records its error; the reader finishes the observer and its message first, then
+    /// reports it. Client input and writes stop meanwhile.
+    failing: Option<ExecError>,
     frames: OwnedMutexGuard<mpsc::Receiver<Bytes>>,
     input: Arc<SteeringInput>,
     /// The bootstrap request: the template for later creates (Go `req`, `opts`).
@@ -270,6 +274,7 @@ impl Duplex {
         let duplex = Self {
             turn,
             observing: None,
+            failing: None,
             frames,
             input,
             req,
@@ -321,14 +326,15 @@ impl Duplex {
 
     async fn serve(&mut self) {
         loop {
-            if self.input_ready && !self.done {
+            let stopping = self.failing.is_some();
+            if self.input_ready && !self.done && !stopping {
                 self.progress().await;
             }
             let deliver = !self.outbox.is_empty();
             if self.done && !deliver {
                 return;
             }
-            let live = !self.done;
+            let live = !self.done && !stopping;
             let writable = self.writes.capacity() > 0;
             let read_client =
                 live && self.input_ready && self.deferred_steer.is_none() && writable && self.outbox.len() < OUTBOX;
@@ -344,7 +350,7 @@ impl Duplex {
                     Err(_) => return,
                 },
                 () = self.out.closed(), if !deliver => return,
-                read = self.turn.rx.recv(), if live && !deliver && !observing => Step::Upstream(read),
+                read = self.turn.rx.recv(), if !self.done && !deliver && !observing => Step::Upstream(read),
                 () = async {
                     if let Some(observing) = pending_observation.as_mut() {
                         (&mut observing.observation).await;
@@ -365,6 +371,13 @@ impl Duplex {
                         ..
                     } = self.observing.take().expect("an observation finished");
                     self.observed(&payload, &kind, establishing);
+                    // The deferred failure follows the message, unless the message
+                    // itself ended the stream.
+                    if let Some(error) = self.failing.take()
+                        && !self.done
+                    {
+                        self.fail(error);
+                    }
                 }
                 Step::Client(frame) => self.client(frame).await,
                 Step::Writer(ended) => self.fail(match ended {
@@ -388,6 +401,10 @@ impl Duplex {
     }
 
     fn fail(&mut self, error: ExecError) {
+        if self.observing.is_some() {
+            self.failing.get_or_insert(error);
+            return;
+        }
         self.outbox.push_back(Err(connection(error)));
         self.done = true;
     }
@@ -425,6 +442,7 @@ impl Duplex {
             self.steer(steer);
         }
         while !self.done
+            && self.failing.is_none()
             && !self.queued_creates.is_empty()
             && self.ready_for_create()
             && self.writes.capacity() > 0

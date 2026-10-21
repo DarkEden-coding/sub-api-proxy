@@ -9,6 +9,8 @@ use futures_util::future::{BoxFuture, Shared};
 pub(crate) type Observation = Shared<BoxFuture<'static, ()>>;
 
 /// Awaits `observation`, keeping it in `slot` meanwhile for [`release_after`].
+/// A read cancelled mid-observation leaves the slot set; turns end on such a drop and
+/// never start another read.
 pub(crate) async fn observe(slot: &mut Option<Observation>, observation: Option<BoxFuture<'static, ()>>) {
     let Some(observation) = observation else {
         return;
@@ -33,6 +35,8 @@ pub(crate) fn release_after<G: Send + 'static>(
                 drop(guard);
             });
         }
+        // Without a runtime (no caller drops a turn there) nothing can wait for the
+        // observation, so the session is released at once.
         _ => {
             release();
             drop(guard);

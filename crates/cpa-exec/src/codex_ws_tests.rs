@@ -1072,6 +1072,11 @@ async fn an_abandoned_turn_keeps_its_session_until_its_observation_returns() {
     assert_eq!(calls(), 1, "turn A's first message was not observed");
     a.abort();
     let _ = a.await;
+    let lock = executor.ws.session("conn-1").turn.clone();
+    assert!(
+        lock.try_lock().is_err(),
+        "dropping A released the session during its observation"
+    );
     let b = turn(executor.clone());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
@@ -1082,6 +1087,7 @@ async fn an_abandoned_turn_keeps_its_session_until_its_observation_returns() {
     assert_eq!(calls(), 1, "turn B was observed while A's observation ran");
     observer.release.add_permits(100);
     tokio::time::timeout(Duration::from_secs(10), b).await.unwrap().unwrap();
+    assert!(lock.try_lock().is_ok(), "the session stayed locked after both turns");
     assert_eq!(
         up.frames.lock().unwrap().len(),
         2,
