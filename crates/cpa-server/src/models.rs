@@ -34,10 +34,8 @@ async fn list(rt: Arc<Runtime>, OriginalUri(uri): OriginalUri, headers: HeaderMa
     let disable_cloaking = || {
         rt.config()
             .document
-            .get("oauth")
-            .and_then(|o| o.get("providers"))
-            .and_then(|p| p.get("claude"))
-            .and_then(|c| c.get("claude-code"))
+            .get("upstream")
+            .and_then(|u| u.get("claude"))
             .and_then(|c| c.get("disable-cloaking-model-list"))
             .and_then(serde_yaml_ng::Value::as_bool)
             .unwrap_or(false)

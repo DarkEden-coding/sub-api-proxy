@@ -241,10 +241,13 @@ const V8_PARENTS: &[&str] = &[
     "client",
     "client.codex",
     "oauth.providers.codex",
-    "oauth.providers.claude",
-    "oauth.providers.claude.claude-code",
     "oauth.providers.aistudio",
     "oauth.providers.antigravity",
+    "upstream",
+    "upstream.codex",
+    "upstream.claude",
+    "upstream.claude.header-defaults",
+    "upstream.xai",
 ];
 
 /// Writes `hash` over the plaintext `secret-key`: in place when the key is written
@@ -588,6 +591,128 @@ mod tests {
         assert_eq!(empty.routing.session_affinity_subagents, None);
         let null = Config::parse("request-retry: 7\nrouting: {retry: {request-retry: null}}\n").unwrap();
         assert_eq!(null.routing.retry.request_retry, 0);
+    }
+
+    /// Go `shared_upstream_test.go` (52d5507d): the legacy, canonical `upstream` and
+    /// historical `oauth.providers` layouts load the same shared settings for OAuth and
+    /// API-key views alike, migrate without their aliases, and keep the Codex header
+    /// defaults OAuth-only.
+    #[test]
+    fn shared_upstream_layouts_agree_and_migrate() {
+        let keys = "api-keys: {codex: [{base-url: https://example.invalid, keys: [{api-key: test-key, disable-codex-cloaking: false}]}]}\n";
+        let codex = "{disable-codex-cloaking: true, stream-bootstrap-buffering: true, stream-bootstrap-timeout: 10s, orphan-delegation-compatibility: true, model-level-cooling: true, response-steering: true";
+        let headers = "{user-agent: client-agent, package-version: 1.2.3, runtime-version: v22.1.0, os: Linux, arch: arm64, timeout: '123', timezone: Asia/Shanghai, stabilize-device-profile: true}";
+        let oauth = "oauth: {auth-dir: client-auth, auth-auto-refresh-workers: 3, providers: {codex: {header-defaults: {user-agent: oauth-agent, beta-features: oauth-beta}}}}\n";
+        let legacy = format!(
+            "auth-dir: client-auth\nauth-auto-refresh-workers: 3\ncodex: {codex}}}\nclaude: {{model-level-cooling: true}}\nclaude-code: {{disable-cloaking-model-list: true}}\ndisable-claude-cloak-mode: true\nclaude-header-defaults: {headers}\nxai: {{inject-x-search: true}}\n{oauth}{keys}"
+        );
+        let canonical = format!(
+            "upstream:\n  codex: {codex}}}\n  claude:\n    model-level-cooling: true\n    disable-cloaking-model-list: true\n    disable-claude-cloak-mode: true\n    header-defaults: {headers}\n  xai: {{inject-x-search: true}}\n{oauth}{keys}"
+        );
+        let historical = format!(
+            "oauth:\n  auth-dir: client-auth\n  auth-auto-refresh-workers: 3\n  providers:\n    codex: {codex}, header-defaults: {{user-agent: oauth-agent, beta-features: oauth-beta}}}}\n    claude:\n      model-level-cooling: true\n      claude-code: {{disable-cloaking-model-list: true}}\n      disable-claude-cloak-mode: true\n      header-defaults: {headers}\n    xai: {{inject-x-search: true}}\n{keys}"
+        );
+        let expected = Config::parse(&canonical).unwrap().document;
+        assert_eq!(
+            expected["upstream"]["claude"]["header-defaults"]["timezone"],
+            "Asia/Shanghai"
+        );
+        for raw in [&legacy, &canonical, &historical] {
+            let doc = ConfigDocument::parse(raw).unwrap();
+            schema::validate(doc.value(), true).unwrap();
+            for alias in ["codex", "claude", "claude-code", "xai", "claude-header-defaults"] {
+                assert!(doc.value().get(alias).is_none(), "{alias} survived: {raw}");
+            }
+            let providers = &doc.value()["oauth"]["providers"];
+            assert!(
+                providers.get("claude").is_none() && providers.get("xai").is_none(),
+                "{raw}"
+            );
+            let codex = providers["codex"].as_mapping().unwrap();
+            assert_eq!(
+                codex.keys().collect::<Vec<_>>(),
+                [&Value::from("header-defaults")],
+                "{raw}"
+            );
+            for text in [raw.to_string(), doc.yaml().unwrap()] {
+                let cfg = Config::parse(&text).unwrap();
+                for view in [&cfg, &*cfg.for_api_key()] {
+                    assert_eq!(view.document["upstream"], expected["upstream"], "{text}");
+                    assert_eq!(view.document["oauth"]["auth-auto-refresh-workers"], 3);
+                    let key = &view.document["api-keys"]["codex"][0]["keys"][0];
+                    assert_eq!(key["disable-codex-cloaking"], Value::Bool(false));
+                }
+                let user_agent =
+                    |c: &Config| c.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"].clone();
+                assert_eq!(user_agent(&cfg), "oauth-agent");
+                assert_eq!(user_agent(&cfg.for_api_key()), "");
+            }
+        }
+    }
+
+    /// Go `TestSharedUpstreamPresenceWinsOverHistoricalAliases` and
+    /// `TestSharedUpstreamEmptyHistoricalContainers`.
+    #[test]
+    fn shared_upstream_presence_wins_and_empty_containers_move() {
+        for value in ["false", "null"] {
+            let raw = format!(
+                "codex: {{response-steering: true}}\noauth: {{providers: {{codex: {{response-steering: true}}, claude: {{header-defaults: {{user-agent: historical-agent, stabilize-device-profile: true}}}}}}}}\nupstream: {{codex: {{response-steering: {value}}}, claude: {{header-defaults: {{user-agent: '', stabilize-device-profile: {value}}}}}}}\n"
+            );
+            let cfg = Config::parse(&raw).unwrap();
+            let upstream = &cfg.document["upstream"];
+            assert_ne!(upstream["codex"]["response-steering"], Value::Bool(true), "{raw}");
+            assert_eq!(upstream["claude"]["header-defaults"]["user-agent"], "", "{raw}");
+            assert_ne!(
+                upstream["claude"]["header-defaults"]["stabilize-device-profile"],
+                Value::Bool(true)
+            );
+            schema::validate(ConfigDocument::parse(&raw).unwrap().value(), true).unwrap();
+        }
+        for (historical, current) in [
+            (
+                "oauth.providers.claude.header-defaults",
+                "upstream.claude.header-defaults",
+            ),
+            ("oauth.providers.claude.claude-code", "upstream.claude"),
+            ("oauth.providers.claude", "upstream.claude"),
+            ("oauth.providers.xai", "upstream.xai"),
+        ] {
+            for value in ["{}", "null"] {
+                let parts: Vec<&str> = historical.split('.').collect();
+                let raw = parts
+                    .iter()
+                    .rev()
+                    .fold(value.to_owned(), |inner, key| format!("{{{key}: {inner}}}"));
+                let doc = ConfigDocument::parse(&raw).unwrap();
+                schema::validate(doc.value(), true).unwrap();
+                assert!(lookup(doc.value().as_mapping().unwrap(), historical).is_none(), "{raw}");
+                assert!(lookup(doc.value().as_mapping().unwrap(), current).is_some(), "{raw}");
+            }
+        }
+        // The legacy Claude structs move by their declared fields only: Go has no
+        // `claude.disable-cloaking-model-list` or `claude-code.model-level-cooling`.
+        let cfg = Config::parse(
+            "claude: {disable-cloaking-model-list: true, model-level-cooling: true}\nclaude-code: {disable-cloaking-model-list: false, model-level-cooling: true}\n",
+        )
+        .unwrap();
+        let claude = &cfg.document["upstream"]["claude"];
+        assert_eq!(claude["disable-cloaking-model-list"], Value::Bool(false));
+        assert_eq!(claude["model-level-cooling"], Value::Bool(true));
+        assert_eq!(cfg.document["claude"]["disable-cloaking-model-list"], Value::Bool(true));
+        assert_eq!(cfg.document["claude-code"]["model-level-cooling"], Value::Bool(true));
+        let cfg = Config::parse("claude-code: {model-level-cooling: true}\n").unwrap();
+        assert!(cfg.document.get("upstream").is_none(), "{:?}", cfg.document);
+        for legacy in ["claude: null\n", "claude-code: {}\n"] {
+            let doc = ConfigDocument::parse(legacy).unwrap();
+            assert_eq!(
+                doc.value()["upstream"]["claude"],
+                Value::Mapping(Mapping::new()),
+                "{legacy}"
+            );
+            assert!(doc.value().get("claude").is_none() && doc.value().get("claude-code").is_none());
+        }
+        let err = Config::parse("oauth: {providers: {xai: true}}\n").unwrap_err();
+        assert_eq!(err.to_string(), "oauth.providers.xai must be a mapping");
     }
 
     #[test]
