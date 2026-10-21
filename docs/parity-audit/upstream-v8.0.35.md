@@ -26,18 +26,18 @@ Columns:
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
-| Credentials, selection and cooldowns | 22 | 7 | 13 | 0 | 2 | 0 |
+| Credentials, selection and cooldowns | 22 | 8 | 12 | 0 | 2 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 3 | 12 | 0 | 0 | 0 |
+| Config and Management API | 15 | 8 | 7 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
-| Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
+| Usage and logging | 3 | 1 | 2 | 0 | 0 | 0 |
 | Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
 | Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **35** | **187** | **0** | **63** | **3** |
+| **All** | **288** | **42** | **180** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -228,7 +228,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 |---|---|---|---|---|---|
 | [`c163bae4`](https://github.com/router-for-me/CLIProxyAPI/commit/c163bae4) | fix(auth): preserve terminal unauthorized state and prevent unsafe refresh retry | yes | to port | M (+132 −26) | partly ported: a Claude token refresh is retried only after a 5xx answer, never after a transport, body-read, decompression or decoding failure that may have spent the single-use refresh token. Post-replay: the terminal unauthorized state (an access token rejected and a refresh answering invalid_grant), its selection block, and keeping in-flight results and cooldown clears from reviving it |
 | [`d4692663`](https://github.com/router-for-me/CLIProxyAPI/commit/d4692663) | fix(auth): snapshot auth before unlocking during registration and update | no | nothing to port | S (+12 −2) | credentials are published as immutable `Arc` snapshots, so a result recorded while a registration or update runs cannot mutate the copy the scheduler holds; Go's race-detector test has no counterpart |
-| [`8a01bc02`](https://github.com/router-for-me/CLIProxyAPI/commit/8a01bc02) | feat(auth): introduce mutation locking and persistence delta merging | no | to port | M (+210 −30) | mutation locking and persistence delta merging |
+| [`8a01bc02`](https://github.com/router-for-me/CLIProxyAPI/commit/8a01bc02) | feat(auth): introduce mutation locking and persistence delta merging | no | ported here | M (+210 −30) | a credential file is written with the credential set unlocked (`CredentialStore::write_unlocked`), so a slow disk no longer stalls reads, selection or other credentials' writes. Each credential's write lock serializes its own writes, a reload gate keeps a reload from landing between a write and its publication, and an edit that changes a credential's ID holds the gate exclusively, so no save delta needs merging. Post-result persistence still writes on the request's thread Go's context-cancelled waits have no counterpart: the writes run on blocking threads. A reload whose scan read a file before the write is c4c1d43e |
 | [`50d5fe18`](https://github.com/router-for-me/CLIProxyAPI/commit/50d5fe18) | fix(cliproxy): avoid selecting rejected credentials during refresh and preserve active quota cooldowns | yes | to port | M (+68 −6) | partly ported: a refresh that rotates the tokens clears the credential's unauthorized cooldowns and keeps live quota blocks, and a Codex token rejected with a 401 is refreshed even when not due. Post-replay: keeping concurrent requests off the rejected token while its refresh is pending (it moves a bound Claude session) and refresh-cancel rescheduling |
 | [`6920ed5d`](https://github.com/router-for-me/CLIProxyAPI/commit/6920ed5d) | fix(cliproxy): propagate credential version and registration epoch in execution results | no | to port | M (+80 −18) | partly covered: an outcome is recorded only while the credential still has the revision it ran with, so a late failure from a replaced or re-created credential never cools the new one. Difference: any edit changes the revision, so an outcome that lands after a metadata-only edit is dropped, where Go applies it (its `CredentialVersion` moves only with the tokens). Applying it can move a Claude session, so that waits for the post-replay set |
 | [`935aa6e3`](https://github.com/router-for-me/CLIProxyAPI/commit/935aa6e3) | fix(cliproxy): prevent in-flight token refresh from overwriting concurrently updated credentials | yes | ported here | S (+6 −0) | a refresh that lands after the tokens were saved is dropped and answers with them; another edit is merged with it like Go `mergeAuthContent`, with the Codex outer tokens gated as one partition; Go's registration-epoch and credential-version guards are not ported |
