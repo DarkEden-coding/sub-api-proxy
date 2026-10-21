@@ -73,21 +73,38 @@ pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {
     if raw.is_empty() {
         return Err("home models payload is empty".into());
     }
-    // Go `map[string][]map[string]any`: null sections and null entries are empty.
+    // Go `map[string][]map[string]any`; a null entry is an empty model.
     let parse_error = |e: serde_json::Error| format!("parse home models payload: {e}");
     let sections: Option<Map<String, Value>> = serde_json::from_slice(raw).map_err(parse_error)?;
-    let sections = sections.unwrap_or_default();
-    let mut parsed: Vec<(String, Vec<Map<String, Value>>)> = Vec::with_capacity(sections.len());
+    let Some(sections) = sections else {
+        return Err("home models payload is not an object".into());
+    };
+    // Go unmarshals every section before it looks at any.
+    let mut parsed = Vec::with_capacity(sections.len());
     for (section, models) in sections {
         let models: Option<Vec<Option<Map<String, Value>>>> = serde_json::from_value(models).map_err(parse_error)?;
-        parsed.push((section, models.unwrap_or_default().into_iter().flatten().collect()));
+        parsed.push((section, models));
     }
-    if parsed.is_empty() {
-        return Err("home models payload has no sections".into());
+    // An error envelope is never a provider section (Go 4d34502f).
+    if parsed.iter().any(|(section, _)| section == "error") {
+        return Err("home models payload contains an error envelope".into());
     }
-    parsed.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out: Vec<Entry> = Vec::new();
+    let mut has_model_records = false;
+    let mut checked = Vec::with_capacity(parsed.len());
     for (section, models) in parsed {
+        let Some(models) = models else {
+            return Err(format!(
+                "home models section {} is null",
+                cpa_common::gostr::quote(&section)
+            ));
+        };
+        has_model_records |= !models.is_empty();
+        let models: Vec<Map<String, Value>> = models.into_iter().map(Option::unwrap_or_default).collect();
+        checked.push((section, models));
+    }
+    checked.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<Entry> = Vec::new();
+    for (section, models) in checked {
         let provider = section.trim().to_lowercase();
         for model in models {
             let mut id = text(&model, "id");
@@ -135,7 +152,9 @@ pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {
         }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
-    if out.is_empty() {
+    // An empty catalog is valid when the client's access scopes have no routes; records
+    // without a usable ID are still malformed (Go 07feedf7).
+    if out.is_empty() && has_model_records {
         return Err("home models payload contains no models".into());
     }
     Ok(out)
@@ -311,11 +330,9 @@ mod tests {
             ("Claude X", 9)
         );
         assert_eq!(decode(b"").unwrap_err(), "home models payload is empty");
-        assert_eq!(decode(b"{}").unwrap_err(), "home models payload has no sections");
-        // Go accepts null sections and entries.
-        let entries = decode(br#"{"claude":null,"codex":[null,{"id":"gpt-5"}]}"#).unwrap();
+        // Go accepts null entries (empty models).
+        let entries = decode(br#"{"codex":[null,{"id":"gpt-5"}]}"#).unwrap();
         assert_eq!(entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["gpt-5"]);
-        assert_eq!(decode(b"null").unwrap_err(), "home models payload has no sections");
         assert_eq!(
             decode(br#"{"a":[{"id":" "}]}"#).unwrap_err(),
             "home models payload contains no models"
@@ -324,6 +341,40 @@ mod tests {
             decode(br#"{"a":1}"#)
                 .unwrap_err()
                 .starts_with("parse home models payload: ")
+        );
+    }
+
+    /// Go `TestDecodeHomeModelsEmptyCatalog`.
+    #[test]
+    fn decode_home_models_empty_catalog() {
+        for raw in ["{}", " { } ", r#"{"claude":[],"codex-pro":[]}"#] {
+            assert_eq!(decode(raw.as_bytes()), Ok(Vec::new()), "{raw}");
+        }
+        for raw in [
+            "",
+            "null",
+            "[]",
+            "{bad}",
+            r#"{"claude":[{}]}"#,
+            r#"{"claude":[null]}"#,
+            r#"{"claude":null}"#,
+            r#"{"error":null}"#,
+            r#"{"error":{"type":"internal_error","message":"unavailable"}}"#,
+            r#"{"error":[]}"#,
+            r#"{"error":[],"claude":[]}"#,
+            r#"{"error":[{"id":"not-a-model"}]}"#,
+            r#"{"error":[],"claude":[{"id":"model-a"}]}"#,
+        ] {
+            assert!(decode(raw.as_bytes()).is_err(), "{raw} accepted");
+        }
+        assert_eq!(decode(b"null").unwrap_err(), "home models payload is not an object");
+        assert_eq!(
+            decode(br#"{"error":[],"claude":[{"id":"model-a"}]}"#).unwrap_err(),
+            "home models payload contains an error envelope"
+        );
+        assert_eq!(
+            decode(br#"{"claude":[],"codex":null}"#).unwrap_err(),
+            r#"home models section "codex" is null"#
         );
     }
 
