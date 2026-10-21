@@ -1,6 +1,7 @@
 //! `/v1/images/*`, `/v1/videos*` and `/openai/v1/videos*` against goldens recorded from
 //! the unmodified Go server (CLIProxyAPI 6fecc6e), and `/v1/audio/speech` and `/v1/tts`
-//! against goldens from v8.0.35, by tests/reference/media: the same config, client
+//! against goldens from v8.0.35, as are the passthrough error headers
+//! (`passthrough_errors_go.json`), by tests/reference/media: the same config, client
 //! requests and scripted upstream replies, compared on status, the kept response headers,
 //! the response body and every raw upstream request.
 
@@ -72,6 +73,11 @@ const KEEP: [&str; 6] = [
 /// Scenarios whose Go error message is Go's own dial error text: the status, headers and
 /// the error envelope's `type` and `code` are compared, and the message must be a string.
 const STATUS_ONLY: [&str; 1] = ["video_content_connect_refused"];
+
+/// Scenarios whose Go error copied the stream's own `Content-Length: 0` from its
+/// passthrough headers, which cuts Go's error body to nothing. Rust drops framing
+/// headers from them (`respond::write_error_headers`), so length and body are skipped.
+const ADDON_FRAMING: [&str; 1] = ["compat_stream_empty"];
 
 /// The error envelope check for a [`STATUS_ONLY`] scenario, `None` when it matches Go.
 fn gateway_error_diff(go: &str, rust: &str) -> Option<String> {
@@ -264,6 +270,9 @@ async fn media_routes_match_go() {
     })
     .await;
     failures.extend(replay("speech", &speech, |s| s.response.clone()).await);
+    let errors: Fixture =
+        serde_json::from_str(include_str!("fixtures/passthrough_errors_go.json")).expect("fixture parses");
+    failures.extend(replay("errors", &errors, |s| s.response.clone()).await);
     assert!(
         failures.is_empty(),
         "{} scenario(s) differ from Go:\n{}",
@@ -372,7 +381,8 @@ async fn replay(tag: &str, fixture: &Fixture, expected: impl Fn(&Scenario) -> St
         if status != s.status {
             diffs.push(format!("status: go {} rust {status}", s.status));
         }
-        let compare_body = !STATUS_ONLY.contains(&s.name.as_str());
+        let framing = ADDON_FRAMING.contains(&s.name.as_str());
+        let compare_body = !STATUS_ONLY.contains(&s.name.as_str()) && !framing;
         let mut want_headers = s.response_headers.clone();
         if !compare_body {
             headers.remove("Content-Length");
@@ -385,7 +395,10 @@ async fn replay(tag: &str, fixture: &Fixture, expected: impl Fn(&Scenario) -> St
         if compare_body && (response != want || response_b64 != s.response_b64) {
             diffs.push(format!("body:\n  go   {want}\n  rust {response}"));
         }
-        if !compare_body && let Some(diff) = gateway_error_diff(&s.response, &response) {
+        if !compare_body
+            && !framing
+            && let Some(diff) = gateway_error_diff(&s.response, &response)
+        {
             diffs.push(diff);
         }
         if requests != s.requests {

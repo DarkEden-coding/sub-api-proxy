@@ -3,9 +3,10 @@
 // server. Run it inside a loopback-only network namespace; it never contacts a provider
 // and every key is fake.
 //
-// Usage: media <go-server-binary> <output.json> [speech]
+// Usage: media <go-server-binary> <output.json> [speech|errors]
 //
-// With "speech" it runs the speech scenarios (speech.go, recorded at v8.0.35) instead.
+// With "speech" it runs the speech scenarios (speech.go, recorded at v8.0.35) instead,
+// with "errors" the passthrough error-header scenarios (errors.go, v8.0.35).
 package main
 
 import (
@@ -234,13 +235,15 @@ func freePort() int {
 }
 
 func main() {
-	if len(os.Args) != 3 && (len(os.Args) != 4 || os.Args[3] != "speech") {
-		fmt.Fprintln(os.Stderr, "usage: media <go-server-binary> <output.json> [speech]")
+	if len(os.Args) != 3 && (len(os.Args) != 4 || (os.Args[3] != "speech" && os.Args[3] != "errors")) {
+		fmt.Fprintln(os.Stderr, "usage: media <go-server-binary> <output.json> [speech|errors]")
 		os.Exit(2)
 	}
 	config, all := Config, scenarios()
-	if len(os.Args) == 4 {
+	if len(os.Args) == 4 && os.Args[3] == "speech" {
 		config, all = SpeechConfig, speechScenarios()
+	} else if len(os.Args) == 4 {
+		config, all = ErrorsConfig, errorScenarios()
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
