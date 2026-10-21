@@ -123,21 +123,10 @@ impl CodexExecutor {
         View::new(credential).websockets()
     }
 
-    /// `codex.response-steering` as the Responses WebSocket handler reads it (Go
-    /// `SDKConfig.CodexResponseSteering`): the configured value, OAuth-only scope ignored.
+    /// `upstream.codex.response-steering` as the Responses WebSocket handler reads it
+    /// (Go `SDKConfig.CodexResponseSteering`), shared by every credential kind.
     pub fn response_steering_configured(cfg: &Config) -> bool {
         request::response_steering(cfg)
-    }
-
-    /// Whether WebSocket turns on `credential` run full duplex: the executor's view of
-    /// `response-steering`, where API keys see Go's `ForAPIKey` (the v8 OAuth-only form
-    /// does not apply to them).
-    pub fn response_steering(credential: &Credential, cfg: &Config) -> bool {
-        if View::new(credential).api_key {
-            request::response_steering(&cfg.for_api_key())
-        } else {
-            request::response_steering(cfg)
-        }
     }
 
     /// Binds a downstream connection's later client frames to its session (Go

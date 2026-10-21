@@ -39,15 +39,27 @@ const PATHS: &[(&str, &str)] = &[
     ("oauth-request-scoped-errors", "oauth.request-scoped-errors"),
     ("oauth-settings", "oauth.settings"),
     ("ws-auth", "oauth.providers.aistudio.ws-auth"),
+    ("codex.disable-codex-cloaking", "upstream.codex.disable-codex-cloaking"),
+    (
+        "codex.stream-bootstrap-buffering",
+        "upstream.codex.stream-bootstrap-buffering",
+    ),
+    (
+        "codex.stream-bootstrap-timeout",
+        "upstream.codex.stream-bootstrap-timeout",
+    ),
+    (
+        "codex.orphan-delegation-compatibility",
+        "upstream.codex.orphan-delegation-compatibility",
+    ),
+    ("codex.model-level-cooling", "upstream.codex.model-level-cooling"),
+    ("codex.response-steering", "upstream.codex.response-steering"),
     ("codex", "oauth.providers.codex"),
     ("codex-header-defaults", "oauth.providers.codex.header-defaults"),
-    ("claude", "oauth.providers.claude"),
-    ("claude-code", "oauth.providers.claude.claude-code"),
-    (
-        "disable-claude-cloak-mode",
-        "oauth.providers.claude.disable-claude-cloak-mode",
-    ),
-    ("claude-header-defaults", "oauth.providers.claude.header-defaults"),
+    ("claude", "upstream.claude"),
+    ("claude-code", "upstream.claude"),
+    ("disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"),
+    ("claude-header-defaults", "upstream.claude.header-defaults"),
     ("antigravity", "oauth.providers.antigravity"),
     (
         "antigravity-signature-cache-enabled",
@@ -61,7 +73,7 @@ const PATHS: &[(&str, &str)] = &[
         "quota-exceeded.antigravity-credits",
         "oauth.providers.antigravity.antigravity-credits",
     ),
-    ("xai", "oauth.providers.xai"),
+    ("xai", "upstream.xai"),
     ("devin", "oauth.providers.devin"),
     ("disable-image-generation", "multimedia.disable-image-generation"),
     ("gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"),
@@ -80,6 +92,90 @@ const PATHS: &[(&str, &str)] = &[
         "observability.usage.redis-usage-queue-retention-seconds",
     ),
     ("pprof", "observability.pprof"),
+];
+// Go `v8SharedPaths` (52d5507d): historical v8 spellings of the shared `upstream`
+// settings. A canonical path wins by presence; these precede the legacy roots.
+pub(super) const SHARED_PATHS: &[(&str, &str)] = &[
+    (
+        "oauth.providers.codex.disable-codex-cloaking",
+        "upstream.codex.disable-codex-cloaking",
+    ),
+    (
+        "oauth.providers.codex.stream-bootstrap-buffering",
+        "upstream.codex.stream-bootstrap-buffering",
+    ),
+    (
+        "oauth.providers.codex.stream-bootstrap-timeout",
+        "upstream.codex.stream-bootstrap-timeout",
+    ),
+    (
+        "oauth.providers.codex.orphan-delegation-compatibility",
+        "upstream.codex.orphan-delegation-compatibility",
+    ),
+    (
+        "oauth.providers.codex.model-level-cooling",
+        "upstream.codex.model-level-cooling",
+    ),
+    (
+        "oauth.providers.codex.response-steering",
+        "upstream.codex.response-steering",
+    ),
+    (
+        "oauth.providers.claude.model-level-cooling",
+        "upstream.claude.model-level-cooling",
+    ),
+    (
+        "oauth.providers.claude.claude-code.disable-cloaking-model-list",
+        "upstream.claude.disable-cloaking-model-list",
+    ),
+    (
+        "oauth.providers.claude.disable-claude-cloak-mode",
+        "upstream.claude.disable-claude-cloak-mode",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.user-agent",
+        "upstream.claude.header-defaults.user-agent",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.package-version",
+        "upstream.claude.header-defaults.package-version",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.runtime-version",
+        "upstream.claude.header-defaults.runtime-version",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.os",
+        "upstream.claude.header-defaults.os",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.arch",
+        "upstream.claude.header-defaults.arch",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.timeout",
+        "upstream.claude.header-defaults.timeout",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.timezone",
+        "upstream.claude.header-defaults.timezone",
+    ),
+    (
+        "oauth.providers.claude.header-defaults.stabilize-device-profile",
+        "upstream.claude.header-defaults.stabilize-device-profile",
+    ),
+    ("oauth.providers.xai.inject-x-search", "upstream.xai.inject-x-search"),
+];
+// Go `v8SharedStructPaths`: an empty or null historical container is an empty
+// `upstream` one; populated ones move through their fields.
+pub(super) const SHARED_STRUCTS: &[(&str, &str)] = &[
+    (
+        "oauth.providers.claude.header-defaults",
+        "upstream.claude.header-defaults",
+    ),
+    ("oauth.providers.claude.claude-code", "upstream.claude"),
+    ("oauth.providers.claude", "upstream.claude"),
+    ("oauth.providers.xai", "upstream.xai"),
 ];
 const FAMILIES: &[(&str, &str)] = &[
     ("gemini-api-key", "gemini"),
@@ -130,6 +226,24 @@ impl ConfigDocument {
                 remove(&mut root, &old);
                 insert_missing(&mut root, "client.codex.optimize-multi-agent-v2", value)?;
             }
+        }
+        for (old, current) in SHARED_PATHS {
+            if let Some(value) = lookup(&root, old).cloned() {
+                remove(&mut root, old);
+                insert_missing(&mut root, current, value)?;
+            }
+        }
+        for (old, current) in SHARED_STRUCTS {
+            match lookup(&root, old) {
+                None => continue,
+                Some(Value::Null) => {}
+                Some(Value::Mapping(m)) if m.is_empty() => {}
+                // Fields the schema does not know stay for validation to report.
+                Some(Value::Mapping(_)) => continue,
+                Some(_) => bail!("{old} must be a mapping"),
+            }
+            remove(&mut root, old);
+            insert_missing(&mut root, current, Value::Mapping(Mapping::new()))?;
         }
         if let Some(keys) = root.get("api-keys").filter(|v| !v.is_mapping()).cloned() {
             root.remove("api-keys");
@@ -662,16 +776,24 @@ mod tests {
 
     #[test]
     fn mixed_layout_merges_leaves_and_keeps_presence() {
-        let d = ConfigDocument::parse("request-retry: 4\ndisable-cooling: true\nrouting: {retry: {request-retry: null}, cooldown: {disable-cooling: false}}\ncodex: {disable-codex-cloaking: true, optimize-multi-agent-v2: true}\nclient: {codex: {optimize-multi-agent-v2: false}}\noauth: {providers: {codex: {response-steering: true}}}\n").unwrap();
+        let d = ConfigDocument::parse("request-retry: 4\ndisable-cooling: true\nrouting: {retry: {request-retry: null}, cooldown: {disable-cooling: false}}\ncodex: {disable-codex-cloaking: true, response-steering: false, optimize-multi-agent-v2: true}\nclient: {codex: {optimize-multi-agent-v2: false}}\noauth: {providers: {codex: {response-steering: true}, xai: {}}}\n").unwrap();
         assert!(d.get(&["routing", "retry", "request-retry"]).unwrap().is_null());
         assert_eq!(
             d.get(&["routing", "cooldown", "disable-cooling"]),
             Some(&Value::Bool(false))
         );
+        // v8.0.35: shared settings move to `upstream`; a historical v8 spelling wins
+        // over the legacy root one.
         assert_eq!(
-            d.get(&["oauth", "providers", "codex", "disable-codex-cloaking"]),
+            d.get(&["upstream", "codex", "disable-codex-cloaking"]),
             Some(&Value::Bool(true))
         );
+        assert_eq!(
+            d.get(&["upstream", "codex", "response-steering"]),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(d.get(&["upstream", "xai"]), Some(&Value::Mapping(Mapping::new())));
+        assert!(d.get(&["oauth", "providers"]).is_none(), "{:?}", d.value());
         assert_eq!(
             d.get(&["client", "codex", "optimize-multi-agent-v2"]),
             Some(&Value::Bool(false))

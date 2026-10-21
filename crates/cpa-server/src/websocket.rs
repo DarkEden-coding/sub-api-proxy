@@ -651,7 +651,7 @@ impl Connection {
         };
         // Go prepares multi-agent v2 tools and orphan delegation outputs here, before the
         // prewarm and dispatch decisions.
-        let client = cpa_common::codex_client::Settings::for_responses_handler(&cfg);
+        let client = cpa_common::codex_client::Settings::from_config(&cfg);
         // The spawn_agent model list comes from the Codex client catalog.
         // Cost: one header check, then one `Once` check, per turn.
         if cpa_common::codex_client::multi_agent_client(&self.headers, client.optimize_multi_agent_v2) {
@@ -912,11 +912,8 @@ impl Connection {
                 };
                 let codex = credential.provider.eq_ignore_ascii_case("codex");
                 s.preserve_output = native_request && codex;
-                // OAuth-only steering leaves API keys in normal mode.
-                let full_duplex = steering
-                    && codex
-                    && s.mode == Mode::Websocket
-                    && CodexExecutor::response_steering(credential, &rt.config());
+                // Shared since v8.0.35: API-key credentials steer too.
+                let full_duplex = steering && codex && s.mode == Mode::Websocket;
                 duplex.store(full_duplex, Ordering::Release);
             })
         };

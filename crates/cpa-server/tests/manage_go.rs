@@ -261,19 +261,27 @@ fn trusted_proxy_validation_errors_match_go_text() {
 
 /// Go records OAuth-only fields by legacy name; cliproxy-rs by v8 path. Go's prefix
 /// table for `oauth.providers` (internal/config/config_v8.go buildV8Paths) maps them.
+/// The fixture predates Go 52d5507d, which moved the shared Codex, Claude and xAI
+/// settings to `upstream.*`; v8.0.35 records only fields whose current path stays
+/// under `oauth.providers.` (config_v8.go:259-264), so the moved ones drop out here.
 #[test]
 fn oauth_only_presence_matches_go() {
+    const SHARED_CODEX: &[&str] = &[
+        "disable-codex-cloaking",
+        "stream-bootstrap-buffering",
+        "stream-bootstrap-timeout",
+        "orphan-delegation-compatibility",
+        "model-level-cooling",
+        "response-steering",
+    ];
     const PREFIXES: &[(&str, &str)] = &[
         ("ws-auth", "oauth.providers.aistudio.ws-auth"),
         ("codex", "oauth.providers.codex"),
         ("codex-header-defaults", "oauth.providers.codex.header-defaults"),
-        ("claude", "oauth.providers.claude"),
-        ("claude-code", "oauth.providers.claude.claude-code"),
-        (
-            "disable-claude-cloak-mode",
-            "oauth.providers.claude.disable-claude-cloak-mode",
-        ),
-        ("claude-header-defaults", "oauth.providers.claude.header-defaults"),
+        ("claude", "upstream.claude"),
+        ("claude-code", "upstream.claude"),
+        ("disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"),
+        ("claude-header-defaults", "upstream.claude.header-defaults"),
         ("antigravity", "oauth.providers.antigravity"),
         (
             "antigravity-signature-cache-enabled",
@@ -287,10 +295,15 @@ fn oauth_only_presence_matches_go() {
             "quota-exceeded.antigravity-credits",
             "oauth.providers.antigravity.antigravity-credits",
         ),
-        ("xai", "oauth.providers.xai"),
+        ("xai", "upstream.xai"),
         ("devin", "oauth.providers.devin"),
     ];
     let to_v8 = |old: &str| {
+        if let Some(field) = old.strip_prefix("codex.")
+            && SHARED_CODEX.contains(&field)
+        {
+            return format!("upstream.codex.{field}");
+        }
         PREFIXES
             .iter()
             .find(|(p, _)| old == *p || old.starts_with(&format!("{p}.")))
@@ -306,14 +319,19 @@ fn oauth_only_presence_matches_go() {
             .unwrap()
             .iter()
             .map(|f| to_v8(f.as_str().unwrap()))
+            .filter(|path| path.starts_with("oauth.providers."))
             .collect();
         assert_eq!(Config::parse(yaml).unwrap().oauth_only, want, "{yaml}");
     }
-    // Go `ForAPIKey`: those fields read as zero for API-key credentials.
+    // Go `ForAPIKey`: those fields read as zero for API-key credentials; the shared
+    // `upstream.codex` value written at its historical path stays.
     let cfg = Config::parse(cases[1]["yaml"].as_str().unwrap()).unwrap();
     let view = cfg.for_api_key();
+    assert_eq!(
+        view.document["upstream"]["codex"]["disable-codex-cloaking"],
+        serde_yaml_ng::Value::Bool(true)
+    );
     let codex = &view.document["oauth"]["providers"]["codex"];
-    assert_eq!(codex["disable-codex-cloaking"], serde_yaml_ng::Value::Bool(false));
     assert_eq!(codex["header-defaults"]["user-agent"], serde_yaml_ng::Value::from(""));
     assert!(codex["live-media-relay"].get("ice-servers").is_none());
     assert_eq!(
@@ -321,10 +339,6 @@ fn oauth_only_presence_matches_go() {
         serde_yaml_ng::Value::Bool(false)
     );
     assert!(view.oauth_only.is_empty());
-    assert_eq!(
-        cfg.document["oauth"]["providers"]["codex"]["disable-codex-cloaking"],
-        serde_yaml_ng::Value::Bool(true)
-    );
     let legacy = Config::parse(cases[0]["yaml"].as_str().unwrap()).unwrap();
     assert!(matches!(legacy.for_api_key(), std::borrow::Cow::Borrowed(_)));
 }

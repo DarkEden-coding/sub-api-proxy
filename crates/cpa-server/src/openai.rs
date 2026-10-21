@@ -425,7 +425,7 @@ pub async fn responses(
         Err(rejection) => return read_failed(&rejection),
     };
     // Go `prepareCodexMultiAgentV2Tools` then `prepareCodexOrphanDelegation`.
-    let settings = cpa_common::codex_client::Settings::for_responses_handler(&rt.config());
+    let settings = cpa_common::codex_client::Settings::from_config(&rt.config());
     // The spawn_agent model list comes from the Codex client catalog.
     // Cost: one header check, then one `Once` check, per request.
     if cpa_common::codex_client::multi_agent_client(&headers, settings.optimize_multi_agent_v2) {
@@ -998,7 +998,7 @@ pub async fn compact(
         Err(rejection) => return read_failed(&rejection),
     };
     // Go `prepareCodexOrphanDelegation` (compact skips the multi-agent tool step).
-    let settings = cpa_common::codex_client::Settings::for_responses_handler(&rt.config());
+    let settings = cpa_common::codex_client::Settings::from_config(&rt.config());
     let mut body = Bytes::from(cpa_common::codex_client::rewrite_orphan_delegation_input(
         &headers,
         &body,

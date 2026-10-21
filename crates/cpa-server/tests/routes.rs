@@ -524,6 +524,61 @@ async fn mid_stream_failure_ends_with_route_error_frame() {
     assert!(!text.contains("[DONE]"), "terminal errors replace [DONE]");
 }
 
+/// `upstream.claude.disable-cloaking-model-list` (Go 52d5507d) in each spelling stops
+/// the Anthropic catalog from cloaking non-Claude IDs.
+#[tokio::test]
+async fn anthropic_model_list_cloaking_reads_the_shared_setting() {
+    for (config, cloaked) in [
+        ("", true),
+        ("upstream: {claude: {disable-cloaking-model-list: true}}\n", false),
+        (
+            "oauth: {providers: {claude: {claude-code: {disable-cloaking-model-list: true}}}}\n",
+            false,
+        ),
+        ("claude-code: {disable-cloaking-model-list: true}\n", false),
+    ] {
+        let key = Credential {
+            id: "claude:apikey:1".into(),
+            provider: "claude".into(),
+            source: Source::Config {
+                section: "claude-api-key".into(),
+                index: 0,
+            },
+            disabled: false,
+            label: "claude-apikey".into(),
+            attributes: [("api_key".into(), "fake-ok".into())].into(),
+            metadata: serde_json::json!({"models": [{"name": MODEL, "alias": "friendly"}]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            revision: 0,
+        };
+        let p = proxy(config, vec![key]).await;
+        let models: Value = wreq::Client::new()
+            .get(format!("{}/v1/models", p.url))
+            .header("authorization", "Bearer client-key")
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let ids: Vec<&str> = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        let want = if cloaked {
+            "claude-fable-5-dd-yldneirf"
+        } else {
+            "friendly"
+        };
+        assert!(ids.contains(&want), "{config}: {ids:?}");
+    }
+}
+
 #[tokio::test]
 async fn config_models_alias_and_force_mapping_reach_upstream_and_client() {
     let mut key = Credential {
@@ -1144,15 +1199,9 @@ async fn responses_route_prepares_codex_orphan_delegation() {
     assert_eq!(send(p.url.clone(), body.clone()).await, 200);
     let upstream = p.seen.requests.lock().unwrap()[0].1.to_string();
     assert!(upstream.contains(rewritten), "{upstream}");
-    // Written in v8 form it is OAuth-only: the handler leaves the input alone, but an
-    // OAuth credential's executor still sees it (Go's executor translation runs
-    // RewriteCodexOrphanDelegationInputForConfig with the unscoped config).
+    // The setting is shared (`upstream.codex`, Go 52d5507d): its historical v8 spelling
+    // rewrites for an API-key credential too, which runs with cfg.ForAPIKey().
     let v8 = "oauth:\n  providers:\n    codex:\n      orphan-delegation-compatibility: true\n";
-    let p = proxy(v8, vec![oauth("a.json", "fake-ok", serde_json::json!({}))]).await;
-    assert_eq!(send(p.url.clone(), body.clone()).await, 200);
-    let upstream = p.seen.requests.lock().unwrap()[0].1.to_string();
-    assert!(upstream.contains(rewritten), "{upstream}");
-    // An API-key credential runs with cfg.ForAPIKey() (executorForAuth): nobody rewrites.
     let mut key = Credential::from_file(
         Path::new("/fake"),
         &Path::new("/fake").join("key.json"),
@@ -1163,7 +1212,7 @@ async fn responses_route_prepares_codex_orphan_delegation() {
     let p = proxy(v8, vec![key]).await;
     assert_eq!(send(p.url.clone(), body).await, 200);
     let upstream = p.seen.requests.lock().unwrap()[0].1.to_string();
-    assert!(!upstream.contains("Tool output from"), "{upstream}");
+    assert!(upstream.contains(rewritten), "{upstream}");
 }
 
 /// Session turns (the Responses WebSocket) run through `dispatch::run`: the pin

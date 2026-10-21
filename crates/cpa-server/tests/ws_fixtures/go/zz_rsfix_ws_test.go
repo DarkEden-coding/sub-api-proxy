@@ -500,7 +500,9 @@ func rsfixWSScenarios() []rsfixWSScenario {
 	multiAgentInput := `[{"type":"function_call_output","call_id":"orphan","name":"create_thread","namespace":"codex_app","output":"thread ok"},` + user("delegate") + `]`
 	spawnCall := `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_s","call_id":"call_s","namespace":"collaboration-optimize","name":"spawn_agent","arguments":"{\"message\":\"go\"}"}}`
 	steerCfg := cfg + "codex:\n  response-steering: true\n"
-	steerOAuthOnlyCfg := cfg + "oauth:\n  providers:\n    codex:\n      response-steering: true\n"
+	// The historical v8 spelling; since 52d5507d it is the shared upstream.codex setting.
+	steerHistoricalCfg := cfg + "oauth:\n  providers:\n    codex:\n      response-steering: true\n"
+	steerUpstreamCfg := cfg + "upstream:\n  codex:\n    response-steering: true\n"
 	steerOffCfg := cfg + "codex:\n  response-steering: false\n"
 	// An OAuth account on the Pro plan catalog's first model.
 	oauthWS := rsfixWSCred{ID: "codex-oauth.json", Attrs: map[string]string{"websockets": "true"}, Models: []string{"gpt-6-astra"}, Metadata: map[string]any{"access_token": "fake-oauth-token"}}
@@ -695,10 +697,12 @@ func rsfixWSScenarios() []rsfixWSScenario {
 			},
 		},
 		{
-			Name: "steer_oauth_only_skips_api_key", Config: steerOAuthOnlyCfg, Creds: []rsfixWSCred{ws},
+			// TestResponsesSteeringErrorRecoveryIntegration/stale_oauth_scope_does_not_disable_shared_api_key_steering.
+			Name: "steer_historical_oauth_path_steers_api_key", Config: steerHistoricalCfg, Creds: []rsfixWSCred{ws},
 			Steps: []rsfixWSStep{
 				{Send: steerCreateInstr("INITIAL"), Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("first"), completed("first")}}}},
-				{Send: steerCreateInstr("REJECTED"), Read: "close", Upstream: []rsfixWSReply{{Events: []string{rejection}}}},
+				{Send: steerCreateInstr("REJECTED"), Read: "until:error", Upstream: []rsfixWSReply{{Events: []string{rejection}}}},
+				{Send: steerCreateInstr("CORRECTED"), Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("corrected"), message("RECOVERED"), completed("corrected")}}}},
 			},
 		},
 		{
@@ -717,14 +721,28 @@ func rsfixWSScenarios() []rsfixWSScenario {
 			},
 		},
 		{
-			Name: "steer_idle_upstream_close_v8_api_key", Config: steerOAuthOnlyCfg, Creds: []rsfixWSCred{ws},
+			Name: "steer_idle_upstream_close_v8_api_key", Config: steerHistoricalCfg, Creds: []rsfixWSCred{ws},
 			Steps: []rsfixWSStep{
 				{Send: steerCreate, Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("first"), completed("first")}, Then: "close"}}},
 				{Read: "close"},
 			},
 		},
 		{
-			Name: "steer_idle_upstream_close_v8_oauth", Config: steerOAuthOnlyCfg, Creds: []rsfixWSCred{oauthWS},
+			Name: "steer_idle_upstream_close_v8_oauth", Config: steerHistoricalCfg, Creds: []rsfixWSCred{oauthWS},
+			Steps: []rsfixWSStep{
+				{Send: `{"type":"response.create","model":"gpt-6-astra","input":[]}`, Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("first"), completed("first")}, Then: "close"}}},
+				{Read: "close"},
+			},
+		},
+		{
+			Name: "steer_idle_upstream_close_upstream_api_key", Config: steerUpstreamCfg, Creds: []rsfixWSCred{ws},
+			Steps: []rsfixWSStep{
+				{Send: steerCreate, Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("first"), completed("first")}, Then: "close"}}},
+				{Read: "close"},
+			},
+		},
+		{
+			Name: "steer_idle_upstream_close_upstream_oauth", Config: steerUpstreamCfg, Creds: []rsfixWSCred{oauthWS},
 			Steps: []rsfixWSStep{
 				{Send: `{"type":"response.create","model":"gpt-6-astra","input":[]}`, Read: "until:response.completed", Upstream: []rsfixWSReply{{Events: []string{created("first"), completed("first")}, Then: "close"}}},
 				{Read: "close"},
