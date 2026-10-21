@@ -1847,6 +1847,18 @@ impl Scheduler {
         self.probes.remove(id);
         models
     }
+
+    /// Go `clearUnauthorizedModelStates`: drops the 401 cooldowns of one credential and
+    /// keeps its quota blocks. Returns whether any was dropped.
+    pub(crate) fn clear_unauthorized(&mut self, id: &str) -> bool {
+        let before = self.cooldowns.len();
+        self.cooldowns.retain(|(cid, _), c| {
+            let error = c.error.to_ascii_lowercase();
+            let unauthorized = c.status == 401 || error.contains("unauthorized") || error.contains("status 401");
+            cid != id || c.quota || !unauthorized
+        });
+        self.cooldowns.len() != before
+    }
 }
 
 #[cfg(test)]

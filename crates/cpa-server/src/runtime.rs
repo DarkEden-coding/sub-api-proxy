@@ -1872,6 +1872,24 @@ impl CredentialStore {
         }
         models
     }
+
+    /// The recovery Go `BindCodexSIWC` runs after saving a binding: an enabled
+    /// credential's unauthorized cooldowns are cleared and persisted, live quota blocks
+    /// stay. Go also forgets the rejected access token; nothing here records one (a 401
+    /// retry keys on the credential revision, which the binding has replaced).
+    pub fn recover_unauthorized(&self, id: &str) {
+        if self.get(id).is_none_or(|c| c.disabled) {
+            return;
+        }
+        let cleared = self
+            .scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear_unauthorized(id);
+        if cleared {
+            self.persist_cooldowns();
+        }
+    }
 }
 
 impl Runtime {
