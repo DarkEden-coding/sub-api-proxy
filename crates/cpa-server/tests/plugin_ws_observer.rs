@@ -12,7 +12,9 @@ use base64::Engine as _;
 use cpa_core::config::Config;
 use cpa_exec::Executors;
 use cpa_server::router;
+use futures_util::StreamExt;
 use serde_json::Value;
+use wreq::ws::message::Message;
 
 const RATE_LIMITS: &str = r#"{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":42}}}"#;
 const CREATED: &str = r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","output":[]}}"#;
@@ -21,7 +23,11 @@ const DONE: &str = r#"{"type":"response.completed","response":{"id":"r1","status
 /// Answers every turn with a rate-limit frame, then the response frames.
 async fn serve_codex() -> String {
     use axum::extract::ws::{Message, WebSocketUpgrade};
-    let handler = |ws: WebSocketUpgrade| async move {
+    let handler = |ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+                   req: axum::http::Request<axum::body::Body>| async move {
+        let Ok(ws) = ws else {
+            panic!("expected a WebSocket upgrade, got {} {}", req.method(), req.uri());
+        };
         ws.on_upgrade(|mut socket| async move {
             while let Some(Ok(message)) = socket.recv().await {
                 if matches!(message, Message::Text(_)) {
@@ -34,7 +40,11 @@ async fn serve_codex() -> String {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, axum::Router::new().fallback(handler)).await.unwrap() });
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handler))
+            .await
+            .unwrap()
+    });
     url
 }
 
@@ -86,20 +96,33 @@ async fn observer_plugins_receive_every_upstream_websocket_frame() {
     tokio::spawn(async move { axum::serve(listener, router(rt)).await.unwrap() });
 
     let log = records.join("watcher.jsonl");
-    for (round, stream) in [false, true].into_iter().enumerate() {
-        let response = wreq::Client::new()
-            .post(format!("{base}/v1/responses"))
-            .header("Authorization", "Bearer client-key-1")
-            .body(format!(r#"{{"model":"gpt-fixture","input":"hi","stream":{stream}}}"#))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200, "stream {stream}");
-        let body = response.text().await.unwrap();
-        assert!(body.contains("r1"), "stream {stream}: {body}");
+    // Go's Codex auto executor takes the upstream WebSocket for a downstream WebSocket.
+    let mut socket = wreq::Client::new()
+        .websocket(format!("{}/v1/responses", base.replacen("http", "ws", 1)))
+        .header("Authorization", "Bearer client-key-1")
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    for turn in 0..2 {
+        let create = r#"{"type":"response.create","model":"gpt-fixture","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#;
+        socket.send(Message::text(create)).await.unwrap();
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap();
+            let Some(Ok(Message::Text(text))) = next else {
+                panic!("turn {turn}: {next:?}");
+            };
+            if text.as_str().contains("\"response.completed\"") {
+                break;
+            }
+        }
 
-        // Delivery runs beside the response; wait for this round's three frames.
-        let want = 3 * (round + 1);
+        // Delivery runs beside the turn; wait for its three frames.
+        let want = 3 * (turn + 1);
         let mut seen = events(&log);
         for _ in 0..100 {
             if seen.len() >= want {
@@ -108,18 +131,22 @@ async fn observer_plugins_receive_every_upstream_websocket_frame() {
             tokio::time::sleep(Duration::from_millis(50)).await;
             seen = events(&log);
         }
-        assert_eq!(seen.len(), want, "stream {stream}: {seen:?}");
-        let round_events = &seen[want - 3..];
-        let types: Vec<&str> = round_events.iter().map(|e| e["EventType"].as_str().unwrap()).collect();
-        assert_eq!(types, ["codex.rate_limits", "response.created", "response.completed"], "stream {stream}");
-        let request_id = round_events[0]["RequestID"].as_str().unwrap();
+        assert_eq!(seen.len(), want, "turn {turn}: {seen:?}");
+        let turn_events = &seen[want - 3..];
+        let types: Vec<&str> = turn_events.iter().map(|e| e["EventType"].as_str().unwrap()).collect();
+        assert_eq!(
+            types,
+            ["codex.rate_limits", "response.created", "response.completed"],
+            "turn {turn}"
+        );
+        let request_id = turn_events[0]["RequestID"].as_str().unwrap();
         assert!(!request_id.is_empty());
-        for (event, frame) in round_events.iter().zip([RATE_LIMITS, CREATED, DONE]) {
+        for (event, frame) in turn_events.iter().zip([RATE_LIMITS, CREATED, DONE]) {
             let payload = base64::engine::general_purpose::STANDARD
                 .decode(event["Payload"].as_str().unwrap())
                 .unwrap();
-            assert_eq!(payload, frame.as_bytes(), "stream {stream}");
-            assert_eq!(event["RequestID"], request_id, "one request ID per request");
+            assert_eq!(payload, frame.as_bytes(), "turn {turn}");
+            assert_eq!(event["RequestID"], request_id, "one request ID per turn");
             assert!(!event["TraceID"].as_str().unwrap().is_empty());
             assert_eq!(event["SourceFormat"], "openai-response");
             assert_eq!(event["Provider"], "codex");
@@ -129,8 +156,8 @@ async fn observer_plugins_receive_every_upstream_websocket_frame() {
             assert_eq!(event["AuthType"], "api_key");
             assert_eq!(event["Metadata"]["selected_auth_id"], auth_id.as_str());
         }
-        if round == 1 {
-            assert_ne!(seen[0]["RequestID"], seen[3]["RequestID"], "each request has its own ID");
+        if turn == 1 {
+            assert_ne!(seen[0]["RequestID"], seen[3]["RequestID"], "each turn has its own ID");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);

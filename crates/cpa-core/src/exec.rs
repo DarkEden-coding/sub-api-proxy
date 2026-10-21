@@ -443,7 +443,8 @@ impl WebSocketEmitter {
     /// One upstream frame; empty frames are not reported, as in Go.
     pub fn emit(&self, payload: &[u8]) {
         if !payload.is_empty() {
-            self.observer.response(self.provider, &self.credential, &self.model, payload);
+            self.observer
+                .response(self.provider, &self.credential, &self.model, payload);
         }
     }
 }

@@ -467,7 +467,13 @@ impl Hooks {
             return None;
         }
         let mut metadata = self.attempt_metadata(req, credential, route_model);
-        if let Some(path) = self.after.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|a| a.path.clone()) {
+        if let Some(path) = self
+            .after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|a| a.path.clone())
+        {
             metadata.insert("request_path".into(), Value::String(path));
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WebSocketResponseEvent>();
