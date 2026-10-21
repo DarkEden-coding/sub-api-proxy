@@ -336,20 +336,29 @@ fn claude_rejects_disabled(model: &str) -> bool {
     .any(|prefix| model.starts_with(prefix))
 }
 
-/// Thinking off: the model's `DisableType` when the registry has one (Go ad9e456d;
-/// `between_tools` on claude-sonnet-5-5), else `disabled`, or the lowest effort on a
-/// model that refuses `disabled` (`model` is the registry ID, or the body's `model` for
-/// an alias; docs/DIFFERENCES-FROM-GO.md).
-// ponytail: a fixed model list; move it into the model registry as a capability if
-// Anthropic keeps adding always-on models.
-fn claude_off(body: &[u8], model: &str, disable_type: &str) -> Vec<u8> {
-    if !disable_type.is_empty() {
-        return claude_disable(body, disable_type);
-    }
+/// Thinking off without registry capabilities (Go `applyCompatibleClaude`): `disabled`,
+/// or the lowest effort on a model that refuses `disabled` (`model` is the registry ID,
+/// or the body's `model` for an alias; docs/DIFFERENCES-FROM-GO.md).
+// ponytail: a fixed model list for models the registry cannot describe; drop it if Go
+// starts deciding by name too.
+fn claude_off_unregistered(body: &[u8], model: &str) -> Vec<u8> {
     if claude_rejects_disabled(model) || claude_rejects_disabled(&json::get(body, "model").str()) {
         return claude_adaptive(body, Some("low"));
     }
     claude_disable(body, "disabled")
+}
+
+/// Go `disableThinking` with registry capabilities: the model's `DisableType` (Go
+/// ad9e456d; `between_tools` on claude-sonnet-5-5), else `disabled`.
+fn claude_off(body: &[u8], disable_type: &str) -> Vec<u8> {
+    claude_disable(
+        body,
+        if disable_type.is_empty() {
+            "disabled"
+        } else {
+            disable_type
+        },
+    )
 }
 
 fn claude(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<u8>, Error> {
@@ -358,11 +367,11 @@ fn claude(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<
         let body = object_or_empty(body);
         // Go `applyCompatibleClaude` disables with `disabled`, whatever the model.
         return Ok(match config.mode {
-            Mode::None => claude_off(&body, model, ""),
+            Mode::None => claude_off_unregistered(&body, model),
             Mode::Auto => claude_enabled(&body, None),
             Mode::Level if config.level.is_empty() => body,
             Mode::Level => claude_adaptive(&body, Some(&config.level)),
-            Mode::Budget if config.budget == 0 => claude_off(&body, model, ""),
+            Mode::Budget if config.budget == 0 => claude_off_unregistered(&body, model),
             Mode::Budget => claude_enabled(&body, Some(config.budget)),
         });
     }
@@ -373,7 +382,7 @@ fn claude(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<
     let body = object_or_empty(body);
     let adaptive = !support.levels.is_empty();
     let budget = match config.mode {
-        Mode::None => return Ok(claude_off(&body, model, &support.disable_type)),
+        Mode::None => return Ok(claude_off(&body, &support.disable_type)),
         Mode::Level if adaptive && !config.level.is_empty() => return Ok(claude_adaptive(&body, Some(&config.level))),
         Mode::Level => match super::convert_level_to_budget(&config.level) {
             Some(budget) => budget,
@@ -384,7 +393,7 @@ fn claude(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<
         Mode::Auto => return Ok(claude_enabled(&body, None)),
     };
     if budget == 0 {
-        return Ok(claude_off(&body, model, &support.disable_type));
+        return Ok(claude_off(&body, &support.disable_type));
     }
     let result = claude_enabled(&body, Some(budget));
     Ok(normalize_claude_budget(result, budget, info))

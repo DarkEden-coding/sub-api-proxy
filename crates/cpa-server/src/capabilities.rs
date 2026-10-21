@@ -586,6 +586,24 @@ mod tests {
         let out: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(out["thinking"], serde_json::json!({"type": "between_tools"}), "{out}");
 
+        // Configured capabilities are authoritative: a model the proxy knows refuses
+        // `disabled` still gets it once its configuration allows turning thinking off.
+        let opus = resolve_model_info("claude-opus-5-5", "claude", Some(support("levels: [low, none]")));
+        let body = br#"{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}"#;
+        let caps = cpa_common::thinking::ModelCaps::from(&opus);
+        let out = cpa_common::thinking::apply_thinking_with_model_info(
+            body,
+            &[],
+            "claude-opus-5-5",
+            "claude",
+            "claude",
+            "claude",
+            Some(&caps),
+        )
+        .unwrap();
+        let out: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(out["thinking"], serde_json::json!({"type": "disabled"}), "{out}");
+
         let explicit = support("levels: [low]\ndisable-type: disabled");
         let explicit = resolve_model_info("claude-sonnet-5-5", "claude", Some(explicit));
         assert_eq!(explicit.thinking.unwrap().disable_type, "disabled");

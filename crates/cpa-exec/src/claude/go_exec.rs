@@ -462,11 +462,6 @@ fn unframe_chat(stream: &str) -> String {
 /// payload-rule params in one Go map): their bodies compare as JSON values.
 const GO_MAP_ORDER: &[&str] = &["TestClaudeExecutorPayloadOverrideDisabledThinking"];
 
-/// Go 6fecc6e tests that turn thinking off: v8.0.35 (ad9e456d `disableThinking`) replaces
-/// the whole `thinking` object instead of setting its type in place, so Go's recorded body
-/// is compared with that one value rewritten the way v8.0.35 writes it.
-const V8_0_35_DISABLED_THINKING: &[&str] = &["TestClaudeExecutor_DisabledThinkingStripsDisplayBeta"];
-
 /// Go v8.0.27 tests that send an API key's caller system text upstream top-level,
 /// where cliproxy-rs moves it after the leading user run as for every request
 /// (docs/DIFFERENCES-FROM-GO.md): Rust's body is compared with Go's after
@@ -803,14 +798,7 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
                     .replace("sk-ant-", "<sk>-"),
             );
         }
-        let (rust_body, mut go_body) = (rust_mask.apply(rust_body), go_mask.apply(go_body));
-        if V8_0_35_DISABLED_THINKING.contains(&test) {
-            go_body = go_body.replacen(
-                r#""thinking": {"type": "disabled"}"#,
-                r#""thinking": {"type":"disabled"}"#,
-                1,
-            );
-        }
+        let (rust_body, go_body) = (rust_mask.apply(rust_body), go_mask.apply(go_body));
         let as_json = |b: &str| serde_json::from_str::<Value>(b).ok();
         let same = rust_body == go_body
             || (GO_MAP_ORDER.contains(&test)

@@ -903,34 +903,44 @@ mod tests {
     }
 
     /// Go `TestPluginRegisteredSonnet55TurnsThinkingOffWithBetweenTools`: a plugin model's
-    /// `DisableType` reaches the Claude applier through the registry conversion.
+    /// `DisableType` reaches the Claude applier through the registry conversion. An older
+    /// plugin's payload without it turns thinking off with `disabled`, even on a model the
+    /// proxy knows refuses it: plugin capabilities are authoritative, as in Go.
     #[test]
     fn plugin_registered_sonnet_5_5_turns_thinking_off_with_between_tools() {
-        let info = model_spec(&cpa_plugin::api::ModelInfo {
-            id: "claude-sonnet-5-5".into(),
-            model_type: "claude".into(),
-            thinking: Some(cpa_plugin::api::ThinkingSupport {
-                zero_allowed: true,
-                levels: vec!["low".into(), "medium".into(), "high".into()],
-                disable_type: "between_tools".into(),
+        let thinking_off = |model: &str, thinking: &[u8]| {
+            let info = model_spec(&cpa_plugin::api::ModelInfo {
+                id: model.into(),
+                model_type: "claude".into(),
+                thinking: Some(cpa_plugin::gojson::from_slice(thinking).unwrap()),
                 ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .to_info();
-        let body = br#"{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}"#;
-        let caps = cpa_common::thinking::ModelCaps::from(&info);
-        let out = cpa_common::thinking::apply_thinking_with_model_info(
-            body,
-            &[],
-            "claude-sonnet-5-5",
-            "claude",
-            "claude",
-            "claude",
-            Some(&caps),
-        )
-        .unwrap();
-        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(out["thinking"], serde_json::json!({"type": "between_tools"}), "{out}");
+            })
+            .to_info();
+            let body = format!(
+                r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"thinking":{{"type":"disabled"}}}}"#
+            );
+            let caps = cpa_common::thinking::ModelCaps::from(&info);
+            let out = cpa_common::thinking::apply_thinking_with_model_info(
+                body.as_bytes(),
+                &[],
+                model,
+                "claude",
+                "claude",
+                "claude",
+                Some(&caps),
+            )
+            .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap()["thinking"].clone()
+        };
+        let current = br#"{"ZeroAllowed":true,"Levels":["low","medium","high"],"DisableType":"between_tools"}"#;
+        assert_eq!(
+            thinking_off("claude-sonnet-5-5", current),
+            serde_json::json!({"type": "between_tools"})
+        );
+        let older = br#"{"ZeroAllowed":true,"Levels":["low","medium","high"]}"#;
+        assert_eq!(
+            thinking_off("claude-opus-5-5", older),
+            serde_json::json!({"type": "disabled"})
+        );
     }
 }

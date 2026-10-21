@@ -3,7 +3,8 @@
 //! models (`claude-opus-5-5-high`, `claude-sonnet-5-5-high`), with v8.0.35's Claude
 //! thinking entries from Go ad9e456d: `disable_type: between_tools` on
 //! `claude-sonnet-5-5`, adaptive-only Opus 5.5 and Fable 5 and 5.1, and adaptive
-//! Opus 4.7 and 4.8.
+//! Opus 4.7 and 4.8, plus `claude-haiku-5-5` (Go f62d4d28): the `claude` section equals
+//! v8.0.35's.
 //!
 //! This is the static layer only. Go overlays a dynamic registry (per-credential
 //! registrations, config model definitions, remote catalog refresh) and consults it before
@@ -146,20 +147,28 @@ impl Catalog {
             .or_else(|| self.claude_family(self.channel("claude"), id))
     }
 
-    /// Go `LookupStaticModelInfoByChannel`: this channel's definition with the exact ID,
-    /// or for `claude` its family entry.
+    /// Go `LookupStaticModelInfoByChannel`: this channel's definition with the exact
+    /// (trimmed) ID, or for `claude` its family entry. Channel names fold as in Go
+    /// `GetStaticModelDefinitionsByChannel`.
     pub fn lookup_in_channel(&self, id: &str, channel: &str) -> Option<&ModelInfo> {
+        let id = id.trim();
         if id.is_empty() {
             return None;
         }
-        let models = self.channel(channel);
-        models.iter().find(|m| m.id == id).or_else(|| {
-            channel
-                .trim()
-                .eq_ignore_ascii_case("claude")
-                .then(|| self.claude_family(models, id))
-                .flatten()
-        })
+        let key = channel.trim().to_ascii_lowercase();
+        let section = match key.as_str() {
+            "gemini-interactions" => "gemini",
+            "codex" => "codex-pro",
+            "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi",
+            "x-ai" | "grok" => "xai",
+            "muse" => "meta",
+            other => other,
+        };
+        let models = self.channel(section);
+        models
+            .iter()
+            .find(|m| m.id == id)
+            .or_else(|| (section == "claude").then(|| self.claude_family(models, id)).flatten())
     }
 
     /// Dated and bracketed Claude variants (`claude-sonnet-5-5-20261001`,
@@ -421,6 +430,12 @@ mod tests {
                 Some(family),
                 "{id}"
             );
+            assert_eq!(
+                c.lookup_in_channel(&format!(" {id} "), " Claude ")
+                    .map(|m| m.id.as_str()),
+                Some(family),
+                "{id}"
+            );
         }
         assert_eq!(
             c.lookup("claude-haiku-4-5-20251001").map(|m| m.id.as_str()),
@@ -491,7 +506,7 @@ mod tests {
         assert_eq!(
             sizes,
             [
-                ("claude", 18),
+                ("claude", 19),
                 ("gemini", 14),
                 ("vertex", 21),
                 ("gemini-cli", 7),
