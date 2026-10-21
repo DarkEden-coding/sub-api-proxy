@@ -1,7 +1,8 @@
 //! Go v8.0.35 plugin-owned providers without a model router: a catalog-only plugin's
 //! models bind to the credentials of their provider (with the credential's excluded
 //! models applied), and a plugin executor serves those credentials through the
-//! ordinary selection loop. Private auth-dir, native test plugins, no upstream.
+//! ordinary selection loop. Plugin schedulers choose among built-in credentials.
+//! Private auth-dir, native test plugins, loopback-only upstreams.
 #![cfg(unix)]
 
 use std::net::SocketAddr;
@@ -53,6 +54,18 @@ async fn env(
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
 ) -> Option<Env> {
+    env_with(name, plugins, extra_yaml, auths, prepare, Default::default()).await
+}
+
+/// [`env`] with a Codex executor (for Codex live endpoints on a local mock).
+async fn env_with(
+    name: &str,
+    plugins: &[(&str, &str)],
+    extra_yaml: &str,
+    auths: &[(&str, &str)],
+    prepare: impl FnOnce(&Path),
+    codex: cpa_exec::codex::CodexExecutor,
+) -> Option<Env> {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -85,7 +98,7 @@ async fn env(
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex: Default::default(),
+            codex,
             devices: Default::default(),
             openai: Default::default(),
             google: Default::default(),
@@ -536,6 +549,560 @@ async fn a_refused_translation_answers_400_without_calling_the_routed_executor()
             "{path}: not executed"
         );
     }
+    env.finish().await;
+}
+
+/// A loopback OpenAI-compatible upstream that records each request's bearer key and
+/// fails with 500 for the key in `fail`.
+async fn keyed_upstream(seen: Arc<std::sync::Mutex<Vec<String>>>, fail: Arc<std::sync::Mutex<String>>) -> String {
+    let handler = move |headers: axum::http::HeaderMap| {
+        let (seen, fail) = (seen.clone(), fail.clone());
+        async move {
+            let key = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .trim_start_matches("Bearer ")
+                .to_owned();
+            seen.lock().unwrap().push(key.clone());
+            if *fail.lock().unwrap() == key {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down".to_owned());
+            }
+            (
+                axum::http::StatusCode::OK,
+                r#"{"id":"r","object":"chat.completion","created":1,"model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_owned(),
+            )
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handler))
+            .await
+            .unwrap()
+    });
+    url
+}
+
+/// Go `pickViaPluginScheduler` in `pickNextMixedLegacy`: the plugin scheduler sees the
+/// ready candidates of the highest priority tier (all tiers when it asks), without
+/// secret attributes, and picks one, rejects, or delegates to a built-in strategy;
+/// an unusable answer leaves the choice to the configured selector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_scheduler_picks_rejects_or_delegates() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::Mutex::new(String::new()));
+    let upstream = keyed_upstream(seen.clone(), fail.clone()).await;
+    let yaml = format!(
+        "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    priority: 5\n    api-key-entries: [{{api-key: k-a}}, {{api-key: k-b}}]\n    models: [{{name: up-model}}]\n  - name: low\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-low}}]\n    models: [{{name: up-model}}]\n"
+    );
+    // Codex live calls answer 201 with the `Thread-Id` as the call ID.
+    let live_upstream = {
+        let handler = |headers: axum::http::HeaderMap| async move {
+            let id = headers["thread-id"].to_str().unwrap().to_owned();
+            (
+                axum::http::StatusCode::CREATED,
+                [
+                    ("location", format!("/v1/live/{id}")),
+                    ("content-type", "application/sdp".to_owned()),
+                ],
+                "v=0",
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
+    for across in [false, true] {
+        // The second run also turns session affinity on.
+        let (caps, yaml) = if across {
+            (
+                "scheduler,scheduler_across_priorities",
+                format!("{yaml}routing:\n  session-affinity: true\n"),
+            )
+        } else {
+            ("scheduler", yaml.clone())
+        };
+        let codex = cpa_exec::codex::CodexExecutor::with_client(
+            wreq::Client::new(),
+            cpa_exec::codex_oauth::CodexOAuth::new(wreq::Client::new()),
+        )
+        .with_live_endpoints(
+            format!("{live_upstream}/backend-api/codex/realtime/calls"),
+            format!("ws{}/v1", live_upstream.trim_start_matches("http")),
+        );
+        let Some(env) = env_with(
+            &format!("plugin-scheduler-{across}"),
+            &[("sched", caps)],
+            &yaml,
+            &[(
+                "codex.json",
+                r#"{"type":"codex","access_token":"at-FAKE","account_id":"acct-FAKE"}"#,
+            )],
+            |_| {},
+            codex,
+        )
+        .await
+        else {
+            return;
+        };
+        let key_of = |id: &str| env.rt.store().get(id).unwrap().attributes["api_key"].clone();
+        let respond = |method: &str, once: bool, envelope: Value| {
+            let dir = env.records.join("respond").join("sched");
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = if once {
+                format!("{method}.once.json")
+            } else {
+                format!("{method}.json")
+            };
+            std::fs::write(dir.join(file), envelope.to_string()).unwrap();
+        };
+        let picks = || calls(&env.records, "sched", "scheduler.pick");
+        // Alpha Search selects one provider (Go `pickNextLegacy`), which the request
+        // names, and returns a reject unenriched with Go's 503 fallback status.
+        let alpha = || async {
+            respond(
+                "scheduler.pick",
+                true,
+                json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+            );
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let alpha = wreq::Client::new()
+                .post(format!("http://{}/backend-api/codex/alpha/search", env.proxy))
+                .header("x-custom", "v")
+                .body(r#"{"id":"s-1","model":"gpt-5.5","query":"q"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(alpha.status().as_u16(), 503);
+            assert_eq!(alpha.text().await.unwrap(), r#"{"error":"quota_hold: wait"}"#);
+            let pick = picks().pop().expect("the scheduler was asked");
+            assert_eq!(pick["Provider"], "codex");
+            assert_eq!(pick["Providers"], json!(["codex"]));
+            assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+            // The synthesized session header (Go `Header.Set` casing).
+            assert_eq!(pick["Options"]["Headers"]["X-Session-Id"], json!(["s-1"]));
+            assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+            assert!(
+                pick["Options"]["Metadata"].get("canonical_session_id").is_none(),
+                "no Enrich"
+            );
+            pick
+        };
+        let send_full = || async {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            seen.lock().unwrap().clear();
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .header("x-custom", "v")
+                .body(r#"{"model":"up-model","messages":[{"role":"user","content":"hi"}]}"#)
+                .send()
+                .await
+                .unwrap();
+            let headers = response.headers().clone();
+            (response.status().as_u16(), headers, response.text().await.unwrap())
+        };
+        let send = || async {
+            let (status, _, body) = send_full().await;
+            (status, body)
+        };
+
+        // The recorder picks the last candidate.
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let pick = picks().pop().expect("the scheduler was asked");
+        let candidates = pick["Candidates"].as_array().unwrap();
+        let keys: Vec<String> = candidates.iter().map(|c| key_of(c["ID"].as_str().unwrap())).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        let want: &[&str] = if across {
+            &["k-a", "k-b", "k-low"]
+        } else {
+            &["k-a", "k-b"]
+        };
+        assert_eq!(sorted, want, "across={across}: the candidates");
+        for c in candidates {
+            let priority = if key_of(c["ID"].as_str().unwrap()) == "k-low" {
+                0
+            } else {
+                5
+            };
+            assert_eq!(c["Priority"], priority);
+            assert_eq!(c["Status"], "active");
+            assert!(
+                c["Attributes"].get("api_key").is_none(),
+                "secret attributes stay out: {c}"
+            );
+            assert!(c["Attributes"].get("base_url").is_some(), "{c}");
+        }
+        let ids: Vec<&str> = candidates.iter().map(|c| c["ID"].as_str().unwrap()).collect();
+        let mut by_id = ids.clone();
+        by_id.sort();
+        assert_eq!(ids, by_id, "candidates are ordered by ID");
+        assert_eq!(pick["Provider"], "");
+        assert_eq!(pick["Model"], "up-model");
+        assert_eq!(pick["Stream"], false);
+        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+        let meta = &pick["Options"]["Metadata"];
+        assert_eq!(meta["session_affinity_provider"], "mixed");
+        assert_eq!(meta["session_affinity_model"], if across { "up-model" } else { "" });
+        assert_eq!(meta["request_path"], "/v1/chat/completions");
+        // Go `session.Enrich`: without an explicit session only the derived identity.
+        assert!(
+            meta["derived_session_id"].as_str().is_some_and(|d| !d.is_empty()),
+            "{meta}"
+        );
+        assert!(meta.get("canonical_session_id").is_none(), "{meta}");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [keys.last().unwrap().clone()],
+            "the picked credential serves"
+        );
+        if across {
+            // Go's affinity lookup cannot observe bindings a plugin scheduler made.
+            let host = env.rt.plugins().clone();
+            let instance = Arc::new(cpa_plugin::client::CallbackInstance::default());
+            let guard = cpa_plugin::testing::callback_context(
+                &host,
+                "sched",
+                instance.clone(),
+                cpa_plugin::callbacks::RequestScope::default(),
+            );
+            let lookup = tokio::task::spawn_blocking(move || {
+                cpa_plugin::testing::call_from_plugin(
+                    &host,
+                    "sched",
+                    &instance,
+                    "host.affinity.lookup",
+                    br#"{"provider":"up","model":"up-model","session_id":"s1"}"#,
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            drop(guard);
+            let lookup: Value = serde_json::from_slice(&lookup).unwrap();
+            assert_eq!(lookup["result"]["status"], "unsupported", "{lookup}");
+            // Under session affinity Alpha's selector argument is the route model.
+            assert_eq!(
+                alpha().await["Options"]["Metadata"]["session_affinity_model"],
+                "gpt-5.5"
+            );
+            env.finish().await;
+            continue;
+        }
+
+        // An unknown ID leaves the choice to the configured selector.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":"nope"}}),
+        );
+        assert_eq!(send().await.0, 200);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // Rejects: Go's auth codes are enriched, another code keeps its text.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true}}),
+        );
+        let (status, headers, body) = send_full().await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body,
+            r#"{"error":{"message":"auth_unavailable: scheduler rejected candidate selection (providers=openai-compatible-up,openai-compatible-low, model=up-model)","type":"server_error","code":"internal_server_error"}}"#
+        );
+        assert!(headers.get("retry-after").is_none(), "{headers:?}");
+        for c in env.rt.store().snapshot() {
+            assert!(
+                env.rt.store().cooldowns(&c.id).is_empty(),
+                "a reject cools nothing down"
+            );
+        }
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains("quota_hold: wait"), "{body}");
+        assert!(seen.lock().unwrap().is_empty(), "a reject sends nothing");
+
+        assert_eq!(alpha().await["Options"]["Metadata"]["session_affinity_model"], "");
+
+        // So does realtime, with Go's empty local model; any reject is a 503.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":false,"error":{"code":"busy","message":"scheduler busy"}}),
+        );
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let live = wreq::Client::new()
+            .post(format!("http://{}/v1/live", env.proxy))
+            .header("content-type", "application/json")
+            .header("x-custom", "v")
+            .body(r#"{"sdp":"v=0"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(live.status().as_u16(), 503, "a statusless scheduler error");
+        assert!(live.text().await.unwrap().contains("scheduler busy"));
+        let pick = picks().pop().expect("the scheduler was asked");
+        assert_eq!(pick["Provider"], "codex");
+        assert_eq!(pick["Model"], "");
+        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+        assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+        assert_eq!(pick["Options"]["Metadata"]["session_affinity_model"], "");
+        assert!(pick["Options"]["Metadata"].get("pinned_auth_id").is_none());
+
+        // An existing call's selection (here a hangup) names its credential and call.
+        let codex_id = env
+            .rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.provider == "codex")
+            .unwrap()
+            .id
+            .clone();
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":codex_id}}),
+        );
+        let created = wreq::Client::new()
+            .post(format!("http://{}/v1/live", env.proxy))
+            .header("content-type", "application/json")
+            .header("thread-id", "call-1")
+            .body(r#"{"sdp":"v=0"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status().as_u16(), 201, "{}", created.text().await.unwrap());
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let hangup = wreq::Client::new()
+            .post(format!("http://{}/v1/realtime/calls/call-1/hangup", env.proxy))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hangup.status().as_u16(), 503);
+        let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+        assert_eq!(meta["pinned_auth_id"], codex_id.as_str(), "{meta}");
+        assert_eq!(meta["execution_session_id"], "call-1", "{meta}");
+        assert_eq!(meta["session_affinity_model"], "", "{meta}");
+
+        // A session Go's `ExtractSessionInfo` sees but `hasExplicitSession` does not
+        // (`metadata.sessionID`) leaves only the derived identity, and a prompt cache key
+        // is canonical without its conversation alias as a parent.
+        for (body, canonical) in [
+            (
+                r#"{"model":"up-model","metadata":{"sessionID":"x"},"messages":[{"role":"user","content":"hi"}]}"#,
+                None,
+            ),
+            (
+                r#"{"model":"up-model","prompt_cache_key":"p1","conversation":{"id":"c1"},"messages":[{"role":"user","content":"hi"}]}"#,
+                Some("pck:p1"),
+            ),
+        ] {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+            match canonical {
+                None => {
+                    assert!(meta.get("canonical_session_id").is_none(), "{meta}");
+                    assert!(
+                        meta["derived_session_id"].as_str().is_some_and(|d| !d.is_empty()),
+                        "{meta}"
+                    );
+                }
+                Some(canonical) => {
+                    assert_eq!(meta["canonical_session_id"], canonical, "{meta}");
+                    assert!(meta.get("parent_session_id").is_none(), "{meta}");
+                    assert!(meta.get("derived_session_id").is_none(), "{meta}");
+                }
+            }
+        }
+
+        // An explicit session is canonical, with its parent; no derived identity.
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let explicit = wreq::Client::new()
+            .post(format!("http://{}/v1/chat/completions", env.proxy))
+            .header("content-type", "application/json")
+            .header("x-session-id", "child")
+            .body(r#"{"model":"up-model","parent_session_id":"parent","messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(explicit.status().as_u16(), 200);
+        let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+        assert_eq!(meta["canonical_session_id"], "header:child", "{meta}");
+        assert_eq!(meta["parent_session_id"], "header:parent", "{meta}");
+        assert!(meta.get("derived_session_id").is_none(), "{meta}");
+        seen.lock().unwrap().clear();
+
+        // The scheduler's own failure answers with its status.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":false,"error":{"code":"busy","message":"scheduler busy","http_status":429}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 429, "{body}");
+
+        // Delegation to the built-in strategies, within the top tier.
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"fill-first"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        // Fill-first takes the top tier's first credential by ID.
+        let first_by_id = candidates
+            .iter()
+            .map(|c| c["ID"].as_str().unwrap())
+            .min()
+            .map(key_of)
+            .unwrap();
+        assert_eq!(served, [first_by_id.as_str(); 3], "fill-first stays on one credential");
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"round-robin"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..4 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        served.sort();
+        assert_eq!(served, ["k-a", "k-a", "k-b", "k-b"], "round-robin alternates");
+
+        // A failed attempt is not offered again: the retry's candidates exclude it.
+        std::fs::remove_file(env.records.join("respond").join("sched").join("scheduler.pick.json")).unwrap();
+        let first = keys.last().unwrap().clone();
+        *fail.lock().unwrap() = first.clone();
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let picks = picks();
+        assert_eq!(picks.len(), 2, "one pick per attempt");
+        let retry: Vec<String> = picks[1]["Candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| key_of(c["ID"].as_str().unwrap()))
+            .collect();
+        assert!(!retry.contains(&first), "{retry:?}");
+        fail.lock().unwrap().clear();
+        env.finish().await;
+    }
+}
+
+/// Go's plugin availability pass does not filter by weight: under weighted round-robin
+/// a ready weight-0 credential is offered and can be picked, and with every weight at
+/// zero the scheduler is still asked. A picked credential that stopped being ready
+/// while the plugin answered falls back to the configured selector (Go serves it from
+/// its snapshot; docs/DIFFERENCES-FROM-GO.md).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_scheduler_sees_zero_weights_and_a_stale_pick_falls_back() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::Mutex::new(String::new()));
+    let upstream = keyed_upstream(seen.clone(), fail).await;
+    let yaml = format!(
+        "routing:\n  strategy: weighted-round-robin\nopenai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a, weight: 0}}, {{api-key: k-b, weight: 1}}]\n    models: [{{name: up-model}}]\n"
+    );
+    let Some(env) = env(
+        "plugin-scheduler-weights",
+        &[("sched", "scheduler")],
+        &yaml,
+        &[],
+        |_| {},
+    )
+    .await
+    else {
+        return;
+    };
+    let credential = |key: &str| {
+        env.rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.attributes.get("api_key").map(String::as_str) == Some(key))
+            .unwrap()
+    };
+    let dir = env.records.join("respond").join("sched");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pick_once = |key: &str| {
+        let envelope = json!({"ok":true,"result":{"handled":true,"auth_id":credential(key).id}});
+        std::fs::write(dir.join("scheduler.pick.once.json"), envelope.to_string()).unwrap();
+    };
+    let picks = || calls(&env.records, "sched", "scheduler.pick");
+    let send = || async {
+        seen.lock().unwrap().clear();
+        let response = wreq::Client::new()
+            .post(format!("http://{}/v1/chat/completions", env.proxy))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"up-model","messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{}", response.text().await.unwrap());
+        seen.lock().unwrap().clone()
+    };
+
+    // The weight-0 credential is offered and serves when picked.
+    pick_once("k-a");
+    assert_eq!(send().await, ["k-a"]);
+    let offered: Vec<Value> = picks().pop().unwrap()["Candidates"].as_array().unwrap().clone();
+    assert_eq!(offered.len(), 2, "{offered:?}");
+
+    // k-a stops being ready while the plugin answers: weighted selection serves k-b.
+    pick_once("k-a");
+    let hold = dir.join("scheduler.pick.hold");
+    std::fs::write(&hold, "").unwrap();
+    let before = picks().len();
+    let disable = async {
+        while picks().len() == before {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut off = (*credential("k-a")).clone();
+        off.disabled = true;
+        env.rt.store().upsert(off);
+        std::fs::remove_file(&hold).unwrap();
+    };
+    let (served, ()) = tokio::join!(send(), disable);
+    assert_eq!(served, ["k-b"]);
+
+    // Every weight at zero: the scheduler is still asked, and its pick serves.
+    let mut zero = (*credential("k-b")).clone();
+    zero.attributes.insert("weight".into(), "0".into());
+    env.rt.store().upsert(zero);
+    pick_once("k-b");
+    let before = picks().len();
+    assert_eq!(send().await, ["k-b"]);
+    assert_eq!(picks().len(), before + 1);
     env.finish().await;
 }
 
