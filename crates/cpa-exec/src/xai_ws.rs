@@ -693,6 +693,8 @@ fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
 /// and the events of its socket. A no-op without an observer.
 struct WsCapture {
     sink: CaptureSink,
+    /// Go `EmitWebSocketResponseEvent`, called with every `AppendAPIWebsocketResponse`.
+    websocket: Option<cpa_core::exec::WebSocketEmitter>,
     url: String,
     headers: Vec<(String, String)>,
     frame: Vec<u8>,
@@ -705,10 +707,12 @@ struct WsCapture {
 impl WsCapture {
     fn new(req: &ExecRequest, credential: &Credential, url: &str, headers: &HeaderMap, frame: &[u8]) -> Self {
         let sink = req.capture().clone();
+        let websocket = req.websocket_emitter(crate::xai::PROVIDER, credential);
         if !sink.enabled() {
             // Nothing reads the fields without an observer: keep no copy of the frame.
             return Self {
                 sink,
+                websocket,
                 url: String::new(),
                 headers: Vec::new(),
                 frame: Vec::new(),
@@ -722,6 +726,7 @@ impl WsCapture {
         Self {
             headers: crate::openai_compat_http::header_pairs(headers),
             sink,
+            websocket,
             url: url.to_owned(),
             frame: frame.to_vec(),
             auth_id: credential.id.clone(),
@@ -806,6 +811,9 @@ impl WsCapture {
     /// `AppendAPIWebsocketResponse`.
     fn response(&self, payload: &[u8]) {
         self.sink.record(CaptureEvent::WebsocketResponse(payload));
+        if let Some(websocket) = &self.websocket {
+            websocket.emit(payload);
+        }
     }
 }
 

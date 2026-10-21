@@ -1036,7 +1036,8 @@ impl CodexExecutor {
             });
         let guard = session.turn.clone().lock_owned().await;
         let frame = request_frame(body);
-        let wire = crate::codex_capture::Wire::new(req.capture(), view.credential);
+        let wire = crate::codex_capture::Wire::new(req.capture(), view.credential)
+            .with_websocket(req.websocket_emitter("codex", view.credential));
         wire.ws_request(&target.url, &headers, frame.as_bytes());
         let (mut conn, mut handshake) = if exec_session.continuation {
             match session.current().filter(|c| c.target == target) {
