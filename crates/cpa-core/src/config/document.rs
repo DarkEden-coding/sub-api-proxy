@@ -157,6 +157,11 @@ impl ConfigDocument {
     pub fn value(&self) -> &Value {
         &self.0
     }
+    /// The document for edits a path update cannot express, such as removing a field
+    /// from every list entry.
+    pub fn value_mut(&mut self) -> &mut Value {
+        &mut self.0
+    }
     /// yaml.v3's decoding of typed scalars (see [`super::coerce_typed_scalars`]).
     pub(super) fn coerce_typed_scalars(&mut self) {
         super::schema::coerce_typed_scalars(&mut self.0);

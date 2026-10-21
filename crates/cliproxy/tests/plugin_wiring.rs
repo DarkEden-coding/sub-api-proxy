@@ -605,10 +605,15 @@ fn request_path_plugins_match_go() {
                 }
                 op => panic!("unknown op {op}"),
             };
-            if got != step["result"] {
+            let mut want = step["result"].clone();
+            // The goldens predate v8.0.35, which exposes `ETag` on every response (`fa68946a`).
+            if let Some(Value::String(exposed)) = want.pointer_mut("/headers/Access-Control-Expose-Headers") {
+                *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
+            }
+            if got != want {
                 failures.push(format!(
-                    "{name} step {n} {}\n  go:   {}\n  rust: {got}",
-                    step["args"], step["result"]
+                    "{name} step {n} {}\n  go:   {want}\n  rust: {got}",
+                    step["args"]
                 ));
             }
         }

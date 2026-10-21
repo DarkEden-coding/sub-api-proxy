@@ -14,7 +14,7 @@
 //! applied. While nothing changes it does no work and sets no timer. As in Go, changes
 //! made by another machine on a network or FUSE file system raise no event and are seen
 //! with the next local change.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
@@ -434,26 +434,29 @@ fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>
         },
     };
     state.lock_auth_dir(&mut config);
-    let mut files = credentials::from_auth_dir(&config);
-    // A malformed in-place auth write is not a deletion. Keep the last good value;
-    // actual removal and a valid disabled update are reconciled normally.
-    for existing in state.rt.store().snapshot() {
-        if let Source::File(path) = &existing.source
-            && path.parent() == Some(config.auth_dir.as_path())
-            && path.exists()
-            && !files.iter().any(|c| c.id == existing.id)
-            && std::fs::read(path).ok().is_some_and(|data| {
-                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&data).is_err()
-            })
-        {
-            files.push(Credential::clone(&existing));
-        }
-    }
+    let (mut files, incomplete) = credentials::scan_auth_dir(&config);
+    keep_incomplete(state, &mut files, &incomplete);
     let result = accepted.then(|| config.clone());
     state.publish(config, Some(files));
     match config_error {
         Some(error) => Err(error),
         None => Ok(result),
+    }
+}
+
+/// An empty or half-written file is not a deletion (Go 7484a521): keep the
+/// last good credentials of the files the scan found incomplete. Deciding from the scan's
+/// own read, never a second one, means a file completed after the scan is picked up by
+/// the reload its write triggers instead of being dropped now. Removal and valid JSON
+/// without a credential are reconciled normally.
+fn keep_incomplete(state: &Management, files: &mut Vec<Credential>, incomplete: &HashSet<PathBuf>) {
+    for existing in state.rt.store().snapshot() {
+        if let Source::File(path) = &existing.source
+            && incomplete.contains(path)
+            && !files.iter().any(|c| c.id == existing.id)
+        {
+            files.push(Credential::clone(&existing));
+        }
     }
 }
 
@@ -480,6 +483,9 @@ mod tests {
         (Management::new(rt, path), dir)
     }
 
+    /// Also Go `TestSetConfigAppliesCurrentFileAndNonFileConfigs_Issue6631`: an external
+    /// edit is published by the reload that read it, and a config that did not come from
+    /// the file (a management or Home publication) still applies.
     #[tokio::test]
     async fn accepted_config_is_captured_and_skipped_reloads_do_not_advance_it() {
         let (state, dir) = state();
@@ -494,6 +500,111 @@ mod tests {
         std::fs::write(&state.path, config(9003)).unwrap();
         assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go 7484a521: an empty or partial in-place write keeps the credential; valid
+    /// JSON without one, or a removed file, deletes it (also the empty, partial and
+    /// valid-but-empty files of Go `TestFileSynthesizerRecordsIncompleteFiles`).
+    #[tokio::test]
+    async fn incomplete_auth_writes_keep_the_credential_until_the_file_is_valid_json() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        assert!(loaded(&state));
+        for (contents, kept) in [
+            ("", true),
+            (r#"{"type":"codex""#, true),
+            (" \n", true),
+            ("null", false),
+            ("{}", false),
+        ] {
+            std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+            reload(&state).unwrap();
+            std::fs::write(&file, contents).unwrap();
+            reload(&state).unwrap();
+            assert_eq!(loaded(&state), kept, "{contents:?}");
+        }
+        std::fs::write(&file, r#"{"type":"codex"}"#).unwrap();
+        reload(&state).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        reload(&state).unwrap();
+        assert!(!loaded(&state));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The editor finishes the file after the scan read it half-written and before the
+    /// reload publishes: the old credential is kept (a second read would see valid JSON,
+    /// keep nothing and drop the credential until the next reload).
+    #[tokio::test]
+    async fn a_file_completed_after_the_scan_keeps_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let good = r#"{"type":"codex","email":"a@example.com"}"#;
+        std::fs::write(&file, good).unwrap();
+        reload(&state).unwrap();
+        std::fs::write(&file, r#"{"type":"codex""#).unwrap();
+        let (mut files, incomplete) = credentials::scan_auth_dir(&state.rt.config());
+        assert!(incomplete.contains(&file) && files.is_empty());
+        std::fs::write(&file, good).unwrap();
+        keep_incomplete(&state, &mut files, &incomplete);
+        assert_eq!(files.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["a.json"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A file that cannot be read (here a symlink loop, for every user) drops its
+    /// credential, as Go's full scan does; only a read that succeeded can mark a file
+    /// incomplete. The watcher does not observe such an entry, so keeping it would
+    /// leave the credential live after the entry is deleted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_file_drops_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&file, &file).unwrap();
+        assert!(std::fs::read(&file).is_err());
+        reload(&state).unwrap();
+        assert!(!state.rt.store().snapshot().iter().any(|c| c.id == "a.json"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The scan counts the entries the watcher observes: a credential whose file is
+    /// replaced by a link to `/dev/null` is dropped by the reload that replacement
+    /// triggers, so deleting the link (which the watcher cannot see, having never
+    /// observed it) leaves nothing live.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_replaced_by_a_special_file_link_drops_its_credential() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"a@example.com"}"#).unwrap();
+        reload(&state).unwrap();
+        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
+        assert!(loaded(&state));
+        let capture = Capture::default();
+        let _guard = capture.install();
+        let watcher = start(&state);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &file).unwrap();
+        capture.wait_for("auth file changed (REMOVE): a.json").await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while loaded(&state) {
+                tokio::time::sleep(TICK).await;
+            }
+        })
+        .await
+        .expect("the reload the replacement triggered drops the credential");
+        std::fs::remove_file(&file).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!loaded(&state));
+        watcher.abort();
+        let _ = watcher.await;
         std::fs::remove_dir_all(dir).unwrap();
     }
 

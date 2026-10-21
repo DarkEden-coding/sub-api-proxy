@@ -497,11 +497,14 @@ async fn settle(state: &Arc<Management>, sid: &str, outcome: Outcome) {
             // `disk` can be held by a save that waits on the store's async I/O, so it is
             // never taken on a runtime worker.
             let worker = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let published = tokio::task::spawn_blocking(move || {
                 let _guard = worker.disk.lock().unwrap_or_else(PoisonError::into_inner);
                 worker.publish((*worker.rt.config()).clone(), None);
             })
             .await;
+            if published.is_err() {
+                return fail_session(state, sid, "Failed to save authentication tokens");
+            }
             state.oauth.complete(sid);
         }
         Outcome::Cancelled => {}

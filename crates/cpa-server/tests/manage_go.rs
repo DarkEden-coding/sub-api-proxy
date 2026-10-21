@@ -613,6 +613,10 @@ mod routes {
                 if want.contains_key("X-CPA-SUPPORT-PLUGIN") {
                     want.insert("X-CPA-SUPPORT-PLUGIN".into(), cpa_plugin::SUPPORT_PLUGIN.into());
                 }
+                // The goldens predate v8.0.35, which exposes `ETag` for config writes (`fa68946a`).
+                if let Some(Value::String(exposed)) = want.get_mut("Access-Control-Expose-Headers") {
+                    *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
+                }
                 assert_eq!(Value::Object(headers), Value::Object(want), "{name}[{i}] headers");
                 compared += 1;
             }
@@ -790,7 +794,11 @@ mod config_writes {
                 } else if want.is_null() {
                     assert!(body.is_empty(), "{at}: {body}");
                 } else {
-                    let got: Value = serde_json::from_str(&body).unwrap();
+                    let mut got: Value = serde_json::from_str(&body).unwrap();
+                    let mut body = body;
+                    if step["method"] == "GET" {
+                        strip_auth_indexes(step["path"].as_str().unwrap(), &mut got, &mut body);
+                    }
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
                         if got == *want {
@@ -852,7 +860,64 @@ mod config_writes {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         assert_eq!(compared, 98);
         eprintln!("config writes: {bytes_compared} of {compared} steps compared byte for byte");
-        assert!(bytes_compared >= 40, "only {bytes_compared} byte comparisons");
+        assert_eq!(bytes_compared, 69, "steps compared byte for byte");
+    }
+}
+
+/// The goldens predate v8.0.35, whose v8 api-keys reads give each group
+/// (`api-keys/<provider>/<n>`) or key (`.../keys/<m>`) its `auth_index`, 16 hex digits
+/// (`0fb50a18`; tests/management.rs pins them). Removes exactly those, located by the
+/// read's config path, from the value and from gin's compact bytes, so both comparisons
+/// still run.
+fn strip_auth_indexes(path: &str, value: &mut Value, body: &mut String) {
+    fn entry(at: &[String]) -> bool {
+        let index = |s: &String| s.parse::<usize>().is_ok();
+        match at {
+            [root, _, group] => root == "api-keys" && index(group),
+            [root, _, group, keys, key] => root == "api-keys" && index(group) && keys == "keys" && index(key),
+            _ => false,
+        }
+    }
+    fn walk(value: &mut Value, at: &mut Vec<String>, removed: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                let index = map.get("auth_index").and_then(Value::as_str).map(str::to_owned);
+                if let Some(index) =
+                    index.filter(|i| entry(at) && i.len() == 16 && i.bytes().all(|b| b.is_ascii_hexdigit()))
+                {
+                    map.shift_remove("auth_index");
+                    removed.push(index);
+                }
+                for (key, v) in map.iter_mut() {
+                    at.push(key.clone());
+                    walk(v, at, removed);
+                    at.pop();
+                }
+            }
+            Value::Array(items) => {
+                for (i, v) in items.iter_mut().enumerate() {
+                    at.push(i.to_string());
+                    walk(v, at, removed);
+                    at.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(rest) = path.strip_prefix("/config") else {
+        return;
+    };
+    let mut at: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    let mut removed = Vec::new();
+    walk(value, &mut at, &mut removed);
+    for index in removed {
+        let field = format!(r#""auth_index":"{index}""#);
+        let (before, after) = (format!(",{field}"), format!("{field},"));
+        *body = if body.contains(&before) {
+            body.replacen(&before, "", 1)
+        } else {
+            body.replacen(&after, "", 1)
+        };
     }
 }
 
