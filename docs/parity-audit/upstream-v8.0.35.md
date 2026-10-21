@@ -17,7 +17,7 @@ Columns:
 | Claude: prompt cache and prompt shaping | 10 | 6 | 0 | 0 | 1 | 3 |
 | Claude: thread continuation | 4 | 4 | 0 | 0 | 0 | 0 |
 | Claude: rate limits and error answers | 2 | 2 | 0 | 0 | 0 | 0 |
-| Claude: other executor work | 13 | 2 | 11 | 0 | 0 | 0 |
+| Claude: other executor work | 13 | 3 | 10 | 0 | 0 | 0 |
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **25** | **199** | **0** | **61** | **3** |
+| **All** | **288** | **26** | **198** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -76,7 +76,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`2bc236d2`](https://github.com/router-for-me/CLIProxyAPI/commit/2bc236d2) | feat(claude): support responses compaction in claude executor | yes | to port | L (+318 −4) | `/responses/compact` through Claude; Rust answers 501 as Go 6fecc6e did |
+| [`2bc236d2`](https://github.com/router-for-me/CLIProxyAPI/commit/2bc236d2) | feat(claude): support responses compaction in claude executor | yes | ported here | L (+318 −4) | `/responses/compact` and compaction triggers through Claude: a non-stream summary turn sealed into a CPA capsule; replayed capsules expand, foreign ones are dropped; replays Go's compaction tests |
 | [`e9c8769a`](https://github.com/router-for-me/CLIProxyAPI/commit/e9c8769a) | fix(executor): normalize and restore non-portable tool call IDs | yes | to port | M (+129 −3) | tool_use IDs rewritten to Anthropic's charset and restored (also Devin) |
 | [`02fc76b1`](https://github.com/router-for-me/CLIProxyAPI/commit/02fc76b1) | fix(claude): restore passthrough MCP tools wrapped with their full mcp__ name | yes | to port | S (+22 −0) | full mcp__ wrapper restoration; verify Rust alias restoration against the new regression |
 | [`0d18d3b3`](https://github.com/router-for-me/CLIProxyAPI/commit/0d18d3b3) | feat(claude): support model-specific default max tokens from registry in OpenAI chat completions | yes | to port | M (+68 −4) | support model-specific default max tokens from registry in OpenAI chat completions |

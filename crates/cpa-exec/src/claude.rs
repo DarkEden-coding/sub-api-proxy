@@ -28,6 +28,7 @@
 mod alias;
 mod betas;
 mod cloak;
+mod compaction;
 mod detect;
 mod headers;
 mod identity;
@@ -239,15 +240,85 @@ impl ClaudeExecutor {
         let cfg = &*scoped;
         // Go never checks for a token here: an empty key counts locally, or reaches the
         // upstream unauthenticated and gets its answer.
-        if req.alt.as_deref() == Some("responses/compact") {
-            // Go returns before it creates the usage reporter: no record at all.
-            req.usage.discard();
-            return Err(ExecError::local(
-                501,
-                FailureScope::Request,
-                "/responses/compact not supported",
-            ));
+        let mut req = req;
+        if req.operation == Operation::Generate {
+            crate::antigravity_compaction::expand_request(&mut req, "claude")
+                .map_err(|e| crate::gemini::status_err(400, e))?;
+            if req.alt.as_deref() == Some("responses/compact")
+                || crate::antigravity_compaction::has_trigger(&req.body)
+                || crate::antigravity_compaction::has_trigger(&req.original_body)
+            {
+                return self.compact(credential, req, cfg, delegation).await;
+            }
         }
+        self.run(credential, req, cfg, delegation, false).await
+    }
+
+    /// `executeClaudeCompaction` / `executeClaudeCompactionStream`: a non-stream Claude
+    /// summary of the conversation, sealed into a compaction item.
+    async fn compact(
+        &self,
+        credential: &Credential,
+        mut req: ExecRequest,
+        cfg: &Config,
+        delegation: Delegation,
+    ) -> Result<ExecResponse, ExecError> {
+        let model = base_model(&req.model);
+        let stream = req.stream;
+        req.body = compaction::summary_payload(crate::antigravity_compaction::source_payload(
+            &req.body,
+            &req.original_body,
+        ))
+        .into();
+        req.original_body = Bytes::new();
+        req.alt = None;
+        req.stream = false;
+        req.source_format = Format::OpenAIResponse;
+        req.response_format = Format::Claude;
+        let answer = self.run(credential, req, cfg, delegation, true).await?;
+        let ResponseBody::Buffered(payload) = answer.body else {
+            return Err(plain_error(
+                "extract summary: no summary text found in upstream response",
+            ));
+        };
+        let text = crate::antigravity_compaction::summary_text(&payload)
+            .map_err(|e| plain_error(format!("extract summary: {e}")))?;
+        let sealed = crate::antigravity_compaction::seal(&text, &model)
+            .map_err(|e| plain_error(format!("seal compaction capsule: {e}")))?;
+        let usage = compaction::Usage::of(&payload);
+        let mut headers = answer.headers;
+        if !stream {
+            return Ok(ExecResponse {
+                status: 200,
+                headers,
+                body: ResponseBody::Buffered(compaction::response(&model, &sealed, usage).into()),
+            });
+        }
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        let chunks: Vec<Result<Bytes, ExecError>> = compaction::stream_chunks(&model, &sealed, usage)
+            .into_iter()
+            .map(|chunk| Ok(Bytes::from(chunk)))
+            .collect();
+        Ok(ExecResponse {
+            status: 200,
+            headers,
+            body: ResponseBody::Stream(futures_util::stream::iter(chunks).boxed()),
+        })
+    }
+
+    /// One Execute / ExecuteStream / CountTokens after compaction; `compaction_summary`
+    /// marks the summary turn of [`Self::compact`].
+    async fn run(
+        &self,
+        credential: &Credential,
+        req: ExecRequest,
+        cfg: &Config,
+        delegation: Delegation,
+        compaction_summary: bool,
+    ) -> Result<ExecResponse, ExecError> {
         if req.response_format != Format::Claude && cpa_translate::pair(req.response_format, Format::Claude).is_none() {
             return Err(ExecError::local(
                 501,
@@ -255,7 +326,8 @@ impl ClaudeExecutor {
                 "Claude response translation pair is not registered",
             ));
         }
-        let ctx = Ctx::new(self, credential, &req, cfg, delegation);
+        let mut ctx = Ctx::new(self, credential, &req, cfg, delegation);
+        ctx.compaction_summary = compaction_summary;
         match req.operation {
             Operation::Generate => self.generate(ctx, req).await,
             Operation::CountTokens => self.count_tokens(ctx, req, delegation.count_upstream).await,
@@ -795,6 +867,8 @@ struct Ctx<'a> {
     kimi: bool,
     /// `upstreamRequestLogProvider`: the provider request logs name.
     log_provider: &'static str,
+    /// The summary turn of a Responses compaction (`claudeCompactionSummaryFromContext`).
+    compaction_summary: bool,
     /// Normalized execution-session ID (websocket executions), or empty.
     execution: String,
     /// `cliproxyauth.ResolvedModelInfo`: the capabilities dispatch bound to this attempt.
@@ -996,6 +1070,7 @@ impl<'a> Ctx<'a> {
             upstream_model: delegation.upstream_model.map_or_else(|| base.clone(), |f| f(&base)),
             kimi: kimi_upstream(&credential.provider, &base_url),
             log_provider: delegation.request_log_provider.unwrap_or("claude"),
+            compaction_summary: false,
             execution: session::normalize(req.execution_session.as_deref().unwrap_or_default()),
             is_compat: req.resolved_model.as_ref().is_some_and(|r| r.is_compat()),
             codex: cpa_common::codex_client::Settings::from_config(cfg),
@@ -1286,6 +1361,9 @@ impl<'a> Ctx<'a> {
                     injected_diagnostics = true;
                 }
             }
+        }
+        if self.compaction_summary {
+            body = compaction::finalize(body);
         }
         let placement = reconcile::SystemPlacement::capture(&before, &body, cloaked);
         let fable = reconcile::FableState::capture(&before, &body, cloaked);
