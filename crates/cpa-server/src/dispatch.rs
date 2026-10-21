@@ -2172,7 +2172,15 @@ async fn attempt(
                 tracker
             })
         };
+        // Go `Options.WebSocketResponseObserver`, bound to the credential the executor gets.
+        let observe = |credential: &cpa_core::credential::Credential, req: &mut ExecRequest| {
+            if let Some(hooks) = hooks {
+                let observer = hooks.websocket_observer(req, credential, &route_model);
+                req.usage = std::mem::take(&mut req.usage).with_websocket(observer);
+            }
+        };
         let mut tracker = start(&lease.credential, &mut req);
+        observe(&lease.credential, &mut req);
         let session = session.as_ref();
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
             let credential = match crate::plugins::model_callbacks::context().filter(|c| !c.proxy_url.is_empty()) {
@@ -2224,6 +2232,7 @@ async fn attempt(
             lease.credential = current;
             lease.redispatch();
             tracker = start(&lease.credential, &mut req);
+            observe(&lease.credential, &mut req);
             executed = execute(lease.credential.clone(), req).await;
         }
         if let (Ok(response), Some(t)) = (&executed, tracker.as_mut()) {
