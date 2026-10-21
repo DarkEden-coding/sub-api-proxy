@@ -1325,6 +1325,7 @@ impl CredentialStore {
         let written = self.write_unlocked(
             &credential.id,
             credential.revision,
+            false,
             |current| {
                 let mut metadata = current.metadata.clone();
                 metadata.insert("disabled".into(), Value::Bool(current.disabled));
@@ -1798,6 +1799,7 @@ impl CredentialStore {
         let committed = self.write_unlocked(
             id,
             expected_revision,
+            false,
             |current| {
                 if patch.remove.iter().any(|k| k == "type")
                     || patch
@@ -1837,21 +1839,30 @@ impl CredentialStore {
     /// `prepare` sees the credential at `expected_revision` (`Stale` otherwise) and
     /// returns the file and bytes to write, or `None` for nothing to do; `publish` then
     /// puts the result in place under the write lock. The credential's write lock and
-    /// the reload gate are held throughout, so neither another write of it nor a set
-    /// replacement can land between the write and its publication.
+    /// the reload gate (shared) are held throughout, so neither another write of it nor
+    /// a set replacement can land between the write and its publication. A publication
+    /// that touches another credential (an identity change) passes `exclusive` and holds
+    /// the gate exclusively instead, so no write of any credential is in flight.
     fn write_unlocked<T, R>(
         &self,
         id: &str,
         expected_revision: u64,
+        exclusive: bool,
         prepare: impl FnOnce(&Arc<Credential>) -> Result<Option<(std::path::PathBuf, Vec<u8>, T)>, PatchError>,
         publish: impl FnOnce(&mut Inner, usize, &[u8], T) -> R,
     ) -> Result<Option<R>, PatchError> {
-        let _reload = self.reload.read().unwrap_or_else(PoisonError::into_inner);
-        let lock = {
+        // Acquired once, before the check and the write: re-taking the gate while holding
+        // it can deadlock behind a waiting reload.
+        let lock = (!exclusive).then(|| {
             let mut locks = self.write_locks.lock().unwrap_or_else(PoisonError::into_inner);
             locks.entry(id.to_owned()).or_default().clone()
+        });
+        let _gate = if exclusive {
+            (None, Some(self.reload.write().unwrap_or_else(PoisonError::into_inner)))
+        } else {
+            (Some(self.reload.read().unwrap_or_else(PoisonError::into_inner)), None)
         };
-        let _own = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _own = lock.as_ref().map(|l| l.lock().unwrap_or_else(PoisonError::into_inner));
         let current = self
             .read()
             .creds
@@ -1869,7 +1880,7 @@ impl CredentialStore {
         };
         write_bytes_atomic(&path, &bytes).map_err(|e| PatchError::Io(e.to_string()))?;
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        // Every other change to this credential waits on one of the two locks held here.
+        // Every other change to this credential waits on the locks held here.
         let index = inner
             .creds
             .iter()
@@ -1927,9 +1938,12 @@ impl CredentialStore {
         bytes: &[u8],
         next: Option<Credential>,
     ) -> Result<(), PatchError> {
+        // A new ID can replace another credential, whose own write lock is not held here.
+        let exclusive = next.as_ref().is_some_and(|n| n.id != id);
         self.write_unlocked(
             id,
             expected_revision,
+            exclusive,
             |current| {
                 let Source::File(path) = &current.source else {
                     return Err(PatchError::ConfigBacked);
@@ -2336,6 +2350,8 @@ fn credentials_changed(a: &Credential, b: &Credential) -> bool {
 /// sibling and a rename. The temp name does not end in `.json`, so a crash never leaves
 /// a loadable credential.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::stall_write(path);
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -2766,129 +2782,199 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Go 8a01bc02 (`TestManagerBlockedSaveAllowsUnrelatedCredential`,
-    /// `TestManagerBlockedSaveSerializesLoad`): while one credential's file write is
-    /// stalled, other credentials stay readable, selectable and writable, and a reload
-    /// waits until the stalled write is published instead of replacing the credential
-    /// between its write and its publication. (A reload whose scan read the file before
-    /// the write is Go c4c1d43e's stale-snapshot check, not ported here.)
-    #[test]
-    fn a_stalled_credential_write_blocks_only_its_reload() {
-        use std::sync::mpsc;
-        let dir = std::env::temp_dir().join(format!("cpa-stalled-write-{}", std::process::id()));
+    /// The next write of `path` (from any thread) stops inside [`write_bytes_atomic`],
+    /// before the file changes, until the returned release is sent or dropped.
+    fn stall_next_write(path: &Path) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        STALLS
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), (entered_tx, release_rx));
+        (entered, release)
+    }
+
+    type Stall = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+    static STALLS: std::sync::LazyLock<Mutex<HashMap<std::path::PathBuf, Stall>>> =
+        std::sync::LazyLock::new(Mutex::default);
+
+    pub(super) fn stall_write(path: &Path) {
+        let Some((entered, release)) = STALLS.lock().unwrap().remove(path) else {
+            return;
+        };
+        let _ = entered.send(());
+        let _ = release.recv();
+    }
+
+    /// Runs `f` on its own thread; its result, or `None` while it is still running after
+    /// `wait`.
+    fn spawn_bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> std::sync::mpsc::Receiver<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx
+    }
+
+    const BOUND: Duration = Duration::from_secs(5);
+    const BLOCKED: Duration = Duration::from_millis(300);
+
+    fn stalled_store(
+        name: &str,
+        files: &[&str],
+    ) -> (std::path::PathBuf, cpa_core::config::Config, Arc<CredentialStore>) {
+        let dir = std::env::temp_dir().join(format!("cpa-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for name in ["a.json", "b.json"] {
-            std::fs::write(dir.join(name), r#"{"type":"claude","access_token":"old"}"#).unwrap();
+        for file in files {
+            std::fs::write(dir.join(file), r#"{"type":"claude","access_token":"old"}"#).unwrap();
         }
         let mut cfg = cpa_core::config::Config::parse("").unwrap();
         cfg.auth_dir = dir.clone();
-        let store = Arc::new(CredentialStore::new(cpa_core::config::credentials::from_auth_dir(&cfg)));
-        let (entered_tx, entered) = mpsc::channel();
-        let (release, release_rx) = mpsc::channel::<()>();
-        let writer = std::thread::spawn({
+        let store = CredentialStore::new(cpa_core::config::credentials::from_auth_dir(&cfg));
+        (dir, cfg, store)
+    }
+
+    fn token_patch(token: &str) -> MetadataPatch {
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("access_token".into(), token.into());
+        patch
+    }
+
+    /// Go 8a01bc02 (`TestManagerBlockedSaveAllowsUnrelatedCredential`,
+    /// `TestManagerBlockedSaveSerializesLoad`): while a refresh commit's file write is
+    /// stalled on disk, snapshots and selection proceed, before and while a reload is
+    /// pending; another credential's write proceeds; and neither the reload nor another
+    /// write of the same credential overtakes the stalled one. (A reload whose scan read
+    /// the file before the write is Go c4c1d43e's stale-snapshot check, not ported here.)
+    #[test]
+    fn a_stalled_credential_write_blocks_only_its_reload() {
+        let (dir, cfg, store) = stalled_store("stalled-write", &["a.json", "b.json"]);
+        let before = store.get("a.json").unwrap().revision;
+        let (entered, release) = stall_next_write(&dir.join("a.json"));
+        let writer = spawn_bounded({
             let store = store.clone();
-            let revision = store.get("a.json").unwrap().revision;
             move || {
-                store.write_unlocked(
-                    "a.json",
-                    revision,
-                    |current| {
-                        entered_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        let Source::File(path) = &current.source else {
-                            unreachable!()
-                        };
-                        Ok(Some((
-                            path.clone(),
-                            br#"{"type":"claude","access_token":"new"}"#.to_vec(),
-                            (),
-                        )))
-                    },
-                    |inner, index, _, ()| {
-                        let mut next = Credential::clone(&inner.creds[index]);
-                        next.metadata.insert("access_token".into(), "new".into());
-                        inner.generation += 1;
-                        next.revision = inner.generation;
-                        inner.creds[index] = Arc::new(next);
-                    },
-                )
+                store
+                    .apply_patch("a.json", before, &token_patch("new"))
+                    .map(|c| c.revision)
             }
         });
-        entered.recv().unwrap();
-        // Bounded: each check runs on a thread and must finish while the write stalls.
-        let within = |what: &str, f: Box<dyn FnOnce() + Send>| {
-            let (done_tx, done) = mpsc::channel();
-            std::thread::spawn(move || {
-                f();
-                done_tx.send(()).unwrap();
-            });
-            assert!(
-                done.recv_timeout(Duration::from_secs(5)).is_ok(),
-                "{what} waited for the stalled write"
-            );
-        };
-        within(
-            "a read",
-            Box::new({
+        entered.recv_timeout(BOUND).expect("the write reached the disk");
+        // Leases stay alive until the end: dropping one records a result and persists.
+        let mut leases = Vec::new();
+        let read_and_select = |leases: &mut Vec<Lease>, when: &str| {
+            let reader = spawn_bounded({
                 let store = store.clone();
-                move || assert_eq!(store.snapshot().len(), 2)
-            }),
-        );
-        within(
-            "a selection",
-            Box::new({
+                move || store.snapshot().len()
+            });
+            assert_eq!(reader.recv_timeout(BOUND).ok(), Some(2), "a snapshot {when}");
+            let selector = spawn_bounded({
                 let store = store.clone();
                 move || {
-                    // Not a.json itself: recording its result persists it, which waits.
-                    let selection = Selection {
+                    store.select(Selection {
                         exclude: vec!["a.json".into()],
                         ..sel("claude")
-                    };
-                    drop(store.select(selection).expect("b.json"));
+                    })
                 }
-            }),
-        );
-        within(
-            "another credential's write",
-            Box::new({
-                let store = store.clone();
-                move || {
-                    let mut patch = MetadataPatch::default();
-                    patch.set.insert("access_token".into(), "b2".into());
-                    let revision = store.get("b.json").unwrap().revision;
-                    store.apply_patch("b.json", revision, &patch).unwrap();
-                }
-            }),
-        );
-        // A reload whose scan already holds the new file: published in between, it would
-        // replace the credential the stalled write is about to publish.
-        let rescan = {
-            let mut set = cpa_core::config::credentials::from_auth_dir(&cfg);
-            let a = set.iter_mut().find(|c| c.id == "a.json").unwrap();
-            a.metadata.insert("access_token".into(), "new".into());
-            set
+            });
+            let lease = selector
+                .recv_timeout(BOUND)
+                .unwrap_or_else(|_| panic!("a selection {when}"));
+            leases.push(lease.expect("b.json"));
         };
-        let (reloaded_tx, reloaded) = mpsc::channel();
-        let reload = std::thread::spawn({
+        read_and_select(&mut leases, "during the write");
+        let other = spawn_bounded({
             let store = store.clone();
             move || {
-                store.reconcile(rescan);
-                reloaded_tx.send(()).unwrap();
+                let revision = store.get("b.json").unwrap().revision;
+                store.apply_patch("b.json", revision, &token_patch("b2")).map(|_| ())
             }
         });
         assert!(
-            reloaded.recv_timeout(Duration::from_millis(300)).is_err(),
+            matches!(other.recv_timeout(BOUND), Ok(Ok(()))),
+            "another credential's write"
+        );
+        // A scan made now still reads A's old file, which is c4c1d43e's stale snapshot;
+        // this reload carries what the write is about to publish, so the end state shows
+        // which one landed last.
+        let mut rescan = cpa_core::config::credentials::from_auth_dir(&cfg);
+        let in_scan = rescan.iter_mut().find(|c| c.id == "a.json").unwrap();
+        in_scan.metadata.insert("access_token".into(), "new".into());
+        in_scan.metadata.insert("reloaded".into(), true.into());
+        let reload = spawn_bounded({
+            let store = store.clone();
+            move || store.reconcile(rescan)
+        });
+        assert!(
+            reload.recv_timeout(BLOCKED).is_err(),
             "the reload overtook the stalled write"
         );
-        release.send(()).unwrap();
-        writer.join().unwrap().expect("the stalled write is published");
-        reload.join().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dir.join("a.json")).unwrap(),
-            r#"{"type":"claude","access_token":"new"}"#
+        read_and_select(&mut leases, "while a reload is pending");
+        let same = spawn_bounded({
+            let store = store.clone();
+            move || store.apply_patch("a.json", before, &token_patch("other")).map(|_| ())
+        });
+        assert!(
+            same.recv_timeout(BLOCKED).is_err(),
+            "a write of the same credential overtook it"
         );
-        assert_eq!(store.get("a.json").unwrap().metadata["access_token"], "new");
+        release.send(()).unwrap();
+        let published = writer
+            .recv_timeout(BOUND)
+            .expect("the write finished")
+            .expect("and published");
+        assert!(published > before);
+        reload.recv_timeout(BOUND).expect("the reload finished");
+        assert!(
+            matches!(same.recv_timeout(BOUND), Ok(Err(PatchError::Stale { .. }))),
+            "the same-credential write saw the published revision"
+        );
+        drop(leases);
+        let file: Map<String, Value> = serde_json::from_slice(&std::fs::read(dir.join("a.json")).unwrap()).unwrap();
+        assert_eq!(file["access_token"], "new");
+        let a = store.get("a.json").unwrap();
+        assert_eq!(
+            a.metadata.get("reloaded"),
+            Some(&Value::Bool(true)),
+            "the reload landed last"
+        );
+        assert!(a.revision > published);
+        assert_eq!(store.get("b.json").unwrap().metadata["access_token"], "b2");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An edit that renames credential A to B's ID replaces B, so it must not run while
+    /// a write of B is between its revision check and its publication.
+    #[test]
+    fn an_identity_change_waits_for_a_write_of_the_credential_it_replaces() {
+        let (dir, _cfg, store) = stalled_store("identity-change", &["a.json", "b.json"]);
+        let b = store.get("b.json").unwrap().revision;
+        let a = store.get("a.json").unwrap();
+        let (entered, release) = stall_next_write(&dir.join("b.json"));
+        let writer = spawn_bounded({
+            let store = store.clone();
+            move || store.apply_patch("b.json", b, &token_patch("b2")).map(|c| c.revision)
+        });
+        entered.recv_timeout(BOUND).expect("B's write reached the disk");
+        let mut renamed = Credential::clone(&a);
+        renamed.id = "b.json".into();
+        renamed.metadata.insert("access_token".into(), "renamed".into());
+        let replace = spawn_bounded({
+            let store = store.clone();
+            move || {
+                let bytes = br#"{"type":"claude","access_token":"renamed"}"#;
+                store.replace_file_backed("a.json", a.revision, bytes, Some(renamed))
+            }
+        });
+        assert!(replace.recv_timeout(BLOCKED).is_err(), "the rename overtook B's write");
+        release.send(()).unwrap();
+        let written = writer.recv_timeout(BOUND).expect("B's write finished");
+        assert!(written.is_ok(), "B's write was published, not dropped: {written:?}");
+        assert!(matches!(replace.recv_timeout(BOUND), Ok(Ok(()))));
+        let ids: Vec<String> = store.snapshot().iter().map(|c| c.id.clone()).collect();
+        assert_eq!(ids, ["b.json"]);
+        assert_eq!(store.get("b.json").unwrap().metadata["access_token"], "renamed");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
