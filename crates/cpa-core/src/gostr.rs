@@ -62,6 +62,14 @@ fn simple_fold(r: u32) -> u32 {
     }
 }
 
+/// One allocation of the input's size: simple case mappings rarely change a rune's
+/// UTF-8 length.
+fn map_runes(s: &str, f: fn(char) -> char) -> String {
+    let mut out = String::with_capacity(s.len());
+    out.extend(s.chars().map(f));
+    out
+}
+
 /// Go's string comparisons, as methods so call sites read like the Go they port.
 pub trait GoStr {
     /// `strings.ToLower`: rune-wise simple lowercase (no context, no expansion).
@@ -74,11 +82,11 @@ pub trait GoStr {
 
 impl GoStr for str {
     fn go_lower(&self) -> String {
-        self.chars().map(to_lower_rune).collect()
+        map_runes(self, to_lower_rune)
     }
 
     fn go_upper(&self) -> String {
-        self.chars().map(to_upper_rune).collect()
+        map_runes(self, to_upper_rune)
     }
 
     fn go_eq_fold(&self, other: &str) -> bool {
