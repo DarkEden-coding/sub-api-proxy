@@ -98,12 +98,6 @@ pub fn validate(data: &[u8]) -> Result<(), String> {
         }
         validate_model(model).map_err(|e| format!("Codex client model catalog model {slug:?}: {e}"))?;
     }
-    if !seen.contains("gpt-5.5") {
-        return Err(format!(
-            "Codex client model catalog is missing default template {:?}",
-            "gpt-5.5"
-        ));
-    }
     Ok(())
 }
 
@@ -210,16 +204,21 @@ fn templates() -> Option<Arc<Templates>> {
             return None;
         };
         let mut by_slug = HashMap::new();
+        let mut default = None;
         for model in models {
             let GoValue::Object(model) = model else {
                 continue;
             };
             let slug = string(&model, "slug");
             if !slug.is_empty() {
+                // `gpt-5.5`, else the catalog's first model.
+                if default.is_none() || slug == "gpt-5.5" {
+                    default = Some(model.clone());
+                }
                 by_slug.insert(slug, model);
             }
         }
-        let default = by_slug.get("gpt-5.5")?.clone();
+        let default = default?;
         Some(Arc::new(Templates { by_slug, default }))
     });
     *cache = Some((revision, parsed.clone()));
@@ -565,11 +564,15 @@ fn apply_provider_capabilities(entry: &mut Map, id: &str, template: bool, regist
     apply_search_tool(entry, id, true, registry);
 }
 
-/// `nullCodexClientRequiredOptions`: keys Codex requires, cleared for non-Codex models.
+/// `nullCodexClientRequiredOptions`: keys Codex requires, cleared for non-Codex models,
+/// which also get direct tool calls without Responses lite or effort updates.
 fn null_required_options(entry: &mut Map) {
     for key in ["apply_patch_tool_type", "upgrade", "availability_nux"] {
         entry.insert(key.into(), GoValue::Null);
     }
+    entry.insert("tool_mode".into(), GoValue::String("direct".into()));
+    entry.insert("use_responses_lite".into(), GoValue::Bool(false));
+    entry.insert("supports_reasoning_effort_updates".into(), GoValue::Bool(false));
 }
 
 /// `useCompactCodexClientInstructions`.
@@ -929,12 +932,10 @@ fn is_devin(id: &str, model: &Map, entry: &Map, registry: &dyn Registry) -> bool
 }
 
 /// `applyCodexClientApplyPatchCapability`: `freeform` only for text models every route
-/// supports.
+/// supports, or without `enable-apply-patch`, for templates that declare it.
 fn apply_patch_capability(entry: &mut Map, id: &str, capability: Option<&dyn Fn(&str) -> bool>) {
+    let template_supported = matches!(entry.get("apply_patch_tool_type"), Some(GoValue::String(s)) if s == "freeform");
     entry.insert("apply_patch_tool_type".into(), GoValue::Null);
-    let Some(capability) = capability else {
-        return;
-    };
     let lower = id.trim().go_lower();
     let base = lower.rfind('/').map_or(lower.as_str(), |i| lower[i + 1..].trim());
     if image_or_video(base) {
@@ -951,6 +952,12 @@ fn apply_patch_capability(entry: &mut Map, id: &str, capability: Option<&dyn Fn(
     if !text && (declared || hidden) {
         return;
     }
+    let Some(capability) = capability else {
+        if template_supported {
+            entry.insert("apply_patch_tool_type".into(), GoValue::String("freeform".into()));
+        }
+        return;
+    };
     if capability(id.trim()) {
         entry.insert("apply_patch_tool_type".into(), GoValue::String("freeform".into()));
     }
