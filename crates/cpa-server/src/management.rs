@@ -913,20 +913,15 @@ fn config_sync_locked(
             Ok(v) if has_document => v,
             _ => return error(400, "invalid_body"),
         };
-        // A whole-config body is alias-normalized first, where a scalar merge fails
-        // (Go `NormalizeV8ConfigAliases`, 400). ponytail: below the root this answers
-        // 422, but in a JSON body Go reads `<<` as a plain key (opaque plugin data
-        // keeps it); telling JSON bodies apart here is the upgrade path.
-        if let Err(e) = cpa_core::config::expand_merges(&mut value) {
-            let status = if parts.is_empty() {
-                StatusCode::BAD_REQUEST
-            } else {
-                StatusCode::UNPROCESSABLE_ENTITY
-            };
-            return invalid_config(status, e);
-        }
         if parts.is_empty() && !value.is_mapping() {
             return error(400, "config_must_be_object");
+        }
+        // A YAML upload is alias-normalized first, where a scalar merge fails (Go
+        // `NormalizeV8ConfigAliases`, 400). JSON keys are quoted, so Go keeps `<<` as a
+        // plain key through the update and expands it only when it parses its own save,
+        // which writes it plain: below.
+        if yaml && let Err(e) = cpa_core::config::expand_merges(&mut value) {
+            return invalid_config(StatusCode::BAD_REQUEST, e);
         }
         auth_index::strip_update(&parts, &mut value);
         if parts.is_empty() {
@@ -939,6 +934,11 @@ fn config_sync_locked(
             doc.preserve_turn_secrets(&before);
         }
         written = Some(value);
+        // The completed candidate, as Go reparses it: keys already there win over merged
+        // ones, and a scalar merge is an invalid config (422).
+        if !yaml && let Err(e) = cpa_core::config::expand_merges(doc.value_mut()) {
+            return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e);
+        }
     }
     ConfigDocument::normalize_aliases(doc.value_mut());
     // Go saves every v8 write as `NormalizeConfigLayout` output, which declares the

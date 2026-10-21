@@ -2649,11 +2649,20 @@ mod tests {
         assert!(content.trim_ascii_end().ends_with(b"\ndone"), "no complete log");
         drop(app);
         drop(state);
-        let leftovers: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|e| e == "tmp"))
-            .collect();
+        // A spool removes its file when dropped, after its section was copied into the
+        // log, so the log can be complete a moment before the file is gone.
+        let mut leftovers = Vec::new();
+        for _ in 0..500 {
+            leftovers = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|e| e == "tmp"))
+                .collect();
+            if leftovers.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         assert!(leftovers.is_empty(), "spool files left behind: {leftovers:?}");
         std::fs::remove_dir_all(dir).unwrap();
         content
