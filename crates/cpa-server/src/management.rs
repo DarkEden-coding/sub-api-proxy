@@ -891,10 +891,8 @@ pub(crate) fn config_sync(
             return error(400, "config_must_be_object");
         }
         auth_index::strip_update(&parts, &mut value);
-        if parts.is_empty()
-            && let Err(e) = ConfigDocument::normalize_aliases(&mut value)
-        {
-            return invalid_config(StatusCode::BAD_REQUEST, e);
+        if parts.is_empty() {
+            ConfigDocument::normalize_aliases(&mut value);
         }
         if doc.update(&parts, value.clone(), method == Method::PATCH).is_err() {
             return error(400, "invalid_path");
@@ -904,9 +902,7 @@ pub(crate) fn config_sync(
         }
         written = Some(value);
     }
-    if let Err(e) = ConfigDocument::normalize_aliases(doc.value_mut()) {
-        return invalid_config(StatusCode::BAD_REQUEST, e);
-    }
+    ConfigDocument::normalize_aliases(doc.value_mut());
     // Go saves every v8 write as `NormalizeConfigLayout` output, which declares the
     // version even when a whole-config PUT omitted it.
     if let Some(root) = doc.value_mut().as_mapping_mut()

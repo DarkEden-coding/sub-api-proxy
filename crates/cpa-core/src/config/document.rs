@@ -349,10 +349,13 @@ impl ConfigDocument {
     /// Go `NormalizeV8ConfigAliases` for a request body or the edited document: the
     /// historical v8 spellings move to their canonical paths. A null historical
     /// container resets its fields, as null canonical leaves, so a PATCH merge cannot
-    /// turn it into a no-op.
-    pub fn normalize_aliases(value: &mut Value) -> anyhow::Result<()> {
+    /// turn it into a no-op. Unlike the loader's [`move_aliases`], nothing is rejected
+    /// here: a missing canonical field replaces a non-mapping ancestor, as Go's
+    /// `setYAMLPath` does, and a malformed historical container stays for the config
+    /// parse to report (422).
+    pub fn normalize_aliases(value: &mut Value) {
         let Some(root) = value.as_mapping_mut() else {
-            return Ok(());
+            return;
         };
         for (container, _) in SHARED_STRUCTS {
             if !matches!(lookup(root, container), Some(Value::Null)) {
@@ -366,7 +369,25 @@ impl ConfigDocument {
             }
             remove(root, container);
         }
-        move_aliases(root)
+        for (old, current) in CLIENT_PATHS.iter().chain(SHARED_PATHS) {
+            if let Some(value) = lookup(root, old).cloned() {
+                if lookup(root, current).is_none() {
+                    set_path(root, current, value);
+                }
+                remove(root, old);
+            }
+        }
+        for (old, current) in SHARED_STRUCTS {
+            match lookup(root, old) {
+                Some(Value::Null) => {}
+                Some(Value::Mapping(m)) if m.is_empty() => {}
+                _ => continue,
+            }
+            if lookup(root, current).is_none() {
+                set_path(root, current, Value::Mapping(Mapping::new()));
+            }
+            remove(root, old);
+        }
     }
 
     /// Go's read-time migration archives unrecognised sections as comments. Returns

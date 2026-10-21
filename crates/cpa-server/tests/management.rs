@@ -4145,6 +4145,55 @@ async fn config_v8_historical_configuration_bodies() {
     }
     assert_eq!(claude["model-level-cooling"], serde_yaml_ng::Value::Bool(true));
     server.abort();
+
+    // Request normalization is not the loader's validation: a missing canonical field
+    // replaces a non-mapping ancestor (Go `setYAMLPath`), and a malformed historical
+    // container is left for the config parse, which answers 422.
+    let f = Fixture::from_yaml("historical-malformed", |auth, hash| {
+        private_config(
+            "upstream: {codex: {response-steering: true}}
+",
+            auth,
+            hash,
+            false,
+        )
+    });
+    let (base, server) = f.server().await;
+    let body = r#"{"upstream":null,"oauth":{"providers":{"xai":{"inject-x-search":true}}}}"#;
+    let (status, text) = call(&base, wreq::Method::PATCH, "/v8/management/config", body).await;
+    assert_eq!(status, 200, "{text}");
+    let file = f.file();
+    assert_canonical(&file);
+    let d = Config::parse(&file).unwrap().document;
+    assert_eq!(
+        d["upstream"]["xai"]["inject-x-search"],
+        serde_yaml_ng::Value::Bool(true),
+        "{file}"
+    );
+    assert_eq!(
+        d["upstream"]["codex"]["response-steering"],
+        serde_yaml_ng::Value::Bool(true),
+        "{file}"
+    );
+    let (status, text) = call(
+        &base,
+        wreq::Method::PUT,
+        "/v8/management/config/oauth/providers/claude",
+        r#""bad""#,
+    )
+    .await;
+    assert_eq!(status, 422, "{text}");
+    let err: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(err["error"], "invalid_config", "{text}");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("oauth.providers.claude must be a mapping"),
+        "{text}"
+    );
+    assert_eq!(f.file(), file, "a refused write changed the file");
+    server.abort();
 }
 
 /// Go `TestLegacyConfigYAMLSavesBySubmittedVersion`: `PUT /v0/management/config.yaml`
@@ -4201,8 +4250,8 @@ async fn v0_config_yaml_saves_by_submitted_version() {
 #[tokio::test]
 async fn v0_setters_save_v8_files_in_the_latest_layout() {
     for raw in [
-        "config-version: 8\noauth: {providers: {codex: {response-steering: true, header-defaults: {user-agent: oauth-agent}}, xai: {inject-x-search: true}}}\n",
-        "# Preserve provider settings\noauth: {providers: {codex: {response-steering: true}, xai: {inject-x-search: true}}}\n",
+        "config-version: 8\n# Preserve provider settings\noauth: {providers: {codex: {response-steering: true, header-defaults: {user-agent: oauth-agent}}, xai: {inject-x-search: true}}}\n",
+        "# Preserve provider settings\noauth: {providers: {codex: {response-steering: true, header-defaults: {user-agent: oauth-agent}}, xai: {inject-x-search: true}}}\n",
         "config-version: 8\nupstream: {codex: {response-steering: true}, xai: {inject-x-search: true}}\nrouting: {retry: {request-retry: 3}}\n",
     ] {
         let f = Fixture::from_yaml("v0-existing-version", |auth, hash| {
@@ -4230,7 +4279,21 @@ async fn v0_setters_save_v8_files_in_the_latest_layout() {
             api.document["upstream"]["xai"]["inject-x-search"],
             serde_yaml_ng::Value::Bool(true)
         );
-        if raw.starts_with('#') {
+        if raw.contains("oauth-agent") {
+            // The Codex header defaults stay OAuth-only through the save.
+            let ua = |d: &serde_yaml_ng::Value| {
+                d["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            assert_eq!(
+                (ua(&cfg.document), ua(&api.document)),
+                ("oauth-agent".to_owned(), String::new()),
+                "{file}"
+            );
+        }
+        if raw.contains('#') {
             assert!(file.contains("# Preserve provider settings"), "{file}");
         }
         server.abort();
