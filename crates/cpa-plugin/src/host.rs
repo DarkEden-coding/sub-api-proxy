@@ -793,18 +793,18 @@ impl Host {
         if id.is_empty() {
             return false;
         }
-        let cancelled = async {
+        // A fresh future for each wait: one that completed must not be polled again.
+        let cancelled = || async {
             match &cancel {
                 Some(cancel) => cancel.cancelled().await,
                 None => std::future::pending().await,
             }
         };
-        tokio::pin!(cancelled);
         // Go `lockApply`: an available lock is taken even when already cancelled.
         let _apply = tokio::select! {
             biased;
             apply = self.inner.apply.lock() => apply,
-            () = &mut cancelled => return false,
+            () = cancelled() => return false,
         };
         let targets = {
             let mut state = self.state();
@@ -840,11 +840,12 @@ impl Host {
         for target in targets {
             let (name, version, path) = (target.name.clone(), target.version.clone(), target.path.clone());
             self.inner.callbacks.close_instance(id, target.client.instance());
-            // The first poll detaches the client and starts its shutdown thread.
+            // The first poll detaches the client and starts its shutdown thread, also
+            // once cancelled.
             tokio::select! {
                 biased;
                 () = target.client.shutdown(wait) => {}
-                () = &mut cancelled => {}
+                () = cancelled() => {}
             }
             tracing::info!(plugin_id = %id, plugin_name = %name, version = %version, path = %path.display(), "pluginhost: plugin unloaded");
         }
@@ -1073,15 +1074,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// [`FakeClient`] whose shutdown blocks while `held` is set.
-    struct HeldClient(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    /// [`FakeClient`] whose shutdown counts its start, then blocks while `held` is set.
+    struct HeldClient {
+        held: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        started: Arc<AtomicUsize>,
+    }
 
     impl PluginClient for HeldClient {
         fn call(&self, method: &str, request: &[u8]) -> Result<Bytes, String> {
             FakeClient.call(method, request)
         }
         fn shutdown(&self) {
-            let (held, cv) = &*self.0;
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let (held, cv) = &*self.held;
             let mut held = lock(held);
             while *held {
                 held = cv.wait(held).unwrap();
@@ -1089,16 +1094,30 @@ mod tests {
         }
     }
 
+    async fn within<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), fut)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+    }
+
     /// Go `UnloadPluginContext` from a Home delete (`deletePluginArtifact`): cancelling
     /// the delete while the plugin's shutdown hangs ends the unload and releases the
-    /// apply lock, so a later config apply proceeds. The shutdown still finishes.
+    /// apply lock, so a later config apply proceeds. Every instance, the loaded one and
+    /// a retired one still draining, is detached and has its shutdown started.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cancelled_home_unload_releases_the_host() {
         let dir = std::env::temp_dir().join(format!("cpa-plugin-held-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("held{}", platform::extension(platform::goos()))), b"").unwrap();
         let held = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let host = Host::with_loader(Arc::new(OneLoader(Arc::new(HeldClient(held.clone())))));
+        let started = Arc::new(AtomicUsize::new(0));
+        let client = || {
+            Arc::new(HeldClient {
+                held: held.clone(),
+                started: started.clone(),
+            })
+        };
+        let host = Host::with_loader(Arc::new(OneLoader(client())));
         let config = |enabled: bool| {
             let yaml = format!(
                 "plugins:\n  enabled: {enabled}\n  dir: {}\n  configs:\n    held:\n      enabled: true\n",
@@ -1108,29 +1127,51 @@ mod tests {
         };
         host.apply_config(config(true)).await;
         assert!(host.plugin_registered("held"));
+        let retired = LoadedPlugin {
+            id: "held".into(),
+            path: dir.join("held-old"),
+            version: "0".into(),
+            name: "n".into(),
+            config_yaml: Vec::new(),
+            plugin: None,
+            registered: true,
+            client: GuardedClient::new(client(), Arc::new(CallbackInstance::default())),
+        };
+        host.state().retired.entry("held".into()).or_default().push(retired);
         *lock(&held.0) = true;
         let cancel = tokio_util::sync::CancellationToken::new();
         let unload = tokio::spawn({
             let (host, cancel) = (host.clone(), cancel.clone());
             async move { crate::homeplugins::PluginRuntime::unload_plugin(&host, "held", &cancel).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while host.plugin_registered("held") {
+        within("the first shutdown", async {
+            while started.load(Ordering::SeqCst) < 1 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
-        .await
-        .expect("the unload detached the plugin");
+        .await;
+        assert!(!host.plugin_registered("held"));
         assert!(
             host.inner.apply.try_lock().is_err(),
             "the hanging unload holds the host"
         );
         cancel.cancel();
-        let unloaded = tokio::time::timeout(Duration::from_secs(5), unload).await;
-        assert!(unloaded.expect("cancellation ended the unload").unwrap());
-        tokio::time::timeout(Duration::from_secs(5), host.apply_config(config(false)))
-            .await
-            .expect("a config apply after the cancelled unload");
+        assert!(
+            within("the cancelled unload", unload).await.unwrap(),
+            "the cancelled unload panicked or reported nothing unloaded"
+        );
+        // The retired instance's shutdown runs on its own thread.
+        within("the retired instance's shutdown", async {
+            while started.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        within(
+            "a config apply after the cancelled unload",
+            host.apply_config(config(false)),
+        )
+        .await;
         *lock(&held.0) = false;
         held.1.notify_all();
         let _ = std::fs::remove_dir_all(&dir);
