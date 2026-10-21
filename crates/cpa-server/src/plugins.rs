@@ -21,7 +21,10 @@ pub(crate) mod model_callbacks;
 /// The host plus the config it should converge on.
 pub struct PluginRuntime {
     host: cpa_plugin::Host,
-    latest: watch::Sender<Option<Arc<Config>>>,
+    /// The latest published config and its publish sequence number.
+    latest: watch::Sender<Option<(u64, Arc<Config>)>>,
+    /// The sequence number of the last config the worker applied.
+    applied: watch::Sender<u64>,
     access: RwLock<Arc<AccessRegistry>>,
     /// Go's executor table entries owned by plugins: provider to the registered executor.
     executors: RwLock<HashMap<String, cpa_plugin::executor::Adapter>>,
@@ -40,6 +43,7 @@ impl PluginRuntime {
         Self {
             host,
             latest: watch::Sender::new(None),
+            applied: watch::Sender::new(0),
             access: RwLock::default(),
             executors: RwLock::default(),
         }
@@ -75,8 +79,27 @@ impl PluginRuntime {
 
     /// Records a published config; the worker started by [`start`] applies it.
     pub(crate) fn config_published(&self, cfg: Arc<Config>) {
-        self.latest.send_replace(Some(cfg));
+        self.latest.send_modify(|latest| {
+            let seq = latest.as_ref().map_or(1, |(seq, _)| seq + 1);
+            *latest = Some((seq, cfg));
+        });
     }
+
+    fn published_seq(&self) -> u64 {
+        self.latest.borrow().as_ref().map_or(0, |(seq, _)| *seq)
+    }
+}
+
+/// Waits until the plugin worker started by [`start`] has applied every config published
+/// so far (Go applies plugin config synchronously while it applies a config).
+pub async fn applied(rt: &Runtime) {
+    let seq = rt.plugin_runtime().published_seq();
+    let _ = rt
+        .plugin_runtime()
+        .applied
+        .subscribe()
+        .wait_for(|applied| *applied >= seq)
+        .await;
 }
 
 /// Go's startup and reload sequence (`syncPluginRuntimeConfigForConfig` and
@@ -666,17 +689,21 @@ pub async fn start(rt: &Arc<Runtime>) {
     model_callbacks::attach(rt);
     let mut rx = rt.plugin_runtime().latest.subscribe();
     rx.mark_unchanged();
+    // At least this publish is in the current config.
+    let seq = rt.plugin_runtime().published_seq();
     sync(rt, rt.config()).await;
+    rt.plugin_runtime().applied.send_replace(seq);
     let weak: Weak<Runtime> = Arc::downgrade(rt);
     tokio::spawn(async move {
         while rx.changed().await.is_ok() {
-            let Some(cfg) = rx.borrow_and_update().clone() else {
+            let Some((seq, cfg)) = rx.borrow_and_update().clone() else {
                 continue;
             };
             let Some(rt) = weak.upgrade() else {
                 return;
             };
             sync(&rt, cfg).await;
+            rt.plugin_runtime().applied.send_replace(seq);
         }
     });
 }
