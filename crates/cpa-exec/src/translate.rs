@@ -313,6 +313,7 @@ mod tests {
             caller: Caller {
                 principal: "fake-client-key".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         }
     }

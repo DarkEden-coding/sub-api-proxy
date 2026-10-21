@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -82,6 +83,7 @@ fn allowed(c: &Credential) -> bool {
 
 async fn alpha_search(
     State(rt): State<Arc<Runtime>>,
+    Extension(caller): Extension<cpa_core::exec::Caller>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -119,8 +121,9 @@ async fn alpha_search(
     if primary.is_empty() {
         (primary, parent) = cpa_common::session::session_ids(&selection_headers, &body, &meta);
     }
-    // Go's Alpha Search context holds only the request ID and this session hierarchy
-    // (it never passes `GetContextWithCancel`); Home's canonical session replaces it.
+    // Go's Alpha Search context holds the request ID, this session hierarchy (it never
+    // passes `GetContextWithCancel`; Home's canonical session replaces it) and the
+    // authenticated caller.
     let client = crate::usage_record::Client {
         session_id: primary.clone(),
         parent_session_id: if parent == primary {
@@ -129,6 +132,8 @@ async fn alpha_search(
             parent.clone()
         },
         request_id: crate::observability::current_request_id().unwrap_or_default(),
+        api_key: caller.principal,
+        access_provider: caller.provider,
         ..Default::default()
     };
     let bound = |s: String| (!s.is_empty()).then(|| cpa_common::session::bound_session_identity(&s));

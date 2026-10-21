@@ -1130,6 +1130,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "authorization",
+                provider: String::new(),
             },
         }
     }

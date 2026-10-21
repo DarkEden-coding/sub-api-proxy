@@ -180,9 +180,9 @@ async fn authenticate(
         match access {
             // No provider registered: Go sets nothing.
             Ok(crate::plugins::Access::Open) => Principal::default(),
-            Ok(crate::plugins::Access::Granted { caller, provider }) => Principal {
+            Ok(crate::plugins::Access::Granted(caller)) => Principal {
                 key: caller.principal,
-                provider,
+                provider: caller.provider,
                 secret: None,
             },
             Err(denied) if matches!(mode, Mode::Ordinary) => {
@@ -406,9 +406,16 @@ async fn select_oauth(
 }
 
 /// Go `ReportHomeUnauthorized(ctx, selected, "codex", model, body)` from a live handler,
-/// whose context holds only the request ID and the session hierarchy (Home's canonical
-/// session replaces it on the record).
-fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body: &[u8], session: (String, String)) {
+/// whose context holds the request ID, the session hierarchy (Home's canonical session
+/// replaces it on the record) and the authenticated principal.
+fn report_unauthorized(
+    rt: &Runtime,
+    principal: &Principal,
+    credential: &Credential,
+    model: &str,
+    body: &[u8],
+    session: (String, String),
+) {
     let (session_id, parent_session_id) = session;
     let facts = crate::usage_record::Facts {
         client: crate::usage_record::Client {
@@ -419,6 +426,8 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
             },
             session_id,
             request_id: crate::observability::current_request_id().unwrap_or_default(),
+            api_key: principal.key.clone(),
+            access_provider: principal.provider.clone(),
             ..Default::default()
         },
         format: cpa_core::format::Format::OpenAIResponse,

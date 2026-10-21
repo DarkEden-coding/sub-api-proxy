@@ -357,6 +357,7 @@ pub(super) async fn call(
     if home && status == 401 {
         super::report_unauthorized(
             &rt,
+            &principal,
             &credential,
             &model,
             &data,
@@ -683,6 +684,7 @@ pub(super) async fn hangup(
     if home && status == 401 {
         super::report_unauthorized(
             &rt,
+            &principal,
             &credential,
             &stored.model,
             &data,

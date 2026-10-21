@@ -2385,6 +2385,7 @@ fn usage_client(
             call.request_path
         ),
         api_key: call.caller.principal.clone(),
+        access_provider: call.caller.provider.clone(),
         ..request_client(cfg, &call.headers, call.peer)
     }
 }
@@ -2779,6 +2780,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             forced_provider: None,
             selection_model: None,
@@ -2844,6 +2846,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             resolved_model: None,
             usage: Default::default(),

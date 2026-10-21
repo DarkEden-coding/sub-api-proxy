@@ -1150,6 +1150,7 @@ async fn usage_queue_records_every_attempt() {
         ("endpoint", "POST /v1/messages"),
         ("auth_type", "oauth"),
         ("api_key", "client-key"),
+        ("access_provider", "config-inline"),
         ("service_tier", "auto"),
         ("response_model", MODEL),
     ] {
@@ -1159,6 +1160,7 @@ async fn usage_queue_records_every_attempt() {
     assert_eq!(ok["trace_id"], request_id);
     assert_eq!(ok["stream"], false);
     assert_eq!(ok["generate"], true);
+    assert_eq!(ok["is_native_key"], true);
     assert_ne!(failed["execution_id"], ok["execution_id"]);
     assert_eq!(ok["access_token_sha256"].as_str().unwrap().len(), 64);
 
@@ -1267,6 +1269,7 @@ async fn session_turns_honour_pin_callback_and_session() {
         caller: Caller {
             principal: "client-key".into(),
             source: "authorization",
+            provider: String::new(),
         },
         forced_provider: None,
         selection_model: None,

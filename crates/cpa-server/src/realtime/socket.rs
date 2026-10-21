@@ -278,6 +278,7 @@ async fn sideband(inbound: Inbound, realtime: bool, style: Sideband, call_id: St
             if home {
                 report_dial_unauthorized(
                     &rt,
+                    &principal,
                     &credential,
                     &call.model,
                     &error,
@@ -352,6 +353,7 @@ async fn until_drained(
 /// else the dial error's text.
 fn report_dial_unauthorized(
     rt: &Runtime,
+    principal: &Principal,
     credential: &cpa_core::credential::Credential,
     model: &str,
     error: &DialError,
@@ -365,7 +367,7 @@ fn report_dial_unauthorized(
     } else {
         &handshake.body
     };
-    super::report_unauthorized(rt, credential, model, body, session);
+    super::report_unauthorized(rt, principal, credential, model, body, session);
 }
 
 /// `HandleDirectWebsocket`.
@@ -439,6 +441,7 @@ async fn direct(inbound: Inbound, model: String) -> Response {
             if lease.is_remote() {
                 report_dial_unauthorized(
                     &rt,
+                    &principal,
                     &credential,
                     &selection_model,
                     &error,

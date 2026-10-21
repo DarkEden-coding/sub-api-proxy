@@ -434,12 +434,14 @@ mod tests {
         let caller = cpa_core::exec::Caller {
             principal: "local-key".into(),
             source: "query-key",
+            provider: String::new(),
         };
         let outside: Vec<_> = home_headers(&headers(&[]), Some(&caller));
         assert_eq!(outside, [("x-goog-api-key".to_owned(), "local-key".to_owned())]);
         let header_caller = cpa_core::exec::Caller {
             principal: "local-key".into(),
             source: "authorization",
+            provider: String::new(),
         };
         assert!(home_headers(&headers(&[]), Some(&header_caller)).is_empty());
     }

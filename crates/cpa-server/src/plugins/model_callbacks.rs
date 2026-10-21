@@ -125,6 +125,7 @@ impl ModelExecutor for Executor {
                 caller: Caller {
                     principal: String::new(),
                     source: "",
+                    provider: String::new(),
                 },
                 forced_provider: Some(req.forced_provider).filter(|s| !s.is_empty()),
                 selection_model: None,
