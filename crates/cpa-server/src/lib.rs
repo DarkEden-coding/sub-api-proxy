@@ -246,12 +246,19 @@ async fn callback(State(rt): State<Arc<Runtime>>, OriginalUri(uri): OriginalUri)
     };
     let (code, state, error) = callback_query(uri.query().unwrap_or_default(), false);
     if !state.is_empty() {
-        let _ = rt.deliver_oauth_callback(&runtime::OAuthCallback {
+        let delivery = rt.deliver_oauth_callback(&runtime::OAuthCallback {
             provider,
             state,
             code,
             error,
         });
+        // Go v8.0.35 `ae3ee3be`: only the Codex route reports the refusal.
+        if provider == "codex" && delivery == runtime::OAuthDelivery::RequiresV8 {
+            return respond::gin_json(
+                409,
+                r#"{"error":"SIWC callbacks require /v8/management/oauth/callback"}"#.into(),
+            );
+        }
     }
     html()
 }
@@ -275,7 +282,7 @@ async fn devin_callback(State(rt): State<Arc<Runtime>>, OriginalUri(uri): Origin
         code,
         error,
     });
-    if !delivered {
+    if delivered != runtime::OAuthDelivery::Delivered {
         return no_store(respond::gin_json(
             400,
             r#"{"error":"invalid or expired OAuth callback"}"#.into(),

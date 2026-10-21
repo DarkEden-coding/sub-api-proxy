@@ -864,6 +864,35 @@ mod config_writes {
     }
 }
 
+/// The goldens predate v8.0.35, whose v8 credential list adds a SIWC summary to each
+/// Codex entry (`d50a1995`). None of the recorded credentials is bound or toggled, so
+/// Go v8.0.35 reports `use_siwc` and `siwc_bound` false and no expiry. The summary is
+/// checked and removed (from the bytes too, so they still compare).
+fn strip_siwc_summaries(value: &mut Value, body: &mut String, at: &str) {
+    let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for entry in files.iter_mut().filter(|e| e["provider"] == "codex") {
+        let map = entry.as_object_mut().unwrap();
+        assert_eq!(map.shift_remove("use_siwc"), Some(json!(false)), "{at}");
+        assert_eq!(map.shift_remove("siwc_bound"), Some(json!(false)), "{at}");
+        assert!(
+            map.shift_remove("siwc_bind_supported").is_some_and(|v| v.is_boolean()),
+            "{at}"
+        );
+        assert!(!map.contains_key("siwc_expires_at"), "{at}");
+    }
+    for field in [
+        r#""siwc_bind_supported":false,"#,
+        r#""siwc_bind_supported":true,"#,
+        r#""siwc_bound":false,"#,
+        r#""use_siwc":false,"#,
+    ] {
+        *body = body.replace(field, "");
+    }
+    *body = body.replace(r#","use_siwc":false}"#, "}");
+}
+
 /// The goldens predate v8.0.35, whose v8 api-keys reads give each group
 /// (`api-keys/<provider>/<n>`) or key (`.../keys/<m>`) its `auth_index`, 16 hex digits
 /// (`0fb50a18`; tests/management.rs pins them). Removes exactly those, located by the
@@ -1146,7 +1175,11 @@ mod creds {
                         assert_eq!(headers.get(h).map(String::as_str), v.as_str(), "{at}: header {h}");
                     }
                 } else {
-                    let got: Value = serde_json::from_str(&body).unwrap();
+                    let mut got: Value = serde_json::from_str(&body).unwrap();
+                    let mut body = body;
+                    if req_path.starts_with("/credentials") && step["method"] == "GET" {
+                        strip_siwc_summaries(&mut got, &mut body, &at);
+                    }
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
                         if got == step["response"] {
