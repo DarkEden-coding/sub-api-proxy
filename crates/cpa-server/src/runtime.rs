@@ -481,19 +481,26 @@ impl Runtime {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let mut revision = current.revision;
+            let mut attempt = patch.clone();
             loop {
-                match store.apply_patch(&id, revision, &patch) {
+                match store.apply_patch(&id, revision, &attempt) {
                     // Edited since the snapshot (the prepare lock does not hold off other
                     // writers). Go 935aa6e3: an edit that changed the credentials wins and
-                    // this refresh is dropped; any other edit takes the refresh on top (Go
-                    // `MergeRefreshedAuth`).
-                    // ponytail: Go also drops it when the credential was registered again
-                    // (its CredentialVersion moved) with the same tokens; here a re-created
-                    // file with equal tokens takes the refresh. A version counter on
-                    // `Credential` would close that.
+                    // this refresh is dropped; any other edit is merged with it (Go
+                    // `MergeRefreshedAuth`), so a rotated refresh token is not lost.
+                    // ponytail: Go rejects an update from an older registration (its
+                    // RegistrationEpoch moved) before any merge, and drops one whose
+                    // CredentialVersion moved, which covers an A→B→A token replacement
+                    // within one registration. Here a re-created file, or tokens put back
+                    // to the snapshot's, takes the merged refresh. A registration counter
+                    // and a credential version on `Credential` would close both.
                     Err(PatchError::Stale { .. }) => {
                         let latest = store.get(&id).ok_or(PatchError::NotFound)?;
                         if credentials_changed(&current, &latest) {
+                            return Ok(latest);
+                        }
+                        attempt = rebase_patch(&current.provider, &current.metadata, &latest.metadata, &patch);
+                        if attempt.set.is_empty() && attempt.remove.is_empty() {
                             return Ok(latest);
                         }
                         revision = latest.revision;
@@ -1949,6 +1956,101 @@ impl Runtime {
     }
 }
 
+/// Go `mergeAuthContent` for a prepare patch computed from `base` (the snapshot) that
+/// lost the race to another edit, `user` being the stored metadata now: the part of
+/// `patch` to apply on top of `user`. A value the patch did not change keeps the edit;
+/// a value both changed keeps the edit unless it is a token payload. A missing key is
+/// not JSON null. Codex outer tokens move as one partition (Go `CredentialRefreshPatch`).
+// ponytail: no prepare patch sets `proxy_url`, `siwc` or `use_siwc`, so Go's dedicated
+// merges for those keys are not ported; add them with the first producer.
+fn rebase_patch(
+    provider: &str,
+    base: &Map<String, Value>,
+    user: &Map<String, Value>,
+    patch: &MetadataPatch,
+) -> MetadataPatch {
+    // Go `codexOuterCredentialKeys` (internal/auth/codex/token.go).
+    const CODEX_OUTER: [&str; 8] = [
+        "id_token",
+        "access_token",
+        "refresh_token",
+        "account_id",
+        "last_refresh",
+        "email",
+        "expired",
+        "plan_type",
+    ];
+    // Go `IsAuthTokenPayloadKey`.
+    let token_payload = |k: &str| {
+        matches!(
+            k.trim().to_ascii_lowercase().as_str(),
+            "access_token"
+                | "refresh_token"
+                | "id_token"
+                | "session_id"
+                | "expired"
+                | "last_refresh"
+                | "expires_in"
+                | "timestamp"
+                | "token_type"
+                | "user_code"
+                | "verification_uri"
+                | "verification_uri_complete"
+        )
+    };
+    let codex = provider == "codex";
+    let kept_by_user = |k: &str| base.get(k) == user.get(k);
+    let mut out = MetadataPatch::default();
+    for (k, v) in &patch.set {
+        let outer = codex && CODEX_OUTER.contains(&k.as_str());
+        if !outer && base.get(k) != Some(v) && (kept_by_user(k) || token_payload(k)) {
+            out.set.insert(k.clone(), v.clone());
+        }
+    }
+    out.remove = patch
+        .remove
+        .iter()
+        .filter(|k| base.contains_key(*k) && kept_by_user(k))
+        .cloned()
+        .collect();
+    if codex {
+        // Go `CredentialRefreshPatch.Apply`: the refreshed tokens apply only while the
+        // stored identity is still the one refreshed (or its result), and then only the
+        // fields the refresh changed.
+        let fields = |m: &Map<String, Value>| -> Map<String, Value> {
+            CODEX_OUTER
+                .iter()
+                .filter_map(|k| m.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                .collect()
+        };
+        let before = fields(base);
+        let mut updated = base.clone();
+        patch.apply(&mut updated);
+        let after = fields(&updated);
+        // Go `sameCredentialVersion` (`reflect.DeepEqual` on map reads: null is missing).
+        let same = |b: &Map<String, Value>| {
+            [
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "account_id",
+                "client_id",
+                "device_id",
+            ]
+            .iter()
+            .all(|k| user.get(*k).filter(|v| !v.is_null()) == b.get(*k).filter(|v| !v.is_null()))
+        };
+        if let Some(baseline) = [&before, &after].into_iter().find(|b| same(b)) {
+            for (k, v) in &after {
+                if baseline.get(k) != Some(v) {
+                    out.set.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Go `CredentialsChanged`: the tokens or API key differ.
 fn credentials_changed(a: &Credential, b: &Credential) -> bool {
     let text = |c: &Credential, keys: &[&str]| {
@@ -1979,24 +2081,36 @@ fn credentials_changed(a: &Credential, b: &Credential) -> bool {
             .unwrap_or_else(|| text(c, &["api_key"]))
     };
     // Go `parseBoolAny`.
+    let parse_bool = |s: &str| match s.trim() {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    };
     let use_siwc = |c: &Credential| {
         let value = c.metadata.get("use_siwc")?;
         value
             .as_bool()
-            .or_else(|| match value.as_str()?.trim() {
-                "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
-                "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
-                _ => None,
-            })
+            .or_else(|| parse_bool(value.as_str()?))
             .or_else(|| value.as_f64().map(|n| n != 0.0))
     };
-    [
-        &["access_token", "accessToken"][..],
-        &["refresh_token", "refreshToken"],
-        &["id_token", "idToken"],
-    ]
-    .iter()
-    .any(|keys| text(a, keys) != text(b, keys))
+    // Go `authAccessToken`: the token requests use, which follows `IsCodexUseSIWC` (a
+    // true attribute, else the file's flag).
+    let effective_access_token = |c: &Credential| {
+        let attribute = c.attributes.get("use_siwc").and_then(|v| parse_bool(v)) == Some(true);
+        if attribute || use_siwc(c) == Some(true) {
+            siwc(c, "access_token")
+        } else {
+            text(c, &["access_token", "accessToken"])
+        }
+    };
+    effective_access_token(a) != effective_access_token(b)
+        || [
+            &["access_token", "accessToken"][..],
+            &["refresh_token", "refreshToken"],
+            &["id_token", "idToken"],
+        ]
+        .iter()
+        .any(|keys| text(a, keys) != text(b, keys))
         || api_key(a) != api_key(b)
         || ["access_token", "refresh_token", "id_token", "client_id"]
             .iter()
@@ -3122,18 +3236,24 @@ mod tests {
 
     /// Go 935aa6e3 (TestManager_RefreshAuth_DropsStaleConcurrentCredential): tokens saved
     /// while a refresh is in flight win over its result, in memory and on disk, and the
-    /// refresh answers with them. An edit that leaves the credentials alone takes the
-    /// refresh on top (Go `MergeRefreshedAuth`), so a rotated refresh token is not lost.
+    /// refresh answers with them. An edit that leaves the credentials alone is merged with
+    /// the refresh (Go `MergeRefreshedAuth`), so a rotated refresh token is not lost and a
+    /// field the refresh did not change keeps the edit.
     #[tokio::test]
     async fn an_in_flight_refresh_does_not_overwrite_newer_credentials() {
         for (edit, want) in [
             (
                 serde_json::json!({"access_token": "saved", "refresh_token": "saved-rt"}),
-                ("saved", "saved-rt", None),
+                ("saved", "saved-rt", None, "free"),
             ),
             (
                 serde_json::json!({"note": "kept"}),
-                ("rotated", "rotated-rt", Some("kept")),
+                ("rotated", "rotated-rt", Some("kept"), "free"),
+            ),
+            // The refresh leaves the plan as it was, so the edit stands.
+            (
+                serde_json::json!({"plan_type": "team"}),
+                ("rotated", "rotated-rt", None, "team"),
             ),
         ] {
             let (hit_tx, mut hit) = tokio::sync::mpsc::unbounded_channel();
@@ -3157,7 +3277,7 @@ mod tests {
             let path = dir.join("codex.json");
             std::fs::write(
                 &path,
-                r#"{"type":"codex","access_token":"outer","refresh_token":"outer-rt"}"#,
+                r#"{"type":"codex","access_token":"outer","refresh_token":"outer-rt","plan_type":"free"}"#,
             )
             .unwrap();
             let mut cfg = Config::parse("").unwrap();
@@ -3205,7 +3325,8 @@ mod tests {
                     (
                         meta["access_token"].as_str().unwrap(),
                         meta["refresh_token"].as_str().unwrap(),
-                        meta["note"].as_str()
+                        meta["note"].as_str(),
+                        meta["plan_type"].as_str().unwrap()
                     ),
                     want,
                     "{edit}: {meta}"
@@ -3213,6 +3334,126 @@ mod tests {
             }
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    /// Go `mergeAuthContent` and `CredentialRefreshPatch.Apply` for a refresh that lost
+    /// the race to another edit (metadata_merge_test.go, refresh_patch_test.go).
+    #[test]
+    fn a_stale_refresh_merges_like_go() {
+        use serde_json::json;
+        let map = |v: Value| v.as_object().unwrap().clone();
+        let codex = json!({"type": "codex", "access_token": "a", "refresh_token": "r", "account_id": "acct", "email": "e@x", "plan_type": "plus"});
+        let refresh = |plan: &str, email: &str| json!({"type": "codex", "access_token": "a2", "refresh_token": "r2", "account_id": "acct", "email": email, "plan_type": plan});
+        let edit = |base: &Value, k: &str, v: Value| {
+            let mut m = map(base.clone());
+            m.insert(k.into(), v);
+            Value::Object(m)
+        };
+        let kimi = json!({"type": "kimi", "note": "a", "expired": "t0", "gone": "a"});
+        for (name, provider, base, user, set, remove, want_set, want_remove) in [
+            (
+                "an unchanged value keeps the edit, a changed token is applied",
+                "kimi",
+                &kimi,
+                edit(&kimi, "note", json!("b")),
+                json!({"type": "kimi", "note": "a", "access_token": "new"}),
+                vec![],
+                json!({"access_token": "new"}),
+                vec![],
+            ),
+            (
+                "both changed a normal field: the edit wins",
+                "kimi",
+                &kimi,
+                edit(&kimi, "note", json!("b")),
+                json!({"note": "x"}),
+                vec![],
+                json!({}),
+                vec![],
+            ),
+            (
+                "both changed a token payload: the refresh wins",
+                "kimi",
+                &kimi,
+                edit(&kimi, "expired", json!("t2")),
+                json!({"expired": "t1"}),
+                vec![],
+                json!({"expired": "t1"}),
+                vec![],
+            ),
+            (
+                "a removal of an edited key is dropped, of an untouched key kept",
+                "kimi",
+                &kimi,
+                edit(&kimi, "expired", json!("t2")),
+                json!({}),
+                vec!["expired", "gone"],
+                json!({}),
+                vec!["gone"],
+            ),
+            (
+                "JSON null is an edit of a missing key",
+                "kimi",
+                &kimi,
+                edit(&kimi, "fresh", Value::Null),
+                json!({"fresh": "x"}),
+                vec![],
+                json!({}),
+                vec![],
+            ),
+            (
+                "Codex: an unchanged plan and email keep the edit",
+                "codex",
+                &codex,
+                edit(&codex, "plan_type", json!("team")),
+                refresh("plus", "e@x"),
+                vec![],
+                json!({"access_token": "a2", "refresh_token": "r2"}),
+                vec![],
+            ),
+            (
+                "Codex: a changed plan and email are applied over the edit",
+                "codex",
+                &codex,
+                edit(&edit(&codex, "plan_type", json!("team")), "email", json!("u@x")),
+                refresh("pro", "n@x"),
+                vec![],
+                json!({"access_token": "a2", "refresh_token": "r2", "plan_type": "pro", "email": "n@x"}),
+                vec![],
+            ),
+            (
+                "Codex: another account drops the whole partition",
+                "codex",
+                &codex,
+                edit(&codex, "account_id", json!("other")),
+                refresh("pro", "n@x"),
+                vec![],
+                json!({}),
+                vec![],
+            ),
+        ] {
+            let patch = MetadataPatch {
+                set: map(set),
+                remove: remove.into_iter().map(str::to_owned).collect(),
+            };
+            let out = rebase_patch(provider, &map(base.clone()), &map(user), &patch);
+            assert_eq!(Value::Object(out.set), want_set, "{name}");
+            assert_eq!(out.remove, want_remove, "{name}");
+        }
+    }
+
+    /// Go `CredentialsChanged` compares the token requests use, which a `use_siwc`
+    /// attribute alone can switch.
+    #[test]
+    fn switching_to_the_siwc_token_changes_the_credentials() {
+        let mut a = cred("codex.json", "codex", false);
+        a.metadata.insert("access_token".into(), "outer".into());
+        a.metadata
+            .insert("siwc".into(), serde_json::json!({"access_token": "nested"}));
+        let mut b = a.clone();
+        assert!(!credentials_changed(&a, &b));
+        b.attributes.insert("use_siwc".into(), "true".into());
+        assert!(credentials_changed(&a, &b));
     }
 
     /// The loop sets no timer while nothing can come due, and a credential added later
