@@ -1467,6 +1467,13 @@ func configScenarios() []configScenario {
 			patch("/config", `{"<<":5}`),
 			put("/config", `{"management":{"secret-key":"fake-secret"},"<<":{"server":{"port":4}}}`),
 			get("/config"),
+			// Keys already in the entry win over merged ones.
+			put("/config/plugins/configs/x", `{"a":1}`),
+			patch("/config/plugins/configs/x", `{"<<":{"a":2,"c":3}}`),
+			get("/config/plugins"),
+			// The root shape is checked before any merge.
+			put("/config", `[{"<<":5}]`),
+			patch("/config", `[{"<<":5}]`),
 		}},
 	}
 }

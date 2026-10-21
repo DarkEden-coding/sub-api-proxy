@@ -31,10 +31,13 @@ pub use schema::{coerce_typed_scalars, go_bool, go_int};
 /// (Aliases are already expanded by the parser.)
 ///
 /// ponytail: the parsed value no longer says whether a key was quoted, so a quoted
-/// `"<<"` key in config.yaml merges here, where yaml.v3 loads it as a plain key (Go's
-/// next save writes it plain and then fails the same way). A JSON body is unaffected:
-/// Go merges its `<<` when it parses the save. Telling quoted keys apart needs the
-/// yaml-edit syntax tree walked alongside the value.
+/// `<<` key in config.yaml merges here, where yaml.v3 loads it as a plain key. Go's
+/// style-normalizing v8 save clears double quotes only: a double-quoted `"<<"` then
+/// merges a mapping or fails on a scalar, a single-quoted `'<<'` stays a plain key, and
+/// an unknown section archived before the save never merges. A JSON body sent to
+/// `/config.yaml` is the same gap (Go 422, here 400). JSON bodies elsewhere keep `<<`
+/// literal until the completed candidate is expanded. Telling quoted keys apart needs
+/// the yaml-edit syntax tree walked alongside the value.
 pub fn expand_merges(value: &mut Value) -> anyhow::Result<()> {
     const NOT_MAPS: &str = "map merge requires map or sequence of maps as the value";
     match value {

@@ -30173,7 +30173,7 @@
      "file": {
       "config-version": 8,
       "management": {
-       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+       "secret-key": "$2a$04$ApLvrZz1waF0QngbVE4KLuQsxitFh3Xkk897Hz9IG8afrKWAD8W6G"
       }
      },
      "file_has_archive": false
@@ -30191,7 +30191,7 @@
      "file": {
       "config-version": 8,
       "management": {
-       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+       "secret-key": "$2a$04$ApLvrZz1waF0QngbVE4KLuQsxitFh3Xkk897Hz9IG8afrKWAD8W6G"
       },
       "plugins": {
        "configs": {
@@ -30220,7 +30220,7 @@
      "file": {
       "config-version": 8,
       "management": {
-       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+       "secret-key": "$2a$04$ApLvrZz1waF0QngbVE4KLuQsxitFh3Xkk897Hz9IG8afrKWAD8W6G"
       },
       "plugins": {
        "configs": {
@@ -30246,7 +30246,7 @@
      "file": {
       "config-version": 8,
       "management": {
-       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+       "secret-key": "$2a$04$ApLvrZz1waF0QngbVE4KLuQsxitFh3Xkk897Hz9IG8afrKWAD8W6G"
       },
       "plugins": {
        "configs": {
@@ -30275,7 +30275,7 @@
      "file": {
       "config-version": 8,
       "management": {
-       "secret-key": "$2a$04$CDc907l9nfB2.GLcEmOmZ.oD77PRzJXg5xKT3NOf2K3nADc64Ntoy"
+       "secret-key": "$2a$04$ApLvrZz1waF0QngbVE4KLuQsxitFh3Xkk897Hz9IG8afrKWAD8W6G"
       },
       "plugins": {
        "configs": {
@@ -30330,6 +30330,151 @@
       "config-version": 8,
       "management": {
        "secret-key": "fake-secret"
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config/plugins/configs/x",
+     "body": "{\"a\":1}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1
+        }
+       }
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config/plugins/configs/x",
+     "body": "{\"\u003c\u003c\":{\"a\":2,\"c\":3}}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "c": 3
+        }
+       }
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config/plugins",
+     "status": 200,
+     "response": {
+      "configs": {
+       "x": {
+        "a": 1,
+        "c": 3
+       }
+      }
+     },
+     "raw_json": "{\"configs\":{\"x\":{\"a\":1,\"c\":3}}}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "c": 3
+        }
+       }
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config",
+     "body": "[{\"\u003c\u003c\":5}]",
+     "status": 400,
+     "response": {
+      "error": "config_must_be_object"
+     },
+     "raw_json": "{\"error\":\"config_must_be_object\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "c": 3
+        }
+       }
+      },
+      "server": {
+       "port": 4
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config",
+     "body": "[{\"\u003c\u003c\":5}]",
+     "status": 400,
+     "response": {
+      "error": "config_must_be_object"
+     },
+     "raw_json": "{\"error\":\"config_must_be_object\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "plugins": {
+       "configs": {
+        "x": {
+         "a": 1,
+         "c": 3
+        }
+       }
       },
       "server": {
        "port": 4
