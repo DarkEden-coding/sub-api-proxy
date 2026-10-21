@@ -1606,21 +1606,21 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0001 | GET /management.html | covered | probe: GET /management.html -> 200; tests: crates/cpa-server/src/safe_mode.rs, crates/cpa-server/tests/management.rs |  | The page is the embedded dashboard, not Go's downloaded panel (deliberate difference, see M5-0283). |
 | M5-0002 | GET /v1/responses | covered | probe: GET /v1/responses -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-exec/src/codex_capture.rs (+16) |  |  |
 | M5-0003 | POST /v1/live | covered | probe: POST /v1/live -> 401; tests: crates/cpa-server/src/realtime.rs, crates/cpa-server/src/realtime/capture_tests.rs (+4) |  |  |
-| M5-0004 | GET /v1/live/:call_id | covered | probe: GET /v1/live/:call_id -> 401; tests: crates/cpa-server/src/realtime.rs, crates/cpa-server/src/realtime/capture_tests.rs (+3) |  |  |
-| M5-0005 | GET /v1/realtime | covered | probe: GET /v1/realtime -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0006 | POST /v1/realtime | covered | probe: POST /v1/realtime -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0007 | POST /v1/realtime/calls | covered | probe: POST /v1/realtime/calls -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0008 | GET /v1/realtime/calls/:call_id | covered | probe: GET /v1/realtime/calls/:call_id -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
+| M5-0004 | GET /v1/live/:call_id | covered | probe: GET /v1/live/:call_id -> 401; tests: crates/cpa-server/src/realtime.rs, crates/cpa-server/src/realtime/capture_tests.rs (+4) |  |  |
+| M5-0005 | GET /v1/realtime | covered | probe: GET /v1/realtime -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0006 | POST /v1/realtime | covered | probe: POST /v1/realtime -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0007 | POST /v1/realtime/calls | covered | probe: POST /v1/realtime/calls -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0008 | GET /v1/realtime/calls/:call_id | covered | probe: GET /v1/realtime/calls/:call_id -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
 | M5-0009 | POST /v1/realtime/client_secrets | covered | probe: POST /v1/realtime/client_secrets -> 401; tests: crates/cpa-server/src/realtime.rs, crates/cpa-server/tests/realtime.rs |  |  |
 | M5-0010 | POST /v1/realtime/sessions | covered | probe: POST /v1/realtime/sessions -> 401; tests: crates/cpa-server/src/realtime.rs |  |  |
 | M5-0011 | POST /v1/realtime/transcription_sessions | covered | probe: POST /v1/realtime/transcription_sessions -> 401; tests: crates/cpa-server/src/realtime.rs |  |  |
 | M5-0012 | GET /v1/realtime/translations | covered | probe: GET /v1/realtime/translations -> 401; tests: crates/cpa-server/src/realtime.rs |  |  |
 | M5-0013 | POST /v1/realtime/translations | covered | probe: POST /v1/realtime/translations -> 401; tests: crates/cpa-server/src/realtime.rs |  |  |
 | M5-0014 | POST /v1/realtime/translations/client_secrets | covered | probe: POST /v1/realtime/translations/client_secrets -> 401; tests: crates/cpa-server/src/realtime.rs |  |  |
-| M5-0015 | POST /v1/realtime/calls/:call_id/hangup | covered | probe: POST /v1/realtime/calls/:call_id/hangup -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0016 | POST /v1/realtime/calls/:call_id/accept | covered | probe: POST /v1/realtime/calls/:call_id/accept -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0017 | POST /v1/realtime/calls/:call_id/reject | covered | probe: POST /v1/realtime/calls/:call_id/reject -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
-| M5-0018 | POST /v1/realtime/calls/:call_id/refer | covered | probe: POST /v1/realtime/calls/:call_id/refer -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+3) |  |  |
+| M5-0015 | POST /v1/realtime/calls/:call_id/hangup | covered | probe: POST /v1/realtime/calls/:call_id/hangup -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0016 | POST /v1/realtime/calls/:call_id/accept | covered | probe: POST /v1/realtime/calls/:call_id/accept -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0017 | POST /v1/realtime/calls/:call_id/reject | covered | probe: POST /v1/realtime/calls/:call_id/reject -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
+| M5-0018 | POST /v1/realtime/calls/:call_id/refer | covered | probe: POST /v1/realtime/calls/:call_id/refer -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/realtime.rs (+4) |  |  |
 | M5-0019 | GET /backend-api/codex/responses | covered | probe: GET /backend-api/codex/responses -> 401; tests: crates/cpa-exec/src/codex_tls_tests.rs, crates/cpa-server/src/observability.rs |  |  |
 
 ### M5: Temporary OAuth callback listeners (separate from the primary listener)
