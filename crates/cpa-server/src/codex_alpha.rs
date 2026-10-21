@@ -139,6 +139,7 @@ async fn alpha_search(
         session_parent: bound(parent),
         session_fork: fork,
         exclude,
+        scheduler: crate::plugins::provider_scheduler_context(&rt, "codex", &selection_headers),
         ..Selection::default()
     };
     // ponytail: one selection, no failover or outcome recording, as in Go; plugin model
@@ -203,17 +204,14 @@ async fn alpha_search(
         Err(AcquireError::Prepare { error: e, .. }) => {
             return error(e.status, &String::from_utf8_lossy(&e.body));
         }
-        // A plugin scheduler's answer, as the selector's error text.
+        // A plugin scheduler's answer: Go returns the error as is, and a statusless one
+        // answers 503 (`HTTPStatusFromErrorOr`).
         Err(AcquireError::Rejected { code, message }) => {
-            let status = if matches!(code.as_str(), "auth_not_found" | "auth_unavailable") {
-                503
-            } else {
-                500
-            };
-            return error(status, &format!("{code}: {message}"));
+            return error(503, &format!("{code}: {message}"));
         }
         Err(AcquireError::Scheduler(e)) => {
-            return error(crate::classify::response_status(&e), &crate::classify::error_text(&e));
+            let status = if e.status > 0 { e.status } else { 503 };
+            return error(status, &crate::classify::error_text(&e));
         }
     };
     search(&rt, lease, &body, &headers, &model, &cfg, &capture, None).await

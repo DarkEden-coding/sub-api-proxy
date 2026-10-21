@@ -436,8 +436,28 @@ fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
 /// session-affinity namespace `mixed` and, under session affinity, the route model.
 /// ponytail: Go's conductor also adds the canonical and parent session IDs before the
 /// pick; add them here if a scheduler needs session identity.
-pub(crate) fn scheduler_context(call: &Call, model: &str, session_affinity: bool) -> super::SchedulerContext {
+pub(crate) fn scheduler_context(
+    call: &Call,
+    model: &str,
+    session_affinity: bool,
+    session: &crate::session::Session,
+) -> super::SchedulerContext {
     let mut metadata = execution_metadata(call, model);
+    // Go `session.Enrich`: an explicit session (or the execution session) is canonical,
+    // with its parent when that differs; otherwise only the derived identity is named.
+    match (session.explicit, session.id.as_deref()) {
+        (true, Some(id)) => {
+            metadata.insert("canonical_session_id".into(), Value::String(id.to_owned()));
+            if let Some(parent) = session.parent.as_deref().filter(|p| *p != id) {
+                metadata.insert("parent_session_id".into(), Value::String(parent.to_owned()));
+            }
+        }
+        _ => {
+            if let Some(derived) = session.derived.as_deref().filter(|d| !d.is_empty()) {
+                metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
+            }
+        }
+    }
     metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
     let affinity_model = if session_affinity {
         model.to_owned()

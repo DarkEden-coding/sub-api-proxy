@@ -324,6 +324,7 @@ async fn select_oauth(
         session_parent: bound(parent),
         session_fork: fork,
         exclude,
+        scheduler: crate::plugins::provider_scheduler_context(rt, "codex", headers),
         ..Selection::default()
     };
     rt.acquire(selection, cfg, policy, &rt.registry())
@@ -378,18 +379,15 @@ async fn select_oauth(
                 text: String::from_utf8_lossy(&error.body).into_owned(),
                 retry_after: None,
             },
-            // A plugin scheduler's answer, as the selector's error text.
+            // A plugin scheduler's answer: Go returns the error as is, and a statusless one
+            // answers 503 (`writeSelectionError`).
             AcquireError::Rejected { code, message } => Rejection {
-                status: if matches!(code.as_str(), "auth_not_found" | "auth_unavailable") {
-                    503
-                } else {
-                    500
-                },
+                status: 503,
                 text: format!("{code}: {message}"),
                 retry_after: None,
             },
             AcquireError::Scheduler(error) => Rejection {
-                status: crate::classify::response_status(&error),
+                status: if error.status > 0 { error.status } else { 503 },
                 text: crate::classify::error_text(&error),
                 retry_after: None,
             },

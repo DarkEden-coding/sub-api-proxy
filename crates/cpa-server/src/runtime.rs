@@ -664,7 +664,9 @@ pub(crate) enum Pick {
 
 /// A selection's eligible credentials with their execution models, and those of them
 /// that are ready now with their provider keys; when none is ready, the error Go's
-/// availability check reports.
+/// availability check reports. `configured` adds the configured selector's own filter
+/// (weighted round-robin skips non-positive weights); a plugin scheduler and its
+/// built-in delegates see every available credential.
 #[allow(clippy::type_complexity)]
 fn ready<'a>(
     creds: &'a [Arc<Credential>],
@@ -673,11 +675,12 @@ fn ready<'a>(
     policy: &Policy,
     admit: &Admit<'_>,
     now: Instant,
+    configured: bool,
 ) -> Result<(Vec<(&'a Arc<Credential>, String)>, Vec<(&'a Arc<Credential>, String)>), AcquireError> {
     let eligible: Vec<_> = creds
         .iter()
         .filter(|c| !c.disabled && !selection.exclude.contains(&c.id))
-        .filter(|c| policy.retry_limit(c) >= selection.retry_round && scheduler.admits(c, policy))
+        .filter(|c| policy.retry_limit(c) >= selection.retry_round && (!configured || scheduler.admits(c, policy)))
         .filter_map(|c| admit(c).map(|m| (c, m)))
         .collect();
     let candidates: Vec<_> = eligible
@@ -1281,13 +1284,24 @@ impl CredentialStore {
     ) -> Result<Vec<Arc<Credential>>, AcquireError> {
         let inner = self.read();
         let scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
-        let (_, ready) = ready(&inner.creds, &scheduler, selection, policy, admit, Instant::now())?;
+        let (_, ready) = ready(
+            &inner.creds,
+            &scheduler,
+            selection,
+            policy,
+            admit,
+            Instant::now(),
+            false,
+        )?;
         let tier = ready.iter().map(|(c, _)| crate::scheduler::priority(c)).max();
-        Ok(ready
+        let mut out: Vec<_> = ready
             .into_iter()
             .filter(|(c, _)| across || Some(crate::scheduler::priority(c)) == tier)
             .map(|(c, _)| Arc::clone(c))
-            .collect())
+            .collect();
+        // Go `availableAuthsFromPriorityBuckets` orders both modes by ID.
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
     }
 
     /// [`Self::select_ranked`] with the choice a plugin scheduler made.
@@ -1303,11 +1317,13 @@ impl CredentialStore {
         let credential = {
             let inner = self.read();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
-            let (eligible, candidates) = ready(&inner.creds, &scheduler, &selection, &policy, admit, now)?;
+            let configured = matches!(pick, Pick::Configured);
+            let (eligible, candidates) = ready(&inner.creds, &scheduler, &selection, &policy, admit, now, configured)?;
             let refs: Vec<(&Credential, &str)> = candidates.iter().map(|(c, p)| (c.as_ref(), p.as_str())).collect();
             let chosen = match &pick {
-                // Go takes the candidate from its snapshot; one that stopped being ready
-                // since leaves the choice to the configured selector.
+                // Go serves the candidate from its pre-call snapshot without checking it
+                // again; here one that stopped being ready during the call leaves the
+                // choice to the configured selector (docs/DIFFERENCES-FROM-GO.md).
                 Pick::Auth(id) => refs.iter().find(|(c, _)| c.id == *id).map(|(c, _)| (*c, None)),
                 Pick::Builtin(strategy) => scheduler
                     .pick_builtin(&refs, &selection, *strategy, ranks)
@@ -1316,7 +1332,15 @@ impl CredentialStore {
             };
             let (picked, lcp) = match chosen {
                 Some(chosen) => chosen,
-                None => scheduler.pick_session(&refs, &selection, &policy, ranks, now).unwrap(),
+                None => {
+                    let refs: Vec<_> = refs.into_iter().filter(|(c, _)| scheduler.admits(c, &policy)).collect();
+                    if refs.is_empty() {
+                        // Only the configured selector's filter removed them: its error.
+                        return Err(ready(&inner.creds, &scheduler, &selection, &policy, admit, now, true)
+                            .expect_err("no admitted candidate is ready"));
+                    }
+                    scheduler.pick_session(&refs, &selection, &policy, ranks, now).unwrap()
+                }
             };
             let (c, m) = eligible.iter().find(|(c, _)| c.id == picked.id).unwrap();
             let generation = scheduler.reserve_probe(c, m, now);
@@ -1765,15 +1789,6 @@ impl CredentialStore {
     }
 
     /// Active cooldowns of one credential.
-    /// Credentials bound to live session-affinity keys that `matches`, without
-    /// refreshing them (the plugin host's `host.affinity.lookup`).
-    pub(crate) fn affinity_bound(&self, matches: impl Fn(&crate::affinity::Key) -> bool) -> Vec<String> {
-        self.scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .affinity_bound(Instant::now(), matches)
-    }
-
     pub fn cooldowns(&self, id: &str) -> Vec<crate::scheduler::CooldownState> {
         self.scheduler
             .lock()

@@ -239,6 +239,31 @@ pub struct SchedulerContext {
     pub options: cpa_plugin::api::SchedulerOptions,
 }
 
+/// Go `pickNextLegacy`'s scheduler options for a single-provider selection (Codex
+/// realtime and Alpha Search): the selection headers, and the provider as the session
+/// affinity provider. `None` without an active plugin scheduler.
+pub(crate) fn provider_scheduler_context(
+    rt: &Runtime,
+    provider: &str,
+    headers: &HeaderMap,
+) -> Option<Arc<SchedulerContext>> {
+    if !rt.plugins().has_scheduler() {
+        return None;
+    }
+    let mut metadata = cpa_plugin::gojson::Metadata::new();
+    metadata.insert(
+        "session_affinity_provider".into(),
+        serde_json::Value::String(provider.into()),
+    );
+    Some(Arc::new(SchedulerContext {
+        stream: false,
+        options: cpa_plugin::api::SchedulerOptions {
+            headers: go_request_header(headers),
+            metadata,
+        },
+    }))
+}
+
 /// The plugin scheduler's request for a selection, or `None` when no plugin scheduler
 /// takes part (none active, or Home mode). Errors are the availability errors Go
 /// reports before asking the scheduler.
@@ -263,7 +288,14 @@ pub(crate) fn scheduler_request(
     }
     let context = selection.scheduler.as_deref();
     Ok(Some(cpa_plugin::api::SchedulerPickRequest {
-        // Handlers select across providers (Go "mixed"), which leaves Provider empty.
+        // Handlers select across providers (Go `pickNextMixed`, "mixed"), which leaves
+        // Provider empty; Codex realtime and Alpha Search select one provider (Go
+        // `pickNextLegacy`), which names it.
+        provider: if selection.providers.is_empty() {
+            selection.provider.trim().to_lowercase()
+        } else {
+            String::new()
+        },
         providers,
         model: selection.model.clone(),
         stream: context.is_some_and(|c| c.stream),
