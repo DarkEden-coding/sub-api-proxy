@@ -189,7 +189,13 @@ fn walk(value: &Value, schema: &Schema, path: &str, strict: bool) -> anyhow::Res
             if value.is_null() && is_raw_entries(schema) {
                 continue;
             }
-            walk(value, inner, &format!("{path}.{key}"), strict)?;
+            // Other keys of a plugin entry are the plugin's own settings.
+            walk(
+                value,
+                inner,
+                &format!("{path}.{key}"),
+                strict && !is_raw_entries(schema),
+            )?;
         } else if let Some(inner) = schema.get("fields").and_then(|f| f.get(key)) {
             walk(value, inner, &format!("{path}.{key}"), strict)?;
         } else if strict || native_group {
