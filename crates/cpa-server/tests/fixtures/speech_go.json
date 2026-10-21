@@ -472,6 +472,38 @@
       "requests": []
     },
     {
+      "name": "speech_zstd_skippable_3mib",
+      "method": "POST",
+      "path": "/v1/audio/speech",
+      "content_type": "application/json",
+      "body_b64": "KLUv/QBoIQEAeyJpbnB1dCI6InpzdGQgaGVsbG8iLCJ2b2ljZSI6ImFzaCJ9",
+      "skip_prefix": 3145728,
+      "headers": {
+        "Content-Encoding": "zstd"
+      },
+      "upstreams": [
+        {
+          "status": 200,
+          "headers": [
+            [
+              "Content-Type",
+              "audio/mpeg"
+            ]
+          ],
+          "body": "skipped-audio"
+        }
+      ],
+      "status": 200,
+      "response_headers": {
+        "Content-Length": "13",
+        "Content-Type": "audio/mpeg"
+      },
+      "response": "skipped-audio",
+      "requests": [
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 58\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"zstd hello\",\"voice_id\":\"orion\"}"
+      ]
+    },
+    {
       "name": "speech_unknown_voice_404",
       "method": "POST",
       "path": "/v1/audio/speech",
@@ -506,7 +538,7 @@
       },
       "response": "{\"error\":\"voice not found\"}",
       "requests": [
-        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 48\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"nope\"}"
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 48\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-2\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"nope\"}"
       ]
     },
     {
@@ -534,7 +566,7 @@
       },
       "response": "ok",
       "requests": [
-        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 51\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-2\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"again\",\"voice_id\":\"eve\"}"
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 51\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"again\",\"voice_id\":\"eve\"}"
       ]
     },
     {
@@ -563,7 +595,7 @@
       },
       "response": "slow-audio",
       "requests": [
-        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 50\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"slow\",\"voice_id\":\"eve\"}"
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 50\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-2\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"slow\",\"voice_id\":\"eve\"}"
       ]
     },
     {
@@ -671,8 +703,8 @@
       },
       "response": "{\"error\":{\"code\":\"model_not_found\",\"message\":\"The model grok-tts does not exist\"}}",
       "requests": [
-        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 47\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-2\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"eve\"}",
-        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 47\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"eve\"}"
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 47\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-1\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"eve\"}",
+        "POST /v1/tts HTTP/1.1\r\nHost: UPSTREAM\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 47\r\nAccept: */*\r\nAuthorization: Bearer XAI-KEY-2\r\nConnection: Keep-Alive\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n{\"language\":\"auto\",\"text\":\"x\",\"voice_id\":\"eve\"}"
       ]
     }
   ]

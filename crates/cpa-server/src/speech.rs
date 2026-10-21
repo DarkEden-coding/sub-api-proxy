@@ -26,8 +26,6 @@ const VOICE_MODEL: &str = "grok-voice-tts-1.0";
 const DEFAULT_VOICE: &str = "eve";
 const MAX_RUNES: usize = 60_000;
 const MAX_BODY: usize = 1 << 20;
-/// The speech routes' raw body limit: zstd cannot shrink a larger body to [`MAX_BODY`].
-pub(crate) const BODY_LIMIT: usize = 2 * MAX_BODY;
 const DEFAULT_SAMPLE_RATE: i64 = 24_000;
 
 /// `openAISpeechVoices`: OpenAI voice names on Grok voices. Other names pass through, so
@@ -59,10 +57,6 @@ pub async fn speech(
 ) -> Response {
     let body = match body {
         Ok(body) => body,
-        // The route's own limit ([`BODY_LIMIT`]): no body this large decodes to 1 MiB.
-        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            return bad_request("request body is larger than 1MB");
-        }
         Err(rejection) => return read_failed(&rejection),
     };
     let body = match crate::openai::read_body(&headers, body) {

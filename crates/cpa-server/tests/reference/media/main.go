@@ -37,14 +37,17 @@ type upstream struct {
 }
 
 type scenario struct {
-	Name        string            `json:"name"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	ContentType string            `json:"content_type,omitempty"`
-	Body        string            `json:"body,omitempty"`
-	BodyB64     string            `json:"body_b64,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Upstreams   []upstream        `json:"upstreams,omitempty"`
+	Name        string `json:"name"`
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	ContentType string `json:"content_type,omitempty"`
+	Body        string `json:"body,omitempty"`
+	BodyB64     string `json:"body_b64,omitempty"`
+	// SkipPrefix puts a zstd skippable frame with this many zero bytes before the body
+	// when it is sent (kept out of the fixture to keep it small).
+	SkipPrefix int               `json:"skip_prefix,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Upstreams  []upstream        `json:"upstreams,omitempty"`
 
 	Status         int               `json:"status"`
 	ResponseHeader map[string]string `json:"response_headers"`
@@ -212,6 +215,15 @@ func canonicalForm(s string) string {
 	return head + pieces[0] + sep + strings.Join(parts, sep) + sep + pieces[len(pieces)-1]
 }
 
+// skippable is a zstd skippable frame (magic 0x184D2A50) of n zero bytes, or "".
+func skippable(n int) string {
+	if n == 0 {
+		return ""
+	}
+	head := []byte{0x50, 0x2a, 0x4d, 0x18, byte(n), byte(n >> 8), byte(n >> 16), byte(n >> 24)}
+	return string(head) + strings.Repeat("\x00", n)
+}
+
 func freePort() int {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -283,7 +295,7 @@ func main() {
 		cap.replies = append([]upstream(nil), s.Upstreams...)
 		cap.requests = nil
 		cap.mu.Unlock()
-		req, errReq := http.NewRequest(s.Method, base+s.Path, strings.NewReader(s.Body))
+		req, errReq := http.NewRequest(s.Method, base+s.Path, strings.NewReader(skippable(s.SkipPrefix)+s.Body))
 		if !utf8.ValidString(s.Body) {
 			s.BodyB64, s.Body = base64.StdEncoding.EncodeToString([]byte(s.Body)), ""
 		}

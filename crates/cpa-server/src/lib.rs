@@ -99,14 +99,8 @@ fn api(rt: Arc<Runtime>) -> Router {
         .route("/v1/completions", post(openai::completions))
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
-        .route(
-            "/v1/audio/speech",
-            post(speech::speech).layer(DefaultBodyLimit::max(speech::BODY_LIMIT)),
-        )
-        .route(
-            "/v1/tts",
-            post(speech::speech).layer(DefaultBodyLimit::max(speech::BODY_LIMIT)),
-        )
+        .route("/v1/audio/speech", post(speech::speech))
+        .route("/v1/tts", post(speech::speech))
         .route("/v1/videos", post(videos::native_post))
         .route("/v1/videos/generations", post(videos::native_post))
         .route("/v1/videos/edits", post(videos::native_post))

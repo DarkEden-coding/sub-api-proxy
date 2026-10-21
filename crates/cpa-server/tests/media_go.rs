@@ -43,6 +43,9 @@ struct Scenario {
     body: String,
     #[serde(default)]
     body_b64: String,
+    /// A zstd skippable frame of this many zero bytes goes before the body.
+    #[serde(default)]
+    skip_prefix: usize,
     #[serde(default)]
     headers: BTreeMap<String, String>,
     #[serde(default)]
@@ -327,11 +330,18 @@ async fn replay(tag: &str, fixture: &Fixture, expected: impl Fn(&Scenario) -> St
         }
         let mut req = client.request(method, format!("{base}{}", s.path)).headers(headers);
         if s.method == "POST" {
-            req = req.body(if s.body_b64.is_empty() {
+            let mut body = Vec::new();
+            if s.skip_prefix > 0 {
+                body.extend([0x50, 0x2a, 0x4d, 0x18]);
+                body.extend((s.skip_prefix as u32).to_le_bytes());
+                body.resize(body.len() + s.skip_prefix, 0);
+            }
+            body.extend(if s.body_b64.is_empty() {
                 s.body.clone().into_bytes()
             } else {
                 base64::engine::general_purpose::STANDARD.decode(&s.body_b64).unwrap()
             });
+            req = req.body(body);
         }
         let res = req.send().await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
         let status = res.status().as_u16();
@@ -386,31 +396,6 @@ async fn replay(tag: &str, fixture: &Fixture, expected: impl Fn(&Scenario) -> St
         }
         if !diffs.is_empty() {
             failures.push(format!("== {tag}/{}\n{}", s.name, diffs.join("\n")));
-        }
-    }
-    if tag == "speech" {
-        // Past the speech routes' own raw limit (twice Go's decoded 1 MiB, so no body
-        // that large decodes under it): Go's oversize answer, never read as JSON.
-        let want = fixture
-            .scenarios
-            .iter()
-            .find(|s| s.name == "speech_zstd_decoded_too_large")
-            .expect("the oversize scenario");
-        let res = client
-            .post(format!("{base}/v1/tts"))
-            .header("Authorization", "Bearer client-key-1")
-            .header("Content-Type", "application/json")
-            .body(vec![b' '; (2 << 20) + 1])
-            .send()
-            .await
-            .unwrap();
-        let status = res.status().as_u16();
-        let body = res.text().await.unwrap();
-        if (status, body.as_str()) != (want.status, want.response.as_str()) {
-            failures.push(format!(
-                "== speech/raw_body_over_limit\n  go   {}\n  rust {status} {body}",
-                want.response
-            ));
         }
     }
     failures

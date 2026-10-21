@@ -35,7 +35,8 @@ are not valid UTF-8 are stored in `body_b64`.
 (`ae3ee3be`) with the same driver and its own config (`SpeechConfig`: two xAI keys, a
 payload rule for the voice model and `passthrough-headers: true`, so upstream audio types
 and would-be error headers show). The zstd request bodies in `speech.go` were made with
-the zstd CLI. The replay compares the six kept response headers, not all of them, and the
+the zstd CLI; `skip_prefix` puts a zstd skippable frame of that many zero bytes before a
+body when it is sent, so a 3 MiB request stays out of the fixture. The replay compares the six kept response headers, not all of them, and the
 audio bodies are short ASCII stand-ins:
 
 ```sh

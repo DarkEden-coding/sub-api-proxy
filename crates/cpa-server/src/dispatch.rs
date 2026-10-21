@@ -529,10 +529,8 @@ where
                     let headers = if respond::passthrough_headers(&cfg) {
                         respond::filter_upstream_headers(&headers)
                     } else {
-                        // Read, not taken: the rendered response still gets them below.
-                        let intercepted = trace.intercepted_headers();
-                        trace.set_intercepted_headers(intercepted.clone());
-                        respond::filter_upstream_headers(&intercepted)
+                        // A snapshot: the rendered response still gets them below.
+                        respond::filter_upstream_headers(&trace.intercepted_headers_snapshot())
                     };
                     Ok(Done::Buffered { headers, body })
                 }
@@ -849,6 +847,10 @@ impl Trace {
     /// (filtered like upstream headers) over the rendered response.
     pub(crate) fn set_intercepted_headers(&self, headers: HeaderMap) {
         *self.3.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = headers;
+    }
+
+    fn intercepted_headers_snapshot(&self) -> HeaderMap {
+        self.3.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn intercepted_headers(&self) -> HeaderMap {

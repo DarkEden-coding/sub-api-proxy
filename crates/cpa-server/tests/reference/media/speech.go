@@ -52,6 +52,11 @@ func zstdPost(name, path, body string, encoding string, replies ...upstream) sce
 	return s
 }
 
+func withSkipPrefix(s scenario, n int) scenario {
+	s.SkipPrefix = n
+	return s
+}
+
 func speechScenarios() []scenario {
 	const speech = "/v1/audio/speech"
 	const tts = "/v1/tts"
@@ -109,6 +114,9 @@ func speechScenarios() []scenario {
 		zstdPost("tts_zstd_stacked", tts, zstdStacked, "zstd, zstd",
 			audio("audio/wav", "stacked-audio")),
 		zstdPost("speech_zstd_decoded_too_large", speech, zstdTooLarge, "zstd"),
+		// 3 MiB on the wire, a small body once decoded: the size check is on the decoded body.
+		withSkipPrefix(zstdPost("speech_zstd_skippable_3mib", speech, zstdHello, "zstd",
+			audio("audio/mpeg", "skipped-audio")), 3<<20),
 		post("speech_unknown_voice_404", speech, jsonType,
 			`{"input":"x","voice":"nope"}`,
 			status(404, `{"error":"voice not found"}`),
