@@ -21,6 +21,7 @@ use serde_json::{Map, Value};
 use super::{ModelInfo, ThinkingSupport, pinned};
 use crate::config::Config;
 use crate::credential::{Credential, Source};
+use crate::gostr::GoStr;
 
 /// Go `responsesWebSearchProviderPathSupport`.
 fn provider_web_search_path(provider: &str) -> Option<bool> {
@@ -488,14 +489,15 @@ fn excluded_for(cfg: &Config, c: &Credential) -> Vec<String> {
         return Vec::new();
     }
     crate::config::credentials::oauth_excluded(cfg)
-        .remove(&c.provider.trim().to_lowercase())
+        .remove(&c.provider.trim().go_lower())
         .unwrap_or_default()
 }
 
+/// Go `applyExcludedModels`: patterns and model IDs both go through `strings.ToLower`.
 fn apply_excluded(models: Vec<Spec>, excluded: &[String]) -> Vec<Spec> {
     let patterns: Vec<String> = excluded
         .iter()
-        .map(|p| p.trim().to_lowercase())
+        .map(|p| p.trim().go_lower())
         .filter(|p| !p.is_empty())
         .collect();
     if patterns.is_empty() {
@@ -504,7 +506,7 @@ fn apply_excluded(models: Vec<Spec>, excluded: &[String]) -> Vec<Spec> {
     models
         .into_iter()
         .filter(|m| {
-            let id = m.id.trim().to_lowercase();
+            let id = m.id.trim().go_lower();
             !patterns.iter().any(|p| wildcard(p, &id))
         })
         .collect()
@@ -1673,6 +1675,25 @@ mod tests {
             ),
             "claude-sonnet-5"
         );
+    }
+
+    /// Exclusions match the way Go lowercases both sides (`strings.ToLower`, where U+0130
+    /// becomes a plain `i`): a configured `MİNİ` excluded as `MİNİ` or `mini` is not
+    /// registered.
+    #[test]
+    fn exclusions_match_with_go_lowercasing() {
+        for excluded in ["MİNİ", "mini"] {
+            let cfg = Config::parse(&format!(
+                "claude-api-key:\n  - api-key: k\n    models: [{{name: MİNİ}}, {{name: keep}}]\n    excluded-models: [{excluded}]\n"
+            ))
+            .unwrap();
+            let creds: Vec<_> = crate::config::credentials::from_config(&cfg)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            let r = Registry::build(&cfg, &creds);
+            assert_eq!(r.ids().collect::<Vec<_>>(), ["keep"], "excluded: {excluded}");
+        }
     }
 
     #[test]
