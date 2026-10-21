@@ -3,10 +3,12 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use cpa_common::gostr::GoStr;
+use cpa_core::exec::Caller;
 use serde_json::{Map, Value, json};
 
 use crate::registry::Spec;
@@ -19,11 +21,22 @@ const CLAUDE_MAX_OUTPUT: i64 = 64_000;
 /// clients (any `client_version` query key) the Codex client catalog, Anthropic clients
 /// (an `Anthropic-Version` header or a `claude-cli` User-Agent) the Anthropic catalog, and
 /// everyone else the OpenAI one.
-pub async fn unified(State(rt): State<Arc<Runtime>>, uri: OriginalUri, headers: HeaderMap) -> Response {
-    list(rt, uri, headers, None).await
+pub async fn unified(
+    State(rt): State<Arc<Runtime>>,
+    Extension(caller): Extension<Caller>,
+    uri: OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    list(rt, caller, uri, headers, None).await
 }
 
-async fn list(rt: Arc<Runtime>, OriginalUri(uri): OriginalUri, headers: HeaderMap, detail: Option<&str>) -> Response {
+async fn list(
+    rt: Arc<Runtime>,
+    caller: Caller,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    detail: Option<&str>,
+) -> Response {
     let header = |name: &str| {
         headers
             .get(name)
@@ -44,7 +57,8 @@ async fn list(rt: Arc<Runtime>, OriginalUri(uri): OriginalUri, headers: HeaderMa
     let intercept = |source: &'static str, response: Response| {
         let rt = rt.clone();
         let headers = headers.clone();
-        async move { crate::plugins::interceptors::model_list(&rt, source, &headers, response, detail).await }
+        let caller = caller.clone();
+        async move { crate::plugins::interceptors::model_list(&rt, &caller, source, &headers, response, detail).await }
     };
     // Go Home mode: the catalog Home answers for this client.
     if let Some(remote) = rt.remote_dispatch() {
@@ -91,12 +105,13 @@ async fn list(rt: Arc<Runtime>, OriginalUri(uri): OriginalUri, headers: HeaderMa
 /// answer this client, after plugin interceptors (Go `ModelDetailIDContextKey`).
 pub async fn detail(
     State(rt): State<Arc<Runtime>>,
+    Extension(caller): Extension<Caller>,
     model: Option<Path<String>>,
     uri: OriginalUri,
     headers: HeaderMap,
 ) -> Response {
     let id = model.map(|Path(model)| model).unwrap_or_default();
-    list(rt, uri, headers, Some(&id)).await
+    list(rt, caller, uri, headers, Some(&id)).await
 }
 
 /// Go `WriteModelListResponse` with a detail ID: the first entry of `data`, then
@@ -333,6 +348,7 @@ fn gemini_entry(m: &Spec) -> Map<String, Value> {
 /// `GET /v1beta/models` (Go `GeminiModels`).
 pub async fn gemini_list(
     State(rt): State<Arc<Runtime>>,
+    Extension(caller): Extension<Caller>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
@@ -342,7 +358,7 @@ pub async fn gemini_list(
             Ok(entries) => {
                 let models: Vec<Value> = entries.iter().map(crate::home_models::gemini).collect();
                 let response = respond::gin_json(200, gojson::sorted(&json!({ "models": models })));
-                crate::plugins::interceptors::model_list(&rt, "gemini", &headers, response, None).await
+                crate::plugins::interceptors::model_list(&rt, &caller, "gemini", &headers, response, None).await
             }
             Err(response) => *response,
         };
@@ -371,7 +387,7 @@ pub async fn gemini_list(
         })
         .collect();
     let response = respond::gin_json(200, gojson::sorted(&json!({ "models": models })));
-    crate::plugins::interceptors::model_list(&rt, "gemini", &headers, response, None).await
+    crate::plugins::interceptors::model_list(&rt, &caller, "gemini", &headers, response, None).await
 }
 
 /// `GET /v1beta/models/*action` (Go `GeminiGetHandler`).

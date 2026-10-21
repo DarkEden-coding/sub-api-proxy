@@ -219,6 +219,7 @@ fn request(s: &Value, usage: cpa_core::exec::UsageSink) -> (ExecRequest, String)
         caller: Caller {
             principal: "fake-client-key".into(),
             source: "authorization",
+            provider: String::new(),
         },
     };
     (req, op.to_owned())

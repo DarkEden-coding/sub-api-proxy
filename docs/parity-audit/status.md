@@ -21,7 +21,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M3 | 424 | 195 | 211 | 18 |
 | M4 | 589 | 251 | 326 | 12 |
 | M5 | 331 | 218 | 110 | 3 |
-| M6 | 267 | 129 | 126 | 12 |
+| M6 | 267 | 129 | 127 | 11 |
 
 ### Gaps by area
 
@@ -29,7 +29,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 |---|---:|---:|---|
 | server | 12 | 285 | M1-0119, M4-0371, M4-0372, M4-0511, M4-0512, M4-0513, M4-0515, M4-0543, M4-0579, M4-0580, M4-0585, M5-0316 |
 | claude | 12 | 63 | M1-0120, M1-0121, M1-0122, M1-0123, M1-0124, M1-0125, M1-0126, M1-0127, M1-0136, M1-0137, M1-0147, M5-0314 |
-| plugins | 11 | 95 | M6-0174, M6-0192, M6-0211, M6-0213, M6-0220, M6-0240, M6-0241, M6-0249, M6-0250, M6-0251, M6-0252 |
+| plugins | 10 | 96 | M6-0174, M6-0192, M6-0211, M6-0213, M6-0220, M6-0240, M6-0241, M6-0249, M6-0250, M6-0251 |
 | codex | 8 | 78 | M3-0351, M3-0355, M3-0362, M3-0363, M3-0364, M3-0367, M3-0380, M5-0323 |
 | google | 6 | 78 | M3-0058, M3-0059, M3-0353, M3-0354, M3-0360, M3-0361 |
 | translate | 5 | 123 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
@@ -255,13 +255,13 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 
 | ID | Item | Status | Evidence | Area | Note |
 |---|---|---|---|---|---|
-| M2-0001 | POST /v1/chat/completions | covered | probe: POST /v1/chat/completions -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-exec/src/kimi_tests.rs (+7) |  |  |
+| M2-0001 | POST /v1/chat/completions | covered | probe: POST /v1/chat/completions -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-exec/src/kimi_tests.rs (+8) |  |  |
 | M2-0002 | POST /v1/completions | covered | probe: POST /v1/completions -> 401; tests: crates/cpa-server/tests/routes.rs |  |  |
 | M2-0003 | POST /v1/responses | covered | probe: POST /v1/responses -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-exec/src/codex_capture.rs (+20) |  |  |
 | M2-0004 | POST /v1/responses/compact | covered | probe: POST /v1/responses/compact -> 401; tests: crates/cpa-server/tests/openai_compat_routes.rs, crates/cpa-server/tests/routes.rs |  |  |
 | M2-0005 | POST /backend-api/codex/responses | covered | probe: POST /backend-api/codex/responses -> 401; tests: crates/cpa-exec/src/codex_tls_tests.rs, crates/cpa-server/src/observability.rs |  |  |
 | M2-0006 | POST /backend-api/codex/responses/compact | partial | probe: POST /backend-api/codex/responses/compact -> 401; no test requests this path | server |  |
-| M2-0007 | GET /v1beta/models | covered | probe: GET /v1beta/models -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/safe_mode.rs (+4) |  |  |
+| M2-0007 | GET /v1beta/models | covered | probe: GET /v1beta/models -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/src/safe_mode.rs (+5) |  |  |
 | M2-0008 | POST /v1beta/interactions | covered | probe: POST /v1beta/interactions -> 401; tests: crates/cpa-server/tests/gemini_routes.rs, crates/cpa-server/tests/routes.rs |  |  |
 | M2-0009 | POST /v1beta/models/*action | covered | probe: POST /v1beta/models/*action -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/tests/aistudio_relay.rs (+3) |  |  |
 | M2-0010 | GET /v1beta/models/*action | covered | probe: GET /v1beta/models/*action -> 401; tests: crates/cliproxy/src/home.rs, crates/cpa-server/tests/aistudio_relay.rs (+3) |  |  |
@@ -1033,7 +1033,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0049 | observability.logs.logging-to-file | covered | read in crates/cliproxy/src/tui/app.rs, crates/cliproxy/src/tui/config.rs (+7); set in crates/cliproxy/src/tui/app.rs, crates/cliproxy/tests/fixtures/tui_go.json (+5) |  | heuristic: key name match |
 | M4-0050 | observability.logs.logs-max-total-size-mb | covered | read in crates/cliproxy/src/tui/config.rs, crates/cpa-server/src/config_diff.rs (+4); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-server/src/management/legacy.rs (+2) |  | heuristic: key name match |
 | M4-0051 | observability.logs.error-logs-max-files | covered | read in crates/cliproxy/src/tui/config.rs, crates/cpa-server/src/config_diff.rs (+4); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-server/src/management/legacy.rs (+3) |  | heuristic: key name match |
-| M4-0052 | observability.usage.usage-statistics-enabled | covered | read in crates/cliproxy/src/home.rs, crates/cliproxy/src/tui/config.rs (+5); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-server/src/dispatch.rs (+12) |  | heuristic: key name match |
+| M4-0052 | observability.usage.usage-statistics-enabled | covered | read in crates/cliproxy/src/home.rs, crates/cliproxy/src/tui/config.rs (+5); set in crates/cliproxy/tests/fixtures/tui_go.json, crates/cpa-server/src/dispatch.rs (+14) |  | heuristic: key name match |
 | M4-0053 | observability.usage.redis-usage-queue-retention-seconds | covered | read in crates/cpa-server/src/config_diff.rs, crates/cpa-server/src/management/legacy/view.rs (+1); set in crates/cpa-server/src/usage.rs, crates/cpa-server/tests/fixtures/config_diff_go.json (+2) |  | heuristic: key name match |
 | M4-0054 | routing.cooldown.disable-cooling | covered | read in crates/cliproxy/src/home.rs, crates/cpa-core/src/config.rs (+9); set in crates/cpa-core/src/config.rs, crates/cpa-exec/src/meta_auth.rs (+6) |  | heuristic: key name match |
 | M4-0055 | routing.cooldown.save-cooldown-status | covered | read in crates/cliproxy/src/home.rs, crates/cpa-core/src/config.rs (+1); set in crates/cpa-server/src/runtime.rs, crates/cpa-server/src/scheduler.rs (+3) |  | heuristic: key name match |
@@ -2153,7 +2153,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0249 | RPC `host.routing.reset_cooldown` (constant `MethodHostRoutingResetCooldown`); input `auth… | missing | New plugin host RPC in sdk/pluginabi/types.go:114; absent from crates/cpa-plugin/src/abi.rs and host dispatch; no ABI test. | plugins | The server has cooldown-reset internals, but plugins cannot call this new method. |
 | M6-0250 | Plugin data contract `ConfigField.Default`. Default value used when the plugin configurati… | missing | Go sdk/pluginapi/types.go:61-68 adds Default; crates/cpa-plugin/src/api.rs ConfigField lacks the field; no wire-contract test. | plugins | Existing schema fixtures keep their old Go reference. |
 | M6-0251 | Plugin data contract `ThinkingSupport.DisableType`. Model-specific thinking-off spelling, … | missing | Go sdk/pluginapi/types.go:192-205 adds DisableType; crates/cpa-plugin/src/api.rs ThinkingSupport lacks the field; no wire-contract test. | plugins | Existing schema fixtures keep their old Go reference. |
-| M6-0252 | Plugin data contract `UsageRecord.IsNativeKey / UsageRecord.AccessProvider`. Client authen… | missing | Go sdk/pluginapi/types.go:1508-1517 adds IsNativeKey and AccessProvider; crates/cpa-plugin/src/api.rs UsageRecord lacks both fields; no wire-contract test. | plugins | Existing schema fixtures keep their old Go reference. |
+| M6-0252 | Plugin data contract `UsageRecord.IsNativeKey / UsageRecord.AccessProvider`. Client authen… | partial | crates/cpa-plugin/src/api.rs UsageRecord IsNativeKey/AccessProvider after APIKey; crates/cpa-server/src/usage_record.rs queued_payload_distinguishes_native_key (queued and plugin record, wire order); tests/routes.rs usage_queue_records_every_attempt; tests/plugin_host_model.rs nested_callbacks_record_the_parent_usage_identity (request and model-list interceptors); tests/routes.rs count_tokens_home_401s_record_the_home_client_key | plugins | Go 37fe2608. The access provider comes from the authenticated Caller; nested host.model calls inherit the parent's through the callback scope. Gap: in Home mode Go's nested call shares the parent's mutable gin context, so a nested call whose own Home pick returns no key records the parent's Home key; Rust records the parent's original identity (needs a shared request-local Home identity). Plugin-executor usage records remain unported (M6-0174). |
 
 ### M6: Complete compatibility test-suite inventory
 

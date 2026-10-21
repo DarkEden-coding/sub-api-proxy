@@ -31,6 +31,9 @@ pub struct Caller {
     pub principal: String,
     /// Where the key came from: `authorization`, `x-api-key`, `query-key`, ...
     pub source: &'static str,
+    /// The access provider that accepted the key (Go gin `accessProvider`): `config-inline`
+    /// for a configured client key, else the plugin's provider; empty when access is open.
+    pub provider: String,
 }
 
 impl fmt::Debug for Caller {

@@ -103,6 +103,7 @@ fn request(case: &Value) -> ExecRequest {
         caller: Caller {
             principal: "fixture-client-key".into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
@@ -195,6 +196,7 @@ async fn custom_origin_counts_locally_without_sending_credentials() {
         caller: Caller {
             principal: "fake-client".into(),
             source: "x-api-key",
+            provider: String::new(),
         },
     };
     let response = tokio::time::timeout(
@@ -289,6 +291,7 @@ async fn messages_responses_record_the_quota_snapshot() {
             caller: Caller {
                 principal: "fake-client".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         }
     };
@@ -665,6 +668,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             caller: Caller {
                 principal: scenario["client_key"].as_str().unwrap().into(),
                 source: "authorization",
+                provider: String::new(),
             },
         };
         let req = enrich(req);
@@ -871,6 +875,7 @@ fn client_request(body: String, headers: http::HeaderMap) -> ExecRequest {
         caller: Caller {
             principal: "agent-client-key".into(),
             source: "authorization",
+            provider: String::new(),
         },
     })
 }
@@ -1180,6 +1185,7 @@ async fn unrestorable_tool_alias_publishes_no_tokens() {
         caller: Caller {
             principal: "fake-client".into(),
             source: "authorization",
+            provider: String::new(),
         },
     });
     let cfg = Config::parse("").unwrap();
@@ -1270,6 +1276,7 @@ async fn usage_reports_follow_go_reporter_calls() {
             caller: Caller {
                 principal: "fake-client".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         };
         let (executor, credential, cfg) = (&executor, &credential, &cfg);
@@ -1447,6 +1454,7 @@ async fn request_logs_follow_go_capture_sites() {
             caller: Caller {
                 principal: "fake-client".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         };
         let (executor, cfg) = (&executor, &cfg);
@@ -1643,6 +1651,7 @@ async fn compat_replay_sequence_matches_go() {
             caller: Caller {
                 principal: scenario["client_key"].as_str().unwrap().into(),
                 source: "authorization",
+                provider: String::new(),
             },
         });
         usage.0.lock().unwrap().clear();
@@ -1787,6 +1796,7 @@ async fn refused_versions_log_only_when_the_identity_is_replaced() {
             caller: Caller {
                 principal: "fake-client".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         }
     };
@@ -1999,6 +2009,7 @@ async fn responses_compaction_matches_go() {
             caller: Caller {
                 principal: "fake-client".into(),
                 source: "x-api-key",
+                provider: String::new(),
             },
         };
         seen.lock().unwrap().clear();

@@ -704,6 +704,26 @@ fn request_path_plugins_match_go() {
             if let Some(Value::String(exposed)) = want.pointer_mut("/headers/Access-Control-Expose-Headers") {
                 *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
             }
+            // They also predate `pluginapi.UsageRecord.IsNativeKey` and `AccessProvider`
+            // (`37fe2608`); the usage scenario authenticates with a configured client key.
+            if step["op"] == "records" {
+                for record in want.as_array_mut().into_iter().flatten() {
+                    if record["method"] != "usage.handle" {
+                        continue;
+                    }
+                    let Some(Value::String(request)) = record.get_mut("request") else {
+                        continue;
+                    };
+                    let start = request.find(r#""APIKey":""#).unwrap() + r#""APIKey":""#.len();
+                    let end = start + request[start..].find('"').unwrap() + 1;
+                    let native = end > start + 1;
+                    let provider = if native { "config-inline" } else { "" };
+                    request.insert_str(
+                        end,
+                        &format!(r#","IsNativeKey":{native},"AccessProvider":"{provider}""#),
+                    );
+                }
+            }
             let (got, want) = match step["op"].as_str() {
                 Some("records") => (async_completions_last(got), async_completions_last(want)),
                 _ => (got, want),

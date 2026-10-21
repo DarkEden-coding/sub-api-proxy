@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use cpa_core::exec::{ExecError, ExecRequest, ExecStream, FailureScope};
+use cpa_core::exec::{Caller, ExecError, ExecRequest, ExecStream, FailureScope};
 use cpa_core::format::Format;
 use cpa_plugin::api::{
     COMPLETION_CANCELED, COMPLETION_FAILED, COMPLETION_REJECTED, COMPLETION_SUCCEEDED, RequestCompletion,
@@ -104,9 +104,10 @@ fn now() -> GoTime {
     GoTime(Some(chrono::Local::now().fixed_offset()))
 }
 
-fn scope(trace: &Trace, headers: Header, metadata: &Metadata) -> RequestScope {
+fn scope(trace: &Trace, headers: Header, metadata: &Metadata, caller: Option<&Caller>) -> RequestScope {
     let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
     let value = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::to_owned);
+    let (api_key, access_provider) = super::model_callbacks::usage_identity(caller, &inherited);
     RequestScope {
         request_id: trace.request_id(),
         capture: trace.capture(),
@@ -116,6 +117,8 @@ fn scope(trace: &Trace, headers: Header, metadata: &Metadata) -> RequestScope {
         pinned_auth_id: value("pinned_auth_id"),
         execution_session: value("execution_session_id"),
         request_path: value("request_path").unwrap_or_default(),
+        api_key,
+        access_provider,
     }
 }
 
@@ -394,6 +397,7 @@ pub(crate) struct Request<'a> {
     pub headers: Header,
     pub body: &'a Bytes,
     pub metadata: Metadata,
+    pub caller: Option<&'a Caller>,
 }
 
 impl Hooks {
@@ -407,7 +411,7 @@ impl Hooks {
         let host = rt.plugins().clone();
         let lifecycle = Lifecycle::start(
             rt,
-            scope(trace, req.headers.clone(), &req.metadata),
+            scope(trace, req.headers.clone(), &req.metadata, req.caller),
             req.source_format,
             req.model,
             req.requested_model,
@@ -837,9 +841,12 @@ impl ChunkInterceptor {
 
 /// Go `WriteModelListResponse`: a model list goes through the response interceptors
 /// (and a lifecycle of its own) before it is written. `response` is the built 200 list;
-/// with `detail`, the answer is that model's entry from the final list.
+/// with `detail`, the answer is that model's entry from the final list. `caller` is the
+/// authenticated client: Go keeps the request context, so nested `host.model.*` calls
+/// from these interceptors record its identity.
 pub(crate) async fn model_list(
     rt: &Runtime,
+    caller: &Caller,
     source_format: &str,
     request_headers: &HeaderMap,
     response: axum::response::Response,
@@ -866,7 +873,12 @@ pub(crate) async fn model_list(
     let trace = Trace::with_request_id(crate::observability::current_request_id());
     let lifecycle = Lifecycle::start(
         rt,
-        scope(&trace, super::go_request_header(request_headers), &Metadata::new()),
+        scope(
+            &trace,
+            super::go_request_header(request_headers),
+            &Metadata::new(),
+            Some(caller),
+        ),
         source_format,
         "",
         "",
@@ -984,6 +996,7 @@ pub(crate) async fn start(
             headers: headers.clone(),
             body: &call.body,
             metadata: super::execution::execution_metadata(call, model),
+            caller: Some(&call.caller),
         },
     )
     .await?;
@@ -1130,6 +1143,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "authorization",
+                provider: String::new(),
             },
         }
     }
@@ -1283,6 +1297,7 @@ mod tests {
                 headers: Header::new(),
                 body: &body,
                 metadata: Metadata::new(),
+                caller: None,
             },
         )
         .await

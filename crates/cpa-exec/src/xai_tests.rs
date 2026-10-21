@@ -177,6 +177,7 @@ fn request(s: &Value, usage: cpa_core::exec::UsageSink) -> ExecRequest {
         caller: Caller {
             principal: s["caller_key"].as_str().unwrap_or_default().to_owned(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }

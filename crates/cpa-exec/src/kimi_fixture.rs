@@ -310,6 +310,7 @@ pub(crate) fn request(fixture: &Value, principal: &str) -> ExecRequest {
         caller: Caller {
             principal: principal.into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
