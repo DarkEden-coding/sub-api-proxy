@@ -256,7 +256,7 @@ async fn save_error(res: Response) -> Response {
 async fn write(state: Arc<Management>, v8: String, value: Value) -> Response {
     let path = format!("/v8/management/config/{v8}");
     let body = value.to_string().into_bytes();
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::PUT, &body))
+    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::PUT, &[], &body))
         .await
         .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
     if res.status() == StatusCode::OK {
@@ -284,7 +284,7 @@ async fn touch(state: Arc<Management>, v8: String) -> Response {
 /// Deletes one v8 path through the shared config writer (absent counts as done).
 async fn remove(state: Arc<Management>, v8: String) -> Response {
     let path = format!("/v8/management/config/{v8}");
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::DELETE, b""))
+    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::DELETE, &[], b""))
         .await
         .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
     match res.status() {

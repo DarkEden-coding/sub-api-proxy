@@ -91,6 +91,9 @@ fn api(rt: Arc<Runtime>) -> Router {
     let auth = || middleware::from_fn_with_state(rt.clone(), access::require_client_key);
     let v1 = Router::new()
         .route("/v1/models", get(models::unified))
+        // Gin's `/models/*model` also matches the bare trailing slash, with an empty ID.
+        .route("/v1/models/", get(models::detail))
+        .route("/v1/models/{*model}", get(models::detail))
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/images/generations", post(images::generations))

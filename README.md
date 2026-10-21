@@ -46,7 +46,7 @@ Run the install command again to upgrade, or `brew upgrade cliproxy-rs` with Hom
 
 ## What is this?
 
-cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 879 covered, 991 partial and 81 missing. [PARITY.md](docs/PARITY.md) defines those counts.
+cliproxy-rs is a Rust rewrite of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), with the compatibility target frozen at Go v8.0.35. It reads the same `config.yaml` and credential formats and implements the client routes and v8 Management API. Parity is incomplete: the audit has 1,951 items, with 887 covered, 983 partial and 81 missing. [PARITY.md](docs/PARITY.md) defines those counts.
 
 The dashboard shows accounts, provider limits, request history and tool settings.
 
@@ -163,7 +163,7 @@ Before switching, read [MIGRATING-FROM-GO.md](docs/MIGRATING-FROM-GO.md), especi
 Not in cliproxy-rs yet:
 
 - An AUR package.
-- Plugin auth parsing of credential files (`auth.parse`), per-credential plugin model discovery (`model.for_auth`) and usage records for plugin executors; plugin request and response translators, thinking appliers and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, credential scheduling, interceptors and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
+- Plugin auth parsing of credential files (`auth.parse`), per-credential plugin model discovery (`model.for_auth`) and usage records for plugin executors; plugin schedulers, request and response translators, thinking appliers and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 

@@ -1633,6 +1633,53 @@ impl CredentialStore {
         Ok(committed)
     }
 
+    /// Go `Manager.Modify` for an auth file: while `id` is still at `expected_revision`,
+    /// writes `bytes` to its file and puts `next` (the credential re-synthesized from
+    /// those bytes, possibly under a new provider or ID; `None` drops it) in its place.
+    /// One write lock covers the check, the file and the swap, so a concurrent token
+    /// refresh ([`Self::apply_patch`]) lands either before (`Stale`) or after, never
+    /// under it, and nothing else in the set is re-read or replaced.
+    pub fn replace_file_backed(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        bytes: &[u8],
+        next: Option<Credential>,
+    ) -> Result<(), PatchError> {
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let index = inner
+            .creds
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or(PatchError::NotFound)?;
+        let slot = &inner.creds[index];
+        if slot.revision != expected_revision {
+            return Err(PatchError::Stale { current: slot.revision });
+        }
+        let Source::File(path) = &slot.source else {
+            return Err(PatchError::ConfigBacked);
+        };
+        write_bytes_atomic(path, bytes).map_err(|e| PatchError::Io(e.to_string()))?;
+        inner.creds.remove(index);
+        if let Some(mut next) = next {
+            inner.generation += 1;
+            next.revision = inner.generation;
+            inner.creds.retain(|c| c.id != next.id);
+            let at = index.min(inner.creds.len());
+            inner.creds.insert(at, Arc::new(next));
+        }
+        inner.epoch += 1;
+        self.changed.send_replace(());
+        self.scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconcile(&inner.creds);
+        drop(inner);
+        self.clear_disabled_cooldowns();
+        self.persist_cooldowns();
+        Ok(())
+    }
+
     /// Replaces the credential set (watcher reload, management import/delete). Unchanged
     /// credentials keep their revision; new and changed ones get fresh revisions.
     pub fn reconcile(&self, credentials: Vec<Credential>) {

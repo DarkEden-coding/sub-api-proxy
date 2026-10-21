@@ -1341,18 +1341,27 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) ->
                 ),
             };
         }
-        let patch = MetadataPatch {
-            set: Map::from_iter([("disabled".into(), disabled.into())]),
-            remove: vec![],
-        };
-        match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
-            Ok(_) => {
-                note_disabled(&state, &target.id, Some(disabled));
-                resync(&state);
-                reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())])
+        // Go v8.0.35 `Manager.Modify`: the flag lands on the record as it is now, so a
+        // token refresh between the lookup and the write does not fail the toggle.
+        let mut current = target;
+        for _ in 0..16 {
+            let mut metadata = current.metadata.clone();
+            metadata.insert("disabled".into(), disabled.into());
+            match save_file_backed(&state, &current, &metadata, false) {
+                Ok(()) => {
+                    note_disabled(&state, &current.id, Some(disabled));
+                    return reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())]);
+                }
+                Err(PatchError::Stale { .. }) => match state.rt.store().get(&current.id) {
+                    Some(c) => current = c,
+                    None => return patch_error(Some(PatchError::NotFound)),
+                },
+                Err(e) => return patch_error(Some(e)),
             }
-            Err(e) => patch_error(Some(e)),
         }
+        patch_error(Some(PatchError::Stale {
+            current: current.revision,
+        }))
     })
     .await
     .unwrap_or_else(|_| patch_error(None))
@@ -1433,14 +1442,37 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     fields.retain(|(p, _)| p != "request_retry");
+    tokio::task::spawn_blocking(move || {
+        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        // ponytail: a credential removed and re-added under the same ID takes the edit;
+        // Go's registration epoch refuses it (404). Bounded so a busy record cannot spin.
+        (0..16)
+            .find_map(|_| apply_fields(&state, &name, &fields, retry))
+            .unwrap_or_else(|| fail(StatusCode::CONFLICT, "stale credential"))
+    })
+    .await
+    .unwrap_or_else(|_| patch_error(None))
+}
+
+/// One attempt of [`fields`] on the credential as it is now; `None` when a concurrent
+/// update (a token refresh, say) changed it first, so the caller re-reads and retries.
+/// Go v8.0.35 `Manager.Modify` (`d69962e4`) applies the edit to the current record
+/// for the same reason instead of failing.
+fn apply_fields(
+    state: &Management,
+    name: &str,
+    fields: &[(String, Value)],
+    retry: Option<Option<i64>>,
+) -> Option<Response> {
+    let root = |p: &str| p.split('.').next().unwrap_or_default().trim().to_owned();
     let all = state.rt.store().snapshot();
     let Some(target) = all
         .iter()
         .find(|c| c.id == name)
-        .or_else(|| all.iter().find(|c| file_name(c).as_deref() == Some(name.as_str())))
+        .or_else(|| all.iter().find(|c| file_name(c).as_deref() == Some(name)))
         .cloned()
     else {
-        return fail(StatusCode::NOT_FOUND, "auth file not found");
+        return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
     };
     // Start from Go's normalized metadata so aliases persist under canonical names.
     let mut meta = target.metadata.clone();
@@ -1450,31 +1482,31 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     let mut changed = false;
-    for (path, value) in &fields {
+    for (path, value) in fields {
         if path.is_empty() {
-            return fail(StatusCode::BAD_REQUEST, "field name is required");
+            return Some(fail(StatusCode::BAD_REQUEST, "field name is required"));
         }
         if path == "weight" {
             if value.is_null() {
                 meta.remove("weight");
             } else if !value.is_number() {
-                return fail(StatusCode::BAD_REQUEST, "weight must be an integer");
+                return Some(fail(StatusCode::BAD_REQUEST, "weight must be an integer"));
             } else {
                 match credentials::parse_weight(value) {
                     Ok(w) => {
                         meta.insert("weight".into(), w.into());
                     }
-                    Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+                    Err(e) => return Some(fail(StatusCode::BAD_REQUEST, e)),
                 }
             }
         } else if root(path) == "weight" {
-            return fail(StatusCode::BAD_REQUEST, "weight does not support nested fields");
+            return Some(fail(StatusCode::BAD_REQUEST, "weight does not support nested fields"));
         } else if path == "headers" {
             merge_headers(&mut meta, value);
         } else {
             let parts: Vec<&str> = path.split('.').map(str::trim).collect();
             if parts.iter().any(|p| p.is_empty()) {
-                return fail(StatusCode::BAD_REQUEST, format!("invalid field path: {path}"));
+                return Some(fail(StatusCode::BAD_REQUEST, format!("invalid field path: {path}")));
             }
             set_path(&mut meta, &parts, value.clone());
         }
@@ -1488,7 +1520,7 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         changed = true;
     }
     if !changed {
-        return fail(StatusCode::BAD_REQUEST, "no fields to update");
+        return Some(fail(StatusCode::BAD_REQUEST, "no fields to update"));
     }
     let mut roots: Vec<String> = fields.iter().map(|(p, _)| root(p)).collect();
     if retry.is_some() {
@@ -1508,10 +1540,11 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         let result = state.rt.store().replace_config_backed(next, target.revision);
         return match result {
             Ok(_) => {
-                note_disabled(&state, &target.id, disabled_note);
-                reply(StatusCode::OK, [("status", "ok".into())])
+                note_disabled(state, &target.id, disabled_note);
+                Some(reply(StatusCode::OK, [("status", "ok".into())]))
             }
-            Err(e) => patch_error(Some(e)),
+            Err(PatchError::Stale { .. }) => None,
+            Err(e) => Some(patch_error(Some(e))),
         };
     }
     // Go's file store writes the auth's disabled flag on every save; a patched
@@ -1530,42 +1563,64 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
         }
     }
     let retyped = patch.set.contains_key("type") || patch.remove.iter().any(|k| k == "type");
-    tokio::task::spawn_blocking(move || {
-        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        if retyped {
-            // `type` picks the executor, so the store refuses it in place; Go allows it
-            // and the file's next synthesis picks the new provider. Write the file the
-            // way Go's store does and re-synthesize.
-            // ponytail: no revision check against a concurrent token refresh here.
-            let Some(path) = path_of(&target).map(Path::to_path_buf) else {
-                return patch_error(None);
-            };
-            let mut next = target.metadata.clone();
-            patch.apply(&mut next);
-            let sorted: BTreeMap<&String, &Value> = next.iter().collect();
-            let written = serde_json::to_vec(&sorted)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| write_file(&path, &bytes).map_err(|e| e.to_string()));
-            return match written {
-                Ok(()) => {
-                    note_disabled(&state, &target.id, disabled_note);
-                    resync(&state);
-                    reply(StatusCode::OK, [("status", "ok".into())])
-                }
-                Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update auth: {e}")),
-            };
+    let mut next = target.metadata.clone();
+    patch.apply(&mut next);
+    match save_file_backed(state, &target, &next, retyped) {
+        Ok(()) => {
+            note_disabled(state, &target.id, disabled_note);
+            Some(reply(StatusCode::OK, [("status", "ok".into())]))
         }
-        match state.rt.store().apply_patch(&target.id, target.revision, &patch) {
-            Ok(_) => {
-                note_disabled(&state, &target.id, disabled_note);
-                resync(&state);
-                reply(StatusCode::OK, [("status", "ok".into())])
-            }
-            Err(e) => patch_error(Some(e)),
-        }
-    })
-    .await
-    .unwrap_or_else(|_| patch_error(None))
+        Err(PatchError::Stale { .. }) => None,
+        Err(e) => Some(patch_error(Some(e))),
+    }
+}
+
+/// Go `Manager.Modify` for an auth file: writes `metadata` and registers the file's
+/// re-synthesis in place of `target`, only while `target` is still the current record
+/// (`Stale` otherwise, and the caller retries on the record as it is now). Only this
+/// credential is re-read; a whole-folder rescan could publish a token a concurrent
+/// refresh had already replaced. A changed `type` is written the way Go's store writes
+/// the file (sorted keys); other edits keep the stored key order.
+fn save_file_backed(
+    state: &Management,
+    target: &Credential,
+    metadata: &Map<String, Value>,
+    retyped: bool,
+) -> Result<(), PatchError> {
+    let Some(path) = path_of(target).map(Path::to_path_buf) else {
+        return Err(PatchError::ConfigBacked);
+    };
+    let bytes = if retyped {
+        serde_json::to_vec(&metadata.iter().collect::<BTreeMap<_, _>>())
+    } else {
+        serde_json::to_vec(metadata).map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        })
+    }
+    .map_err(|e| PatchError::Io(e.to_string()))?;
+    // Synthesized as the auth-folder scan sees the file.
+    let cfg = state.rt.config();
+    let scanned = path
+        .file_name()
+        .map_or_else(|| path.clone(), |name| cfg.auth_dir.join(name));
+    let (next, fallback) = match credentials::from_file(&cfg, &cfg.auth_dir, &scanned, &bytes) {
+        Ok(Some(c)) => (Some(c), false),
+        Ok(None) => (credentials::upload_fallback(&cfg.auth_dir, &scanned, &bytes), true),
+        Err(e) => return Err(PatchError::Io(e)),
+    };
+    let kept = next.is_some();
+    state
+        .rt
+        .store()
+        .replace_file_backed(&target.id, target.revision, &bytes, next)?;
+    let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
+    fallbacks.remove(&path);
+    fallbacks.remove(&scanned);
+    if fallback && kept {
+        fallbacks.insert(scanned);
+    }
+    Ok(())
 }
 
 fn set_path(meta: &mut Map<String, Value>, parts: &[&str], value: Value) {
@@ -1640,24 +1695,128 @@ fn channel_models(channel: &str) -> Option<&'static Vec<Value>> {
     definitions().get(&key)?.as_array()
 }
 
-pub(crate) async fn model_definitions(UrlPath(channel): UrlPath<String>) -> Response {
+/// Go `GetStaticModelDefinitions`: the built-in catalog for `channel`, else (v8.0.35,
+/// `50cfd238`) a plugin's static catalog for that provider, else the models its
+/// credentials registered, sorted by ID.
+pub(crate) async fn model_definitions(
+    State(state): State<Arc<Management>>,
+    UrlPath(channel): UrlPath<String>,
+) -> Response {
     let channel = channel.trim().to_owned();
     if channel.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "channel is required");
     }
-    match channel_models(&channel) {
-        Some(models) => reply_ordered(
-            StatusCode::OK,
-            [
-                ("channel", channel.to_lowercase().into()),
-                ("models", Value::Array(models.clone())),
-            ],
-        ),
-        None => reply(
+    let models = match channel_models(&channel) {
+        Some(models) if !models.is_empty() => models.clone(),
+        _ => dynamic_definitions(&state, &channel),
+    };
+    if models.is_empty() {
+        return reply(
             StatusCode::BAD_REQUEST,
             [("error", "unknown channel".into()), ("channel", channel.into())],
-        ),
+        );
     }
+    reply_ordered(
+        StatusCode::OK,
+        [
+            ("channel", channel.to_lowercase().into()),
+            ("models", Value::Array(models)),
+        ],
+    )
+}
+
+/// Go `pluginModelDefinitionsByChannel`, each model as `registry.ModelInfo` encodes.
+fn dynamic_definitions(state: &Management, channel: &str) -> Vec<Value> {
+    let plugin = state.rt.plugins().models_for_provider(channel);
+    if !plugin.is_empty() {
+        return plugin.iter().map(plugin_model_json).collect();
+    }
+    let rt = &state.rt;
+    let mut models: Vec<_> = rt
+        .registry()
+        .available_by_provider(channel, |client, model| rt.suspension(client, model))
+        .iter()
+        .map(|spec| spec.to_info().raw)
+        .collect();
+    models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    models
+        .into_iter()
+        .map(|mut raw| {
+            // `json:"-"` fields of Go's ModelInfo.
+            for internal in [
+                "max_context_length",
+                "support_configuration_update",
+                "is_compat",
+                "user_defined",
+            ] {
+                raw.remove(internal);
+            }
+            Value::Object(raw)
+        })
+        .collect()
+}
+
+/// Go `pluginModelInfoToRegistryModelInfo` then `json.Marshal`: struct order, with
+/// Go's `omitempty` fields left out when zero.
+fn plugin_model_json(m: &cpa_plugin::api::ModelInfo) -> Value {
+    let mut out = Map::new();
+    out.insert("id".into(), m.id.clone().into());
+    out.insert("object".into(), m.object.clone().into());
+    out.insert("created".into(), m.created.into());
+    out.insert("owned_by".into(), m.owned_by.clone().into());
+    out.insert("type".into(), m.model_type.clone().into());
+    let mut text = |key: &str, v: &str| {
+        if !v.is_empty() {
+            out.insert(key.into(), v.into());
+        }
+    };
+    text("display_name", &m.display_name);
+    text("name", &m.name);
+    text("version", &m.version);
+    text("description", &m.description);
+    let numbers = [
+        ("inputTokenLimit", m.input_token_limit),
+        ("outputTokenLimit", m.output_token_limit),
+    ];
+    for (key, v) in numbers {
+        if v != 0 {
+            out.insert(key.into(), v.into());
+        }
+    }
+    let list = |out: &mut Map<String, Value>, key: &str, v: &[String]| {
+        if !v.is_empty() {
+            out.insert(key.into(), v.into());
+        }
+    };
+    list(&mut out, "supportedGenerationMethods", &m.supported_generation_methods);
+    for (key, v) in [
+        ("context_length", m.context_length),
+        ("max_completion_tokens", m.max_completion_tokens),
+    ] {
+        if v != 0 {
+            out.insert(key.into(), v.into());
+        }
+    }
+    list(&mut out, "supported_parameters", &m.supported_parameters);
+    list(&mut out, "supportedInputModalities", &m.supported_input_modalities);
+    list(&mut out, "supportedOutputModalities", &m.supported_output_modalities);
+    if let Some(t) = &m.thinking {
+        let mut thinking = Map::new();
+        for (key, v) in [("min", t.min), ("max", t.max)] {
+            if v != 0 {
+                thinking.insert(key.into(), v.into());
+            }
+        }
+        if t.zero_allowed {
+            thinking.insert("zero_allowed".into(), true.into());
+        }
+        if t.dynamic_allowed {
+            thinking.insert("dynamic_allowed".into(), true.into());
+        }
+        list(&mut thinking, "levels", &t.levels);
+        out.insert("thinking".into(), Value::Object(thinking));
+    }
+    Value::Object(out)
 }
 
 /// Go `GetModelsForClient`: the models the credential registers (the dynamic
@@ -1833,5 +1992,139 @@ mod tests {
         assert_eq!(go_time(t), "2023-11-14T22:13:20.12Z");
         let t = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         assert_eq!(go_time(t), "2023-11-14T22:13:20Z");
+    }
+
+    /// `registry.ModelInfo`'s JSON tags: struct order, `omitempty` zeros dropped, and
+    /// the identity fields always present.
+    #[test]
+    fn plugin_models_encode_like_go_registry_model_info() {
+        use cpa_plugin::api::{ModelInfo, ThinkingSupport};
+        let model = ModelInfo {
+            id: "work-pro".into(),
+            display_name: "Work Pro".into(),
+            input_token_limit: 1000,
+            supported_generation_methods: vec!["generateContent".into()],
+            max_completion_tokens: 64,
+            supported_input_modalities: vec!["TEXT".into()],
+            thinking: Some(ThinkingSupport {
+                max: 2048,
+                dynamic_allowed: true,
+                ..Default::default()
+            }),
+            user_defined: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&plugin_model_json(&model)).unwrap(),
+            r#"{"id":"work-pro","object":"","created":0,"owned_by":"","type":"","display_name":"Work Pro","inputTokenLimit":1000,"supportedGenerationMethods":["generateContent"],"max_completion_tokens":64,"supportedInputModalities":["TEXT"],"thinking":{"max":2048,"dynamic_allowed":true}}"#
+        );
+    }
+
+    fn management(name: &str, files: &[(&str, &str)]) -> (Arc<Management>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cpa-modify-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, body) in files {
+            std::fs::write(dir.join(file), body).unwrap();
+        }
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            credentials::from_auth_dir(&cfg),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        (Management::new(rt, path), dir)
+    }
+
+    /// What a token refresh commits: the store's compare-and-swap patch.
+    fn refresh(state: &Management, id: &str, token: &str) {
+        let current = state.rt.store().get(id).unwrap();
+        let patch = MetadataPatch {
+            set: Map::from_iter([("access_token".into(), token.into())]),
+            remove: vec![],
+        };
+        state.rt.store().apply_patch(id, current.revision, &patch).unwrap();
+    }
+
+    fn on_disk(dir: &std::path::Path, file: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap()
+    }
+
+    /// Go `Manager.Modify` (`d69962e4`): a refresh that commits after a patch read the
+    /// record makes the patch stale instead of being overwritten, for an in-place edit
+    /// and for a changed `type` alike; the retry on the current record keeps both.
+    #[tokio::test]
+    async fn a_refresh_after_a_patch_read_the_record_is_never_overwritten() {
+        let (state, dir) = management("stale", &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)]);
+        for (round, retyped) in [(1, false), (2, true)] {
+            let read = state.rt.store().get("a.json").unwrap();
+            let token = format!("fake-{round}");
+            refresh(&state, "a.json", &token);
+            let edit = |c: &Credential| {
+                let mut meta = c.metadata.clone();
+                meta.insert(format!("note_{round}"), round.into());
+                if retyped {
+                    meta.insert("type".into(), "codex".into());
+                }
+                meta
+            };
+            let stale = save_file_backed(&state, &read, &edit(&read), retyped);
+            assert!(matches!(stale, Err(PatchError::Stale { .. })), "{stale:?}");
+            assert_eq!(on_disk(&dir, "a.json")["access_token"], token.as_str());
+            assert_eq!(
+                state.rt.store().get("a.json").unwrap().metadata["access_token"],
+                token.as_str()
+            );
+            let current = state.rt.store().get("a.json").unwrap();
+            save_file_backed(&state, &current, &edit(&current), retyped).unwrap();
+            let saved = on_disk(&dir, "a.json");
+            assert_eq!(
+                (saved["access_token"].as_str(), &saved[format!("note_{round}")]),
+                (Some(token.as_str()), &json!(round))
+            );
+        }
+        assert_eq!(state.rt.store().get("a.json").unwrap().provider, "codex");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A patch re-reads only its own credential. A whole-folder rescan could publish
+    /// another credential's file as a scan read it before that credential's refresh
+    /// committed; here that older file sits on disk while the store holds the refresh.
+    #[tokio::test]
+    async fn a_patch_publishes_only_the_credential_it_changed() {
+        let (state, dir) = management(
+            "only",
+            &[
+                ("a.json", r#"{"type":"claude","access_token":"fake-a"}"#),
+                ("c.json", r#"{"type":"claude","access_token":"fake-old"}"#),
+            ],
+        );
+        refresh(&state, "c.json", "fake-new");
+        std::fs::write(dir.join("c.json"), r#"{"type":"claude","access_token":"fake-old"}"#).unwrap();
+        let token = |state: &Management| state.rt.store().get("c.json").unwrap().metadata["access_token"].clone();
+        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","note":1}"#)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","type":"codex"}"#)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = status(
+            State(state.clone()),
+            Bytes::from(r#"{"name":"a.json","disabled":true}"#),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(token(&state), "fake-new");
+        let a = state.rt.store().get("a.json").unwrap();
+        assert_eq!(
+            (a.provider.as_str(), a.disabled, &a.metadata["note"]),
+            ("codex", true, &json!(1))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
