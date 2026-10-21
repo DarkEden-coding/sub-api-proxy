@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use super::auth_files::{Query, fail, reply};
 use super::{Management, json as respond};
+use crate::runtime::OAuthDelivery as Delivery;
 
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 const COMPLETED_TTL: Duration = Duration::from_secs(60);
@@ -40,6 +41,12 @@ struct Session {
     plugin: bool,
     /// The plugin's polling context (Go `Session.Metadata`).
     metadata: cpa_plugin::gojson::Metadata,
+    /// A v8 Sign in with ChatGPT binding (Go `oauthSession.SIWC`).
+    siwc: Option<Arc<super::siwc::Flow>>,
+    /// The binding's callback was accepted and its exchange started.
+    siwc_exchanging: bool,
+    /// Go `SIWCCommitting`: a started disk commit keeps the session past its expiry.
+    siwc_committing: bool,
 }
 
 #[derive(Clone)]
@@ -57,7 +64,13 @@ impl Sessions {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
         let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
-        map.retain(|_, s| s.expires > now);
+        map.retain(|_, s| {
+            let keep = s.expires > now || s.siwc_committing;
+            if let Some(flow) = s.siwc.as_ref().filter(|_| !keep) {
+                flow.cancel();
+            }
+            keep
+        });
         map
     }
 
@@ -76,6 +89,9 @@ impl Sessions {
                 callback: None,
                 plugin: false,
                 metadata: Default::default(),
+                siwc: None,
+                siwc_exchanging: false,
+                siwc_committing: false,
             },
         );
     }
@@ -100,6 +116,9 @@ impl Sessions {
                 callback: None,
                 plugin: true,
                 metadata,
+                siwc: None,
+                siwc_exchanging: false,
+                siwc_committing: false,
             },
         );
         true
@@ -125,6 +144,7 @@ impl Sessions {
         };
         if let Some(s) = self.lock().get_mut(state.trim()).filter(|s| !s.completed) {
             s.status = message.to_owned();
+            s.siwc_committing = false;
             s.expires = Instant::now() + SESSION_TTL;
         }
     }
@@ -134,6 +154,7 @@ impl Sessions {
             s.status.clear();
             s.callback = None;
             s.metadata.clear();
+            s.siwc_committing = false;
             s.completed = true;
             s.expires = Instant::now() + COMPLETED_TTL;
         }
@@ -153,33 +174,132 @@ impl Sessions {
         })
     }
 
+    /// Go `Cancel`. A binding whose disk commit has started is past cancelling: Go
+    /// waits on the session gate for that commit, which then leaves the session
+    /// completed or failed, so the answer is `false` either way.
     fn cancel(&self, state: &str) -> bool {
         let mut map = self.lock();
         let state = state.trim();
-        if map.get(state).is_some_and(|s| !s.completed && s.status.is_empty()) {
-            map.remove(state);
+        if map
+            .get(state)
+            .is_some_and(|s| !s.completed && s.status.is_empty() && !s.siwc_committing)
+        {
+            if let Some(flow) = map.remove(state).and_then(|s| s.siwc) {
+                flow.cancel();
+            }
             return true;
         }
         false
     }
 
     /// Go `WriteOAuthCallbackFileForPendingSession`: keeps the callback for the waiter.
-    /// `false` when the provider or state is unusable or the login is not pending.
-    fn deliver(&self, provider: &str, state: &str, code: &str, error: &str) -> bool {
+    /// A binding's state is refused: its code may only reach the v8 callback.
+    fn deliver(&self, provider: &str, state: &str, code: &str, error: &str) -> Delivery {
         let Some(provider) = normalize_callback_provider(provider) else {
-            return false;
+            return Delivery::NotPending;
         };
-        if !valid_state(state) || !self.is_pending(state, &provider) {
+        if !valid_state(state) {
+            return Delivery::NotPending;
+        }
+        let mut map = self.lock();
+        let Some(s) = map.get_mut(state.trim()) else {
+            return Delivery::NotPending;
+        };
+        if s.siwc.is_some() {
+            return Delivery::RequiresV8;
+        }
+        if s.completed || !s.status.is_empty() || !s.provider.eq_ignore_ascii_case(&provider) {
+            return Delivery::NotPending;
+        }
+        s.callback = Some(Callback {
+            code: code.trim().to_owned(),
+            state: state.trim().to_owned(),
+            error: error.trim().to_owned(),
+        });
+        Delivery::Delivered
+    }
+
+    /// Go `registerSIWC`: `false` when the state exists or the credential already has
+    /// a pending binding.
+    pub(super) fn register_siwc(&self, state: &str, flow: Arc<super::siwc::Flow>, ttl: Duration) -> bool {
+        let mut map = self.lock();
+        let busy = map.values().any(|s| {
+            !s.completed && s.status.is_empty() && s.siwc.as_ref().is_some_and(|f| f.target_id == flow.target_id)
+        });
+        if busy || map.contains_key(state) {
             return false;
         }
-        if let Some(s) = self.lock().get_mut(state.trim()) {
-            s.callback = Some(Callback {
-                code: code.trim().to_owned(),
-                state: state.trim().to_owned(),
-                error: error.trim().to_owned(),
-            });
-        }
+        map.insert(
+            state.to_owned(),
+            Session {
+                provider: "codex".into(),
+                status: String::new(),
+                completed: false,
+                expires: Instant::now() + ttl,
+                callback: None,
+                plugin: false,
+                metadata: Default::default(),
+                siwc: Some(flow),
+                siwc_exchanging: false,
+                siwc_committing: false,
+            },
+        );
         true
+    }
+
+    /// The binding a state belongs to, whatever its status.
+    pub(super) fn siwc(&self, state: &str) -> Option<Arc<super::siwc::Flow>> {
+        self.lock().get(state.trim()).and_then(|s| s.siwc.clone())
+    }
+
+    /// Accepts the binding's one callback while it is pending.
+    pub(super) fn begin_siwc(&self, state: &str, flow: &Arc<super::siwc::Flow>) -> bool {
+        let mut map = self.lock();
+        match map.get_mut(state) {
+            Some(s) if Self::siwc_pending(s, flow) && !s.siwc_exchanging => {
+                s.siwc_exchanging = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The binding is still pending (not cancelled, expired, failed or completed).
+    pub(super) fn siwc_is_pending(&self, state: &str, flow: &Arc<super::siwc::Flow>) -> bool {
+        self.lock().get(state).is_some_and(|s| Self::siwc_pending(s, flow))
+    }
+
+    /// Go `claimSIWCCommit`; callers hold `disk`, so file mutations are fenced.
+    pub(super) fn claim_siwc_commit(&self, state: &str, flow: &Arc<super::siwc::Flow>) -> bool {
+        let mut map = self.lock();
+        match map.get_mut(state) {
+            Some(s) if Self::siwc_pending(s, flow) && !s.siwc_committing => {
+                s.siwc_committing = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn siwc_pending(s: &Session, flow: &Arc<super::siwc::Flow>) -> bool {
+        !s.completed && s.status.is_empty() && s.siwc.as_ref().is_some_and(|f| Arc::ptr_eq(f, flow))
+    }
+
+    /// Go `beginSIWCFileMutation` (callers hold `disk`): a v8 upload or delete of a
+    /// binding's file, even an identical one, fails that binding.
+    pub(super) fn invalidate_siwc(&self, path: &std::path::Path) {
+        let target = super::siwc::canonical(path);
+        let mut map = self.lock();
+        for s in map.values_mut() {
+            if let Some(flow) = s.siwc.as_ref().filter(|f| f.path == target)
+                && !s.completed
+                && s.status.is_empty()
+            {
+                flow.cancel();
+                s.status = "SIWC binding target changed; start a new binding".into();
+                s.expires = Instant::now() + COMPLETED_TTL;
+            }
+        }
     }
 
     fn take_callback(&self, state: &str) -> Option<Callback> {
@@ -198,7 +318,7 @@ pub(super) fn valid_state(state: &str) -> bool {
 }
 
 /// Go `NormalizeOAuthCallbackProvider`: the built-in aliases, else a plugin-style name.
-fn normalize_callback_provider(provider: &str) -> Option<String> {
+pub(super) fn normalize_callback_provider(provider: &str) -> Option<String> {
     let p = provider.trim().to_lowercase();
     let builtin = match p.as_str() {
         "anthropic" | "claude" => Some("anthropic"),
@@ -282,8 +402,9 @@ pub(super) fn install_callback_sink(state: &Arc<Management>) {
     state
         .rt
         .set_oauth_callback_sink(Some(Arc::new(move |cb: &crate::runtime::OAuthCallback| {
-            weak.upgrade()
-                .is_some_and(|m| m.oauth.deliver(cb.provider, &cb.state, &cb.code, &cb.error))
+            weak.upgrade().map_or(Delivery::NotPending, |m| {
+                m.oauth.deliver(cb.provider, &cb.state, &cb.code, &cb.error)
+            })
         })));
 }
 
@@ -318,7 +439,7 @@ fn global_proxy(state: &Management) -> Proxy {
 
 /// The client for login traffic: the global proxy (else the environment's proxies);
 /// local endpoints in tests.
-fn login_client(state: &Management) -> wreq::Client {
+pub(super) fn login_client(state: &Management) -> wreq::Client {
     if state.login_base.is_some() {
         return state.clients.get(&Proxy::Direct);
     }
@@ -1258,16 +1379,22 @@ pub(crate) async fn cancel(State(state): State<Arc<Management>>, RawQuery(raw): 
 }
 
 #[derive(Default)]
-struct CallbackRequest {
-    provider: String,
-    redirect_url: String,
-    code: String,
-    state: String,
-    error: String,
+pub(super) struct CallbackRequest {
+    pub(super) provider: String,
+    pub(super) redirect_url: String,
+    pub(super) code: String,
+    pub(super) state: String,
+    pub(super) error: String,
+    /// v8 only: the client ID a Sign in with ChatGPT authorization issued.
+    pub(super) client_id: String,
 }
 
-/// Go `GetOAuthCallback`.
-pub(crate) async fn callback_get(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery) -> Response {
+/// Go `GetOAuthCallback`, and under v8 `GetOAuthCallbackV8`.
+pub(crate) async fn callback_get(
+    State(state): State<Arc<Management>>,
+    uri: axum::http::Uri,
+    RawQuery(raw): RawQuery,
+) -> Response {
     let q = Query::parse(raw);
     let error = [q.first("error"), q.first("error_description")]
         .into_iter()
@@ -1280,15 +1407,24 @@ pub(crate) async fn callback_get(State(state): State<Arc<Management>>, RawQuery(
         code: q.first("code").trim().to_owned(),
         state: q.first("state").trim().to_owned(),
         error,
+        client_id: q.first("client_id").trim().to_owned(),
         ..CallbackRequest::default()
     };
+    if uri.path().starts_with("/v8/")
+        && let Some(response) = super::siwc::callback(&state, &req, Some(&q))
+    {
+        return response;
+    }
     handle_callback(&state, req)
 }
 
 /// Go `PostOAuthCallback`: gin's `ShouldBindJSON` into `oauthCallbackRequest`
 /// (first JSON value, exact-then-case-insensitive names, type mismatches rejected).
-pub(crate) async fn callback_post(State(state): State<Arc<Management>>, body: Bytes) -> Response {
-    const FIELDS: [&str; 5] = ["provider", "redirect_url", "code", "state", "error"];
+/// Under v8, `PostOAuthCallbackV8`, whose request also has `client_id`.
+pub(crate) async fn callback_post(State(state): State<Arc<Management>>, uri: axum::http::Uri, body: Bytes) -> Response {
+    let v8 = uri.path().starts_with("/v8/");
+    const FIELDS: [&str; 6] = ["provider", "redirect_url", "code", "state", "error", "client_id"];
+    let fields = if v8 { &FIELDS[..] } else { &FIELDS[..5] };
     let invalid = || status_error(StatusCode::BAD_REQUEST, "invalid body");
     let members = serde_json::Deserializer::from_slice(&body)
         .into_iter::<super::api_call::Members>()
@@ -1298,10 +1434,10 @@ pub(crate) async fn callback_post(State(state): State<Arc<Management>>, body: By
     };
     let mut req = CallbackRequest::default();
     for (key, v) in members.unwrap_or_default() {
-        let Some(i) = FIELDS
+        let Some(i) = fields
             .iter()
             .position(|f| *f == key)
-            .or_else(|| FIELDS.iter().position(|f| f.eq_ignore_ascii_case(&key)))
+            .or_else(|| fields.iter().position(|f| f.eq_ignore_ascii_case(&key)))
         else {
             continue;
         };
@@ -1310,13 +1446,17 @@ pub(crate) async fn callback_post(State(state): State<Arc<Management>>, body: By
             1 => &mut req.redirect_url,
             2 => &mut req.code,
             3 => &mut req.state,
-            _ => &mut req.error,
+            4 => &mut req.error,
+            _ => &mut req.client_id,
         };
         match v {
             Value::String(s) => *slot = s,
             Value::Null => {}
             _ => return invalid(),
         }
+    }
+    if v8 && let Some(response) = super::siwc::callback(&state, &req, None) {
+        return response;
     }
     handle_callback(&state, req)
 }
@@ -1391,7 +1531,12 @@ fn handle_callback(state: &Management, req: CallbackRequest) -> Response {
             }
         };
     }
-    if !plugin && state.oauth.deliver(&canonical, &sid, &code, &error) {
+    if !plugin
+        && matches!(
+            state.oauth.deliver(&canonical, &sid, &code, &error),
+            Delivery::Delivered
+        )
+    {
         return reply(StatusCode::OK, [("status", "ok".into())]);
     }
     match state.oauth.get(&sid) {
@@ -1490,7 +1635,7 @@ mod tests {
         let s = Sessions::default();
         s.register("st", "codex");
         assert!(s.is_pending("st", "CODEX"));
-        assert!(s.deliver("openai", "st", "c", ""));
+        assert_eq!(s.deliver("openai", "st", "c", ""), Delivery::Delivered);
         assert_eq!(s.take_callback("st").map(|c| c.code).as_deref(), Some("c"));
         s.set_error("st", " ");
         assert_eq!(
@@ -1498,7 +1643,7 @@ mod tests {
             Some(("codex".into(), "Authentication failed".into(), false))
         );
         assert!(!s.cancel("st"), "an errored session is not cancellable");
-        assert!(!s.deliver("codex", "st", "c", ""));
+        assert_eq!(s.deliver("codex", "st", "c", ""), Delivery::NotPending);
         s.register("done", "meta");
         s.complete("done");
         assert_eq!(s.get("done"), Some(("meta".into(), String::new(), true)));

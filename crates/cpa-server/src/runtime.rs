@@ -65,10 +65,20 @@ pub struct OAuthCallback {
     pub error: String,
 }
 
+/// What became of a provider callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthDelivery {
+    Delivered,
+    /// No login with that state is pending, or the callback could not be recorded.
+    NotPending,
+    /// The state belongs to a Sign in with ChatGPT binding, which takes its callback
+    /// only through the v8 Management API (Go `ErrSIWCCallbackRequiresV8`).
+    RequiresV8,
+}
+
 /// Hands a callback to a pending management login (Go
-/// `WriteOAuthCallbackFileForPendingSession`); returns false when no login with that
-/// state is pending or the callback could not be recorded.
-pub type OAuthCallbackSink = Arc<dyn Fn(&OAuthCallback) -> bool + Send + Sync>;
+/// `WriteOAuthCallbackFileForPendingSession`).
+pub type OAuthCallbackSink = Arc<dyn Fn(&OAuthCallback) -> OAuthDelivery + Send + Sync>;
 
 impl Runtime {
     /// The scheduler policy is derived from the config (`routing` plus the OAuth
@@ -233,9 +243,9 @@ impl Runtime {
         *self.oauth_sink.write().unwrap_or_else(PoisonError::into_inner) = sink;
     }
 
-    pub fn deliver_oauth_callback(&self, callback: &OAuthCallback) -> bool {
+    pub fn deliver_oauth_callback(&self, callback: &OAuthCallback) -> OAuthDelivery {
         let sink = self.oauth_sink.read().unwrap_or_else(PoisonError::into_inner).clone();
-        sink.is_some_and(|sink| sink(callback))
+        sink.map_or(OAuthDelivery::NotPending, |sink| sink(callback))
     }
 
     /// The credential an executor call receives: the stored one, or in a test runtime
@@ -444,8 +454,9 @@ impl Runtime {
         cfg: &Config,
         failed: Option<u64>,
     ) -> Result<Arc<Credential>, ExecError> {
-        let lock = self.store.prepare_lock(id);
-        let _guard = lock.lock().await;
+        // Owned: the commit below moves it into its blocking job, which a cancelled caller
+        // cannot stop, so the lock covers the read through the commit either way.
+        let guard = self.store.prepare_lock(id).lock_owned().await;
         // Another request may have prepared it while we waited.
         let current = self.store.get(id).filter(|c| !c.disabled).ok_or_else(|| {
             ExecError::local(
@@ -464,17 +475,20 @@ impl Runtime {
         let store = self.store.clone();
         let revision = current.revision;
         let id = id.to_owned();
-        tokio::task::spawn_blocking(move || store.apply_patch(&id, revision, &patch))
-            .await
-            .map_err(|e| PatchError::Io(e.to_string()))
-            .and_then(|r| r)
-            .map_err(|e| {
-                ExecError::local(
-                    500,
-                    FailureScope::Request,
-                    format!("committing prepared credential: {e:?}"),
-                )
-            })
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            store.apply_patch(&id, revision, &patch)
+        })
+        .await
+        .map_err(|e| PatchError::Io(e.to_string()))
+        .and_then(|r| r)
+        .map_err(|e| {
+            ExecError::local(
+                500,
+                FailureScope::Request,
+                format!("committing prepared credential: {e:?}"),
+            )
+        })
     }
 
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
@@ -2836,6 +2850,110 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(second.is_finished());
         assert!(rt.refresh_task.lock().unwrap().is_none());
+    }
+
+    /// A refresh whose caller is cancelled while its commit waits keeps the preparation
+    /// lock until the commit returns: a writer that serializes on the lock (an SIWC
+    /// binding) lands after the rotated tokens instead of making them stale.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_refresh_holds_the_preparation_lock_through_its_commit() {
+        let (hit_tx, mut hit) = tokio::sync::mpsc::unbounded_channel();
+        let answer = Arc::new(tokio::sync::Semaphore::new(0));
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            axum::routing::post({
+                let answer = answer.clone();
+                move || async move {
+                    hit_tx.send(()).unwrap();
+                    answer.acquire().await.unwrap().forget();
+                    r#"{"access_token":"rotated","refresh_token":"rotated-rt","expires_in":3600}"#
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let token_url = format!("http://{}/oauth/token", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = std::env::temp_dir().join(format!("cpa-prepare-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("codex.json");
+        std::fs::write(
+            &path,
+            r#"{"type":"codex","access_token":"outer","refresh_token":"outer-rt"}"#,
+        )
+        .unwrap();
+        let mut cfg = Config::parse("").unwrap();
+        cfg.auth_dir = dir.clone();
+        let client = wreq::Client::new();
+        let oauth =
+            cpa_exec::codex_oauth::CodexOAuth::with_endpoints(client.clone(), &token_url, &token_url, &token_url);
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            cpa_core::config::credentials::from_auth_dir(&cfg)
+                .into_iter()
+                .map(crate::testing::local)
+                .collect(),
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: cpa_exec::codex::CodexExecutor::with_client(client, oauth),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let refresh = tokio::spawn({
+            let rt = rt.clone();
+            async move { rt.refresh_credential("codex.json").await }
+        });
+        if tokio::time::timeout(Duration::from_secs(5), hit.recv()).await.is_err() {
+            panic!("no refresh request: {:?}", refresh.await);
+        }
+        // Hold the store so the refresh's commit job blocks inside `apply_patch`, then
+        // let the token response through and cancel the caller while the job waits.
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let store = rt.store.clone();
+            move || {
+                let _inner = store.inner.write().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        held.recv().unwrap();
+        answer.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        refresh.abort();
+        assert!(refresh.await.unwrap_err().is_cancelled());
+        let lock = rt.store.prepare_lock("codex.json");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), lock.clone().lock_owned())
+                .await
+                .is_err(),
+            "the detached commit still holds the lock"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let _binding = tokio::time::timeout(Duration::from_secs(5), lock.lock_owned())
+            .await
+            .unwrap();
+        let current = rt.store.get("codex.json").unwrap();
+        assert_eq!(current.str("access_token"), Some("rotated"));
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("use_siwc".into(), true.into());
+        let bound = rt.store.apply_patch("codex.json", current.revision, &patch).unwrap();
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for meta in [&disk, &Value::Object(bound.metadata.clone())] {
+            assert_eq!(
+                (&meta["access_token"], &meta["refresh_token"], &meta["use_siwc"]),
+                (
+                    &serde_json::json!("rotated"),
+                    &serde_json::json!("rotated-rt"),
+                    &serde_json::json!(true)
+                ),
+                "{meta}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The loop sets no timer while nothing can come due, and a credential added later

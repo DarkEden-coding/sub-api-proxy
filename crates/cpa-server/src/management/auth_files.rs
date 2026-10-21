@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::body::Bytes;
 use axum::extract::{Path as UrlPath, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use cpa_core::config::{ConfigDocument, credentials};
 use cpa_core::credential::{Credential, MetadataPatch, Source};
@@ -72,7 +72,7 @@ impl Query {
         self.get(key).unwrap_or_default()
     }
 
-    fn all(&self, key: &str) -> Vec<&str> {
+    pub(super) fn all(&self, key: &str) -> Vec<&str> {
         self.0
             .iter()
             .filter(|(k, _)| k == key)
@@ -175,7 +175,7 @@ pub(super) fn file_name(c: &Credential) -> Option<String> {
 }
 
 /// Go `isRuntimeOnlyAuth`: an AI Studio browser on the `/v1/ws` relay, with no file.
-fn runtime_only(c: &Credential) -> bool {
+pub(super) fn runtime_only(c: &Credential) -> bool {
     matches!(c.source, Source::Runtime)
 }
 
@@ -302,6 +302,24 @@ fn access_token_expiry(c: &Credential) -> Option<SystemTime> {
         return Some(exp);
     }
     expiry_from(&c.metadata)
+}
+
+/// Go `Auth.SIWCExpirationTime` over the `siwc` section: its expiry fields, then its
+/// access token's JWT `exp`.
+pub(super) fn siwc_expiry(section: &Map<String, Value>) -> Option<SystemTime> {
+    expiry_from(section).or_else(|| {
+        let token = section.get("access_token")?.as_str().filter(|t| !t.trim().is_empty())?;
+        jwt_claims(token)?.get("exp").and_then(parse_time)
+    })
+}
+
+/// Go `strconv.ParseBool`.
+pub(super) fn go_parse_bool(s: &str) -> Option<bool> {
+    match s {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    }
 }
 
 fn expiry_from(meta: &Map<String, Value>) -> Option<SystemTime> {
@@ -489,7 +507,7 @@ fn int_value(v: &Value) -> Option<i64> {
 
 /// Go `buildAuthFileEntryLocked`. `None` hides the credential (config API keys and
 /// disabled credentials whose file is gone).
-fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Value>> {
+fn entry(state: &Management, c: &Credential, v8: bool) -> Option<BTreeMap<&'static str, Value>> {
     let runtime = runtime_only(c);
     // Go `buildAuthFileEntryLocked`: runtime-only auths are listed from memory and
     // hidden while disabled; other credentials need a file path.
@@ -677,11 +695,7 @@ fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Va
     }
     let bool_of = |v: &Value| match v {
         Value::Bool(b) => Some(*b),
-        Value::String(s) => match s.trim() {
-            "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
-            "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
-            _ => None,
-        },
+        Value::String(s) => go_parse_bool(s.trim()),
         _ => None,
     };
     let websockets = c
@@ -699,6 +713,9 @@ fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Va
         "cooldowns",
         Value::Array(store.cooldowns(&c.id).iter().map(cooldown_view).collect()),
     );
+    if v8 {
+        super::siwc::summary(c, &mut e);
+    }
     Some(e)
 }
 
@@ -706,7 +723,8 @@ fn entry_value(e: BTreeMap<&'static str, Value>) -> Value {
     Value::Object(e.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
 }
 
-pub(crate) async fn list(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery) -> Response {
+pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuery(raw): RawQuery) -> Response {
+    let v8 = uri.path().starts_with("/v8/");
     let q = Query::parse(raw);
     let positive = |name: &'static str| -> Result<Option<usize>, String> {
         match q.get(name) {
@@ -743,7 +761,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, RawQuery(raw): Ra
     if !paginated {
         let mut files: Vec<(String, Value)> = matching
             .iter()
-            .filter_map(|c| entry(&state, c).map(|e| (list_name(c), entry_value(e))))
+            .filter_map(|c| entry(&state, c, v8).map(|e| (list_name(c), entry_value(e))))
             .collect();
         files.sort_by_key(|(n, _)| n.to_lowercase());
         return reply_ordered(
@@ -768,7 +786,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, RawQuery(raw): Ra
     let end = (start + page_size).min(total);
     let files: Vec<Value> = matching[start..end]
         .iter()
-        .filter_map(|c| entry(&state, c).map(entry_value))
+        .filter_map(|c| entry(&state, c, v8).map(entry_value))
         .collect();
     reply_ordered(
         StatusCode::OK,
@@ -848,7 +866,7 @@ fn resync(state: &Management) {
 }
 
 /// Go `writeAuthFile`: validate as Go's `buildAuthFromFileData` does, then persist.
-fn store_file(state: &Management, name: &str, data: &[u8]) -> Result<(), String> {
+fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(), String> {
     let cfg = state.rt.config();
     let base = Path::new(name)
         .file_name()
@@ -880,6 +898,9 @@ fn store_file(state: &Management, name: &str, data: &[u8]) -> Result<(), String>
         serde_json::to_vec(&persisted).map_err(|e| e.to_string())?
     };
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+    if v8 {
+        state.oauth.invalidate_siwc(&dst);
+    }
     write_file(&dst, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
     {
         let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -895,6 +916,7 @@ fn store_file(state: &Management, name: &str, data: &[u8]) -> Result<(), String>
 
 pub(crate) async fn upload(
     State(state): State<Arc<Management>>,
+    uri: Uri,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -904,6 +926,8 @@ pub(crate) async fn upload(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_owned();
+    // Go `UploadAuthFileV8`: v8 writes fail a pending SIWC binding of the file.
+    let v8 = uri.path().starts_with("/v8/");
     if multipart::is_form(&content_type) {
         let files = match multipart::form_files(&content_type, &body) {
             Ok(files) => files,
@@ -914,7 +938,7 @@ pub(crate) async fn upload(
             if !ends_json(&name) {
                 return Err((true, "file must be .json".into()));
             }
-            store_file(&state, &name, &part.data)
+            store_file(&state, &name, &part.data, v8)
                 .map(|()| name)
                 .map_err(|e| (false, e))
         };
@@ -969,7 +993,7 @@ pub(crate) async fn upload(
     if !ends_json(&name) {
         return fail(StatusCode::BAD_REQUEST, "name must end with .json");
     }
-    let result = tokio::task::spawn_blocking(move || store_file(&state, &name, &body)).await;
+    let result = tokio::task::spawn_blocking(move || store_file(&state, &name, &body, v8)).await;
     match result {
         Ok(Ok(())) => reply(StatusCode::OK, [("status", "ok".into())]),
         Ok(Err(msg)) => fail(StatusCode::INTERNAL_SERVER_ERROR, msg),
@@ -1016,7 +1040,7 @@ fn delete_names(q: &Query, body: &[u8]) -> Result<Vec<String>, &'static str> {
 }
 
 /// Go `deleteAuthFileByName`. Callers hold `disk` and resync afterwards.
-fn delete_one(state: &Management, name: &str) -> Result<String, (StatusCode, String)> {
+fn delete_one(state: &Management, name: &str, v8: bool) -> Result<String, (StatusCode, String)> {
     let name = name.trim();
     if unsafe_name(name) {
         return Err((StatusCode::BAD_REQUEST, "invalid name".into()));
@@ -1039,6 +1063,9 @@ fn delete_one(state: &Management, name: &str) -> Result<String, (StatusCode, Str
     let target: PathBuf = found
         .and_then(|c| path_of(c).map(Path::to_path_buf))
         .unwrap_or_else(|| cfg.auth_dir.join(&base));
+    if v8 {
+        state.oauth.invalidate_siwc(&target);
+    }
     match std::fs::remove_file(&target) {
         Ok(()) => {
             // Go `deleteTokenRecord`: remote stores record the removal explicitly.
@@ -1054,11 +1081,18 @@ fn delete_one(state: &Management, name: &str) -> Result<String, (StatusCode, Str
     }
 }
 
-pub(crate) async fn delete(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery, body: Bytes) -> Response {
+pub(crate) async fn delete(
+    State(state): State<Arc<Management>>,
+    uri: Uri,
+    RawQuery(raw): RawQuery,
+    body: Bytes,
+) -> Response {
     let q = Query::parse(raw);
+    // Go `DeleteAuthFileV8`.
+    let v8 = uri.path().starts_with("/v8/");
     tokio::task::spawn_blocking(move || {
         let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        let response = delete_sync(&state, &q, &body);
+        let response = delete_sync(&state, &q, &body, v8);
         resync(&state);
         response
     })
@@ -1066,7 +1100,7 @@ pub(crate) async fn delete(State(state): State<Arc<Management>>, RawQuery(raw): 
     .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
 }
 
-fn delete_sync(state: &Management, q: &Query, body: &[u8]) -> Response {
+fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response {
     if matches!(q.first("all"), "true" | "1" | "*") {
         let dir = state.rt.config().auth_dir.clone();
         let entries = match std::fs::read_dir(&dir) {
@@ -1081,7 +1115,12 @@ fn delete_sync(state: &Management, q: &Query, body: &[u8]) -> Response {
         let mut deleted = 0;
         for entry in entries.flatten() {
             let is_json = entry.file_name().to_string_lossy().to_lowercase().ends_with(".json");
-            if entry.file_type().is_ok_and(|t| !t.is_dir()) && is_json && std::fs::remove_file(entry.path()).is_ok() {
+            if entry.file_type().is_ok_and(|t| !t.is_dir()) && is_json && {
+                if v8 {
+                    state.oauth.invalidate_siwc(&entry.path());
+                }
+                std::fs::remove_file(entry.path()).is_ok()
+            } {
                 if let Err(error) = state.store_delete(&entry.path()) {
                     return fail(StatusCode::INTERNAL_SERVER_ERROR, error);
                 }
@@ -1096,14 +1135,14 @@ fn delete_sync(state: &Management, q: &Query, body: &[u8]) -> Response {
     };
     match names.as_slice() {
         [] => fail(StatusCode::BAD_REQUEST, "invalid name"),
-        [one] => match delete_one(state, one) {
+        [one] => match delete_one(state, one, v8) {
             Ok(_) => reply(StatusCode::OK, [("status", "ok".into())]),
             Err((status, msg)) => fail(status, msg),
         },
         many => {
             let (mut files, mut failed) = (Vec::new(), Vec::new());
             for name in many {
-                match delete_one(state, name) {
+                match delete_one(state, name, v8) {
                     Ok(base) => files.push(Value::from(base)),
                     Err((_, msg)) => failed.push(h([("name", name.clone().into()), ("error", msg.into())])),
                 }
@@ -1587,9 +1626,6 @@ fn save_file_backed(
     metadata: &Map<String, Value>,
     retyped: bool,
 ) -> Result<(), PatchError> {
-    let Some(path) = path_of(target).map(Path::to_path_buf) else {
-        return Err(PatchError::ConfigBacked);
-    };
     let bytes = if retyped {
         serde_json::to_vec(&metadata.iter().collect::<BTreeMap<_, _>>())
     } else {
@@ -1599,6 +1635,15 @@ fn save_file_backed(
         })
     }
     .map_err(|e| PatchError::Io(e.to_string()))?;
+    save_bytes(state, target, bytes)
+}
+
+/// Writes `bytes` as `target`'s file and registers their re-synthesis in its place,
+/// while `target` is still the current record (see [`save_file_backed`]).
+pub(super) fn save_bytes(state: &Management, target: &Credential, bytes: Vec<u8>) -> Result<(), PatchError> {
+    let Some(path) = path_of(target).map(Path::to_path_buf) else {
+        return Err(PatchError::ConfigBacked);
+    };
     // Synthesized as the auth-folder scan sees the file.
     let cfg = state.rt.config();
     let scanned = path
