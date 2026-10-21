@@ -556,6 +556,13 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// One watcher reload as `start` makes it: reload what was observed, then record
+    /// what was applied.
+    fn step(state: &Management, cache: &mut HashCache, read_config: bool, observed: &Snapshot) -> Snapshot {
+        let (_, read) = reload_config(state, read_config, observed);
+        record(cache, observed.clone(), Some(read))
+    }
+
     /// The watcher records what its reload read, not what it observed before: a write
     /// landing after the read is reloaded when next observed, even when it restores
     /// bytes observed earlier (Go 1631875b
@@ -565,13 +572,6 @@ mod tests {
     /// 7484a521 forgets the hash of an incomplete read). Go
     /// `TestReloadConfigIfChangedSerializesConcurrentReloads_Issue6631` has no Rust
     /// interleaving: one watcher task reloads, under the disk lock.
-    /// One watcher reload as `start` makes it: reload what was observed, then record
-    /// what was applied.
-    fn step(state: &Management, cache: &mut HashCache, read_config: bool, observed: &Snapshot) -> Snapshot {
-        let (_, read) = reload_config(state, read_config, observed);
-        record(cache, observed.clone(), Some(read))
-    }
-
     #[tokio::test]
     async fn the_watcher_records_what_its_reload_read_not_what_it_observed() {
         let (state, dir) = state();
