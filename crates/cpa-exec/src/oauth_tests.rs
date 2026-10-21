@@ -10,7 +10,8 @@ struct Mock {
     calls: Mutex<Vec<(String, http::HeaderMap, Vec<u8>)>>,
     profile_status: u16,
     token_status: u16,
-    /// Statuses for the next token calls, before `token_status` applies.
+    /// Statuses for the next token calls, before `token_status` applies. 1 answers 200
+    /// with a body that is not JSON.
     token_statuses: Mutex<std::collections::VecDeque<u16>>,
     omit_refresh: bool,
     started: tokio::sync::Notify,
@@ -38,6 +39,9 @@ async fn handler(State(mock): State<Arc<Mock>>, request: Request) -> axum::respo
             .unwrap()
             .pop_front()
             .unwrap_or(mock.token_status);
+        if status == 1 {
+            return "not json".into_response();
+        }
         if status != 0 {
             return (
                 http::StatusCode::from_u16(status).unwrap(),
@@ -219,6 +223,42 @@ async fn a_late_joiner_keeps_its_own_retry_budget() {
     let patch = b.await.unwrap().unwrap();
     assert_eq!(patch.set["refresh_token"], "fake-rotated");
     assert_eq!(mock.token_calls.load(Ordering::SeqCst), 4);
+}
+
+/// Go c163bae4 (isClaudeRefreshRetryable): a 5xx answer is retried, but a response
+/// that cannot be read is not. Anthropic may already have spent the single-use refresh
+/// token, so a second exchange would turn the fault into invalid_grant.
+#[tokio::test]
+async fn an_unreadable_refresh_answer_is_not_retried() {
+    let mock = Arc::new(Mock {
+        token_statuses: Mutex::new([503, 1].into()),
+        ..Default::default()
+    });
+    let oauth = service(mock.clone()).await;
+    let error = oauth.refresh("fake-refresh-unreadable").await.unwrap_err();
+    assert_eq!(error.status, 502);
+    assert_eq!(
+        mock.token_calls.load(Ordering::SeqCst),
+        2,
+        "the 503 is retried once, then no more"
+    );
+    // A connection dropped before any answer (DoesNotReplayAfterTransportError).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/token", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    tokio::spawn({
+        let accepted = accepted.clone();
+        async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                accepted.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            }
+        }
+    });
+    let oauth = OAuth::with_endpoints(wreq::Client::new(), &url, &url, &url);
+    let error = oauth.refresh("fake-refresh-dropped").await.unwrap_err();
+    assert_eq!(error.scope, FailureScope::Transport);
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
