@@ -147,7 +147,7 @@ pub(crate) fn is_ai_path(path: &str) -> bool {
 async fn access_log(State(state): State<Access>, mut request: Request, next: Next) -> Response {
     let start = Instant::now();
     let path = crate::management::percent_decode(request.uri().path());
-    let query = mask_query(request.uri().query().unwrap_or_default());
+    let query = logged_query(&path, request.uri().query().unwrap_or_default());
     let method = request.method().to_string();
     let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|p| p.0);
     let client = state
@@ -341,6 +341,15 @@ pub(crate) fn hide_key(value: &[u8]) -> Vec<u8> {
 
 /// Go util.MaskSensitiveQuery preserves raw names, order, malformed escapes and
 /// non-sensitive values. It does not parse/re-encode the whole query.
+/// The query an access line shows. Go v8.0.35 `d50a1995`: a v8 OAuth query carries
+/// the callback state, code and issued client ID, so none of it is logged.
+fn logged_query(path: &str, raw: &str) -> String {
+    if path.starts_with("/v8/management/oauth/") {
+        return String::new();
+    }
+    mask_query(raw)
+}
+
 pub(crate) fn mask_query(raw: &str) -> String {
     raw.split('&')
         .map(|part| {
@@ -614,6 +623,18 @@ mod tests {
             mask_query("value=sk-secret-client-key&index=3"),
             "value=sk-s...-key&index=3"
         );
+        // Go v8.0.35 `TestGinLogrusLoggerRedactsV8OAuthQueries`: no v8 OAuth query, so
+        // no `?` either; other paths, the v0 callback included, keep the masked query.
+        let oauth = "state=secret-state&code=secret-code&client_id=issued-secret&error=secret-error";
+        for path in [
+            "/v8/management/oauth/callback",
+            "/v8/management/oauth/status",
+            "/v8/management/oauth/session",
+        ] {
+            assert_eq!(logged_query(path, oauth), "");
+        }
+        assert_eq!(logged_query("/v0/management/oauth-callback", "state=s"), "state=s");
+        assert_eq!(logged_query("/v8/management/oauthx", "state=s"), "state=s");
         for case in fixture["lines"].as_array().unwrap() {
             assert_eq!(
                 access_line(

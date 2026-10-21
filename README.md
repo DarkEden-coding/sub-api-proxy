@@ -139,7 +139,7 @@ This project is for one person using their own accounts on their own machines. K
 
 Use the provider's sanctioned path where one exists:
 
-- OpenAI offers [Sign in with ChatGPT](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt) so eligible users can use their plan in participating tools, including local personal projects. That permission depends on the integration and consent scopes. cliproxy-rs's Codex login follows CLIProxyAPI's existing login flow; it is not the new Sign in with ChatGPT integration.
+- OpenAI offers [Sign in with ChatGPT](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt) so eligible users can use their plan in participating tools, including local personal projects. That permission depends on the integration and consent scopes. cliproxy-rs's Codex login follows CLIProxyAPI's existing login flow; it is not the new Sign in with ChatGPT integration. The Management API can already bind Sign in with ChatGPT tokens to a Codex credential, but requests do not use them yet.
 - Claude Code supports [gateway configuration](https://code.claude.com/docs/en/llm-gateway-connect). You can route other models into Claude Code through the proxy using their API keys. Anthropic's [authentication rules](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) reserve Claude subscription OAuth for Claude Code and other native Anthropic applications. Use an API key or supported cloud provider for Claude in third-party tools.
 
 Personal use is still subject to each provider's terms, and providers can restrict or suspend accounts that break them. Sharing an account, or using it to serve other people, is the clearest case.
@@ -165,6 +165,7 @@ Not in cliproxy-rs yet:
 - An AUR package.
 - Plugin auth parsing of credential files (`auth.parse`), per-credential plugin model discovery (`model.for_auth`) and usage records for plugin executors; plugin schedulers, request and response translators, thinking appliers and the WebSocket response observer. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, interceptors and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
 - Home-managed plugin sync, tasks and status reports. Home usage, log and in-flight reporting and KV storage already work.
+- Codex requests through bound Sign in with ChatGPT tokens (`use_siwc`) and the `--siwc-bind` command.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 
 ## Performance

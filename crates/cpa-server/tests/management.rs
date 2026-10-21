@@ -2231,7 +2231,7 @@ async fn devin_login_completes_through_the_main_listener_callback() {
             state: state.to_owned(),
             code: code.to_owned(),
             error: error.to_owned(),
-        })
+        }) == cpa_server::runtime::OAuthDelivery::Delivered
     };
     // A denied authorization ends the session with Go's message.
     let started = oauth_get(&base, "/oauth/auth-url?provider=devin").await;
@@ -2251,12 +2251,15 @@ async fn devin_login_completes_through_the_main_listener_callback() {
     assert_eq!(query["redirect_uri"], "http://127.0.0.1:18999/callback");
     assert_eq!(query["state"], state);
     assert!(!deliver("unknown-state", "c", ""));
-    assert!(!f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
-        provider: "codex",
-        state: state.clone(),
-        code: "c".into(),
-        error: String::new(),
-    }));
+    assert_ne!(
+        f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+            provider: "codex",
+            state: state.clone(),
+            code: "c".into(),
+            error: String::new(),
+        }),
+        cpa_server::runtime::OAuthDelivery::Delivered
+    );
     assert!(deliver(&state, "fake-devin-code", ""));
     assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
     let path = f.dir.join("auth/devin-dev-user.json");
@@ -2315,7 +2318,7 @@ async fn codex_login_completes_through_the_main_listener_callback() {
         code: "fake-code".into(),
         error: String::new(),
     });
-    assert!(delivered);
+    assert_eq!(delivered, cpa_server::runtime::OAuthDelivery::Delivered);
     assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
     let token_request = seen
         .lock()
@@ -2337,12 +2340,15 @@ async fn codex_login_completes_through_the_main_listener_callback() {
         .find(|c| c.provider == "codex")
         .expect("saved and published");
     assert_eq!(codex.str("email"), Some("c@example.invalid"));
-    assert!(!f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
-        provider: "codex",
-        state,
-        code: "again".into(),
-        error: String::new(),
-    }));
+    assert_ne!(
+        f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+            provider: "codex",
+            state,
+            code: "again".into(),
+            error: String::new(),
+        }),
+        cpa_server::runtime::OAuthDelivery::Delivered
+    );
     server.abort();
     fake_server.abort();
 }
@@ -2973,12 +2979,15 @@ async fn kimi_channel_selects_kimi_ai_and_codex_exchange_errors_read_like_go() {
     let (base, _state, server) = login_server(&f, &bad).await;
     let started = oauth_get(&base, "/oauth/auth-url?provider=codex").await;
     let state = started["state"].as_str().unwrap().to_owned();
-    assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
-        provider: "codex",
-        state: state.clone(),
-        code: "fake-code".into(),
-        error: String::new(),
-    }));
+    assert_eq!(
+        f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+            provider: "codex",
+            state: state.clone(),
+            code: "fake-code".into(),
+            error: String::new(),
+        }),
+        cpa_server::runtime::OAuthDelivery::Delivered
+    );
     // Go appends the upstream body; session errors are readable by anyone holding
     // the state, so cliproxy-rs stops at the status (deliberate hardening).
     assert_eq!(
@@ -3031,4 +3040,429 @@ async fn config_writes_render_json_values_as_block_yaml() {
         "untouched text keeps its style: {file}"
     );
     server.abort();
+}
+
+/// Go v8.0.35 Sign in with ChatGPT binding (`d50a1995`, `ae3ee3be`) against a local
+/// token endpoint: start validation, the legacy-callback refusal, callback forms and
+/// conflicts, the bound file, the v8 summary, failures, cancellation, and the v8-only
+/// invalidation by a credential upload.
+#[tokio::test]
+async fn siwc_binding_flows_follow_go() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+    let forms: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let (exchanging, resume) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+    );
+    let app = axum::Router::new().route(
+        "/api/accounts/oauth/token",
+        axum::routing::post({
+            let (forms, exchanging, resume) = (forms.clone(), exchanging.clone(), resume.clone());
+            move |body: String| async move {
+                forms.lock().unwrap().push(body.clone());
+                let code = url::form_urlencoded::parse(body.as_bytes())
+                    .find(|(k, _)| k == "code")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                if code == "fail" {
+                    return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "secret-sentinel".to_owned());
+                }
+                // `hang` never answers (its exchange is expected to be dropped);
+                // `hold` waits for a permit.
+                if code == "hang" {
+                    exchanging.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                if code == "hold" {
+                    exchanging.notify_one();
+                    let _ = resume.acquire().await.unwrap();
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    r#"{"access_token":"siwc-at","refresh_token":"siwc-rt","id_token":"siwc-id","scope":"openid chatgpt.tokens.use.direct","expires_in":3600}"#.to_owned(),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let original = r#"{"type":"codex","email":"a@example.invalid","account_id":"acct","access_token":"outer","refresh_token":"outer-rt","note":"keep","big":123456789012345678901234567890,"siwc":{"device_id":"E61BBE28-07EF-466D-8E5D-A344F94AB305"}}"#;
+    let f = Fixture::from_yaml("siwc", |auth, hash| {
+        std::fs::write(auth.join("codex.json"), original).unwrap();
+        std::fs::write(
+            auth.join("claude.json"),
+            r#"{"type":"claude","access_token":"a","refresh_token":"b"}"#,
+        )
+        .unwrap();
+        std::fs::write(auth.join("no-refresh.json"), r#"{"type":"codex","access_token":"a"}"#).unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n  providers:\n    codex:\n      signin-with-chatgpt-identifier: '  Custom Agent  '\n",
+            auth.display()
+        )
+    });
+    let file = f.dir.join("auth").join("codex.json");
+    let (settled_tx, mut settled) = tokio::sync::mpsc::unbounded_channel();
+    let options = management::Options {
+        login_base: Some(fake.clone()),
+        login_settled: Some(settled_tx),
+        ..Default::default()
+    };
+    let (base, _management, server) = serve_with(&f, options).await;
+    let client = wreq::Client::new();
+    let send = |method: wreq::Method, path: String, body: String| {
+        let request = client
+            .request(method, format!("{base}{path}"))
+            .bearer_auth("fake-management-only")
+            .header("content-type", "application/json")
+            .body(body);
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap();
+            (status, text)
+        }
+    };
+    let bind = |body: &str| send(wreq::Method::POST, "/v8/management/oauth/siwc/bind".into(), body.into());
+    let callback = |body: Value| {
+        send(
+            wreq::Method::POST,
+            "/v8/management/oauth/callback".into(),
+            body.to_string(),
+        )
+    };
+    let redirect = |state: &str, code: &str| {
+        format!("http://127.0.0.1:1455/auth/callback?state={state}&code={code}&client_id=oaiapp_issued")
+    };
+    let parsed = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+    async fn wait_settled(settled: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), settled.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    let bound_file = || std::fs::read_to_string(&file).unwrap();
+
+    // Start validation (gin `ShouldBindJSON`, then the target).
+    for (body, status, want) in [
+        ("", 400, json!({"error": "invalid request body"})),
+        ("[1]", 400, json!({"error": "invalid request body"})),
+        (r#"{"name":1}"#, 400, json!({"error": "invalid request body"})),
+        ("{}", 400, json!({"error": "name is required"})),
+        (
+            r#"{"name":"missing.json"}"#,
+            404,
+            json!({"error": "auth file not found"}),
+        ),
+        (
+            r#"{"name":"claude.json"}"#,
+            400,
+            json!({"error": "SIWC binding requires a file-backed Codex OAuth credential"}),
+        ),
+        (
+            r#"{"name":"no-refresh.json"}"#,
+            400,
+            json!({"error": "SIWC binding requires a file-backed Codex OAuth credential"}),
+        ),
+    ] {
+        let (got, text) = bind(body).await;
+        assert_eq!((got, parsed(&text)), (status, want), "{body}");
+    }
+    let (status, _) = send(
+        wreq::Method::POST,
+        "/v0/management/oauth/siwc/bind".into(),
+        r#"{"name":"codex.json"}"#.into(),
+    )
+    .await;
+    assert_eq!(status, 404, "v8 only");
+    let keyless = client
+        .post(format!("{base}/v8/management/oauth/siwc/bind"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(keyless.status().as_u16(), 401);
+
+    // A binding starts with server-held PKCE, device ID and redirect.
+    let (status, text) = bind(r#"{"NAME":" codex.json "}"#).await;
+    assert_eq!(status, 200, "{text}");
+    let started = parsed(&text);
+    let sid = started["state"].as_str().unwrap().to_owned();
+    assert_eq!(
+        started,
+        json!({"status": "ok", "url": started["url"], "state": sid, "flow": "siwc_bind", "expires_in": 300})
+    );
+    let url = url::Url::parse(started["url"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        url.as_str().split('?').next(),
+        Some("https://auth.openai.com/api/accounts/authorize")
+    );
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], "dynamic_agent_client");
+    assert_eq!(query["redirect_uri"], "http://127.0.0.1:1455/auth/callback");
+    assert_eq!(query["agent_name_hint"], "Custom Agent");
+    assert_eq!(
+        query["ext_agent_host_id"],
+        "urn:uuid:e61bbe28-07ef-466d-8e5d-a344f94ab305"
+    );
+    assert_eq!(query["state"], sid);
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert!(!query["nonce"].is_empty() && query["nonce"] != sid);
+    let (status, text) = bind(r#"{"name":"codex.json"}"#).await;
+    assert_eq!(
+        (status, parsed(&text)),
+        (
+            409,
+            json!({"error": "a SIWC binding is already pending for this credential"})
+        )
+    );
+
+    // Legacy sinks refuse the state and leave the binding pending.
+    let (status, text) = send(
+        wreq::Method::POST,
+        "/v0/management/oauth-callback".into(),
+        json!({"provider": "codex", "state": sid, "code": "issued-code"}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        (status, parsed(&text)),
+        (409, json!({"status": "error", "error": "oauth flow is not pending"}))
+    );
+    assert_eq!(
+        f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+            provider: "codex",
+            state: sid.clone(),
+            code: "issued-code".into(),
+            error: String::new(),
+        }),
+        cpa_server::runtime::OAuthDelivery::RequiresV8
+    );
+
+    // Incomplete or conflicting callbacks are refused before any exchange.
+    let evil = redirect(&sid, "issued-code").replace("127.0.0.1", "evil.example");
+    let userinfo = redirect(&sid, "issued-code").replace("http://", "http://u@");
+    for body in [
+        json!({"state": sid, "code": "c"}),
+        json!({"state": sid, "client_id": "client"}),
+        json!({"state": sid, "code": "c", "client_id": "client", "provider": "claude"}),
+        json!({"state": sid, "redirect_url": redirect("other-state", "c")}),
+        json!({"state": sid, "redirect_url": evil}),
+        json!({"redirect_url": userinfo}),
+        json!({"redirect_url": format!("{}#frag", redirect(&sid, "c"))}),
+        json!({"redirect_url": format!("{}&client_id=other", redirect(&sid, "c"))}),
+        json!({"state": sid, "client_id": "other", "redirect_url": redirect(&sid, "c")}),
+    ] {
+        let (status, text) = callback(body.clone()).await;
+        assert_eq!(status, 400, "{body}: {text}");
+    }
+    let (status, _) = send(
+        wreq::Method::GET,
+        format!("/v8/management/oauth/callback?state={sid}&code=c&client_id=a&client_id=b"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(forms.lock().unwrap().is_empty());
+
+    // The pasted loopback URL completes it with the issued client ID.
+    let (status, text) = callback(json!({"provider": "openai", "redirect_url": redirect(&sid, "issued-code")})).await;
+    assert_eq!((status, parsed(&text)), (200, json!({"status": "ok"})));
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
+    let form = forms.lock().unwrap().pop().unwrap();
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(form.as_bytes()).into_owned().collect();
+    assert_eq!(form["client_id"], "oaiapp_issued");
+    assert_eq!(form["code"], "issued-code");
+    assert_eq!(form["grant_type"], "authorization_code");
+    assert_eq!(form["redirect_uri"], "http://127.0.0.1:1455/auth/callback");
+    assert_eq!(form["resource"], "https://api.openai.com/v1");
+    let verifier = &form["code_verifier"];
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+        query["code_challenge"],
+        "the verifier the session kept"
+    );
+    assert!(!text.contains(verifier.as_str()));
+    // Go `json.Marshal` of the merged file: sorted, compact, other members verbatim.
+    let bound = bound_file();
+    assert!(
+        bound.starts_with(r#"{"access_token":"outer","account_id":"acct","big":123456789012345678901234567890,"email":"a@example.invalid","note":"keep","refresh_token":"outer-rt","siwc":{"access_token":"siwc-at","client_id":"oaiapp_issued","device_id":"e61bbe28-07ef-466d-8e5d-a344f94ab305","expired":""#),
+        "{bound}"
+    );
+    assert!(
+        bound.ends_with(r#""refresh_token":"siwc-rt","scope":"openid chatgpt.tokens.use.direct","scopes":["openid","chatgpt.tokens.use.direct"]},"type":"codex","use_siwc":true}"#),
+        "{bound}"
+    );
+    let published =
+        f.rt.store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.id == "codex.json")
+            .unwrap();
+    assert_eq!(published.metadata["use_siwc"], true);
+    assert_eq!(published.metadata["siwc"]["client_id"], "oaiapp_issued");
+    // The v8 list summarizes it without a token; v0 is unchanged.
+    let (_, listed) = send(wreq::Method::GET, "/v8/management/credentials".into(), String::new()).await;
+    for secret in ["siwc-at", "siwc-rt", "siwc-id", "oaiapp_issued"] {
+        assert!(!listed.contains(secret), "{secret}");
+    }
+    let listed = parsed(&listed);
+    let entry = |listed: &Value, name: &str| {
+        listed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let codex = entry(&listed, "codex.json");
+    assert_eq!(
+        (&codex["siwc_bind_supported"], &codex["use_siwc"], &codex["siwc_bound"]),
+        (&json!(true), &json!(true), &json!(true))
+    );
+    let expires = chrono::DateTime::parse_from_rfc3339(codex["siwc_expires_at"].as_str().unwrap()).unwrap();
+    assert!(codex["siwc_expires_at"].as_str().unwrap().ends_with('Z'));
+    let left = (expires.to_utc() - chrono::Utc::now()).num_seconds();
+    assert!((3300..=3420).contains(&left), "{left}");
+    assert_eq!(entry(&listed, "no-refresh.json")["siwc_bind_supported"], false);
+    assert!(entry(&listed, "claude.json").get("siwc_bound").is_none());
+    let (_, legacy) = send(wreq::Method::GET, "/v0/management/auth-files".into(), String::new()).await;
+    assert!(entry(&parsed(&legacy), "codex.json").get("siwc_bound").is_none());
+    // A second callback and a late cancel change nothing.
+    let (status, text) = callback(json!({"redirect_url": redirect(&sid, "issued-code")})).await;
+    assert_eq!(
+        (status, parsed(&text)),
+        (
+            409,
+            json!({"status": "error", "error": "SIWC session is no longer accepting callbacks"})
+        )
+    );
+    let (_, text) = send(
+        wreq::Method::DELETE,
+        format!("/v8/management/oauth/session?state={sid}"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(parsed(&text), json!({"status": "ok", "cancelled": false}));
+
+    let start = || async {
+        let (status, text) = bind(r#"{"name":"codex.json"}"#).await;
+        assert_eq!(status, 200, "{text}");
+        parsed(&text)["state"].as_str().unwrap().to_owned()
+    };
+    // A denied authorization and a failed exchange report fixed messages and save nothing.
+    let sid = start().await;
+    let (status, _) = send(
+        wreq::Method::GET,
+        format!("/v8/management/oauth/callback?state={sid}&error=access_denied%3A+secret-data"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(
+        final_status(&base, &sid, 5).await,
+        json!({"status": "error", "error": "SIWC authorization was denied or failed"})
+    );
+    let sid = start().await;
+    let (status, _) = callback(json!({"redirect_url": redirect(&sid, "fail")})).await;
+    assert_eq!(status, 200);
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(
+        final_status(&base, &sid, 5).await,
+        json!({"status": "error", "error": "Failed to exchange SIWC authorization code; start a new binding"})
+    );
+    assert_eq!(bound_file(), bound);
+
+    // Cancelling during the exchange drops it; the state is then unknown.
+    let sid = start().await;
+    assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hang")})).await.0, 200);
+    tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+        .await
+        .unwrap();
+    let (_, text) = send(
+        wreq::Method::DELETE,
+        format!("/v8/management/oauth/session?state={sid}"),
+        String::new(),
+    )
+    .await;
+    assert_eq!(parsed(&text), json!({"status": "ok", "cancelled": true}));
+    let (status, text) = callback(json!({"redirect_url": redirect(&sid, "hang")})).await;
+    assert_eq!(
+        (status, parsed(&text)),
+        (404, json!({"status": "error", "error": "unknown or expired state"}))
+    );
+
+    // A v8 upload of the file, even unchanged, fails a pending binding; a v0 one does not.
+    let upload = |version: &str| {
+        let path = match version {
+            "v8" => "/v8/management/credentials?name=codex.json",
+            _ => "/v0/management/auth-files?name=codex.json",
+        };
+        send(wreq::Method::POST, path.into(), bound_file())
+    };
+    let sid = start().await;
+    assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hang")})).await.0, 200);
+    tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+        .await
+        .unwrap();
+    assert_eq!(upload("v8").await.0, 200);
+    assert_eq!(
+        final_status(&base, &sid, 5).await,
+        json!({"status": "error", "error": "SIWC binding target changed; start a new binding"})
+    );
+    let sid = start().await;
+    assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hold")})).await.0, 200);
+    tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+        .await
+        .unwrap();
+    assert_eq!(upload("v0").await.0, 200);
+    resume.add_permits(1);
+    assert_eq!(wait_settled(&mut settled).await, sid);
+    assert_eq!(final_status(&base, &sid, 5).await, json!({"status": "ok"}));
+
+    // So does a v8 delete; the file is then gone.
+    let sid = start().await;
+    assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hang")})).await.0, 200);
+    tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+        .await
+        .unwrap();
+    let (status, _) = send(
+        wreq::Method::DELETE,
+        "/v8/management/credentials?name=codex.json".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        final_status(&base, &sid, 5).await,
+        json!({"status": "error", "error": "SIWC binding target changed; start a new binding"})
+    );
+    assert!(!file.exists());
+    let (status, _) = send(
+        wreq::Method::POST,
+        "/v8/management/credentials?name=codex.json".into(),
+        original.into(),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // The credential file itself may not be a symlink.
+    #[cfg(unix)]
+    {
+        let target = f.dir.join("auth").join("target.json");
+        std::fs::rename(&file, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        let (status, text) = bind(r#"{"name":"codex.json"}"#).await;
+        assert_eq!(
+            (status, parsed(&text)),
+            (400, json!({"error": "SIWC binding target is unavailable or invalid"}))
+        );
+    }
+    server.abort();
+    upstream.abort();
 }

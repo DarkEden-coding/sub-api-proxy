@@ -65,10 +65,20 @@ pub struct OAuthCallback {
     pub error: String,
 }
 
+/// What became of a provider callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthDelivery {
+    Delivered,
+    /// No login with that state is pending, or the callback could not be recorded.
+    NotPending,
+    /// The state belongs to a Sign in with ChatGPT binding, which takes its callback
+    /// only through the v8 Management API (Go `ErrSIWCCallbackRequiresV8`).
+    RequiresV8,
+}
+
 /// Hands a callback to a pending management login (Go
-/// `WriteOAuthCallbackFileForPendingSession`); returns false when no login with that
-/// state is pending or the callback could not be recorded.
-pub type OAuthCallbackSink = Arc<dyn Fn(&OAuthCallback) -> bool + Send + Sync>;
+/// `WriteOAuthCallbackFileForPendingSession`).
+pub type OAuthCallbackSink = Arc<dyn Fn(&OAuthCallback) -> OAuthDelivery + Send + Sync>;
 
 impl Runtime {
     /// The scheduler policy is derived from the config (`routing` plus the OAuth
@@ -233,9 +243,9 @@ impl Runtime {
         *self.oauth_sink.write().unwrap_or_else(PoisonError::into_inner) = sink;
     }
 
-    pub fn deliver_oauth_callback(&self, callback: &OAuthCallback) -> bool {
+    pub fn deliver_oauth_callback(&self, callback: &OAuthCallback) -> OAuthDelivery {
         let sink = self.oauth_sink.read().unwrap_or_else(PoisonError::into_inner).clone();
-        sink.is_some_and(|sink| sink(callback))
+        sink.map_or(OAuthDelivery::NotPending, |sink| sink(callback))
     }
 
     /// The credential an executor call receives: the stored one, or in a test runtime

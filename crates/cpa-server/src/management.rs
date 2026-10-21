@@ -35,6 +35,7 @@ mod plugin_store;
 mod plugins;
 pub(crate) mod quota;
 mod quota_probe;
+mod siwc;
 pub use access::cors;
 pub(crate) use access::{Cors, cors_headers};
 pub(crate) use plugins::go_query;
@@ -518,6 +519,7 @@ pub fn router(state: Arc<Management>) -> Router {
         ("oauth/status", methods().get(guarded!(s, oauth::status))),
         ("oauth/session", methods().delete(guarded!(s, oauth::cancel))),
         ("oauth/import", methods().post(guarded!(s, oauth::import))),
+        ("oauth/siwc/bind", methods().post(guarded!(s, siwc::bind))),
         (
             "observability/logs",
             methods()
