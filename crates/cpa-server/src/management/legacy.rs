@@ -727,6 +727,22 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, body: 
             "failed to hash remote management key: bcrypt: password length exceeds 72 bytes".into(),
         );
     }
+    // Go v8.0.35 `WriteConfig` (3be5fa44): a v8 upload is saved in the latest layout;
+    // a legacy-only one as submitted.
+    let text = if cpa_core::config::is_v8_layout(&root) {
+        let mut doc = match cpa_core::config::ConfigDocument::parse(&text) {
+            Ok(doc) => doc,
+            Err(e) => return fail(StatusCode::BAD_REQUEST, "invalid_yaml", format!("{e:#}")),
+        };
+        let basis = doc.migrated_text(&text).unwrap_or_else(|| text.clone());
+        let archived = doc.archive_unknown();
+        match doc.render_preserving(&basis) {
+            Ok(rendered) => rendered + &cpa_core::config::archive_comments(&archived),
+            Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", format!("{e:#}")),
+        }
+    } else {
+        text
+    };
     tokio::task::spawn_blocking(move || {
         let _guard = state.disk.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if cpa_core::config::ConfigDocument::write(&state.path, &text).is_err() {
