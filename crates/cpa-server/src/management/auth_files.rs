@@ -505,11 +505,11 @@ fn int_value(v: &Value) -> Option<i64> {
     }
 }
 
-/// Go `buildAuthFileEntryLocked`. `None` hides the credential (config API keys and
-/// disabled credentials whose file is gone).
 /// Go `authFileQuotaContext`: the quota plugin selected per provider key.
 type QuotaPlugins = std::collections::HashMap<String, String>;
 
+/// Go `buildAuthFileEntryLocked`. `None` hides the credential (config API keys and
+/// disabled credentials whose file is gone).
 fn entry(state: &Management, c: &Credential, v8: bool, quota: &QuotaPlugins) -> Option<BTreeMap<&'static str, Value>> {
     let runtime = runtime_only(c);
     // Go `buildAuthFileEntryLocked`: runtime-only auths are listed from memory and
