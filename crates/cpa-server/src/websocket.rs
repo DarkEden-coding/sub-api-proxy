@@ -212,6 +212,8 @@ struct Failure {
     /// The raw upstream `error` event, sent as-is when exposed.
     payload: Option<String>,
     replay: bool,
+    /// Go `ErrorMessage.Addon`: copied into the error event.
+    addon: Option<Box<HeaderMap>>,
 }
 
 impl Failure {
@@ -221,6 +223,7 @@ impl Failure {
             text: String::from_utf8_lossy(&e.body).into_owned(),
             payload: None,
             replay: e.is_replay_required(),
+            addon: e.addon.clone(),
         }
     }
 
@@ -231,6 +234,7 @@ impl Failure {
                 text: classify::error_text(e),
                 payload: None,
                 replay: e.is_replay_required(),
+                addon: e.addon.clone(),
             },
             other => Self::local(other.status(), &other.text()),
         }
@@ -242,6 +246,7 @@ impl Failure {
             text: text.into(),
             payload: None,
             replay: false,
+            addon: None,
         }
     }
 }
@@ -642,7 +647,7 @@ impl Connection {
             Ok(pair) => pair,
             Err(error) => {
                 // Request-shape errors keep the connection open.
-                let frame = error_payload(error.status, &error.message);
+                let frame = error_payload(error.status, &error.message, None);
                 return match send_text(socket, frame).await {
                     true => Flow::Next,
                     false => Flow::End,
@@ -1065,6 +1070,7 @@ impl Connection {
                         text: payload.trim().to_owned(),
                         payload: Some(payload.trim().to_owned()),
                         replay: false,
+                        addon: None,
                     };
                     close_for_failure(socket, &failure).await;
                     return Forwarded::End;
@@ -1197,7 +1203,7 @@ async fn close_for_failure(socket: &mut Sink, failure: &Failure) {
         let payload = failure
             .payload
             .clone()
-            .unwrap_or_else(|| error_payload(failure.status, &failure.text));
+            .unwrap_or_else(|| error_payload(failure.status, &failure.text, failure.addon.as_deref()));
         socket.event("response", payload.as_bytes());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     } else {
@@ -1216,7 +1222,7 @@ async fn close_for_upstream_loss(socket: &mut Sink, error: &ExecError) {
     if let Some((code, reason)) = close_code(&failure) {
         close_with_code(socket, code, &reason).await;
     } else if exposed(&failure) {
-        let payload = error_payload(failure.status, &failure.text);
+        let payload = error_payload(failure.status, &failure.text, failure.addon.as_deref());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     }
     socket.terminate(CLOSE_SENT);

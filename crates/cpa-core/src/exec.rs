@@ -565,6 +565,11 @@ pub struct ExecError {
     /// Send status, body and filtered headers to the client unchanged instead of the
     /// route's normal error shape (claude_executor_fast_error.go).
     pub direct: bool,
+    /// Headers this error hands the client under `requests.passthrough-headers` (Go
+    /// `ErrorMessage.Addon`, filled only from errors with `Headers()`: Codex and xAI
+    /// WebSocket error frames and stream bootstrap failures). `headers` stays the
+    /// classification copy and is never sent.
+    pub addon: Option<Box<HeaderMap>>,
 }
 
 impl ExecError {
@@ -576,6 +581,7 @@ impl ExecError {
             headers: Box::default(),
             retry_after: None,
             direct: false,
+            addon: None,
         }
     }
 }

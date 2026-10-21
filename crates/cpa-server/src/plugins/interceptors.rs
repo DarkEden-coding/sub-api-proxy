@@ -137,6 +137,7 @@ fn terminated(resp: &RequestInterceptResponse) -> Failure {
         headers: Box::new(header_map(&resp.response_headers)),
         retry_after: None,
         direct: true,
+        addon: None,
     })
 }
 
