@@ -1043,13 +1043,19 @@ pub(crate) type LayoutHook = Box<dyn FnOnce() + Send>;
 /// Go v8.0.35 `SaveConfigPreserveComments`: a v0 save keeps a file without v8 sections
 /// in its legacy layout, so legacy settings keep their scope (a legacy
 /// `codex-header-defaults` still applies to API keys); a v8 file saves through the v8
-/// writer. One `disk` lock covers the layout check and the chosen write, so an upload
-/// cannot change the layout in between.
+/// writer. The caller holds the `disk` lock across the layout check and the chosen
+/// write, so an upload cannot change the layout in between, and across reading the
+/// value it changes, so a concurrent save cannot be lost (Go 1631875b).
 /// ponytail: the legacy branch changes only the edited key; Go also merges its whole
 /// typed legacy render into the file and drops removed integration keys. Port
 /// `mergeMappingPreserve` here if a difference in the saved file matters.
-pub(crate) fn v0_save(state: &Management, legacy: &[&str], edit: LegacyEdit, v8: V8Edit) -> Response {
-    let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+pub(crate) fn v0_save(
+    state: &Management,
+    _disk: &std::sync::MutexGuard<'_, ()>,
+    legacy: &[&str],
+    edit: LegacyEdit,
+    v8: V8Edit,
+) -> Response {
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
