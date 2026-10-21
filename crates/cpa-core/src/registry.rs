@@ -1,6 +1,9 @@
 //! Pinned static model catalog: `internal/registry/models/models.json` from CLIProxyAPI
 //! v8.0.27, embedded verbatim. It is 6fecc6e's catalog plus the Antigravity Claude 5.5
-//! models (`claude-opus-5-5-high`, `claude-sonnet-5-5-high`).
+//! models (`claude-opus-5-5-high`, `claude-sonnet-5-5-high`), with v8.0.35's Claude
+//! thinking entries from Go ad9e456d: `disable_type: between_tools` on
+//! `claude-sonnet-5-5`, adaptive-only Opus 5.5 and Fable 5 and 5.1, and adaptive
+//! Opus 4.7 and 4.8.
 //!
 //! This is the static layer only. Go overlays a dynamic registry (per-credential
 //! registrations, config model definitions, remote catalog refresh) and consults it before
@@ -140,6 +143,46 @@ impl Catalog {
                 self.channel(channel).iter().chain(statics)
             })
             .find(|m| m.id == id)
+            .or_else(|| self.claude_family(self.channel("claude"), id))
+    }
+
+    /// Go `LookupStaticModelInfoByChannel`: this channel's definition with the exact ID,
+    /// or for `claude` its family entry.
+    pub fn lookup_in_channel(&self, id: &str, channel: &str) -> Option<&ModelInfo> {
+        if id.is_empty() {
+            return None;
+        }
+        let models = self.channel(channel);
+        models.iter().find(|m| m.id == id).or_else(|| {
+            channel
+                .trim()
+                .eq_ignore_ascii_case("claude")
+                .then(|| self.claude_family(models, id))
+                .flatten()
+        })
+    }
+
+    /// Dated and bracketed Claude variants (`claude-sonnet-5-5-20261001`,
+    /// `claude-opus-5-5[1m]`) share their catalog entry's capabilities (Go
+    /// `claudeFamilyModelIDs`): the ID without a `[...]` suffix, then also without a
+    /// `-YYYYMMDD` date.
+    fn claude_family<'a>(&self, models: &'a [ModelInfo], id: &str) -> Option<&'a ModelInfo> {
+        if !id.starts_with("claude-") {
+            return None;
+        }
+        let mut base = id;
+        let mut candidates = Vec::with_capacity(2);
+        if let Some(i) = base.find('[').filter(|&i| i > 0 && base.ends_with(']')) {
+            base = &base[..i];
+            candidates.push(base);
+        }
+        let n = base.len();
+        if n > 9 && base.as_bytes()[n - 9] == b'-' && base.as_bytes()[n - 8..].iter().all(u8::is_ascii_digit) {
+            candidates.push(&base[..n - 9]);
+        }
+        candidates
+            .into_iter()
+            .find_map(|family| models.iter().find(|m| m.id == family))
     }
 }
 
@@ -356,6 +399,47 @@ mod tests {
 
     fn catalog(json: &str) -> Catalog {
         Catalog::parse(json).unwrap()
+    }
+
+    /// Go TestLookupStaticModelInfoClaudeVariantsUseCatalogEntry (claude_family_lookup_test.go).
+    #[test]
+    fn claude_variants_use_their_catalog_entry() {
+        let c = catalog(MODELS_JSON);
+        for (id, family) in [
+            ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+            ("claude-opus-5-5-20261001", "claude-opus-5-5"),
+            ("claude-opus-5-5-20261001[1m]", "claude-opus-5-5"),
+            ("claude-sonnet-5-5[1m]", "claude-sonnet-5-5"),
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
+            ("claude-fable-5[1m]", "claude-fable-5"),
+            ("claude-fable-5-1[1m]", "claude-fable-5-1"),
+            ("claude-haiku-4-5-20251001[1m]", "claude-haiku-4-5-20251001"),
+        ] {
+            assert_eq!(c.lookup(id).map(|m| m.id.as_str()), Some(family), "{id}");
+            assert_eq!(
+                c.lookup_in_channel(id, "claude").map(|m| m.id.as_str()),
+                Some(family),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            c.lookup("claude-haiku-4-5-20251001").map(|m| m.id.as_str()),
+            Some("claude-haiku-4-5-20251001")
+        );
+        for id in [
+            "claude-unknown-20261001",
+            "claude-opus-5-5-2026",
+            "claude-opus-5-5[1m",
+            "gpt-5[1m]",
+        ] {
+            assert!(c.lookup(id).is_none(), "{id}");
+        }
+        assert_eq!(
+            c.lookup("claude-sonnet-5-5")
+                .and_then(|m| m.thinking.as_ref())
+                .map(|t| t.disable_type.as_str()),
+            Some("between_tools")
+        );
     }
 
     /// Go TestDetectChangedProviders_CodexConfigurationUpdate: an internal-field-only

@@ -694,9 +694,7 @@ fn build_config_models(
                 user_defined: true,
                 explicit_thinking: m.thinking.is_some(),
                 native_web_search: pinned()
-                    .channel(metadata_channel)
-                    .iter()
-                    .find(|i| i.id == name)
+                    .lookup_in_channel(name, metadata_channel)
                     .and_then(native_web_search),
                 ..Spec::default()
             })

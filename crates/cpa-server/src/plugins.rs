@@ -901,4 +901,36 @@ mod tests {
         assert_eq!(outcome(&result), (200, ""));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Go `TestPluginRegisteredSonnet55TurnsThinkingOffWithBetweenTools`: a plugin model's
+    /// `DisableType` reaches the Claude applier through the registry conversion.
+    #[test]
+    fn plugin_registered_sonnet_5_5_turns_thinking_off_with_between_tools() {
+        let info = model_spec(&cpa_plugin::api::ModelInfo {
+            id: "claude-sonnet-5-5".into(),
+            model_type: "claude".into(),
+            thinking: Some(cpa_plugin::api::ThinkingSupport {
+                zero_allowed: true,
+                levels: vec!["low".into(), "medium".into(), "high".into()],
+                disable_type: "between_tools".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .to_info();
+        let body = br#"{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}"#;
+        let caps = cpa_common::thinking::ModelCaps::from(&info);
+        let out = cpa_common::thinking::apply_thinking_with_model_info(
+            body,
+            &[],
+            "claude-sonnet-5-5",
+            "claude",
+            "claude",
+            "claude",
+            Some(&caps),
+        )
+        .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(out["thinking"], serde_json::json!({"type": "between_tools"}), "{out}");
+    }
 }
