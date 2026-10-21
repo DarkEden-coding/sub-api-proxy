@@ -31,13 +31,13 @@ Columns:
 | Config and Management API | 15 | 10 | 5 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 2 | 10 | 0 | 0 | 0 |
-| Usage and logging | 3 | 1 | 2 | 0 | 0 | 0 |
+| Usage and logging | 3 | 2 | 1 | 0 | 0 | 0 |
 | Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
 | Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **47** | **175** | **0** | **63** | **3** |
+| **All** | **288** | **48** | **174** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -324,7 +324,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
 | [`611ebba4`](https://github.com/router-for-me/CLIProxyAPI/commit/611ebba4) | refactor(executor): unify model reporting and replay logs | no | to port | M (+52 −144) | shared model observation; log wording |
-| [`37fe2608`](https://github.com/router-for-me/CLIProxyAPI/commit/37fe2608) | feat(usage): propagate access provider and native key metadata to usage records | yes | to port | M (+243 −5) | access provider and native key in usage records |
+| [`37fe2608`](https://github.com/router-for-me/CLIProxyAPI/commit/37fe2608) | feat(usage): propagate access provider and native key metadata to usage records | yes | ported here | M (+243 −5) | the access provider rides on the authenticated `Caller`; queued records gain `is_native_key` and `access_provider` after `api_key`, usage-plugin records `IsNativeKey` and `AccessProvider`, and Home 401 records (also from realtime and Alpha Search) now carry the client key, or with none from local access the key this request's Home pick returned; nested `host.model.*` calls record the parent request's identity, except that in Home mode they don't pick up a key Home resolved for the parent (M6-0252 partial); plugin-executor usage stays unported (M6-0174) |
 | [`4337f1f0`](https://github.com/router-for-me/CLIProxyAPI/commit/4337f1f0) | fix(logging): escape request path in access log to prevent log injection | yes | ported here | S (+1 −1) | the access-log path is quoted with Go `%q` (observability.rs go_access_and_redaction_goldens: TestGinLogrusLoggerEscapesEncodedNewlineInPath, TestGinLogrusLoggerKeepsMaskedQueryReadable) |
 
 ## Antigravity

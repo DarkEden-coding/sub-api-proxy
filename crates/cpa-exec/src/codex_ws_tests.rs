@@ -211,6 +211,7 @@ fn request(body: &str) -> ExecRequest {
         caller: Caller {
             principal: "client-key-FAKE".into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }

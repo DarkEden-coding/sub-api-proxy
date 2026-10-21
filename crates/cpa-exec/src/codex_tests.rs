@@ -74,6 +74,7 @@ fn request(case: &Value) -> ExecRequest {
         caller: Caller {
             principal: "client-key-FAKE".into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
@@ -525,6 +526,7 @@ fn plain_request(stream: bool, alt: Option<&str>) -> ExecRequest {
         caller: Caller {
             principal: String::new(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
@@ -773,6 +775,7 @@ async fn images_match_go_on_every_fixture_case() {
             caller: Caller {
                 principal: "client-key-FAKE".into(),
                 source: "authorization",
+                provider: String::new(),
             },
         };
         let result = executor.images(&credential, req, request_path, &cfg).await;

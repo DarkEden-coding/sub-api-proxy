@@ -1388,6 +1388,7 @@ mod tests {
             caller: cpa_core::exec::Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             resolved_model: None,
             usage: Default::default(),

@@ -245,6 +245,7 @@ fn request(turn: &Value, session: &str, usage: cpa_core::exec::UsageSink) -> Exe
         caller: Caller {
             principal: String::new(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }

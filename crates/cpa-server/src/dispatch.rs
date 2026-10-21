@@ -1749,14 +1749,22 @@ async fn remote_round(
                 request.caller.principal = user_key.clone();
                 let usage = cx.usage.map(|facts| {
                     let mut facts = (**facts).clone();
-                    facts.client.api_key = user_key;
+                    facts.client.api_key = user_key.clone();
                     Arc::new(facts)
                 });
-                (request, usage)
+                // A count_tokens Home 401 record too: Go's handler context drops the
+                // middleware's usage key (`GetContextWithCancel` over a background
+                // context), so `usage.APIKeyFromContext` reads the gin key Home set.
+                let unauthorized = cx.unauthorized.map(|facts| {
+                    let mut facts = (**facts).clone();
+                    facts.client.api_key = user_key.clone();
+                    Arc::new(facts)
+                });
+                (request, usage, unauthorized)
             });
-            let (request, usage) = match &home_caller {
-                Some((request, usage)) => (request, usage.as_ref()),
-                None => (cx.request, cx.usage),
+            let (request, usage, unauthorized) = match &home_caller {
+                Some((request, usage, unauthorized)) => (request, usage.as_ref(), unauthorized.as_ref()),
+                None => (cx.request, cx.usage, cx.unauthorized),
             };
             // Go `executeHomeOnce`: Home's upstream model when it chose one, and only the
             // first model either way.
@@ -1802,7 +1810,7 @@ async fn remote_round(
                 alias: &alias,
                 compact: cx.compact,
                 keep_model: cx.call.selection_model.is_some(),
-                unauthorized: cx.unauthorized,
+                unauthorized,
             };
             let cancelled = lease
                 .remote_cancelled()
@@ -2370,6 +2378,13 @@ fn usage_client(
     trace: &Trace,
     session: &crate::session::Session,
 ) -> crate::usage_record::Client {
+    // A nested `host.model.*` call has no caller of its own; its records carry the
+    // parent request's identity (Go restores the parent callback context).
+    let nested = (call.caller.principal.is_empty() && call.caller.provider.is_empty())
+        .then(crate::plugins::model_callbacks::nested_usage_identity)
+        .flatten();
+    let (api_key, access_provider) =
+        nested.unwrap_or_else(|| (call.caller.principal.clone(), call.caller.provider.clone()));
     crate::usage_record::Client {
         session_id: session.id.clone().unwrap_or_default(),
         parent_session_id: session.parent.clone().unwrap_or_default(),
@@ -2384,7 +2399,8 @@ fn usage_client(
             if call.turn.is_some() { "GET" } else { "POST" },
             call.request_path
         ),
-        api_key: call.caller.principal.clone(),
+        api_key,
+        access_provider,
         ..request_client(cfg, &call.headers, call.peer)
     }
 }
@@ -2779,6 +2795,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             forced_provider: None,
             selection_model: None,
@@ -2844,6 +2861,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             resolved_model: None,
             usage: Default::default(),

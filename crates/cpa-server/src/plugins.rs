@@ -538,10 +538,10 @@ impl PluginRuntime {
 pub(crate) enum Access {
     /// No provider registered: Go's manager returns no result and sets nothing.
     Open,
-    /// Go `sdkaccess.Result`: the caller and the provider identifier that accepted it.
+    /// Go `sdkaccess.Result`: the caller, with the provider identifier that accepted it.
     /// ponytail: a plugin's result metadata is not kept (`Caller` has no field for it;
     /// only Go's Home mode reads it).
-    Granted { caller: Caller, provider: String },
+    Granted(Caller),
 }
 
 /// Go `sdkaccess.AuthError` as the middlewares answer it.
@@ -576,10 +576,10 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                     parts.uri.query().unwrap_or_default(),
                 ) {
                     Ok(caller) => {
-                        outcome = Some(Ok(Access::Granted {
-                            caller,
+                        outcome = Some(Ok(Access::Granted(Caller {
                             provider: CONFIG_PROVIDER.to_owned(),
-                        }));
+                            ..caller
+                        })));
                         break;
                     }
                     Err(message) => invalid |= message != MISSING_API_KEY,
@@ -627,13 +627,11 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                     body: cpa_plugin::gojson::NonNilBytes(bytes),
                 };
                 if let Some(accepted) = rt.plugins().frontend_authenticate(id, &request).await {
-                    outcome = Some(Ok(Access::Granted {
-                        caller: Caller {
-                            principal: accepted.principal,
-                            source: "",
-                        },
+                    outcome = Some(Ok(Access::Granted(Caller {
+                        principal: accepted.principal,
+                        source: "",
                         provider: accepted.provider,
-                    }));
+                    })));
                     break;
                 }
             }
