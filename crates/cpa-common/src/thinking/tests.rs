@@ -41,6 +41,7 @@ pub(crate) fn caps(v: &Value) -> Option<ModelCaps> {
         max: t["max"].as_i64().unwrap(),
         zero_allowed: t["zero_allowed"].as_bool().unwrap(),
         dynamic_allowed: t["dynamic_allowed"].as_bool().unwrap(),
+        disable_type: t.get("disable_type").and_then(Value::as_str).unwrap_or_default().into(),
         levels: t["levels"]
             .as_array()
             .unwrap()

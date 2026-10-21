@@ -417,6 +417,7 @@ fn model_spec(m: &cpa_plugin::api::ModelInfo) -> cpa_core::registry::dynamic::Sp
             max: t.max,
             zero_allowed: t.zero_allowed,
             dynamic_allowed: t.dynamic_allowed,
+            disable_type: t.disable_type.clone(),
             levels: t.levels.clone(),
         }),
         user_defined: m.user_defined,

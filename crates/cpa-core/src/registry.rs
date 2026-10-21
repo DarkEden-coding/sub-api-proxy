@@ -46,6 +46,10 @@ pub struct ThinkingSupport {
     pub zero_allowed: bool,
     #[serde(alias = "dynamic-allowed")]
     pub dynamic_allowed: bool,
+    /// The Claude `thinking.type` that turns thinking off (`disable-type` in config
+    /// YAML). Empty means `disabled`; claude-sonnet-5-5 needs `between_tools`.
+    #[serde(alias = "disable-type")]
+    pub disable_type: String,
     /// Discrete effort levels; empty means budget-based thinking.
     pub levels: Vec<String>,
 }

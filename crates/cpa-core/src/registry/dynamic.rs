@@ -188,6 +188,9 @@ pub fn thinking_value(t: &ThinkingSupport) -> Value {
     if t.dynamic_allowed {
         m.insert("dynamic_allowed".into(), true.into());
     }
+    if !t.disable_type.is_empty() {
+        m.insert("disable_type".into(), t.disable_type.clone().into());
+    }
     if !t.levels.is_empty() {
         m.insert("levels".into(), t.levels.clone().into());
     }
