@@ -54,6 +54,7 @@ fn request(s: &Value) -> ExecRequest {
         caller: Caller {
             principal: "fake-client-key".into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }

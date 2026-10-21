@@ -62,6 +62,7 @@ fn request(r: &Value) -> ExecRequest {
         caller: Caller {
             principal: String::new(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }

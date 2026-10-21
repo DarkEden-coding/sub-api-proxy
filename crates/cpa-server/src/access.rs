@@ -23,8 +23,9 @@ pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, ne
         Ok(crate::plugins::Access::Open) => Caller {
             principal: String::new(),
             source: "",
+            provider: String::new(),
         },
-        Ok(crate::plugins::Access::Granted { caller, .. }) => caller,
+        Ok(crate::plugins::Access::Granted(caller)) => caller,
         // gin `AbortWithStatusJSON(status, gin.H{"error": msg})`.
         Err(denied) => {
             let body = crate::gojson::Obj::new().str("error", denied.message).finish();
@@ -41,6 +42,7 @@ pub(crate) fn authenticate(keys: &[String], headers: &HeaderMap, query: &str) ->
         return Ok(Caller {
             principal: String::new(),
             source: "",
+            provider: String::new(),
         });
     }
     let header = |name: &str| headers.get(name).map(|v| v.as_bytes()).unwrap_or_default();
@@ -66,6 +68,7 @@ pub(crate) fn authenticate(keys: &[String], headers: &HeaderMap, query: &str) ->
             keys.iter().find(|k| k.as_bytes() == value).map(|k| Caller {
                 principal: k.clone(),
                 source,
+                provider: String::new(),
             })
         })
         .ok_or("Invalid API key")

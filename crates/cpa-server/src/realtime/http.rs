@@ -265,10 +265,11 @@ pub(super) async fn call(
         Err(message) => return fail(503, &message),
     };
     let selection_headers = principal.selection_headers(&headers);
-    let lease = match select_oauth(&rt, &cfg, None, &selection_headers, &body, None, &call.model, "http").await {
-        Ok(lease) => lease,
-        Err(rejection) => return rejection.render(realtime),
-    };
+    let (lease, home_key) =
+        match select_oauth(&rt, &cfg, None, &selection_headers, &body, None, &call.model, "http").await {
+            Ok(picked) => picked,
+            Err(rejection) => return rejection.render(realtime),
+        };
     let home = lease.is_remote();
     let model = call.model.clone();
     let credential = lease.credential.clone();
@@ -357,6 +358,8 @@ pub(super) async fn call(
     if home && status == 401 {
         super::report_unauthorized(
             &rt,
+            &principal,
+            &home_key,
             &credential,
             &model,
             &data,
@@ -574,10 +577,11 @@ pub(super) async fn hangup(
     let selection_headers = principal.selection_headers(&headers);
     // Go: the call's active Home pick, else a pick pinned to the call's credential that
     // ends with this request.
-    let (credential, lease) = match stored.home.as_ref().and_then(|hold| hold.active()) {
-        Some(credential) => (credential, None),
+    // A reused pick carries no client key from Home: only this request's own pick does.
+    let (credential, lease, home_key) = match stored.home.as_ref().and_then(|hold| hold.active()) {
+        Some(credential) => (credential, None, String::new()),
         None => {
-            let lease = match select_oauth(
+            let (lease, home_key) = match select_oauth(
                 &rt,
                 &cfg,
                 Some(&stored.auth_id),
@@ -589,10 +593,10 @@ pub(super) async fn hangup(
             )
             .await
             {
-                Ok(lease) => lease,
+                Ok(picked) => picked,
                 Err(rejection) => return rejection.render(true),
             };
-            (lease.credential.clone(), Some(lease))
+            (lease.credential.clone(), Some(lease), home_key)
         }
     };
     let home = lease.as_ref().map_or(stored.home.is_some(), |lease| lease.is_remote());
@@ -683,6 +687,8 @@ pub(super) async fn hangup(
     if home && status == 401 {
         super::report_unauthorized(
             &rt,
+            &principal,
+            &home_key,
             &credential,
             &stored.model,
             &data,

@@ -2579,7 +2579,7 @@ mod tests {
         // `countTokensUpstream`); its auth's provider differs from its executor key.
         let pick = |id: &str, token: &str| {
             format!(
-                r#"{{"model":"kimi-up","auth_index":"idx-{id}","auth":{{"id":"{id}","provider":"Kimi.com","attributes":{{"base_url":"{upstream}"}},"metadata":{{"type":"kimi","access_token":"{token}"}}}}}}"#
+                r#"{{"model":"kimi-up","auth_index":"idx-{id}","user_api_key":"home-client","auth":{{"id":"{id}","provider":"Kimi.com","attributes":{{"base_url":"{upstream}"}},"metadata":{{"type":"kimi","access_token":"{token}"}}}}}}"#
             )
         };
         let home = scripted_with_kv(
@@ -2627,12 +2627,15 @@ mod tests {
             ),
             ("auth_type", "oauth"),
             ("source", ""),
-            ("api_key", ""),
+            // Go 37fe2608: open local access, so the key Home authenticated.
+            ("api_key", "home-client"),
             ("endpoint", "POST /v1/messages/count_tokens"),
         ];
         for (key, want) in expect {
             assert_eq!(record[key], want, "{key}: {record}");
         }
+        assert_eq!(record["is_native_key"], false);
+        assert!(record.get("access_provider").is_none(), "{record}");
         assert_eq!(
             record["session_id"],
             cpa_common::session::normalize_to_canonical_uuid(&sent_session)
@@ -2660,7 +2663,7 @@ mod tests {
         // An API key carrying an access token: Go fingerprints the metadata token
         // whatever the auth kind.
         let reply = format!(
-            r#"{{"model":"gpt-home-upstream","auth_index":"idx-alpha","auth":{{"id":"cred-alpha","provider":"codex","attributes":{{"api_key":"sk-fake-alpha","base_url":"{upstream}","codex_alpha_search":"true","runtime_only":"true"}},"metadata":{{"access_token":"oat-fake-codex"}}}}}}"#
+            r#"{{"model":"gpt-home-upstream","auth_index":"idx-alpha","user_api_key":"home-client","auth":{{"id":"cred-alpha","provider":"codex","attributes":{{"api_key":"sk-fake-alpha","base_url":"{upstream}","codex_alpha_search":"true","runtime_only":"true"}},"metadata":{{"access_token":"oat-fake-codex"}}}}}}"#
         );
         let home = scripted("port: 0\n", vec![reply]).await;
         let (base, rt, shutdown, task) = node(&home).await;
@@ -2693,7 +2696,8 @@ mod tests {
             ),
             ("auth_type", "apikey"),
             ("source", "memory"),
-            ("api_key", ""),
+            // Go 37fe2608: open local access, so the key Home authenticated.
+            ("api_key", "home-client"),
             ("client_ip", ""),
             ("user_agent", ""),
             ("endpoint", ""),
@@ -2703,6 +2707,8 @@ mod tests {
         for (key, want) in expect {
             assert_eq!(record[key], want, "{key}: {record}");
         }
+        assert_eq!(record["is_native_key"], false);
+        assert!(record.get("access_provider").is_none(), "{record}");
         assert_eq!(
             record["session_id"],
             cpa_common::session::normalize_to_canonical_uuid("search-1")

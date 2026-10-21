@@ -591,6 +591,7 @@ async fn claude_replay_sequence_matches_go() {
             caller: cpa_core::exec::Caller {
                 principal: "client-key-1".into(),
                 source: "authorization",
+                provider: String::new(),
             },
         };
         let down = downstream(exec.execute(&claude, &cred, req, &cfg()).await).await;

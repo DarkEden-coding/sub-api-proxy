@@ -639,6 +639,7 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
         caller: Caller {
             principal: record["caller"].as_str().unwrap_or_default().to_owned(),
             source: "authorization",
+            provider: String::new(),
         },
     };
     let chat = req.response_format == Format::OpenAI && kind == "execute_stream";

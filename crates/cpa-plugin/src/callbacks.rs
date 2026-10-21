@@ -37,6 +37,10 @@ pub struct RequestScope {
     pub pinned_auth_id: Option<String>,
     pub execution_session: Option<String>,
     pub request_path: String,
+    /// The client's usage identity (Go's parent callback context: `userApiKey` and
+    /// `accessProvider`), for the usage records of nested `host.model.*` calls.
+    pub api_key: String,
+    pub access_provider: String,
 }
 
 impl std::fmt::Debug for RequestScope {
