@@ -805,14 +805,14 @@ mod tests {
     /// the scan's paths are relative and the fallback's absolute).
     #[tokio::test]
     async fn a_reload_does_not_undo_a_write_to_an_upload_fallback() {
-        // The relative form climbs from the working directory to `/`; on Windows the
-        // temp folder can be on another drive, which no relative path reaches.
-        for relative in [false, true].into_iter().filter(|r| !r || cfg!(unix)) {
+        for relative in [false, true] {
             let (state, dir) = state();
+            // A relative auth-dir lives under the working directory: no relative path
+            // reaches a temp folder on another Windows drive.
+            let local = PathBuf::from(format!("cpa-watch-relative-{}", uuid::Uuid::new_v4()));
             if relative {
-                let up = "../".repeat(std::env::current_dir().unwrap().components().count() - 1);
-                let auth = Path::new(&up).join(dir.strip_prefix("/").unwrap());
-                std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", auth.display())).unwrap();
+                std::fs::create_dir_all(&local).unwrap();
+                std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", local.display())).unwrap();
             }
             reload(&state).unwrap();
             let config = (*state.rt.config()).clone();
@@ -841,6 +841,9 @@ mod tests {
                 "relative: {relative}"
             );
             std::fs::remove_dir_all(dir).unwrap();
+            if relative {
+                std::fs::remove_dir_all(local).unwrap();
+            }
         }
     }
 
