@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{Retainable, SessionLease};
 
+use crate::remote::Availability;
 use crate::runtime::Lease;
 
 /// One attempt's Home pick as the executor sees it.
@@ -199,8 +200,8 @@ pub struct SessionHome {
     auths: Mutex<HashMap<String, Remembered>>,
 }
 
-/// A remembered credential and the pick that owns the entry.
-type Remembered = (Weak<Pick>, Arc<Credential>);
+/// A remembered credential with its runtime state, and the pick that owns the entry.
+type Remembered = (Weak<Pick>, Arc<Credential>, Arc<Availability>);
 
 impl SessionHome {
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Kept>> {
@@ -217,10 +218,17 @@ impl SessionHome {
     /// (`target_replaced`).
     /// The session remembers a credential with WebSockets enabled until this pick ends
     /// (Go `bindHomeSelectionRuntimeAuth`).
-    pub(crate) fn keep(self: &Arc<Self>, pick: Arc<Pick>, credential: &Arc<Credential>, route: &str, user_key: String) {
+    pub(crate) fn keep(
+        self: &Arc<Self>,
+        pick: Arc<Pick>,
+        credential: &Arc<Credential>,
+        availability: Arc<Availability>,
+        route: &str,
+        user_key: String,
+    ) {
         let request_retry = *self.granted_retry.lock().unwrap_or_else(PoisonError::into_inner);
         if cpa_exec::websockets_enabled(credential) {
-            self.remember(&pick, credential);
+            self.remember(&pick, credential, availability);
         }
         let previous = self.slot().replace(Kept {
             pick,
@@ -291,20 +299,20 @@ impl SessionHome {
         }
     }
 
-    fn remember(self: &Arc<Self>, pick: &Arc<Pick>, credential: &Arc<Credential>) {
+    fn remember(self: &Arc<Self>, pick: &Arc<Pick>, credential: &Arc<Credential>, availability: Arc<Availability>) {
         let id = credential.id.clone();
         let owner = Arc::downgrade(pick);
         self.auths
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.clone(), (owner.clone(), credential.clone()));
+            .insert(id.clone(), (owner.clone(), credential.clone(), availability));
         // Go `forgetHomeRuntimeAuth`: only while this pick still owns the entry, so an
         // ended pick never erases a newer pick's credential with the same ID.
         let session = Arc::downgrade(self);
         let forget = move || {
             if let Some(session) = session.upgrade() {
                 let mut auths = session.auths.lock().unwrap_or_else(PoisonError::into_inner);
-                if auths.get(&id).is_some_and(|(current, _)| current.ptr_eq(&owner)) {
+                if auths.get(&id).is_some_and(|(current, _, _)| current.ptr_eq(&owner)) {
                     auths.remove(&id);
                 }
             }
@@ -321,12 +329,12 @@ impl SessionHome {
     /// Go `GetExecutionSessionAuthByID`: a Home credential a live kept pick holds. Every
     /// pick ends before it drops (a session's `Kept` holds it, an attempt's `PickGuard`
     /// closes it), so no entry outlives its owner.
-    pub(crate) fn auth(&self, id: &str) -> Option<Arc<Credential>> {
+    pub(crate) fn auth(&self, id: &str) -> Option<(Arc<Credential>, Arc<Availability>)> {
         self.auths
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(id)
-            .map(|(_, credential)| credential.clone())
+            .map(|(_, credential, availability)| (credential.clone(), availability.clone()))
     }
 
     /// The downstream connection ended (Go `CloseExecutionSession`).
@@ -361,6 +369,7 @@ mod tests {
                     cancel: None,
                     request_retry: None,
                     user_api_key: String::new(),
+                    private: Default::default(),
                 })
             })
         }
@@ -416,7 +425,7 @@ mod tests {
             let pick: Arc<Pick> = Arc::default();
             assert!(pick.retain(Box::new(|| ())));
             assert!(pick.keep(lease).is_none());
-            home.keep(pick.clone(), &credential, "gpt-5", String::new());
+            home.keep(pick.clone(), &credential, Default::default(), "gpt-5", String::new());
             pick
         }
 

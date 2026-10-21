@@ -769,13 +769,16 @@ impl Connection {
 
     /// Go `sessionAuthByIDWithSource`: the store's current view first, then a Home
     /// credential this session kept (the flag).
-    fn session_credential(&self, id: &str) -> Option<(Arc<Credential>, bool)> {
+    fn session_credential(&self, id: &str) -> Option<(Arc<Credential>, Option<Arc<crate::remote::Availability>>)> {
         if id.is_empty() {
             return None;
         }
         match self.rt.store().get(id) {
-            Some(credential) => Some((credential, false)),
-            None => self.home.auth(id).map(|credential| (credential, true)),
+            Some(credential) => Some((credential, None)),
+            None => self
+                .home
+                .auth(id)
+                .map(|(credential, availability)| (credential, Some(availability))),
         }
     }
 
@@ -850,14 +853,19 @@ impl Connection {
     /// decides availability, and it matches while pinned for the same model key.
     /// ponytail: provider membership reads `provider_key`, which honours a `provider_key`
     /// attribute; Go lower-cases `auth.Provider`. They agree for Codex and xAI snapshots.
-    fn pin_matches(&self, credential: &Credential, model: &str, home: Option<&str>) -> bool {
+    fn pin_matches(
+        &self,
+        credential: &Credential,
+        model: &str,
+        home: Option<(&str, &crate::remote::Availability)>,
+    ) -> bool {
         let (providers, key) = self.providers(model);
         if !providers.contains(&provider_key(credential)) {
             return false;
         }
         match home {
-            Some(pinned_key) => {
-                crate::remote::available_for_model(credential, &key, SystemTime::now())
+            Some((pinned_key, snapshot)) => {
+                crate::remote::available_for_model(credential, snapshot, &key, SystemTime::now())
                     && pinned_key.trim().go_eq_fold(key.trim())
             }
             None => self.usable(credential, &key) && self.rt.registry().client_supports(&credential.id, &key),
@@ -870,7 +878,9 @@ impl Connection {
         let keep = self.session_credential(&self.pinned).is_some_and(|(pinned, home)| {
             self.pinned_by_provider
                 .get(&provider_key(&pinned))
-                .is_some_and(|(id, key)| *id == self.pinned && self.pin_matches(&pinned, model, home.then_some(key)))
+                .is_some_and(|(id, key)| {
+                    *id == self.pinned && self.pin_matches(&pinned, model, home.as_deref().map(|a| (key.as_str(), a)))
+                })
         });
         if !keep {
             self.pinned.clear();
@@ -881,7 +891,11 @@ impl Connection {
         if let [provider] = self.providers(model).0.as_slice() {
             let remembered = self.pinned_by_provider.get(provider).cloned();
             match remembered.and_then(|(id, key)| self.session_credential(&id).map(|c| (id, key, c))) {
-                Some((id, key, (c, home))) if self.pin_matches(&c, model, home.then_some(&key)) => self.pinned = id,
+                Some((id, key, (c, home)))
+                    if self.pin_matches(&c, model, home.as_deref().map(|a| (key.as_str(), a))) =>
+                {
+                    self.pinned = id
+                }
                 _ => {
                     self.pinned_by_provider.remove(provider);
                 }

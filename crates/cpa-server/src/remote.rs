@@ -32,50 +32,60 @@ pub const MODEL_INFO: &str = "home_model_info";
 pub const SESSION: &str = "home_session_id";
 /// Its parent (Go `HomeDispatchSelection.ParentSessionID`).
 pub const PARENT_SESSION: &str = "home_parent_session_id";
-/// The dispatched auth's runtime availability ([`Availability`] as JSON), which only
-/// the Home credential decoder sets.
-pub const AVAILABILITY: &str = "home_availability";
+/// What a Home pick carries that Go keeps outside `Auth.Attributes`: the auth's
+/// runtime state, and the attribute names the dispatcher set itself (plugins never see
+/// those; attributes Home sent stay).
+#[derive(Debug, Default, Clone)]
+pub struct Private {
+    pub availability: Arc<Availability>,
+    pub attributes: Vec<String>,
+}
 
 /// The runtime state Go keeps on a dispatched `coreauth.Auth` (`status`, `unavailable`,
 /// `next_retry_after`, `model_states`) and the Responses WebSocket pin check reads,
 /// decoded as Go's typed JSON decoding does.
-#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Availability {
-    #[serde(flatten)]
     state: State,
-    /// A `null` entry is Go's nil state: present, but never consulted.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    /// A `None` entry is Go's nil state (`null`): present, but never consulted.
     model_states: std::collections::BTreeMap<String, Option<State>>,
 }
 
-#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, PartialEq)]
 struct State {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     status: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     unavailable: bool,
     /// Unix seconds and nanoseconds; `None` is Go's zero time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     retry: Option<(i64, u32)>,
 }
 
+/// An object's members as written. ponytail: a repeated key keeps its last value, where
+/// Go applies each in turn and skips a `null`; Go also matches names case-insensitively.
+type RawObject<'a> = std::collections::HashMap<String, &'a serde_json::value::RawValue>;
+
 impl State {
-    fn decode(object: &serde_json::Map<String, serde_json::Value>) -> Result<Self, ()> {
+    fn decode(object: &RawObject<'_>) -> Result<Self, ()> {
         use serde_json::Value;
-        let field = |key: &str| object.get(key).filter(|v| !v.is_null());
+        let field = |key: &str| object.get(key).map(|raw| raw.get()).filter(|raw| *raw != "null");
+        let value = |raw: &str| serde_json::from_str::<Value>(raw).map_err(|_| ());
         Ok(Self {
-            status: match field("status") {
+            status: match field("status").map(value).transpose()? {
                 None => String::new(),
-                Some(Value::String(s)) => s.clone(),
+                Some(Value::String(s)) => s,
                 Some(_) => return Err(()),
             },
-            unavailable: match field("unavailable") {
+            unavailable: match field("unavailable").map(value).transpose()? {
                 None => false,
                 Some(v) => v.as_bool().ok_or(())?,
             },
+            // Go's `Time.UnmarshalJSON` parses the quoted bytes as written, escapes and
+            // all: a backslash never parses.
             retry: match field("next_retry_after") {
                 None => None,
-                Some(v) => go_time(v.as_str().ok_or(())?).ok_or(())?,
+                Some(raw) => {
+                    let quoted = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')).ok_or(())?;
+                    go_time(quoted).ok_or(())?
+                }
             },
         })
     }
@@ -91,31 +101,31 @@ impl State {
 }
 
 impl Availability {
-    /// Go's `json.Unmarshal` into `coreauth.Auth` for these fields: `null` or absent
-    /// keeps the default, any other mistyped value or unparsable time fails the whole
-    /// reply (Home's `invalid_auth`, with this message). `None` when everything is the
-    /// default.
-    pub fn decode(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, &'static str> {
+    /// Go's `json.Unmarshal` of an auth object (as written) into `coreauth.Auth`, for
+    /// these fields: `null` or absent keeps the default, any other mistyped value or
+    /// unparsable time fails the whole reply (Home's `invalid_auth`, with this message).
+    pub fn decode(auth: &str) -> Result<Self, &'static str> {
         Self::decode_fields(auth).map_err(|()| "home returned invalid auth payload")
     }
 
-    fn decode_fields(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, ()> {
-        use serde_json::Value;
-        let state = State::decode(auth)?;
-        let model_states = match auth.get("model_states") {
-            None | Some(Value::Null) => Default::default(),
-            Some(Value::Object(states)) => states
-                .iter()
-                .map(|(model, state)| match state {
-                    Value::Null => Ok((model.clone(), None)),
-                    Value::Object(state) => Ok((model.clone(), Some(State::decode(state)?))),
-                    _ => Err(()),
+    fn decode_fields(auth: &str) -> Result<Self, ()> {
+        let object: RawObject<'_> = serde_json::from_str(auth).map_err(|_| ())?;
+        let state = State::decode(&object)?;
+        let model_states = match object.get("model_states").map(|raw| raw.get()) {
+            None | Some("null") => Default::default(),
+            Some(raw) => serde_json::from_str::<RawObject<'_>>(raw)
+                .map_err(|_| ())?
+                .into_iter()
+                .map(|(model, state)| match state.get() {
+                    "null" => Ok((model, None)),
+                    raw => {
+                        let state: RawObject<'_> = serde_json::from_str(raw).map_err(|_| ())?;
+                        Ok((model, Some(State::decode(&state)?)))
+                    }
                 })
                 .collect::<Result<_, ()>>()?,
-            Some(_) => return Err(()),
         };
-        let decoded = Self { state, model_states };
-        Ok((decoded != Self::default()).then_some(decoded))
+        Ok(Self { state, model_states })
     }
 }
 
@@ -132,12 +142,8 @@ fn go_time(raw: &str) -> Option<Option<(i64, u32)>> {
             .then(|| part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
     };
     let at = |i: usize, c: u8| b.get(i) == Some(&c);
-    // Go's `atoi` on the four year bytes takes a sign.
-    let year = match b.first()? {
-        b'-' => -(digits(1, 4)? as i32),
-        b'+' => digits(1, 4)? as i32,
-        _ => digits(0, 4)? as i32,
-    };
+    // Go's `stdLongYear` wants a digit first, so no sign.
+    let year = digits(0, 4)? as i32;
     let (month, day) = (digits(5, 7)?, digits(8, 10)?);
     if !(at(4, b'-') && at(7, b'-') && at(10, b'T')) {
         return None;
@@ -195,15 +201,15 @@ fn go_time(raw: &str) -> Option<Option<(i64, u32)>> {
 /// enabled (`disabled` and `status`), then the model's state when the snapshot has one
 /// (its status and cooldown decide), else the auth-wide cooldown. A cooldown counts only
 /// while its retry time is set and in the future.
-pub fn available_for_model(credential: &Credential, model: &str, now: std::time::SystemTime) -> bool {
+pub fn available_for_model(
+    credential: &Credential,
+    snapshot: &Availability,
+    model: &str,
+    now: std::time::SystemTime,
+) -> bool {
     if credential.disabled {
         return false;
     }
-    let snapshot: Availability = credential
-        .attributes
-        .get(AVAILABILITY)
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .unwrap_or_default();
     let now = match now.duration_since(std::time::UNIX_EPOCH) {
         Ok(since) => (since.as_secs() as i64, since.subsec_nanos()),
         Err(_) => (0, 0),
@@ -309,6 +315,7 @@ pub struct RemoteGrant {
     /// The client key Home authenticated (Go `dispatch.UserAPIKey`), trimmed; empty
     /// when Home sent none. Private request context, like `Caller::principal`.
     pub user_api_key: String,
+    pub private: Private,
 }
 
 /// How a failed pick takes part in retries (Go's typed Home errors).
@@ -484,6 +491,7 @@ pub(crate) struct RemoteEnd {
     pub end: Option<EndLease>,
     pub releases: PendingReleases,
     pub cancel: Option<CancelSignal>,
+    pub private: Private,
 }
 
 impl RemoteEnd {
@@ -608,6 +616,8 @@ mod tests {
             ("2999-01-01T00:00:00,Z", None),
             ("2999-01-01T00:00:00+0100", None),
             ("2999-01-01T00:00:00Z ", None),
+            ("+001-01-01T00:00:00Z", None),
+            ("-001-01-01T00:00:00Z", None),
             ("2999-01-01T00:00:00", None),
             ("", None),
         ] {
@@ -619,7 +629,7 @@ mod tests {
     /// any other mistyped value fails the reply.
     #[test]
     fn home_availability_rejects_what_go_cannot_decode() {
-        let decode = |json: &str| Availability::decode(&serde_json::from_str(json).unwrap());
+        let decode = Availability::decode;
         for valid in [
             r#"{}"#,
             r#"{"status":null,"unavailable":null,"next_retry_after":null,"model_states":null}"#,
@@ -636,6 +646,9 @@ mod tests {
             r#"{"model_states":{"m":1}}"#,
             r#"{"model_states":{"m":{"next_retry_after":""}}}"#,
             r#"{"model_states":{"m":{"unavailable":1}}}"#,
+            // Go parses the quoted bytes as written: an escaped `Z` is not `Z`.
+            r#"{"next_retry_after":"2999-01-01T00:00:00\u005a"}"#,
+            r#"{"model_states":{"m":{"next_retry_after":"2999-01-01T00:00:00\u005a"}}}"#,
         ] {
             assert!(decode(invalid).is_err(), "{invalid}");
         }
@@ -646,12 +659,8 @@ mod tests {
     fn home_availability_follows_go() {
         let now = std::time::UNIX_EPOCH + Duration::from_secs(1_767_225_600);
         let available = |json: &str, model: &str| {
-            let mut c = Credential::relay_session("home-a");
-            if let Some(a) = Availability::decode(&serde_json::from_str(json).unwrap()).unwrap() {
-                c.attributes
-                    .insert(AVAILABILITY.into(), serde_json::to_string(&a).unwrap());
-            }
-            available_for_model(&c, model, now)
+            let snapshot = Availability::decode(json).unwrap();
+            available_for_model(&Credential::relay_session("home-a"), &snapshot, model, now)
         };
         let future = "2999-01-01T00:00:00,1Z";
         for (json, model, want) in [

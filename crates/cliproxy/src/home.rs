@@ -379,14 +379,11 @@ impl Dispatcher {
         }
         // Go decodes the auth's runtime state with the reply: a mistyped field or an
         // unparsable time fails it.
-        let response = match DispatchResponse::parse(&raw) {
-            Ok(response) => match cpa_server::remote::Availability::decode(&response.auth) {
-                Ok(_) => response,
-                Err(message) => {
-                    end_scope(&scope);
-                    return Err(reject(502, "invalid_auth", message));
-                }
-            },
+        let (response, availability) = match DispatchResponse::parse(&raw).and_then(|response| {
+            let availability = auth_availability(&raw).map_err(str::to_owned)?;
+            Ok((response, availability))
+        }) {
+            Ok(decoded) => decoded,
             Err(message) => {
                 end_scope(&scope);
                 return Err(reject(502, "invalid_auth", message));
@@ -483,12 +480,17 @@ impl Dispatcher {
         });
         // Go: Home's request-retry limit applies unless the request is pinned.
         let request_retry = response.request_retry.filter(|r| *r >= 0 && pinned.is_empty());
+        let private = cpa_server::remote::Private {
+            availability: Arc::new(availability),
+            attributes: dispatcher_attributes(&response.auth, &credential),
+        };
         Ok(RemoteGrant {
             credential,
             end,
             cancel: Some(cancel),
             request_retry,
             user_api_key: response.user_api_key.trim().to_owned(),
+            private,
         })
     }
 }
@@ -557,6 +559,52 @@ fn executor_key(provider: &str, label: &str, attributes: &BTreeMap<String, Strin
         "kimi.ai" => "kimi-ai".into(),
         other => other.to_owned(),
     }
+}
+
+/// Go's typed decoding of the dispatched auth's runtime state, on the reply as written:
+/// the nested `auth` first (Go's first `json.Unmarshal`), then, when it has no ID and Go
+/// decodes the whole reply as the auth (older Homes), the reply itself.
+fn auth_availability(raw: &[u8]) -> Result<cpa_server::remote::Availability, &'static str> {
+    use serde_json::value::RawValue;
+    const INVALID: &str = "home returned invalid auth payload";
+    let reply: std::collections::HashMap<String, &RawValue> = serde_json::from_slice(raw).map_err(|_| INVALID)?;
+    let nested = reply.get("auth").map(|auth| auth.get()).filter(|auth| *auth != "null");
+    let decoded = nested.map(cpa_server::remote::Availability::decode).transpose()?;
+    // The same rule `DispatchResponse::parse` applies.
+    let nested_id = nested
+        .and_then(|auth| serde_json::from_str::<Map<String, Value>>(auth).ok())
+        .and_then(|auth| auth.get("id").and_then(Value::as_str).map(|id| !id.trim().is_empty()))
+        .unwrap_or(false);
+    match decoded {
+        Some(decoded) if nested_id => Ok(decoded),
+        _ => cpa_server::remote::Availability::decode(std::str::from_utf8(raw).map_err(|_| INVALID)?),
+    }
+}
+
+/// The attribute names this node set on a dispatched credential, which Go keeps outside
+/// `Auth.Attributes` (the auth's own provider, Home's auth index, the selection's model
+/// info, sessions and model options): any whose value is not what Home sent itself.
+/// ponytail: where Home sent one of these names, the decoder's own value replaces it
+/// (and model info or options it does not set are removed), as before.
+fn dispatcher_attributes(auth: &Map<String, Value>, credential: &Credential) -> Vec<String> {
+    let sent = auth.get("attributes").and_then(Value::as_object);
+    [
+        cpa_server::remote::PROVIDER,
+        cpa_core::config::credentials::HOME_AUTH_INDEX,
+        cpa_server::remote::MODEL_INFO,
+        cpa_core::config::credentials::HOME_MODEL_OPTIONS,
+        cpa_server::remote::SESSION,
+        cpa_server::remote::PARENT_SESSION,
+    ]
+    .into_iter()
+    .filter(|key| {
+        credential
+            .attributes
+            .get(*key)
+            .is_some_and(|value| sent.and_then(|sent| sent.get(*key)).and_then(Value::as_str) != Some(value.as_str()))
+    })
+    .map(str::to_owned)
+    .collect()
 }
 
 /// The dispatched Go `coreauth.Auth` as a runtime credential. It lives for one lease:
@@ -666,18 +714,8 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
     for key in [
         cpa_server::remote::MODEL_INFO,
         cpa_core::config::credentials::HOME_MODEL_OPTIONS,
-        cpa_server::remote::AVAILABILITY,
     ] {
         credential.attributes.remove(key);
-    }
-    // The snapshot's runtime state, which Go keeps on the auth and the Responses
-    // WebSocket pin check reads (`responsesWebsocketAuthAvailableForModel`). The pick
-    // already refused a reply where it does not decode.
-    if let Ok(Some(availability)) = cpa_server::remote::Availability::decode(auth) {
-        credential.attributes.insert(
-            cpa_server::remote::AVAILABILITY.into(),
-            serde_json::to_string(&availability).unwrap_or_default(),
-        );
     }
     let info = response.model_info.as_ref().filter(|info| {
         info.get("id")
@@ -5108,6 +5146,71 @@ mod tests {
             assert_eq!(picker.in_flight(), 0, "the pending dispatch ended");
             picker.registry.drain(Duration::from_secs(1)).await.unwrap();
         }
+    }
+
+    /// Go's first `json.Unmarshal` of the reply decodes the nested auth: its malformed
+    /// runtime state answers `invalid_auth` before the model check that would fence, and
+    /// releases the accounted lease. Only when Go falls back to the whole reply as the
+    /// auth (no nested ID) does the outer object's state count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_auth_state_is_invalid_auth_before_the_fallback() {
+        let mismatched = format!(r#"{{"model":"other",{TUPLE},"auth":{{"unavailable":"true"}}}}"#);
+        let home = sequenced("port: 0\n", vec![fake::bulk(&mismatched)], Default::default()).await;
+        let picker = Picker::new(&home).await;
+        let Err(error) = picker.pick().await else {
+            panic!("accepted");
+        };
+        assert_eq!((&*error.code, error.error.status), ("invalid_auth", 502));
+        assert_eq!(
+            String::from_utf8_lossy(&error.error.body),
+            "invalid_auth: home returned invalid auth payload"
+        );
+        assert!(!picker.fenced());
+        assert_eq!(picker.in_flight(), 0);
+        assert_eq!(picker.releases(), vec![("cred-1/gpt".to_owned(), 1)]);
+
+        for (reply, accepted) in [
+            // An older Home's reply is the auth itself.
+            (r#"{"id":"cred-1","provider":"codex","unavailable":"true"}"#, false),
+            // With a nested ID the outer object is not an auth.
+            (
+                r#"{"auth":{"id":"cred-1","provider":"codex"},"unavailable":"true"}"#,
+                true,
+            ),
+        ] {
+            let home = sequenced("port: 0\n", vec![fake::bulk(reply)], Default::default()).await;
+            let picker = Picker::new(&home).await;
+            match picker.pick().await {
+                Ok(grant) => {
+                    assert!(accepted, "{reply}");
+                    (grant.end)();
+                }
+                Err(error) => {
+                    assert!(!accepted, "{reply}");
+                    assert_eq!(&*error.code, "invalid_auth", "{reply}");
+                }
+            }
+        }
+    }
+
+    /// Attributes this node sets on a pick, which Go keeps outside `Auth.Attributes`,
+    /// are marked private so plugins never see them; an attribute Home sent under such
+    /// a name, which the node did not replace, stays Home's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_node_set_attributes_are_private() {
+        let reply = r#"{"auth_index":"idx-1","auth":{"id":"cred-1","provider":"codex","attributes":{"home_session_id":"plugin-owned"}}}"#;
+        let home = sequenced("port: 0\n", vec![fake::bulk(reply)], Default::default()).await;
+        let picker = Picker::new(&home).await;
+        let grant = picker.pick().await.unwrap();
+        assert_eq!(grant.credential.attributes[cpa_server::remote::SESSION], "plugin-owned");
+        assert_eq!(
+            grant.private.attributes,
+            [
+                cpa_server::remote::PROVIDER,
+                cpa_core::config::credentials::HOME_AUTH_INDEX
+            ]
+        );
+        (grant.end)();
     }
 
     /// Go `TestPickHomeDispatchSelectionValidAccountedLocalValidationReleasesAndKeepsHomeHealthy`:
