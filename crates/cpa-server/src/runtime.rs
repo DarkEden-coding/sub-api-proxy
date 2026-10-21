@@ -329,7 +329,9 @@ impl Runtime {
                 crate::scheduler::Windows::observed(&provider, &s.signals, s.observed_at, now)
             })
         };
-        let mut lease = self.store.select_ranked(selection, policy, &admit, &ranks)?;
+        let request = crate::plugins::scheduler_request(self, &selection, &policy, &admit)?;
+        let pick = crate::plugins::scheduler_pick(self, request).await?;
+        let mut lease = self.store.select_picked(selection, policy, &admit, &ranks, pick)?;
         if self.executors.readiness(&lease.credential, cfg) != Readiness::PrepareNow {
             return Ok(lease);
         }
@@ -664,6 +666,63 @@ fn refresh_workers(cfg: &Config) -> usize {
         .map_or(16, |n| n as usize)
 }
 
+/// How a selection picks among its ready candidates.
+pub(crate) enum Pick {
+    /// The configured selector (strategy and session affinity).
+    Configured,
+    /// A plugin scheduler's delegation to a built-in strategy.
+    Builtin(crate::scheduler::Strategy),
+    /// A plugin scheduler's chosen credential.
+    Auth(String),
+}
+
+/// A selection's eligible credentials with their execution models, and those of them
+/// that are ready now with their provider keys; when none is ready, the error Go's
+/// availability check reports. `configured` adds the configured selector's own filter
+/// (weighted round-robin skips non-positive weights); a plugin scheduler and its
+/// built-in delegates see every available credential.
+#[allow(clippy::type_complexity)]
+fn ready<'a>(
+    creds: &'a [Arc<Credential>],
+    scheduler: &crate::scheduler::Scheduler,
+    selection: &Selection,
+    policy: &Policy,
+    admit: &Admit<'_>,
+    now: Instant,
+    configured: bool,
+) -> Result<(Vec<(&'a Arc<Credential>, String)>, Vec<(&'a Arc<Credential>, String)>), AcquireError> {
+    let eligible: Vec<_> = creds
+        .iter()
+        .filter(|c| !c.disabled && !selection.exclude.contains(&c.id))
+        .filter(|c| policy.retry_limit(c) >= selection.retry_round && (!configured || scheduler.admits(c, policy)))
+        .filter_map(|c| admit(c).map(|m| (c, m)))
+        .collect();
+    let candidates: Vec<_> = eligible
+        .iter()
+        .filter(|(c, m)| scheduler.wait(c, m, now).is_none())
+        .map(|(c, _)| (*c, crate::registry::provider_key(c)))
+        .collect();
+    if candidates.is_empty() {
+        let cause = eligible
+            .iter()
+            .filter_map(|(c, m)| scheduler.last_error(c, m))
+            .max_by_key(|s| s.deadline)
+            .map(|s| s.error.clone());
+        let wait = eligible.iter().filter_map(|(c, m)| scheduler.wait(c, m, now)).min();
+        if !eligible.is_empty() && eligible.iter().all(|(c, m)| scheduler.quota_cooling(c, m, now)) {
+            return Err(AcquireError::Cooldown {
+                wait: wait.unwrap_or_default(),
+                cause,
+            });
+        }
+        return Err(AcquireError::Unavailable {
+            retry_after: if eligible.is_empty() { None } else { wait },
+            cause,
+        });
+    }
+    Ok((eligible, candidates))
+}
+
 #[derive(Debug)]
 pub enum AcquireError {
     /// No candidate is ready. `retry_after` is set when candidates exist but are all
@@ -681,6 +740,13 @@ pub enum AcquireError {
         id: String,
         error: ExecError,
     },
+    /// A plugin scheduler rejected the selection (Go `pickViaPluginScheduler`).
+    Rejected {
+        code: String,
+        message: String,
+    },
+    /// A plugin scheduler's call failed; Go returns its error as the selection error.
+    Scheduler(ExecError),
 }
 
 /// Route-model state is separate from the lease's resolved execution model.
@@ -705,6 +771,9 @@ pub struct Selection {
     /// Credential IDs already tried in this request.
     pub exclude: Vec<String>,
     pub retry_round: usize,
+    /// What a plugin scheduler learns about the request (Go `SchedulerPickRequest`'s
+    /// `Stream` and `Options`); without it the scheduler sees no headers or metadata.
+    pub scheduler: Option<Arc<crate::plugins::SchedulerContext>>,
 }
 
 impl Selection {
@@ -1214,42 +1283,79 @@ impl CredentialStore {
         admit: &Admit<'_>,
         ranks: &crate::scheduler::Ranks<'_>,
     ) -> Result<Lease, AcquireError> {
+        self.select_picked(selection, policy, admit, ranks, Pick::Configured)
+    }
+
+    /// The ready candidates a plugin scheduler chooses among (Go
+    /// `availableAuthsForSelector`'s priority list): the highest priority tier, or every
+    /// tier when the scheduler asks for them.
+    pub(crate) fn scheduler_candidates(
+        &self,
+        selection: &Selection,
+        policy: &Policy,
+        admit: &Admit<'_>,
+        across: bool,
+    ) -> Result<Vec<Arc<Credential>>, AcquireError> {
+        let inner = self.read();
+        let scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_, ready) = ready(
+            &inner.creds,
+            &scheduler,
+            selection,
+            policy,
+            admit,
+            Instant::now(),
+            false,
+        )?;
+        let tier = ready.iter().map(|(c, _)| crate::scheduler::priority(c)).max();
+        let mut out: Vec<_> = ready
+            .into_iter()
+            .filter(|(c, _)| across || Some(crate::scheduler::priority(c)) == tier)
+            .map(|(c, _)| Arc::clone(c))
+            .collect();
+        // Go `availableAuthsFromPriorityBuckets` orders both modes by ID.
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// [`Self::select_ranked`] with the choice a plugin scheduler made.
+    pub(crate) fn select_picked(
+        self: &Arc<Self>,
+        selection: Selection,
+        policy: Arc<Policy>,
+        admit: &Admit<'_>,
+        ranks: &crate::scheduler::Ranks<'_>,
+        pick: Pick,
+    ) -> Result<Lease, AcquireError> {
         let now = Instant::now();
         let credential = {
             let inner = self.read();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
-            let eligible: Vec<_> = inner
-                .creds
-                .iter()
-                .filter(|c| !c.disabled && !selection.exclude.contains(&c.id))
-                .filter(|c| policy.retry_limit(c) >= selection.retry_round && scheduler.admits(c, &policy))
-                .filter_map(|c| admit(c).map(|m| (c, m)))
-                .collect();
-            let candidates: Vec<_> = eligible
-                .iter()
-                .filter(|(c, m)| scheduler.wait(c, m, now).is_none())
-                .map(|(c, _)| (c.as_ref(), crate::registry::provider_key(c)))
-                .collect();
-            if candidates.is_empty() {
-                let cause = eligible
-                    .iter()
-                    .filter_map(|(c, m)| scheduler.last_error(c, m))
-                    .max_by_key(|s| s.deadline)
-                    .map(|s| s.error.clone());
-                let wait = eligible.iter().filter_map(|(c, m)| scheduler.wait(c, m, now)).min();
-                if !eligible.is_empty() && eligible.iter().all(|(c, m)| scheduler.quota_cooling(c, m, now)) {
-                    return Err(AcquireError::Cooldown {
-                        wait: wait.unwrap_or_default(),
-                        cause,
-                    });
+            let configured = matches!(pick, Pick::Configured);
+            let (eligible, candidates) = ready(&inner.creds, &scheduler, &selection, &policy, admit, now, configured)?;
+            let refs: Vec<(&Credential, &str)> = candidates.iter().map(|(c, p)| (c.as_ref(), p.as_str())).collect();
+            let chosen = match &pick {
+                // Go serves the candidate from its pre-call snapshot without checking it
+                // again; here one that stopped being ready during the call leaves the
+                // choice to the configured selector (docs/DIFFERENCES-FROM-GO.md).
+                Pick::Auth(id) => refs.iter().find(|(c, _)| c.id == *id).map(|(c, _)| (*c, None)),
+                Pick::Builtin(strategy) => scheduler
+                    .pick_builtin(&refs, &selection, *strategy, ranks)
+                    .map(|c| (c, None)),
+                Pick::Configured => None,
+            };
+            let (picked, lcp) = match chosen {
+                Some(chosen) => chosen,
+                None => {
+                    let refs: Vec<_> = refs.into_iter().filter(|(c, _)| scheduler.admits(c, &policy)).collect();
+                    if refs.is_empty() {
+                        // Only the configured selector's filter removed them: its error.
+                        return Err(ready(&inner.creds, &scheduler, &selection, &policy, admit, now, true)
+                            .expect_err("no admitted candidate is ready"));
+                    }
+                    scheduler.pick_session(&refs, &selection, &policy, ranks, now).unwrap()
                 }
-                return Err(AcquireError::Unavailable {
-                    retry_after: if eligible.is_empty() { None } else { wait },
-                    cause,
-                });
-            }
-            let refs: Vec<(&Credential, &str)> = candidates.iter().map(|(c, p)| (*c, p.as_str())).collect();
-            let (picked, lcp) = scheduler.pick_session(&refs, &selection, &policy, ranks, now).unwrap();
+            };
             let (c, m) = eligible.iter().find(|(c, _)| c.id == picked.id).unwrap();
             let generation = scheduler.reserve_probe(c, m, now);
             (Arc::clone(c), lcp, generation)
@@ -1744,15 +1850,6 @@ impl CredentialStore {
     }
 
     /// Active cooldowns of one credential.
-    /// Credentials bound to live session-affinity keys that `matches`, without
-    /// refreshing them (the plugin host's `host.affinity.lookup`).
-    pub(crate) fn affinity_bound(&self, matches: impl Fn(&crate::affinity::Key) -> bool) -> Vec<String> {
-        self.scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .affinity_bound(Instant::now(), matches)
-    }
-
     pub fn cooldowns(&self, id: &str) -> Vec<crate::scheduler::CooldownState> {
         self.scheduler
             .lock()

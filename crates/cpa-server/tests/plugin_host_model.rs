@@ -20,6 +20,10 @@ const BODY: &str = r#"{ "model":"fast", "messages":[{"role":"user","content":"he
 const REPLY: &str = r#"{ "id":"reply", "choices":[{"message":{"content":"ok"}}] }"#;
 const CHUNK: &str = r#"{"id":"reply","choices":[{"delta":{"content":"ok"}}]}"#;
 
+/// The tests share process-wide plugin and callback state, so they take turns when they
+/// run as threads of one process (plain `cargo test`; nextest runs one per process).
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Default)]
 struct Seen(Mutex<Vec<(String, String, Bytes)>>);
 
@@ -135,6 +139,7 @@ fn canned(records: &Path, label: &str, method: &str, result: Value) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn callbacks_execute_pin_and_stream_without_recursing_into_the_caller() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model") else {
         return;
@@ -401,6 +406,7 @@ async fn callbacks_execute_pin_and_stream_without_recursing_into_the_caller() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn callback_streams_preserve_executor_bytes_across_interceptor_unload() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_bytes") else {
         return;
@@ -560,6 +566,7 @@ fn callback(host: &cpa_plugin::Host, instance: &Arc<CallbackInstance>, method: &
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_context") else {
         return;
@@ -746,6 +753,7 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
 /// hand over unframed payloads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn responses_bootstrap_flushes_a_pending_payload() {
+    let _serial = SERIAL.lock().await;
     use axum::response::IntoResponse;
     use futures_util::StreamExt as _;
     const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}"#;

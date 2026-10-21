@@ -438,6 +438,11 @@ fn metadata<'a>(c: &'a Credential, key: &str) -> Option<&'a Value> {
         .or_else(|| c.metadata.get(key.replace('_', "-").as_str()))
 }
 
+/// A credential's priority tier, as selection reads it.
+pub(crate) fn priority(c: &Credential) -> i64 {
+    integer(c, "priority").unwrap_or(0)
+}
+
 fn integer(c: &Credential, key: &str) -> Option<i64> {
     c.attributes
         .get(key)
@@ -970,7 +975,7 @@ impl Scheduler {
             {
                 return Some((c, Some(found)));
             }
-            let picked = self.pick_unbound(candidates, selection, policy, ranks, now)?;
+            let picked = self.pick_unbound(candidates, selection, policy.strategy, ranks)?;
             let bound = self.lcp.bind(&namespace, request.prepared(), &picked.id, now);
             return Some((picked, bound));
         }
@@ -989,7 +994,7 @@ impl Scheduler {
     ) -> Option<&'a Credential> {
         let ttl = policy.session_affinity_ttl;
         let Some(keys) = self.affinity(policy).then(|| session_keys(selection)).flatten() else {
-            return self.pick_unbound(candidates, selection, policy, ranks, now);
+            return self.pick_unbound(candidates, selection, policy.strategy, ranks);
         };
         self.affinity.sweep(now, ttl);
         let fork = selection.session_fork;
@@ -1011,7 +1016,7 @@ impl Scheduler {
         };
         let picked = match reuse {
             Some(c) => c,
-            None => self.pick_unbound(candidates, selection, policy, ranks, now)?,
+            None => self.pick_unbound(candidates, selection, policy.strategy, ranks)?,
         };
         self.affinity.bind(&picked.id, &bind_keys, now, ttl);
         Some(picked)
@@ -1072,13 +1077,28 @@ impl Scheduler {
         }
     }
 
+    /// Go's built-in scheduler with `strategy` (`pickSingleWithStrategy` and
+    /// `pickMixedWithStrategy`), without session affinity: what a plugin scheduler's
+    /// `delegate_builtin` answer runs.
+    /// ponytail: Go keeps the built-in scheduler's cursors apart from the configured
+    /// selector's; here they share the rotation state. Separate the maps if a plugin
+    /// scheduler mixing delegation and its own picks needs Go's exact rotation.
+    pub fn pick_builtin<'a>(
+        &mut self,
+        candidates: &[(&'a Credential, &str)],
+        selection: &Selection,
+        strategy: Strategy,
+        ranks: &Ranks<'_>,
+    ) -> Option<&'a Credential> {
+        self.pick_unbound(candidates, selection, strategy, ranks)
+    }
+
     fn pick_unbound<'a>(
         &mut self,
         candidates: &[(&'a Credential, &str)],
         selection: &Selection,
-        policy: &Policy,
+        strategy: Strategy,
         ranks: &Ranks<'_>,
-        _now: Instant,
     ) -> Option<&'a Credential> {
         let model = canonical_model(&selection.model).to_owned();
         let provider_keys = selection.provider_keys();
@@ -1114,9 +1134,9 @@ impl Scheduler {
         }
         let picked = if groups.len() == 1 {
             let (provider, members) = &groups[0];
-            self.pick_within(provider, &model, members, policy.strategy, ranks)
+            self.pick_within(provider, &model, members, strategy, ranks)
         } else {
-            match policy.strategy {
+            match strategy {
                 Strategy::FillFirst => groups[0].1[0],
                 // Like fill-first: the first provider group, then its soonest reset.
                 Strategy::SoonestReset => {
@@ -1794,11 +1814,6 @@ pub struct CooldownState {
 }
 
 impl Scheduler {
-    /// Live session-affinity bindings whose key `matches` (see [`crate::affinity::Cache::bound`]).
-    pub(crate) fn affinity_bound(&self, now: Instant, matches: impl Fn(&crate::affinity::Key) -> bool) -> Vec<String> {
-        self.affinity.bound(now, matches)
-    }
-
     /// Unexpired cooldowns of one credential, model keys sorted, credential-wide first.
     pub(crate) fn cooldowns_of(&self, id: &str, now: Instant) -> Vec<CooldownState> {
         let mut out: Vec<CooldownState> = self

@@ -431,6 +431,56 @@ fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
     ExecError::local(status, FailureScope::Model, message)
 }
 
+/// What a plugin scheduler learns about a handler request (Go `schedulerOptions` at
+/// `pickNextMixedLegacy`): the client headers, and the execution metadata with the
+/// session-affinity namespace `mixed` and, under session affinity, the route model.
+pub(crate) fn scheduler_context(
+    call: &Call,
+    model: &str,
+    session_affinity: bool,
+    derived: Option<&str>,
+) -> super::SchedulerContext {
+    let mut metadata = execution_metadata(call, model);
+    // Go `session.Enrich` (its branches, not the affinity resolver's): a client-named
+    // session (`hasExplicitSession`) is canonical with its parent; otherwise the
+    // execution session is; otherwise only the derived identity is named.
+    let bound = |s: &str| Value::String(cpa_common::session::bound_session_identity(s));
+    let execution = call
+        .execution_session
+        .as_deref()
+        .map(cpa_common::session::normalize_explicit_id)
+        .unwrap_or_default();
+    if cpa_common::session::has_explicit_session(&call.headers, &call.body) {
+        let execution = (!execution.is_empty()).then_some(execution.as_str());
+        if let Some(info) = cpa_common::session::extract_session_info(&call.headers, &call.body, execution)
+            .filter(|info| !info.session_id.is_empty())
+        {
+            metadata.insert("canonical_session_id".into(), bound(&info.session_id));
+            if !info.parent_session_id.is_empty() && info.parent_session_id != info.session_id {
+                metadata.insert("parent_session_id".into(), bound(&info.parent_session_id));
+            }
+        }
+    } else if !execution.is_empty() {
+        metadata.insert("canonical_session_id".into(), bound(&format!("execution:{execution}")));
+    } else if let Some(derived) = derived.filter(|d| !d.is_empty()) {
+        metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
+    }
+    metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
+    let affinity_model = if session_affinity {
+        model.to_owned()
+    } else {
+        String::new()
+    };
+    metadata.insert("session_affinity_model".into(), Value::String(affinity_model));
+    super::SchedulerContext {
+        stream: call.stream,
+        options: cpa_plugin::api::SchedulerOptions {
+            headers: super::go_request_header(&call.headers),
+            metadata,
+        },
+    }
+}
+
 /// request context plus the request's model facts; `model` is the resolved model.
 pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
     let mut meta = request_metadata(call);

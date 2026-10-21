@@ -231,6 +231,167 @@ async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
     native
 }
 
+/// The request facts a plugin scheduler receives (Go `SchedulerPickRequest.Stream` and
+/// `Options`: the client headers and the execution metadata, JSON values only).
+#[derive(Debug, Default)]
+pub struct SchedulerContext {
+    pub stream: bool,
+    pub options: cpa_plugin::api::SchedulerOptions,
+}
+
+/// Go `pickNextLegacy`'s scheduler options for a single-provider selection (Codex
+/// realtime and Alpha Search): the selection headers, the route's own metadata
+/// (`metadata`, such as a realtime call's pinned credential and execution session), the
+/// provider as the session affinity provider and `affinity_model` (Go
+/// `selectionArgForSelector`: the route model under session affinity, else empty).
+/// These routes do not run `session.Enrich`. `None` without an active plugin scheduler.
+pub(crate) fn provider_scheduler_context(
+    rt: &Runtime,
+    provider: &str,
+    headers: &HeaderMap,
+    affinity_model: &str,
+    metadata: &[(&str, &str)],
+) -> Option<Arc<SchedulerContext>> {
+    if !rt.plugins().has_scheduler() {
+        return None;
+    }
+    let string = |s: &str| serde_json::Value::String(s.to_owned());
+    let mut out: cpa_plugin::gojson::Metadata = metadata.iter().map(|(k, v)| ((*k).to_owned(), string(v))).collect();
+    out.insert("session_affinity_provider".into(), string(provider));
+    out.insert("session_affinity_model".into(), string(affinity_model));
+    Some(Arc::new(SchedulerContext {
+        stream: false,
+        options: cpa_plugin::api::SchedulerOptions {
+            headers: go_request_header(headers),
+            metadata: out,
+        },
+    }))
+}
+
+/// The plugin scheduler's request for a selection, or `None` when no plugin scheduler
+/// takes part (none active, or Home mode). Errors are the availability errors Go
+/// reports before asking the scheduler.
+pub(crate) fn scheduler_request(
+    rt: &Runtime,
+    selection: &crate::runtime::Selection,
+    policy: &crate::scheduler::Policy,
+    admit: &crate::runtime::Admit<'_>,
+) -> Result<Option<cpa_plugin::api::SchedulerPickRequest>, crate::runtime::AcquireError> {
+    let host = rt.plugins();
+    if rt.remote_dispatch().is_some() || !host.has_scheduler() {
+        return Ok(None);
+    }
+    let across = host.scheduler_wants_across_priorities();
+    let candidates = rt.store().scheduler_candidates(selection, policy, admit, across)?;
+    let mut providers: Vec<String> = Vec::new();
+    for p in selection.provider_keys() {
+        let p = p.trim().to_lowercase();
+        if !p.is_empty() && p != "mixed" && !providers.contains(&p) {
+            providers.push(p);
+        }
+    }
+    let context = selection.scheduler.as_deref();
+    Ok(Some(cpa_plugin::api::SchedulerPickRequest {
+        // Handlers select across providers (Go `pickNextMixed`, "mixed"), which leaves
+        // Provider empty; Codex realtime and Alpha Search select one provider (Go
+        // `pickNextLegacy`), which names it.
+        provider: if selection.providers.is_empty() {
+            selection.provider.trim().to_lowercase()
+        } else {
+            String::new()
+        },
+        providers,
+        model: selection.model.clone(),
+        stream: context.is_some_and(|c| c.stream),
+        options: context.map(|c| c.options.clone()).unwrap_or_default(),
+        candidates: candidates
+            .iter()
+            .map(|c| cpa_plugin::api::SchedulerAuthCandidate {
+                id: c.id.clone(),
+                provider: c.provider.trim().to_lowercase(),
+                priority: crate::scheduler::priority(c),
+                // ponytail: candidates are ready, which Go reports as `active` unless an
+                // earlier failure left the credential in `error`; that status is not
+                // tracked apart from cooldowns here.
+                status: "active".into(),
+                attributes: c
+                    .attributes
+                    .iter()
+                    .filter(|(k, _)| !scheduler_attribute_sensitive(k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }))
+}
+
+/// Go `pickViaPluginScheduler` before native selection (`pickNextMixedLegacy`): the
+/// highest-priority active plugin scheduler chooses among the ready candidates, rejects
+/// the selection, or delegates to a built-in strategy; without an answer the configured
+/// selector chooses. Go's Home mode selects remotely and consults no plugin scheduler.
+pub(crate) async fn scheduler_pick(
+    rt: &Runtime,
+    request: Option<cpa_plugin::api::SchedulerPickRequest>,
+) -> Result<crate::runtime::Pick, crate::runtime::AcquireError> {
+    use crate::runtime::{AcquireError, Pick};
+    let Some(request) = request else {
+        return Ok(Pick::Configured);
+    };
+    let resp = match rt.plugins().pick_auth(request).await {
+        Ok(Some(resp)) => resp,
+        Ok(None) => return Ok(Pick::Configured),
+        // Go returns the plugin's error; its status, if any, decides the response.
+        Err(e) => {
+            return Err(AcquireError::Scheduler(cpa_core::exec::ExecError::local(
+                e.status(),
+                cpa_core::exec::FailureScope::Model,
+                e.to_string(),
+            )));
+        }
+    };
+    if resp.reject {
+        return Err(AcquireError::Rejected {
+            code: resp.reject_code,
+            message: resp.reject_reason,
+        });
+    }
+    if !resp.auth_id.is_empty() {
+        return Ok(Pick::Auth(resp.auth_id));
+    }
+    Ok(match resp.delegate_builtin.as_str() {
+        cpa_plugin::api::SCHEDULER_BUILTIN_ROUND_ROBIN => Pick::Builtin(crate::scheduler::Strategy::RoundRobin),
+        cpa_plugin::api::SCHEDULER_BUILTIN_FILL_FIRST => Pick::Builtin(crate::scheduler::Strategy::FillFirst),
+        _ => Pick::Configured,
+    })
+}
+
+/// Go `schedulerAttributeSensitive`: credential attributes a scheduler never sees.
+fn scheduler_attribute_sensitive(key: &str) -> bool {
+    let key = key.trim().to_lowercase();
+    let normalized: String = key
+        .chars()
+        .map(|c| if matches!(c, '-' | '.' | ' ') { '_' } else { c })
+        .collect();
+    let compact: String = key.chars().filter(|c| !matches!(c, '_' | '-' | '.' | ' ')).collect();
+    [
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "cookie",
+        "credential",
+        "password",
+        "storage",
+        "authorization",
+        "auth_header",
+        "proxy_url",
+    ]
+    .iter()
+    .any(|fragment| key.contains(fragment) || normalized.contains(fragment) || compact.contains(fragment))
+}
+
 /// Go `pluginModelInfoToRegistryModelInfo`.
 fn model_spec(m: &cpa_plugin::api::ModelInfo) -> cpa_core::registry::dynamic::Spec {
     cpa_core::registry::dynamic::Spec {
