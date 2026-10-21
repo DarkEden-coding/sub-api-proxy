@@ -740,19 +740,28 @@ async fn misc_routes_match_go() {
     );
     let (status, _, text) = post(&p.url, &format!("/v1beta/models/{MODEL}:embed"), "{}").await;
     assert_eq!((status, text.as_str()), (200, ""));
-    // Compact through Claude: the executor's 501 is a request fault, no failover.
+    // Compact through Claude (v8.0.35 2bc236d2): one non-stream summary turn, sealed
+    // into a single compaction item.
     let (status, _, text) = post(
         &p.url,
         "/v1/responses/compact",
         &format!(r#"{{"model":"{MODEL}","input":"x","stream":false}}"#),
     )
     .await;
-    assert_eq!(status, 501);
-    assert_eq!(
-        text,
-        r#"{"error":{"message":"/responses/compact not supported","type":"server_error","code":"internal_server_error"}}"#
+    assert_eq!(status, 200, "{text}");
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(answer["object"], "response.compaction");
+    assert_eq!(answer["output"].as_array().unwrap().len(), 1);
+    assert_eq!(answer["output"][0]["type"], "compaction");
+    assert_eq!(answer["usage"]["total_tokens"], 6);
+    let seen = p.seen.requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1["stream"], false);
+    assert!(
+        seen[0].1["messages"]
+            .to_string()
+            .contains("Please provide a concise and comprehensive summary")
     );
-    assert!(p.seen.requests.lock().unwrap().is_empty());
 }
 
 #[derive(Default)]

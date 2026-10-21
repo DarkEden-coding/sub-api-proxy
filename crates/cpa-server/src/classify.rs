@@ -257,9 +257,10 @@ pub fn credential_scoped(e: &ExecError) -> bool {
     e.scope == FailureScope::Credential && e.status == 429
 }
 
-/// A statusless model-scoped error. Only plugin executors report these (an `rpcError`
-/// without a status or a plain error); built-in executors report connection faults as
-/// transport. Go classifies such an error by its message, in three separate decisions
+/// A statusless model-scoped error: a plugin executor's `rpcError` without a status or
+/// plain error, or a built-in executor's Go `fmt.Errorf` that is no connection fault (the
+/// Claude and Antigravity compaction summary extraction and seal). Built-in executors
+/// report connection faults as transport. Go classifies such an error by its message, in three separate decisions
 /// (sdk/cliproxy/auth/conductor_cooldown.go): the result code (`resultErrorFromError`),
 /// the cooldown skip on that result (`shouldSkipCredentialCooldown`) and the retry round
 /// on the error (`isRequestRetryRoundError`).
@@ -528,6 +529,24 @@ fn missing_phrase(value: &str) -> bool {
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    /// The Claude and Antigravity compaction summary failures (Go `fmt.Errorf`, v8.0.35
+    /// 2bc236d2): a normal model failure on the trigger path, availability-neutral on the
+    /// compact alt, and never a retry round.
+    #[test]
+    fn compaction_summary_failures_follow_go() {
+        for message in [
+            "extract summary: no summary text found in upstream response",
+            "seal compaction capsule: generate nonce: x",
+        ] {
+            let e = ExecError::local(0, FailureScope::Model, message);
+            assert!(!skips_cooldown(&e), "{message}");
+            assert!(!is_retry_round(&e), "{message}");
+            assert!(!is_transport(&e), "{message}");
+            assert!(is_compact_neutral(&e) && !is_compact_fault(&e), "{message}");
+            assert!(!is_request_invalid(&e), "{message}");
+        }
+    }
 
     fn upstream(status: u16, body: &str) -> ExecError {
         let mut e = ExecError::local(status, FailureScope::Request, body.to_owned());
