@@ -1,13 +1,15 @@
 //! Plugin translator hooks (Go `sdktranslator.PluginHooks`). Go's server always installs
 //! its plugin host with `SetPluginHooks`, and every registry call walks the active
 //! plugins that have the capability. Here the installed hooks run only while
-//! [`set_active`] says a plugin offers one of them, so without such a plugin a
-//! translation costs one atomic load.
+//! [`publish`] says a plugin offers one of them, so without such a plugin a translation
+//! costs one atomic load. The flag is read on every call and every stream line, so open
+//! streams follow plugins as they load, unload or fuse.
 //!
 //! Formats are Go's format strings (a plugin executor may name formats this crate does
 //! not know). On the response side `from` is the upstream format and `to` the client's,
 //! as in Go's `TranslateStream(ctx, from, to, ...)`.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -25,6 +27,20 @@ pub struct Response<'a> {
     pub stream: bool,
 }
 
+/// How a thread may wait for a plugin call. A plugin can call back into the host
+/// (`host.http.do`, `host.model.execute`), and those callbacks run on the async runtime,
+/// so the thread that waits must not be the one that runtime needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blocking {
+    /// Call on this thread; no runtime worker waits on it.
+    Direct,
+    /// A multi-thread runtime worker: hand its other tasks off while waiting.
+    Yield,
+    /// The runtime cannot run while this thread waits (a current-thread runtime or a
+    /// `LocalSet`): plugin calls are refused.
+    Refuse,
+}
+
 /// Go `translator.PluginHooks`. Implementations block for the plugin calls; the
 /// normalizers return their input when no plugin answers, the translators `None`.
 pub trait PluginHooks: Send + Sync {
@@ -33,19 +49,39 @@ pub trait PluginHooks: Send + Sync {
     fn normalize_response_before(&self, response: &Response<'_>, body: Vec<u8>) -> Vec<u8>;
     fn translate_response(&self, response: &Response<'_>, body: &[u8]) -> Option<Vec<u8>>;
     fn normalize_response_after(&self, response: &Response<'_>, body: Vec<u8>) -> Vec<u8>;
+    /// How this thread may wait, judged from its async runtime.
+    fn blocking(&self) -> Blocking;
+    /// Runs `f` with this worker's other tasks handed off. False, without running `f`,
+    /// when the runtime does not allow it.
+    fn yield_while(&self, f: &mut dyn FnMut()) -> bool;
 }
 
+/// The hooks are installed and the plugin host is enabled: streams keep the context a
+/// hook call needs, and translation on a deep stack keeps its worker free.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+/// An active, unfused plugin offers a translator or normalizer.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static HOOKS: RwLock<Option<Arc<dyn PluginHooks>>> = RwLock::new(None);
 
-/// Installs (or removes) the hooks. They run once [`set_active`] turns them on.
+thread_local! {
+    /// [`Blocking`] passed from the thread that started a deep-stack thread.
+    static INHERITED: Cell<Option<Blocking>> = const { Cell::new(None) };
+}
+
+/// Installs (or removes) the hooks. They run once [`publish`] turns them on.
 pub fn install(hooks: Option<Arc<dyn PluginHooks>>) {
     *HOOKS.write().unwrap_or_else(PoisonError::into_inner) = hooks;
 }
 
-/// Whether an active plugin offers a translator or normalizer.
-pub fn set_active(active: bool) {
+/// The plugin host's state: whether it is enabled, and whether an active plugin offers a
+/// translator or normalizer.
+pub fn publish(enabled: bool, active: bool) {
+    ENABLED.store(enabled, Ordering::Release);
     ACTIVE.store(active, Ordering::Release);
+}
+
+fn installed() -> Option<Arc<dyn PluginHooks>> {
+    HOOKS.read().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 /// The hooks to run now, if any.
@@ -53,7 +89,42 @@ pub fn current() -> Option<Arc<dyn PluginHooks>> {
     if !ACTIVE.load(Ordering::Acquire) {
         return None;
     }
-    HOOKS.read().unwrap_or_else(PoisonError::into_inner).clone()
+    installed()
+}
+
+/// The [`Blocking`] a deep-stack thread inherited from the worker that started it.
+pub fn inherited() -> Option<Blocking> {
+    INHERITED.with(Cell::get)
+}
+
+/// Runs `run` (which starts a deep-stack thread and joins it) so a plugin call on that
+/// thread cannot deadlock the runtime: a worker yields while it joins, and the thread
+/// learns how it may block. `run` gets the [`Blocking`] for the new thread.
+pub(crate) fn deep_stack<T>(mut run: impl FnMut(Option<Blocking>) -> T) -> T {
+    let hooks = if ENABLED.load(Ordering::Acquire) {
+        installed()
+    } else {
+        None
+    };
+    let Some(hooks) = hooks else {
+        return run(None);
+    };
+    match inherited().unwrap_or_else(|| hooks.blocking()) {
+        Blocking::Yield => {
+            let mut out = None;
+            if hooks.yield_while(&mut || out = Some(run(Some(Blocking::Direct)))) {
+                out.expect("yield_while ran the join")
+            } else {
+                run(Some(Blocking::Refuse))
+            }
+        }
+        mode => run(Some(mode)),
+    }
+}
+
+/// Sets the [`Blocking`] a deep-stack thread inherited.
+pub(crate) fn inherit(mode: Option<Blocking>) {
+    INHERITED.with(|cell| cell.set(mode));
 }
 
 /// Go `sdktranslator.NormalizeRequest`, for callers that translate without the
@@ -108,10 +179,9 @@ pub fn unregistered_non_stream(from: &str, to: &str, ctx: &ResponseCtx<'_>, body
     hooks.normalize_response_after(&r, out)
 }
 
-/// One stream's hook state: Go calls the hooks around each `TranslateStream` call,
-/// which is one [`GoStream::line`] here.
+/// One stream's hook context: Go calls the hooks around each `TranslateStream` call,
+/// which is one [`GoStream::line`] here, and finds the hook plugins at each call.
 struct Hooked {
-    hooks: Arc<dyn PluginHooks>,
     /// `None` for an unregistered pair: the plugin translator stands in.
     inner: Option<Box<dyn GoStream>>,
     from: String,
@@ -121,8 +191,20 @@ struct Hooked {
     translated_request: Vec<u8>,
 }
 
+impl Hooked {
+    fn unhooked(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        match &mut self.inner {
+            Some(inner) => inner.line(line),
+            None => Ok(vec![line.to_vec()]),
+        }
+    }
+}
+
 impl GoStream for Hooked {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        let Some(hooks) = current() else {
+            return self.unhooked(line);
+        };
         let r = Response {
             from: &self.from,
             to: &self.to,
@@ -131,7 +213,7 @@ impl GoStream for Hooked {
             translated_request: &self.translated_request,
             stream: true,
         };
-        let body = self.hooks.normalize_response_before(&r, line.to_vec());
+        let body = hooks.normalize_response_before(&r, line.to_vec());
         let outputs = match &mut self.inner {
             Some(inner) => {
                 let outputs = inner.line(&body)?;
@@ -141,12 +223,16 @@ impl GoStream for Hooked {
                 }
                 outputs
             }
-            None => vec![self.hooks.translate_response(&r, &body).unwrap_or(body)],
+            None => vec![hooks.translate_response(&r, &body).unwrap_or(body)],
         };
         Ok(outputs
             .into_iter()
-            .map(|out| self.hooks.normalize_response_after(&r, out))
+            .map(|out| hooks.normalize_response_after(&r, out))
             .collect())
+    }
+
+    fn framing_line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        self.unhooked(line)
     }
 
     fn tool_input_failed(&self) -> bool {
@@ -161,15 +247,8 @@ impl GoStream for Hooked {
     }
 }
 
-fn hooked(
-    hooks: Arc<dyn PluginHooks>,
-    from: &str,
-    to: &str,
-    ctx: &ResponseCtx<'_>,
-    inner: Option<Box<dyn GoStream>>,
-) -> Box<dyn GoStream> {
+fn hooked(from: &str, to: &str, ctx: &ResponseCtx<'_>, inner: Option<Box<dyn GoStream>>) -> Box<dyn GoStream> {
     Box::new(Hooked {
-        hooks,
         inner,
         from: from.to_owned(),
         to: to.to_owned(),
@@ -179,17 +258,19 @@ fn hooked(
     })
 }
 
-/// A registered stream transform with the hooks active when the stream opens.
+/// A registered stream transform, with the context for hook calls while the plugin host
+/// is enabled (without plugins the stream is returned as is).
 pub(crate) fn wrap_stream(from: &str, to: &str, ctx: &ResponseCtx<'_>, inner: Box<dyn GoStream>) -> Box<dyn GoStream> {
-    match current() {
-        Some(hooks) => hooked(hooks, from, to, ctx, Some(inner)),
-        None => inner,
+    if ENABLED.load(Ordering::Acquire) {
+        hooked(from, to, ctx, Some(inner))
+    } else {
+        inner
     }
 }
 
-/// Go `TranslateStream` for a pair without a registered transform, while hooks are
-/// active: each line through the normalizers and the plugin translator. `None` passes
-/// lines through unchanged.
+/// Go `TranslateStream` for a pair without a registered transform, while the plugin host
+/// is enabled: each line through the normalizers and the plugin translator when they are
+/// active, unchanged otherwise. `None` passes lines through unchanged.
 pub fn unregistered_stream(from: &str, to: &str, ctx: &ResponseCtx<'_>) -> Option<Box<dyn GoStream>> {
-    current().map(|hooks| hooked(hooks, from, to, ctx, None))
+    ENABLED.load(Ordering::Acquire).then(|| hooked(from, to, ctx, None))
 }

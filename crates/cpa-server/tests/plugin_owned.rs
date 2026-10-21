@@ -325,14 +325,17 @@ async fn plugin_translator_hooks_run_around_translation() {
     assert_eq!(before["Stream"], false);
     assert_eq!(before["Model"], "up-model");
 
-    // Streaming: the response normalizers run once per upstream line.
+    // Streaming: the before-normalizers run once per assembled upstream frame, [DONE]
+    // included (Go's OpenAI-compatible executor calls the registry per frame), and the
+    // after-normalizers once per translated chunk.
     let _ = std::fs::remove_file(env.records.join("hooks.jsonl"));
     let (status, body) = env.chat_stream("up-model").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body.matches(r#""content":"after""#).count(), 2, "{body}");
     let lines = calls(&env.records, "hooks", "response.normalize_before");
-    assert!(lines.len() >= 3, "every line, [DONE] included: {}", lines.len());
+    assert_eq!(lines.len(), 3, "two data frames and [DONE]: {lines:?}");
     assert!(lines.iter().all(|l| l["Stream"] == true));
+    assert_eq!(calls(&env.records, "hooks", "response.normalize_after").len(), 2);
 
     // A plugin executor answering in its own format: no native transform exists, so the
     // plugin response translator converts each payload (Go `executorResponseTranslationAvailable`
@@ -354,6 +357,94 @@ async fn plugin_translator_hooks_run_around_translation() {
     let (status, body) = env.chat_stream("acme-1").await;
     assert_eq!(status, 200, "{body}");
     assert!(body.starts_with("data: UNO\n\ndata: two\n\ndata: three\n\n"), "{body}");
+    env.finish().await;
+}
+
+/// A hook that calls back into the host (`host.http.do`) while a stream with deeply
+/// nested JSON is translated on a deep-stack thread, on a one-worker runtime: the worker
+/// yields while it joins that thread, so the callback and the stream both finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plugin_hook_callbacks_finish_on_a_deep_stack() {
+    let upstream = {
+        let chunk = r#"data: {"id":"r","object":"chat.completion.chunk","created":1,"model":"up-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#;
+        let stream = format!("{chunk}\n\n{chunk}\n\ndata: [DONE]\n\n");
+        let router = axum::Router::new()
+            .route("/ping", axum::routing::get(|| async { "pong" }))
+            .fallback(move || {
+                let stream = stream.clone();
+                async move { ([("content-type", "text/event-stream")], stream) }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        url
+    };
+    let ping = format!("{upstream}/ping");
+    let Some(env) = env(
+        "plugin-hook-deep-stack",
+        &[("hooks", "response_before_translator")],
+        &format!(
+            "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a}}]\n    models: [{{name: up-model}}]\n"
+        ),
+        &[],
+        |records| {
+            let dir = records.join("respond").join("hooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("response.normalize_before.json"),
+                json!({"ok":true,"result":{},"host_calls":[{"method":"host.http.do","request":{"method":"GET","url":ping}}]})
+                    .to_string(),
+            )
+            .unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    // More than 256 levels: every stream event runs on a deep-stack thread.
+    let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
+    let body = format!(
+        r#"{{"model":"up-model","stream":true,"metadata":{{"deep":{deep}}},"messages":[{{"role":"user","content":"hi"}}]}}"#
+    );
+    // The client runs on its own runtime, so a stalled server fails the test instead of
+    // hanging it.
+    let url = format!("http://{}/v1/chat/completions", env.proxy);
+    let (status, text) = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let send = wreq::Client::new()
+                    .post(url)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send();
+                let response = tokio::time::timeout(std::time::Duration::from_secs(30), send)
+                    .await
+                    .expect("the proxy answers")
+                    .unwrap();
+                let status = response.status().as_u16();
+                let text = tokio::time::timeout(std::time::Duration::from_secs(30), response.text())
+                    .await
+                    .expect("the stream ends")
+                    .unwrap();
+                (status, text)
+            })
+    })
+    .join()
+    .unwrap();
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(text.matches(r#""content":"ok""#).count(), 2, "{text}");
+    let callbacks = calls(&env.records, "hooks", "host_callback");
+    assert_eq!(callbacks.len(), 3, "{callbacks:?}");
+    assert!(
+        callbacks
+            .iter()
+            .all(|c| c["ok"] == true && c["result"]["StatusCode"] == 200),
+        "{callbacks:?}"
+    );
     env.finish().await;
 }
 

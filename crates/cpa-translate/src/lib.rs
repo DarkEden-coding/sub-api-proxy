@@ -562,17 +562,24 @@ pub(crate) fn deep_stack<T: Send>(levels: usize, f: impl FnOnce() -> Result<T, E
         return Err(Error("translator: test stack reservation failure".into()));
     }
     let size = levels.saturating_mul(PER_LEVEL).clamp(MIN_STACK, 1 << 30);
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new().stack_size(size).spawn_scoped(scope, || {
-            ON_DEEP_STACK.with(|flag| flag.set(true));
-            f()
-        });
-        match worker {
-            Ok(handle) => handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            Err(e) => Err(Error(format!(
-                "translator: cannot reserve a {size}-byte stack for JSON nested {levels} levels deep: {e}"
-            ))),
-        }
+    let mut f = Some(f);
+    // Plugin hooks may run on the new thread and call back into the async runtime, so
+    // the join happens where the runtime can still make progress (see hooks::deep_stack).
+    hooks::deep_stack(|blocking| {
+        let f = f.take().expect("deep_stack runs its closure once");
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new().stack_size(size).spawn_scoped(scope, || {
+                ON_DEEP_STACK.with(|flag| flag.set(true));
+                hooks::inherit(blocking);
+                f()
+            });
+            match worker {
+                Ok(handle) => handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(e) => Err(Error(format!(
+                    "translator: cannot reserve a {size}-byte stack for JSON nested {levels} levels deep: {e}"
+                ))),
+            }
+        })
     })
 }
 

@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use cpa_core::format::Format;
-use cpa_translate::hooks::{self, PluginHooks, Response};
+use cpa_translate::hooks::{self, Blocking, PluginHooks, Response};
 use cpa_translate::{RequestCtx, ResponseCtx, translate_non_stream, translate_request};
 
 #[derive(Default)]
@@ -31,7 +31,8 @@ impl PluginHooks for Log {
         Some(br#"{"translated":true}"#.to_vec())
     }
     fn normalize_response_before(&self, r: &Response<'_>, body: Vec<u8>) -> Vec<u8> {
-        self.push(format!("before {}->{} stream={}", r.from, r.to, r.stream));
+        let deep = hooks::inherited().map_or(String::new(), |b| format!(" inherited={b:?}"));
+        self.push(format!("before {}->{} stream={}{deep}", r.from, r.to, r.stream));
         body
     }
     fn translate_response(&self, r: &Response<'_>, _: &[u8]) -> Option<Vec<u8>> {
@@ -41,6 +42,14 @@ impl PluginHooks for Log {
     fn normalize_response_after(&self, _: &Response<'_>, body: Vec<u8>) -> Vec<u8> {
         self.push("after".into());
         [&body[..], b"+after"].concat()
+    }
+    fn blocking(&self) -> Blocking {
+        Blocking::Yield
+    }
+    fn yield_while(&self, f: &mut dyn FnMut()) -> bool {
+        self.push("yield".into());
+        f();
+        true
     }
 }
 
@@ -59,7 +68,7 @@ fn hooks_follow_the_registry_order() {
     assert_eq!(same, br#"{"model":"m"}"#);
     assert!(calls().is_empty());
 
-    hooks::set_active(true);
+    hooks::publish(true, true);
     // A registered pair: the native transform, then the normalizer on its output.
     let out = translate_request(Format::OpenAI, Format::OpenAI, &ctx, br#"{"model":"m"}"#).unwrap();
     assert!(
@@ -101,7 +110,41 @@ fn hooks_follow_the_registry_order() {
     assert_eq!(stream.line(b"line").unwrap(), [b"plugin+after".to_vec()]);
     assert_eq!(calls()[0], "before acme->openai stream=true");
 
-    hooks::set_active(false);
+    // An open stream follows the plugins: inactive lines pass through untouched.
+    hooks::publish(true, false);
+    assert_eq!(stream.line(b"line").unwrap(), [b"line".to_vec()]);
+    assert!(calls().is_empty());
+    hooks::publish(true, true);
+    assert_eq!(stream.line(b"line").unwrap(), [b"plugin+after".to_vec()]);
+    calls();
+
+    // The OpenAI-compatible executor's events end in a blank line, which is framing:
+    // one hook round per assembled frame, as Go calls the registry.
+    let mut sse = cpa_translate::stream_with(Format::OpenAI, Format::OpenAI, &rctx, Default::default()).unwrap();
+    sse.event(b"data: {\"id\":\"a\"}\n\n").unwrap();
+    sse.event(b"data: [DONE]\n\n").unwrap();
+    let rounds = calls();
+    assert_eq!(
+        rounds.iter().filter(|c| c.starts_with("before")).count(),
+        2,
+        "{rounds:?}"
+    );
+
+    // On a deep-stack thread the worker yields while it joins, and the hook call on that
+    // thread may block directly.
+    let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
+    let deep_ctx = ResponseCtx {
+        model: "m",
+        original_request: deep.as_bytes(),
+        translated_request: b"{}",
+    };
+    let mut sse = cpa_translate::stream_with(Format::OpenAI, Format::OpenAI, &deep_ctx, Default::default()).unwrap();
+    sse.event(b"data: {\"id\":\"a\"}\n\n").unwrap();
+    let rounds = calls();
+    assert_eq!(rounds[0], "yield", "{rounds:?}");
+    assert_eq!(rounds[1], "before openai->openai stream=true inherited=Direct");
+
+    hooks::publish(false, false);
     assert!(cpa_translate::go_stream_between("openai", "acme", &rctx).is_none());
     assert_eq!(translate_non_stream("openai", "acme", &rctx, b"raw").unwrap(), b"raw");
     assert!(calls().is_empty());

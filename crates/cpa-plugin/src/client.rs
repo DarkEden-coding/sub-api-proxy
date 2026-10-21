@@ -95,6 +95,44 @@ impl std::fmt::Display for GuardError {
     }
 }
 
+/// How this thread may wait for a blocking plugin call, from its Tokio runtime.
+pub(crate) fn runtime_blocking() -> cpa_translate::hooks::Blocking {
+    use cpa_translate::hooks::Blocking;
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => Blocking::Yield,
+        Ok(_) => Blocking::Refuse,
+        Err(_) => Blocking::Direct,
+    }
+}
+
+/// Runs `f` in `block_in_place`. False, without running `f`, where Tokio forbids it (a
+/// `LocalSet` on a multi-thread runtime).
+pub(crate) fn yield_while(f: &mut dyn FnMut()) -> bool {
+    let mut ran = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio::task::block_in_place(|| {
+            ran = true;
+            f();
+        })
+    }));
+    match result {
+        Ok(()) => true,
+        Err(_) if !ran => false,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A blocking plugin call this thread cannot make without stalling its runtime.
+fn refused() -> GuardError {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            "pluginhost: plugin translator calls need a multi-thread Tokio runtime; they are skipped on this thread"
+        );
+    }
+    GuardError::Transport("plugin call refused: the async runtime cannot run while this thread waits".into())
+}
+
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     panic
         .downcast_ref::<&str>()
@@ -182,10 +220,13 @@ impl GuardedClient {
     }
 
     /// [`Self::call`] on the calling thread, for synchronous callers (the translator
-    /// hooks). On a multi-threaded runtime worker the call runs in `block_in_place`, so
-    /// the worker's other tasks move on; elsewhere (a current-thread runtime, a blocking
-    /// or plain thread) it blocks that thread.
+    /// hooks). A plugin may call back into the host while it runs, and those callbacks
+    /// need the async runtime, so how the thread waits depends on where it runs (see
+    /// [`cpa_translate::hooks::Blocking`]): a runtime worker hands its tasks off, a
+    /// deep-stack thread follows the worker that started it, and a thread whose runtime
+    /// would stall (a current-thread runtime, a `LocalSet`) refuses the call.
     pub fn call_blocking(&self, method: &str, request: &[u8]) -> Result<Bytes, GuardError> {
+        use cpa_translate::hooks::Blocking;
         let inner = self.acquire()?;
         struct Release<'a>(&'a GuardedClient);
         impl Drop for Release<'_> {
@@ -195,11 +236,16 @@ impl GuardedClient {
         }
         let _release = Release(self);
         let call = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.call(method, request)));
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(call)
+        let result = match cpa_translate::hooks::inherited().unwrap_or_else(runtime_blocking) {
+            Blocking::Direct => call(),
+            Blocking::Yield => {
+                let mut out = None;
+                if !yield_while(&mut || out = Some(call())) {
+                    return Err(refused());
+                }
+                out.expect("yield_while ran the call")
             }
-            _ => call(),
+            Blocking::Refuse => return Err(refused()),
         };
         match result {
             Ok(result) => result.map_err(GuardError::Transport),

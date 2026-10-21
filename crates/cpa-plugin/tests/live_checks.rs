@@ -103,7 +103,8 @@ fn calls(log: &Log) -> Vec<String> {
     std::mem::take(&mut *log.lock().unwrap())
 }
 
-#[tokio::test]
+// Transform calls block, which needs a multi-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chained_hooks_skip_a_plugin_fused_by_an_earlier_call() {
     let a = Script {
         caps: r#""request_normalizer":true,"request_interceptor":true,"response_stream_interceptor":true"#,
@@ -159,19 +160,43 @@ async fn fusing_a_plugin_drops_its_thinking_provider() {
     assert_eq!(host.thinking_provider("t"), None);
 }
 
-/// Fusing the last translator plugin restores the registry's no-hook fast path.
-#[tokio::test]
+/// Fusing the last translator plugin restores the registry's no-hook fast path, also
+/// for a stream that is already open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fusing_the_last_translator_plugin_turns_the_hooks_off() {
     let a = Script {
-        caps: r#""request_normalizer":true"#,
-        results: BTreeMap::new(),
+        caps: r#""response_before_translator":true"#,
+        // "X": a body for every normalize_before call.
+        results: [("response.normalize_before", r#"{"Body":"WA=="}"#)].into(),
         fuse_on: None,
     };
     let (host, _) = host_with("hooks", [("a", a)].into()).await;
     host.install_translator_hooks();
-    assert!(cpa_translate::hooks::current().is_some());
-    host.fuse("a", "RequestNormalizer.NormalizeRequest", "test");
+    let ctx = cpa_translate::ResponseCtx {
+        model: "m",
+        original_request: b"{}",
+        translated_request: b"{}",
+    };
+    let mut stream = cpa_translate::go_stream_between("openai", "acme", &ctx).unwrap();
+    assert_eq!(stream.line(b"line").unwrap(), [b"X".to_vec()]);
+    host.fuse("a", "ResponseNormalizer.NormalizeResponseBefore", "test");
     assert!(cpa_translate::hooks::current().is_none());
+    assert_eq!(stream.line(b"line").unwrap(), [b"line".to_vec()]);
+}
+
+/// On a current-thread runtime a blocking transform call would stall the runtime its
+/// host callbacks need, so it is refused: the plugin is not called and the body is kept.
+#[tokio::test]
+async fn transform_calls_are_refused_on_a_current_thread_runtime() {
+    let a = Script {
+        caps: r#""response_before_translator":true"#,
+        results: [("response.normalize_before", r#"{"Body":"WA=="}"#)].into(),
+        fuse_on: None,
+    };
+    let (host, log) = host_with("refuse", [("a", a)].into()).await;
+    let t = cpa_plugin::transform::ResponseTransform::default();
+    assert_eq!(host.normalize_response_before(&t, Bytes::from_static(b"body")), "body");
+    assert!(calls(&log).is_empty());
 }
 
 #[tokio::test]

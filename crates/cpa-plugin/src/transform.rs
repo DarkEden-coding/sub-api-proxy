@@ -140,24 +140,9 @@ impl Host {
         !self.hook_records(|r| r.plugin.caps.response_translator).is_empty()
     }
 
-    /// Whether an active, unfused plugin offers a request or response translator or
-    /// normalizer.
-    fn has_translator_hooks(&self) -> bool {
-        !self
-            .hook_records(|r| {
-                let c = &r.plugin.caps;
-                c.request_translator
-                    || c.request_normalizer
-                    || c.response_translator
-                    || c.response_before_translator
-                    || c.response_after_translator
-            })
-            .is_empty()
-    }
-
     /// Go `sdktranslator.SetPluginHooks(host)`: the translation registry calls this host's
     /// translators and normalizers. Process-wide, like Go's default registry; the host
-    /// that installed them keeps [`cpa_translate::hooks::set_active`] current.
+    /// that installed them publishes its state with every record change and fuse.
     pub fn install_translator_hooks(&self) {
         self.inner
             .translator_hooks
@@ -165,14 +150,8 @@ impl Host {
         cpa_translate::hooks::install(Some(std::sync::Arc::new(TranslatorHooks(std::sync::Arc::downgrade(
             &self.inner,
         )))));
-        self.publish_translator_hooks();
-    }
-
-    /// After the active plugins change: whether the installed hooks have work.
-    pub(crate) fn publish_translator_hooks(&self) {
-        if self.inner.translator_hooks.load(std::sync::atomic::Ordering::Acquire) {
-            cpa_translate::hooks::set_active(self.has_translator_hooks());
-        }
+        let state = self.state();
+        self.publish_translator_hooks(&state, &self.snapshot());
     }
 
     /// Go `refreshThinkingProviders` + `thinking.RegisterPluginProvider`: provider name to
@@ -285,6 +264,16 @@ pub fn usage_session_ids(
     (session, parent)
 }
 
+/// Whether `record` declares a request or response translator or normalizer.
+pub(crate) fn offers_translator_hook(record: &Record) -> bool {
+    let c = &record.plugin.caps;
+    c.request_translator
+        || c.request_normalizer
+        || c.response_translator
+        || c.response_before_translator
+        || c.response_after_translator
+}
+
 /// The installed translator hooks; a dropped host answers nothing.
 struct TranslatorHooks(std::sync::Weak<crate::host::Inner>);
 
@@ -328,6 +317,14 @@ impl cpa_translate::hooks::PluginHooks for TranslatorHooks {
             Some(host) => host.normalize_response_after(response, Bytes::from(body)).into(),
             None => body,
         }
+    }
+
+    fn blocking(&self) -> cpa_translate::hooks::Blocking {
+        crate::client::runtime_blocking()
+    }
+
+    fn yield_while(&self, f: &mut dyn FnMut()) -> bool {
+        crate::client::yield_while(f)
     }
 }
 

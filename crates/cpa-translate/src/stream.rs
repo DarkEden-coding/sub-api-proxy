@@ -16,6 +16,11 @@ use cpa_core::format::Format;
 pub trait GoStream: Send {
     /// One upstream line (no terminator) in, zero or more Go chunks out.
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error>;
+    /// A line that is framing here rather than a Go `TranslateStream` call: the
+    /// translator sees it, plugin hooks do not.
+    fn framing_line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        self.line(line)
+    }
     /// Go's `ToolInputError() != nil` on the translator state.
     fn tool_input_failed(&self) -> bool {
         false
@@ -478,7 +483,13 @@ impl Framed {
             }
         } else if self.upstream == Format::OpenAI {
             for line in openai_lines(event) {
-                chunks.extend(self.inner.line(&line)?);
+                // Go's OpenAI-compatible executor calls the registry once per assembled
+                // frame; the blank line that ends each event here is not one of them.
+                chunks.extend(if line.is_empty() {
+                    self.inner.framing_line(&line)?
+                } else {
+                    self.inner.line(&line)?
+                });
             }
         } else if self.options.whole_events {
             chunks.extend(self.inner.line(event)?);

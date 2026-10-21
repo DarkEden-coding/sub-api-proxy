@@ -234,12 +234,28 @@ impl Host {
     /// Publishes a snapshot. Takes the state guard so that publication and the active
     /// maps change in one critical section (Go `h.mu`): a registration that compares
     /// snapshots under the state lock then never commits against a half-applied change.
-    fn store_snapshot(&self, _state: &mut State, snapshot: Snapshot) {
+    fn store_snapshot(&self, state: &mut State, snapshot: Snapshot) {
+        self.publish_translator_hooks(state, &snapshot);
         *self
             .inner
             .snapshot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(snapshot);
+    }
+
+    /// Publishes whether the installed translator hooks have work, with the state lock
+    /// held, in the same step that commits records or a fuse (Go reads its active
+    /// records at every registry call).
+    pub(crate) fn publish_translator_hooks(&self, state: &State, snapshot: &Snapshot) {
+        if !self.inner.translator_hooks.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let active = snapshot.records.iter().any(|r| {
+            crate::transform::offers_translator_hook(r)
+                && !state.fused.contains_key(&r.id)
+                && record_current_in(state, r)
+        });
+        cpa_translate::hooks::publish(snapshot.enabled, active);
     }
 
     pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -275,15 +291,7 @@ impl Host {
 
     /// Go `recordCurrent` / `pluginIdentityCurrent`.
     pub fn record_current(&self, record: &Record) -> bool {
-        let state = self.state();
-        let id = record.id.trim();
-        let path = clean_path(&record.path);
-        let version = record.version.trim();
-        !id.is_empty()
-            && !path.as_os_str().is_empty()
-            && state.active_paths.get(id) == Some(&path)
-            && state.file_versions.get(&path).map(String::as_str) == Some(version)
-            && state.active_versions.get(id).map(String::as_str) == Some(version)
+        record_current_in(&self.state(), record)
     }
 
     pub fn is_fused(&self, id: &str) -> bool {
@@ -297,8 +305,8 @@ impl Host {
         state.fused.insert(id.to_owned(), format!("{what} panic: {panic}"));
         // Go `thinking.UnregisterPluginProviders`.
         state.thinking_providers.retain(|_, owner| owner != id);
+        self.publish_translator_hooks(&state, &self.snapshot());
         drop(state);
-        self.publish_translator_hooks();
         tracing::error!(plugin_id = %id, method = %what, "pluginhost: plugin panic recovered: {panic}");
     }
 
@@ -403,7 +411,7 @@ impl Host {
         self.state().config = Some(cfg.clone());
         if !rc.enabled {
             self.deactivate_all();
-            self.records_changed().await;
+            self.refresh_thinking_providers().await;
             return;
         }
         let desired = config::desired_versions(&rc.items);
@@ -412,7 +420,7 @@ impl Host {
             Err(e) => {
                 tracing::warn!("pluginhost: failed to select plugin files: {e}");
                 self.deactivate_all();
-                self.records_changed().await;
+                self.refresh_thinking_providers().await;
                 return;
             }
         };
@@ -536,7 +544,7 @@ impl Host {
             );
             cleanup
         };
-        self.records_changed().await;
+        self.refresh_thinking_providers().await;
         for (id, version, path, old_version, old_path) in hot_reloads {
             tracing::info!(plugin_id = %id, active_version = %version, active_path = %path.display(), retired_version = %old_version, retired_path = %old_path.display(), "pluginhost: plugin hot reloaded");
         }
@@ -806,7 +814,7 @@ impl Host {
             targets
         };
         self.inner.callbacks.close_plugin(id);
-        self.records_changed().await;
+        self.refresh_thinking_providers().await;
         for target in targets {
             let (name, version, path) = (target.name.clone(), target.version.clone(), target.path.clone());
             self.inner.callbacks.close_instance(id, target.client.instance());
@@ -859,12 +867,6 @@ impl Host {
         self.active_records()
             .into_iter()
             .find(|r| r.id == id && !self.is_fused(&r.id))
-    }
-
-    /// After the active plugins change: thinking providers and translator hooks.
-    async fn records_changed(&self) {
-        self.refresh_thinking_providers().await;
-        self.publish_translator_hooks();
     }
 
     /// One typed RPC to an active plugin, fusing it on a host-side panic.
@@ -987,6 +989,18 @@ fn remove_runtime_state(state: &mut State, id: &str) {
 /// Payload bytes for an RPC field that Go fills with `bytes.Clone`.
 pub fn bytes_of(v: &[u8]) -> Bytes {
     Bytes::copy_from_slice(v)
+}
+
+/// Go `recordCurrent` against locked state.
+fn record_current_in(state: &State, record: &Record) -> bool {
+    let id = record.id.trim();
+    let path = clean_path(&record.path);
+    let version = record.version.trim();
+    !id.is_empty()
+        && !path.as_os_str().is_empty()
+        && state.active_paths.get(id) == Some(&path)
+        && state.file_versions.get(&path).map(String::as_str) == Some(version)
+        && state.active_versions.get(id).map(String::as_str) == Some(version)
 }
 
 #[cfg(test)]
