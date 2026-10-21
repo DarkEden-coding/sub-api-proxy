@@ -418,22 +418,20 @@ impl ConfigDocument {
     /// when it has none. A legacy-only document is not migrated.
     pub fn without_conflicts(text: &str) -> anyhow::Result<Option<String>> {
         let mut raw: Value = serde_yaml_ng::from_str(text)?;
-        if raw.is_null() {
-            return Ok(None);
-        }
         super::expand_merges(&mut raw)?;
-        let paths = conflicting(&raw);
-        if paths.is_empty() {
+        let Some(root) = raw.as_mapping_mut() else {
             return Ok(None);
-        }
-        for path in &paths {
-            let parts: Vec<&str> = path.split('.').collect();
-            let (leaf, parents) = parts.split_last().expect("paths are not empty");
-            // A path below one already removed is gone with it.
-            let parent = parents.iter().try_fold(&mut raw, |node, part| node.get_mut(*part));
-            if let Some(map) = parent.and_then(Value::as_mapping_mut) {
-                map.shift_remove(*leaf);
+        };
+        let mut changed = false;
+        // Go checks each pair against the document as earlier deletions left it.
+        for (old, new) in conflict_candidates(root) {
+            let legacy = lookup(root, &old).is_some_and(|v| !(old == "api-keys" && v.is_mapping()));
+            if legacy && lookup(root, &new).is_some() {
+                changed |= delete_pruning(root, &old.split('.').collect::<Vec<_>>());
             }
+        }
+        if !changed {
+            return Ok(None);
         }
         Ok(Some(ConfigDocument(raw).render_preserving(text)?))
     }
@@ -657,59 +655,96 @@ impl ConfigDocument {
     }
 }
 
-/// The legacy paths of `raw` (merges expanded) that Go's non-migrating layout cleanup
-/// deletes: historical v8 aliases, the leaves of the legacy roots (each claimed by the
-/// first entry of [`PATHS`] that covers it), empty or null legacy structs, legacy key
-/// families beside their `api-keys` group, and the private-IP alias.
-fn conflicting(raw: &Value) -> Vec<String> {
-    let Some(root) = raw.as_mapping() else {
-        return Vec::new();
-    };
+/// The (legacy, v8) pairs Go's non-migrating `NormalizeConfigLayout` checks, in its
+/// order: the private-IP alias, the historical v8 aliases, the declared legacy leaves
+/// (each claimed by the first [`PATHS`] entry that covers it), the client key list,
+/// empty or null legacy structs whose v8 struct is present, then the key families.
+/// Declared means the v8 schema has the setting, as Go's walk of its `Config` type
+/// does; a same-spelled field Go does not declare is not an override.
+fn conflict_candidates(root: &Mapping) -> Vec<(String, String)> {
     let present = |path: &str| lookup(root, path).is_some();
-    let mut out = Vec::new();
-    for (old, new) in CLIENT_PATHS.iter().chain(SHARED_PATHS) {
-        if present(old) && present(new) {
-            out.push((*old).to_owned());
-        }
-    }
-    fn walk(root: &Mapping, prefix: usize, old: String, new: String, out: &mut Vec<String>) {
-        let claimant = PATHS
+    let pair = |old: &str, new: &str| (old.to_owned(), new.to_owned());
+    let mut out = vec![pair(
+        "codex.live-media-relay.allow-private-remote-ips",
+        "oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+    )];
+    out.extend(CLIENT_PATHS.iter().chain(SHARED_PATHS).map(|(old, new)| pair(old, new)));
+    let mut structs = Vec::new();
+    fn walk(
+        root: &Mapping,
+        claim: usize,
+        old: String,
+        new: String,
+        leaves: &mut Vec<(String, String)>,
+        structs: &mut Vec<(String, String)>,
+    ) {
+        let first = PATHS
             .iter()
             .position(|(p, _)| old == *p || old.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')));
-        let Some(value) = lookup(root, &old) else {
+        let Some(value) = lookup(root, &old).filter(|_| first == Some(claim)) else {
             return;
         };
-        if claimant != Some(prefix) || lookup(root, &new).is_none() {
-            return;
-        }
-        match value {
-            Value::Mapping(children) if !children.is_empty() && super::schema::is_struct(&new) => {
+        match (super::schema::declared(&new), value) {
+            (Some(false), _) => leaves.push((old, new)),
+            (Some(true), Value::Mapping(children)) if !children.is_empty() => {
                 for key in children.keys().filter_map(Value::as_str) {
-                    walk(root, prefix, format!("{old}.{key}"), format!("{new}.{key}"), out);
+                    walk(
+                        root,
+                        claim,
+                        format!("{old}.{key}"),
+                        format!("{new}.{key}"),
+                        leaves,
+                        structs,
+                    );
                 }
             }
-            _ => out.push(old),
+            (Some(true), Value::Null | Value::Mapping(_)) if lookup(root, &new).is_some() => structs.push((old, new)),
+            _ => {}
         }
     }
     for (i, (old, new)) in PATHS.iter().enumerate() {
-        walk(root, i, (*old).to_owned(), (*new).to_owned(), &mut out);
+        walk(root, i, (*old).to_owned(), (*new).to_owned(), &mut out, &mut structs);
     }
-    // A root `api-keys` list is the legacy client key list; a mapping is v8.
-    if present("access.api-keys") && root.get("api-keys").is_some_and(|v| !v.is_mapping()) {
-        out.push("api-keys".to_owned());
-    }
-    for (old, family) in FAMILIES {
-        if present(old) && present(&format!("api-keys.{family}")) {
-            out.push((*old).to_owned());
+    out.push(pair("api-keys", "access.api-keys"));
+    out.extend(structs);
+    // PATHS moves the legacy Claude structs by their leaves; Go's struct paths also
+    // hold the containers themselves.
+    let claude = [("claude", "upstream.claude"), ("claude-code", "upstream.claude")];
+    for (old, new) in claude.iter().chain(SHARED_STRUCTS) {
+        let empty = matches!(lookup(root, old), Some(Value::Null))
+            || lookup(root, old)
+                .and_then(Value::as_mapping)
+                .is_some_and(Mapping::is_empty);
+        if empty && present(new) {
+            out.push(pair(old, new));
         }
     }
-    const ALLOW: &str = "codex.live-media-relay.allow-private-remote-ips";
-    if present(ALLOW) && present("oauth.providers.codex.live-media-relay.disable-private-remote-ips") {
-        out.push(ALLOW.to_owned());
-    }
-    out.sort();
-    out.dedup();
+    out.extend(
+        FAMILIES
+            .iter()
+            .map(|(old, family)| ((*old).to_owned(), format!("api-keys.{family}"))),
+    );
     out
+}
+
+/// Go `deleteYAMLPath`: removes `parts` and every parent mapping the removal empties.
+fn delete_pruning(map: &mut Mapping, parts: &[&str]) -> bool {
+    let Some((first, rest)) = parts.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return map.shift_remove(*first).is_some();
+    }
+    let Some(child) = map.get_mut(*first).and_then(Value::as_mapping_mut) else {
+        return false;
+    };
+    if !delete_pruning(child, rest) {
+        return false;
+    }
+    if child.is_empty() {
+        map.shift_remove(*first);
+    }
+    true
 }
 
 fn sync_mapping(dst: &yaml_edit::Mapping, src: &Mapping, before: &Mapping) -> anyhow::Result<()> {

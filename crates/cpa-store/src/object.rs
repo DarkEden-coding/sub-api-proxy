@@ -742,12 +742,14 @@ mod tests {
         let s3 = FakeS3::start("us-east-1", Location::Answer, 1000).await;
         let dir = scratch("obj-seed-refused");
         let example = dir.join("config.example.yaml");
-        let anchored = format!("defaults: &management\n  secret-key: {PLAIN}\nmanagement: *management\n");
+        // The secret aliased into a value a startup validator would quote: the error,
+        // which the binary logs, must not carry it.
+        let anchored = format!("management:\n  secret-key: &key {PLAIN}\ntrusted-proxies: [*key]\n");
         std::fs::write(&example, &anchored).unwrap();
         let refused = store(&s3, &dir.join("objectstore"));
         let error = refused.bootstrap(&example).await.unwrap_err();
         assert!(
-            format!("{error:#}").contains("prepare local config for seeding"),
+            format!("{error:#}").contains("prepare local config for seeding") && !format!("{error:#}").contains(PLAIN),
             "{error:#}"
         );
         assert!(s3.object("tokens", "config/config.yaml").is_none());

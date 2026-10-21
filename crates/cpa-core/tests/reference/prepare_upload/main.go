@@ -1,0 +1,170 @@
+// Records Go v8.0.35's config.PrepareConfigFileForUpload (f9437700) for
+// crates/cpa-core/tests/prepare_upload_go.rs. Run from a module nested under the v8
+// module path (so internal/config is importable) with a replace to the reference
+// clone:
+//
+//	go run . ../../fixtures/prepare_upload_go.json
+//
+// No network: every case is a file in a temporary directory.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
+)
+
+type result struct {
+	Name  string `json:"name"`
+	YAML  string `json:"yaml"`
+	Plain string `json:"plain,omitempty"`
+	// Error is Go's error text, empty on success.
+	Error     string `json:"error"`
+	Unchanged bool   `json:"unchanged"`
+	// Result is the prepared file decoded as plain YAML, bcrypt hashes as "<bcrypt>";
+	// null when it does not decode.
+	Result any `json:"result"`
+	// Verifies: the prepared file's effective secret is the bcrypt hash of Plain.
+	Verifies bool `json:"verifies"`
+	// EffectiveSame: the prepared file decodes to the same Config, secret aside.
+	EffectiveSame bool `json:"effective_same"`
+}
+
+const plain = "upload-plaintext-secret"
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+func masked(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, x := range t {
+			t[k] = masked(x)
+		}
+	case []any:
+		for i, x := range t {
+			t[i] = masked(x)
+		}
+	case string:
+		if len(t) == 60 && strings.HasPrefix(t, "$2") {
+			return "<bcrypt>"
+		}
+	}
+	return v
+}
+
+func effective(data []byte) (string, string) {
+	var cfg config.Config
+	if yaml.Unmarshal(data, &cfg) != nil {
+		return "", "undecodable"
+	}
+	secret := cfg.RemoteManagement.SecretKey
+	cfg.RemoteManagement.SecretKey = ""
+	out, err := json.Marshal(cfg)
+	must(err)
+	return secret, string(out)
+}
+
+func main() {
+	hashed, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.MinCost)
+	must(err)
+	hash := string(hashed)
+	anchored := "defaults: &legacy\n  secret-key: " + plain + "\nremote-management: *legacy\nmanagement:\n  secret-key: "
+	type tc struct{ name, yaml, plain string }
+	cases := []tc{
+		// TestPrepareConfigFileForUpload*.
+		{"legacy layout", "# operator note\nport: 8317\nremote-management:\n  secret-key: " + plain + "\n", plain},
+		{"v8 layout", "# operator note\nport: 8317\nmanagement:\n  secret-key: " + plain + "\n", plain},
+		{"v8 secret spelled like its section", "management:\n  secret-key: management\n", "management"},
+		{"overridden legacy secret spelled like the v8 section", "remote-management:\n  secret-key: management\nmanagement:\n  secret-key: '" + hash + "'\n", ""},
+		{"yaml null beside string null secret", "proxy-url: null\nmanagement:\n  secret-key: 'null'\n", "null"},
+		{"duplicated plaintext", "remote-management:\n  secret-key: " + plain + "\nmanagement:\n  secret-key: " + plain + "\n", plain},
+		{"stale legacy beside hashed v8", "remote-management:\n  secret-key: " + plain + "\nmanagement:\n  secret-key: '" + hash + "'\n", plain},
+		{"hashed legacy secret", "# operator note\nremote-management:\n  secret-key: '" + hash + "'\n", plain},
+		{"hashed v8 secret", "# operator note\nmanagement:\n  secret-key: '" + hash + "'\n", plain},
+		{"no secret", "# operator note\nport: 8317\n", ""},
+		{"null v8 secret", "# operator note\nmanagement:\n  secret-key: null\n", ""},
+		{"tilde legacy secret", "# operator note\nremote-management:\n  secret-key: ~\n", ""},
+		{"empty file", "", ""},
+		{"unparsable", "remote-management:\n  secret-key: " + plain + "\nport: [8317\n", plain},
+		{"secret too long for bcrypt", "remote-management:\n  secret-key: " + strings.Repeat("s", 73) + "\n", strings.Repeat("s", 73)},
+		{"mapping anchor", "defaults: &management\n  secret-key: " + plain + "\nmanagement: *management\n", plain},
+		{"scalar anchor", "password: &password " + plain + "\nmanagement:\n  secret-key: *password\n", plain},
+		{"merge key", "defaults: &management\n  secret-key: " + plain + "\nmanagement:\n  <<: *management\n  allow-remote: true\n", plain},
+		{"shared anchor", "management: &management\n  secret-key: " + plain + "\nother: *management\n", plain},
+		{"anchored legacy beside plaintext v8", anchored + "current-plaintext-secret\n", plain},
+		{"anchored legacy beside hashed v8", anchored + "'" + hash + "'\n", plain},
+		// Scalars compare by their text, not their parsed value.
+		{"quoted hex secret beside an unquoted copy", "management:\n  secret-key: \"0x1F\"\ncopy: 0x1F\n", "0x1F"},
+		{"decimal secret beside a hex copy", "management:\n  secret-key: '31'\ncopy: 0x1F\n", "31"},
+		{"unquoted hex secret", "management:\n  secret-key: 0x1F\n", "0x1F"},
+		{"unquoted boolean secret", "management:\n  secret-key: yes\n", "yes"},
+		// bcrypt's 72-byte limit and Go's looksLikeBcrypt.
+		{"71 bytes", "management:\n  secret-key: " + strings.Repeat("a", 71) + "\n", strings.Repeat("a", 71)},
+		{"72 bytes", "management:\n  secret-key: " + strings.Repeat("a", 72) + "\n", strings.Repeat("a", 72)},
+		{"73 bytes", "management:\n  secret-key: " + strings.Repeat("a", 73) + "\n", strings.Repeat("a", 73)},
+		{"71 bytes multibyte", "management:\n  secret-key: " + strings.Repeat("é", 35) + "a\n", strings.Repeat("é", 35) + "a"},
+		{"72 bytes multibyte", "management:\n  secret-key: " + strings.Repeat("é", 36) + "\n", strings.Repeat("é", 36)},
+		{"73 bytes multibyte", "management:\n  secret-key: " + strings.Repeat("é", 36) + "a\n", strings.Repeat("é", 36) + "a"},
+		{"bare $2a$", "management:\n  secret-key: '$2a$'\n", "$2a$"},
+		{"bare $2b$", "management:\n  secret-key: '$2b$'\n", "$2b$"},
+		{"bare $2y$", "management:\n  secret-key: '$2y$'\n", "$2y$"},
+		// A secret in a value the startup validators would reject and quote.
+		{"secret aliased into trusted-proxies", "management:\n  secret-key: &key synthetic-secret\ntrusted-proxies: [*key]\n", "synthetic-secret"},
+		{"hash aliased into trusted-proxies", "management:\n  secret-key: &key '" + hash + "'\ntrusted-proxies: [*key]\n", plain},
+		{"secret aliased into the relay public-ip", "management:\n  secret-key: &key synthetic-secret\ncodex:\n  live-media-relay:\n    public-ip: *key\n", "synthetic-secret"},
+		// Layout cleanup: only declared overrides go (TestV8PresencePrecedenceAndCleanup).
+		{"legacy only", "request-retry: 4\ndisable-cooling: true\napi-keys: [old]\n", ""},
+		{"mixed explicit zero", "# keep\nrequest-retry: 4\ndisable-cooling: true\napi-keys: [old]\nrouting:\n  retry: {request-retry: 0}\n  cooldown: {disable-cooling: false}\naccess: {api-keys: []}\n", ""},
+		{"version does not force migration", "config-version: 8\nrequest-retry: 4\ndisable-cooling: true\napi-keys: [old]\n", ""},
+		{"partial new block", "request-retry: 4\ndisable-cooling: true\napi-keys: [old]\nrouting: {retry: {max-retry-credentials: 2}}\n", ""},
+		{"family beside its group, null legacy struct", "claude-api-key: [{api-key: a}]\napi-keys: {claude: [{keys: [{api-key: b}]}]}\nremote-management: null\nmanagement: {allow-remote: true}\n", ""},
+		{"first prefix claims a leaf", "codex:\n  response-steering: true\noauth:\n  providers:\n    codex:\n      response-steering: false\n", ""},
+		{"undeclared same-spelled oauth field", "codex:\n  live-media-relay:\n    enabled: true\n    allow-private-remote-ips: false\noauth:\n  providers:\n    codex:\n      live-media-relay:\n        allow-private-remote-ips: true\n", ""},
+		{"private-IP alias beside the canonical field", "codex:\n  live-media-relay:\n    allow-private-remote-ips: false\noauth:\n  providers:\n    codex:\n      live-media-relay:\n        disable-private-remote-ips: false\n", ""},
+		{"declared relay leaf overridden", "codex:\n  live-media-relay:\n    enabled: true\n    max-sessions: 3\noauth:\n  providers:\n    codex:\n      live-media-relay:\n        enabled: false\n", ""},
+		{"empty legacy claude beside upstream", "claude: {}\nupstream:\n  claude:\n    model-level-cooling: true\n", ""},
+		{"null legacy claude-code beside upstream", "claude-code: null\nupstream:\n  claude:\n    model-level-cooling: true\n", ""},
+		{"empty historical oauth claude beside upstream", "oauth:\n  providers:\n    claude: {}\nupstream:\n  claude:\n    model-level-cooling: true\n", ""},
+		{"null historical oauth xai beside upstream", "oauth:\n  providers:\n    xai: null\nupstream:\n  xai:\n    inject-x-search: true\n", ""},
+		{"historical alias beside upstream", "oauth:\n  providers:\n    codex:\n      model-level-cooling: true\nupstream:\n  codex:\n    model-level-cooling: false\n", ""},
+		{"scalar at a struct path", "tls: 5\nserver:\n  tls:\n    enable: false\n", ""},
+		{"empty legacy struct, v8 struct present", "tls: {}\nserver:\n  tls:\n    enable: true\n", ""},
+	}
+	dir, err := os.MkdirTemp("", "cpa-prepare-")
+	must(err)
+	defer os.RemoveAll(dir)
+	var out []result
+	for i, c := range cases {
+		path := filepath.Join(dir, fmt.Sprintf("%d.yaml", i))
+		must(os.WriteFile(path, []byte(c.yaml), 0o600))
+		r := result{Name: c.name, YAML: c.yaml, Plain: c.plain}
+		if errPrepare := config.PrepareConfigFileForUpload(path); errPrepare != nil {
+			r.Error = errPrepare.Error()
+		}
+		data, errRead := os.ReadFile(path)
+		must(errRead)
+		r.Unchanged = string(data) == c.yaml
+		var doc any
+		if yaml.Unmarshal(data, &doc) == nil {
+			r.Result = masked(doc)
+		}
+		secret, after := effective(data)
+		_, before := effective([]byte(c.yaml))
+		r.Verifies = c.plain != "" && bcrypt.CompareHashAndPassword([]byte(secret), []byte(c.plain)) == nil
+		r.EffectiveSame = before == after
+		out = append(out, r)
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	must(err)
+	must(os.WriteFile(os.Args[1], append(data, '\n'), 0o644))
+}
