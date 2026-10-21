@@ -17,7 +17,7 @@ Columns:
 | Claude: prompt cache and prompt shaping | 10 | 6 | 0 | 0 | 1 | 3 |
 | Claude: thread continuation | 4 | 4 | 0 | 0 | 0 | 0 |
 | Claude: rate limits and error answers | 2 | 2 | 0 | 0 | 0 | 0 |
-| Claude: other executor work | 13 | 0 | 13 | 0 | 0 | 0 |
+| Claude: other executor work | 13 | 2 | 11 | 0 | 0 | 0 |
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
@@ -28,7 +28,7 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 0 | 22 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 1 | 14 | 0 | 0 | 0 |
+| Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
 | Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **22** | **202** | **0** | **61** | **3** |
+| **All** | **288** | **25** | **199** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -80,12 +80,12 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`e9c8769a`](https://github.com/router-for-me/CLIProxyAPI/commit/e9c8769a) | fix(executor): normalize and restore non-portable tool call IDs | yes | to port | M (+129 −3) | tool_use IDs rewritten to Anthropic's charset and restored (also Devin) |
 | [`02fc76b1`](https://github.com/router-for-me/CLIProxyAPI/commit/02fc76b1) | fix(claude): restore passthrough MCP tools wrapped with their full mcp__ name | yes | to port | S (+22 −0) | full mcp__ wrapper restoration; verify Rust alias restoration against the new regression |
 | [`0d18d3b3`](https://github.com/router-for-me/CLIProxyAPI/commit/0d18d3b3) | feat(claude): support model-specific default max tokens from registry in OpenAI chat completions | yes | to port | M (+68 −4) | support model-specific default max tokens from registry in OpenAI chat completions |
-| [`345cc9d5`](https://github.com/router-for-me/CLIProxyAPI/commit/345cc9d5) | feat(claude): add timeout and retry logic for silent TLS handshakes | yes | to port | L (+326 −8) | silent TLS handshake deadline, retry marker and conductor classification; followed by b3dc6c3f |
+| [`345cc9d5`](https://github.com/router-for-me/CLIProxyAPI/commit/345cc9d5) | feat(claude): add timeout and retry logic for silent TLS handshakes | yes | ported here | L (+326 −8) | silent TLS handshake bound on the Claude Code and Chrome transports; the failure is a transport fault (retry, no cooldown); the bound also covers dialing (M4-0514) |
 | [`7604d3df`](https://github.com/router-for-me/CLIProxyAPI/commit/7604d3df) | feat(claude): add session date pin retention to preserve continuity across credential switches | yes | to port | L (+325 −19) | date-pin retention across credential switches and configurable retention; not just session-local pinning |
 | [`911f49cb`](https://github.com/router-for-me/CLIProxyAPI/commit/911f49cb) | feat(claude): add automatic thinking block binding and beta policy for preserved-thinking models | yes | to port | M (+103 −2) | preserved-thinking block binding and beta policy; followed by e13bc9a1 and ad9e456d |
 | [`e13bc9a1`](https://github.com/router-for-me/CLIProxyAPI/commit/e13bc9a1) | feat(claude): synthesize adaptive thinking block binding for preserved-thinking models | yes | to port | S (+22 −10) | synthesize adaptive thinking block binding for preserved-thinking models |
 | [`ad9e456d`](https://github.com/router-for-me/CLIProxyAPI/commit/ad9e456d) | feat(claude): support `between_tools` thinking disable type and adaptive fallbacks | yes | to port | M (+188 −57) | support `between_tools` thinking disable type and adaptive fallbacks |
-| [`db1bab01`](https://github.com/router-for-me/CLIProxyAPI/commit/db1bab01) | feat(runtime): narrow Claude per-minute rate-limit cooldown when short Retry-After is present | yes | to port | M (+103 −2) | narrow Claude per-minute rate-limit cooldown when short Retry-After is present |
+| [`db1bab01`](https://github.com/router-for-me/CLIProxyAPI/commit/db1bab01) | feat(runtime): narrow Claude per-minute rate-limit cooldown when short Retry-After is present | yes | ported here | M (+103 −2) | per-minute 429 narrowing; replays Go-recorded vectors (`tests/fixtures/claude_ratelimit_go.json`) |
 | [`9d453bc0`](https://github.com/router-for-me/CLIProxyAPI/commit/9d453bc0) | feat(cache): add Claude web search result caching and restoration for sessions | yes | to port | L (+508 −0) | session web-search result restoration and cache configuration; ab9c06b4 adds Home persistence |
 | [`084b9ca7`](https://github.com/router-for-me/CLIProxyAPI/commit/084b9ca7) | feat(claude): strip Claude Code identity on API keys with cloak mode never or uncloak | yes | to port | M (+139 −12) | cloak never/uncloak must remove Claude Code identity, not merely disable injected cloaking |
 | [`ab9c06b4`](https://github.com/router-for-me/CLIProxyAPI/commit/ab9c06b4) | feat(cache): add Home KV support to Claude web search result cache | yes | to port | M (+106 −17) | add Home KV support to Claude web search result cache |
@@ -276,7 +276,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | to port | S (+20 −7) | v8 API: collection styles and quoted mapping keys |
 | [`0c708401`](https://github.com/router-for-me/CLIProxyAPI/commit/0c708401) | fix(management): resolve v8 plugin quota contract gaps | yes | to port | M (+64 −41) | v8 plugin quota contract |
 | [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | to port | S (+3 −1) | `quota_plugin_id` on v8 auth files |
-| [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | to port | M (+48 −43) | move tls-handshake-timeout-seconds to root request configuration |
+| [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | ported here | M (+48 −43) | root `requests.tls-handshake-timeout-seconds` with the flat legacy spelling |
 | [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
 | [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |
 | [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | to port | M (+74 −3) | ETag/If-Match optimistic concurrency and CORS headers for v8 configuration |

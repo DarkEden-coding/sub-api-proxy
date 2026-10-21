@@ -1838,3 +1838,88 @@ fn shared_window_429_follows_model_level_cooling() {
         assert_eq!(error.scope, scope, "{yaml}");
     }
 }
+
+/// `tests/fixtures/claude_ratelimit_go.json`, recorded from v8.0.35 by
+/// `tests/reference/claude_ratelimit`: the per-minute 429 cooldown (db1bab01), the
+/// header-only cooldown it replaces, and the scope and retry of a classified and a fast
+/// direct 429.
+#[test]
+fn claude_rate_limit_cooldown_and_scope_match_go() {
+    let fixture: Value = serde_json::from_str(include_str!("../../tests/fixtures/claude_ratelimit_go.json")).unwrap();
+    let fixed = std::time::UNIX_EPOCH + Duration::from_secs(fixture["now_unix"].as_u64().unwrap());
+    let headers = |case: &Value, now: std::time::SystemTime| -> http::HeaderMap {
+        let unix = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let expand = |raw: &str| {
+            let Some((kind, rest)) = raw.strip_prefix('{').and_then(|r| r.split_once('+')) else {
+                return raw.to_owned();
+            };
+            let offset: u64 = rest.trim_end_matches('}').parse().unwrap();
+            match kind {
+                "now" => (unix + offset).to_string(),
+                _ => httpdate::fmt_http_date(now + Duration::from_secs(offset)),
+            }
+        };
+        let mut map = http::HeaderMap::new();
+        for pair in case["headers"].as_array().unwrap() {
+            let name = http::HeaderName::from_bytes(pair[0].as_str().unwrap().as_bytes()).unwrap();
+            map.append(name, expand(pair[1].as_str().unwrap()).parse().unwrap());
+        }
+        map
+    };
+    let millis = |d: Option<Duration>| d.map(|d| d.as_millis() as u64);
+    let scope = |scope: FailureScope| match scope {
+        FailureScope::Credential => "credential",
+        FailureScope::Model => "model",
+        FailureScope::Request => "request",
+        other => panic!("unexpected scope {other:?}"),
+    };
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let body = Bytes::from(case["body"].as_str().unwrap().to_owned());
+        let at_fixed = headers(case, fixed);
+        // DIFFERENCES-FROM-GO.md: of two byte-identical keys only the last counts, so a
+        // later `"error":null` hides the per-minute error and the header-only result stays.
+        let reset_ms = if name == "later null keeps the error" {
+            case["header_only_ms"].as_u64()
+        } else {
+            case["reset_ms"].as_u64()
+        };
+        assert_eq!(
+            millis(crate::quota::reset_for_error(&at_fixed, &body, fixed, Duration::ZERO)),
+            reset_ms,
+            "{name}: cooldown"
+        );
+        assert_eq!(
+            millis(crate::quota::reset(&at_fixed, fixed, Duration::ZERO)),
+            case["header_only_ms"].as_u64(),
+            "{name}: header-only cooldown"
+        );
+        assert_eq!(
+            crate::quota::shared_rejection(&at_fixed),
+            case["shared"].as_bool().unwrap(),
+            "{name}"
+        );
+        let live = headers(case, std::time::SystemTime::now());
+        let classified = upstream_error(429, live.clone(), body.clone(), false, false);
+        assert_eq!(scope(classified.scope), case["scope"], "{name}: scope");
+        assert_eq!(
+            classified.retry_after.is_some(),
+            case["classify_retry"],
+            "{name}: retry"
+        );
+        let fast = upstream_error(429, live, body, true, false);
+        assert_eq!(scope(fast.scope), case["fast_scope"], "{name}: fast scope");
+        assert_eq!(fast.retry_after.is_some(), case["fast_retry"], "{name}: fast retry");
+        // Live cooldowns carry the 1-30 s fuzz on top of the fixed-clock base; the
+        // offsets are whole seconds from a clock that has a fraction.
+        for (path, retry) in [("classified", classified.retry_after), ("fast", fast.retry_after)] {
+            if let (Some(retry), Some(base)) = (retry, reset_ms) {
+                let ms = retry.as_millis() as u64;
+                assert!(
+                    ms > base.saturating_sub(2000) && ms <= base + 30_000,
+                    "{name}: {path} live cooldown {ms} vs {base}"
+                );
+            }
+        }
+    }
+}
