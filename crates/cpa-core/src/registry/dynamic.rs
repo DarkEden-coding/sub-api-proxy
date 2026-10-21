@@ -25,7 +25,7 @@ use crate::gostr::GoStr;
 
 /// Go `responsesWebSearchProviderPathSupport`.
 fn provider_web_search_path(provider: &str) -> Option<bool> {
-    match provider.trim().to_lowercase().as_str() {
+    match provider.trim().go_lower().as_str() {
         "codex" | "xai" | "claude" | "antigravity" => Some(true),
         "openai"
         | "openai-compatibility"
@@ -200,7 +200,7 @@ pub fn thinking_value(t: &ThinkingSupport) -> Value {
 /// non-empty `api_key` attribute (`apikey`), then OAuth token metadata (`oauth`).
 /// Unrecognised kinds fall through to the next source.
 pub fn auth_kind(c: &Credential) -> Option<&'static str> {
-    let normalize = |s: &str| match s.trim().to_lowercase().as_str() {
+    let normalize = |s: &str| match s.trim().go_lower().as_str() {
         "apikey" | "api_key" | "api-key" => Some("apikey"),
         "oauth" | "oauth2" => Some("oauth"),
         _ => None,
@@ -277,9 +277,9 @@ pub fn provider_key(c: &Credential) -> String {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
     {
-        return key.to_lowercase();
+        return key.go_lower();
     }
-    c.provider.trim().to_lowercase()
+    c.provider.trim().go_lower()
 }
 
 /// The authoritative `prefix` (attributes first, then file metadata).
@@ -367,7 +367,7 @@ fn sanitize_aliases(entries: Vec<OAuthAlias>) -> Vec<OAuthAlias> {
             (!e.name.is_empty()
                 && !e.alias.is_empty()
                 && !e.name.eq_ignore_ascii_case(&e.alias)
-                && seen.insert(e.alias.to_lowercase()))
+                && seen.insert(e.alias.go_lower()))
             .then_some(e)
         })
         .collect()
@@ -385,7 +385,7 @@ pub fn global_aliases(cfg: &Config) -> HashMap<String, Vec<OAuthAlias>> {
         return out;
     };
     for (channel, list) in map {
-        let channel = channel.as_str().unwrap_or_default().trim().to_lowercase();
+        let channel = channel.as_str().unwrap_or_default().trim().go_lower();
         let entries: Vec<OAuthAlias> = serde_yaml_ng::from_value(list.clone()).unwrap_or_default();
         let clean = sanitize_aliases(entries);
         if !channel.is_empty() && !clean.is_empty() {
@@ -425,7 +425,7 @@ fn alias_channel(c: &Credential) -> Option<String> {
     if is_api_key(c) {
         return None;
     }
-    match c.provider.trim().to_lowercase().as_str() {
+    match c.provider.trim().go_lower().as_str() {
         "gemini" | "" => None,
         other => Some(other.to_owned()),
     }
@@ -436,9 +436,9 @@ fn oauth_aliases_for(cfg_aliases: &HashMap<String, Vec<OAuthAlias>>, c: &Credent
         return Vec::new();
     };
     let mut out = attribute_aliases(c);
-    let mut seen: std::collections::HashSet<String> = out.iter().map(|a| a.alias.to_lowercase()).collect();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(|a| a.alias.go_lower()).collect();
     for entry in cfg_aliases.get(&channel).into_iter().flatten() {
-        if seen.insert(entry.alias.to_lowercase()) {
+        if seen.insert(entry.alias.go_lower()) {
             out.push(entry.clone());
         }
     }
@@ -524,7 +524,7 @@ fn native_web_search(info: &ModelInfo) -> Option<bool> {
 fn normalize_modalities(raw: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     raw.iter()
-        .map(|m| m.trim().to_lowercase())
+        .map(|m| m.trim().go_lower())
         .filter(|m| !m.is_empty() && seen.insert(m.clone()))
         .collect()
 }
@@ -559,7 +559,7 @@ fn codex_channel(name: &str) -> Vec<Spec> {
     let mut models: Vec<Spec> = channel(name)
         .into_iter()
         .filter(|m| {
-            let id = m.id.trim().to_lowercase();
+            let id = m.id.trim().go_lower();
             !id.is_empty() && !builtins.iter().any(|b| b.id == id)
         })
         .collect();
@@ -660,7 +660,7 @@ fn build_config_models(
             } else {
                 m.alias.trim()
             };
-            if alias.is_empty() || !seen.insert(alias.to_lowercase()) {
+            if alias.is_empty() || !seen.insert(alias.go_lower()) {
                 return None;
             }
             let display = [m.display_name.trim(), name, alias]
@@ -708,7 +708,7 @@ pub fn normalize_thinking(mut t: ThinkingSupport) -> ThinkingSupport {
     let mut seen = std::collections::HashSet::new();
     let levels = std::mem::take(&mut t.levels);
     for level in levels {
-        let level = level.trim().to_lowercase();
+        let level = level.trim().go_lower();
         if level.is_empty() {
             continue;
         }
@@ -784,7 +784,7 @@ fn compat_models(models: &[ConfigModel], owned_by: &str, now: i64) -> Vec<Spec> 
 fn apply_aliases(aliases: &[OAuthAlias], models: Vec<Spec>) -> Vec<Spec> {
     let mut forward: HashMap<String, Vec<&OAuthAlias>> = HashMap::new();
     for a in aliases {
-        forward.entry(a.name.to_lowercase()).or_default().push(a);
+        forward.entry(a.name.go_lower()).or_default().push(a);
     }
     if forward.is_empty() {
         return models;
@@ -796,7 +796,7 @@ fn apply_aliases(aliases: &[OAuthAlias], models: Vec<Spec>) -> Vec<Spec> {
         if id.is_empty() {
             continue;
         }
-        let key = id.to_lowercase();
+        let key = id.go_lower();
         let Some(entries) = forward.get(&key) else {
             if seen.insert(key) {
                 out.push(model);
@@ -810,7 +810,7 @@ fn apply_aliases(aliases: &[OAuthAlias], models: Vec<Spec>) -> Vec<Spec> {
         let mut added = false;
         for entry in entries {
             let mapped = entry.alias.trim();
-            if mapped.is_empty() || mapped.eq_ignore_ascii_case(&id) || !seen.insert(mapped.to_lowercase()) {
+            if mapped.is_empty() || mapped.eq_ignore_ascii_case(&id) || !seen.insert(mapped.go_lower()) {
                 continue;
             }
             let mut clone = model.clone();
@@ -972,7 +972,7 @@ fn with_web_search_hints(credential: &str, mut models: Vec<Spec>) -> Vec<Spec> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(ids) = hints.get(credential) {
         for model in &mut models {
-            if ids.contains(&model.id.trim().to_lowercase()) {
+            if ids.contains(&model.id.trim().go_lower()) {
                 model.supports_web_search = true;
             }
         }
@@ -988,7 +988,7 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
     let excluded = excluded_for(cfg, c);
     let configured = config_models(c);
     let api_key = is_api_key(c);
-    let provider = c.provider.trim().to_lowercase();
+    let provider = c.provider.trim().go_lower();
     if openai_compat(c) {
         let owned_by = c.attributes.get("compat_name").cloned().unwrap_or_default();
         // Go appends the provider's plugin models here too, without exclusions, and
@@ -1025,7 +1025,7 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
             let plan = c
                 .attributes
                 .get("plan_type")
-                .map(|p| p.trim().to_lowercase())
+                .map(|p| p.trim().go_lower())
                 .unwrap_or_default();
             codex_channel(match plan.as_str() {
                 "plus" => "codex-plus",
@@ -1202,8 +1202,8 @@ impl Registry {
             return Vec::new();
         }
         let exact = self.model_providers(model);
-        if exact.is_empty() && model.to_lowercase() != model {
-            return self.model_providers(&model.to_lowercase());
+        if exact.is_empty() && model.go_lower() != model {
+            return self.model_providers(&model.go_lower());
         }
         exact
     }
@@ -1301,7 +1301,7 @@ impl Registry {
     /// each with the first such credential's model info. Registration order (Go's is
     /// map order).
     pub fn available_by_provider(&self, provider: &str, state: impl Fn(&str, &str) -> Suspension) -> Vec<Arc<Spec>> {
-        let provider = provider.trim().to_lowercase();
+        let provider = provider.trim().go_lower();
         if provider.is_empty() {
             return Vec::new();
         }
@@ -1487,7 +1487,7 @@ fn alias_pool(requested: &str, models: &[ConfigModel]) -> Vec<String> {
                 continue;
             }
             let resolved = preserve_suffix(if name.is_empty() { &candidate } else { name }, requested);
-            if !resolved.is_empty() && seen.insert(resolved.to_lowercase()) {
+            if !resolved.is_empty() && seen.insert(resolved.go_lower()) {
                 out.push(resolved);
             }
         }
@@ -1693,6 +1693,31 @@ mod tests {
                 .collect();
             let r = Registry::build(&cfg, &creds);
             assert_eq!(r.ids().collect::<Vec<_>>(), ["keep"], "excluded: {excluded}");
+        }
+    }
+
+    /// An openai-compatibility group named `HİGH` registers under Go's lowercased key,
+    /// and asking for it by its configured name finds its models (Go
+    /// `GetAvailableModelsByProvider` lowercases with `strings.ToLower`).
+    #[test]
+    fn compat_provider_lookup_lowercases_like_go() {
+        let cfg = Config::parse(
+            "openai-compatibility:\n  - name: HİGH\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n    models: [{name: m1}]\n",
+        )
+        .unwrap();
+        let creds: Vec<_> = crate::config::credentials::from_config(&cfg)
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        assert_eq!(provider_key(&creds[0]), "openai-compatible-high");
+        let r = Registry::build(&cfg, &creds);
+        for asked in ["openai-compatible-HİGH", "openai-compatible-high"] {
+            let ids: Vec<String> = r
+                .available_by_provider(asked, |_, _| Suspension::None)
+                .iter()
+                .map(|m| m.id.clone())
+                .collect();
+            assert_eq!(ids, ["m1"], "{asked}");
         }
     }
 

@@ -927,7 +927,7 @@ pub fn api_key_config_proxy(cfg: &Config, c: &Credential) -> String {
         }
         return String::new();
     }
-    let family = match c.provider.trim().to_lowercase().as_str() {
+    let family = match c.provider.trim().go_lower().as_str() {
         "gemini" => "gemini",
         "gemini-interactions" => "interactions",
         "claude" => "claude",
