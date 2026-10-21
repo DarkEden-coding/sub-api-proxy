@@ -221,6 +221,8 @@ pub(crate) struct View<'a> {
     /// keep idle chatgpt.com connections instead of Go's connection per request. Read
     /// from the config snapshot of each request, so a reload applies to the next one.
     pub chatgpt_keep_alive: bool,
+    /// `requests.tls-handshake-timeout-seconds` for chatgpt.com ([`crate::tls::handshake_timeout`]).
+    pub handshake: Option<std::time::Duration>,
 }
 
 impl<'a> View<'a> {
@@ -229,6 +231,7 @@ impl<'a> View<'a> {
         Self {
             proxy: crate::proxy::Proxy::effective(credential, cfg),
             chatgpt_keep_alive: chatgpt_keep_alive(cfg),
+            handshake: crate::tls::handshake_timeout(cfg),
             ..Self::new(credential)
         }
     }
@@ -261,6 +264,7 @@ impl<'a> View<'a> {
             proxy: crate::proxy::Proxy::Inherit,
             session: None,
             chatgpt_keep_alive: false,
+            handshake: None,
         }
     }
 
