@@ -212,24 +212,39 @@ impl Runner {
             if let Ok(res) = runner.http(&json!({"method": "GET", "path": "/healthz"}))
                 && res["status"] == 200
             {
-                // Steps compare request-time calls: Go registers plugin executors only
-                // after its listener is up, so the generator waits for that and drops
-                // startup calls. Here the sync finished before serving; check that it
-                // resolved every executor plugin's provider, then drop the calls.
-                let startup = runner.records(&json!({"methods": ["executor.identifier"]}));
-                let mut asked: Vec<&str> = startup
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| r["label"].as_str().unwrap())
-                    .collect();
+                // Steps compare request-time calls, so the plugin syncs of startup are
+                // waited for and dropped (the generator settles for the same reason).
+                // Like Go, the server syncs plugins twice: before it serves here (Go:
+                // once its listener is up), and when the config watcher's first look
+                // reloads the config (Go's watcher reloads clients when it starts).
+                // Each sync asks every executor plugin, none of which registers models,
+                // for its identifier twice. The watcher's reload comes about 200 ms
+                // after serving starts and can otherwise land in any later step.
+                let labels = executor_labels(scenario);
+                let mut asked: Vec<String> = Vec::new();
+                let synced = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let records = runner.records(&json!({"methods": ["executor.identifier"]}));
+                    asked.extend(
+                        records
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|r| r["label"].as_str().unwrap().to_owned()),
+                    );
+                    if labels.iter().all(|l| asked.iter().filter(|a| a == l).count() >= 4) {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < synced,
+                        "{}: startup plugin syncs asked {asked:?} for the executor identifiers of {labels:?}",
+                        scenario["name"]
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                asked.sort_unstable();
                 asked.dedup();
-                assert_eq!(
-                    asked,
-                    executor_labels(scenario),
-                    "{}: startup executor.identifier",
-                    scenario["name"]
-                );
+                assert_eq!(asked, labels, "{}: startup executor.identifier", scenario["name"]);
                 return runner;
             }
             if Instant::now() > deadline || runner.child.try_wait().unwrap().is_some() {
@@ -401,6 +416,21 @@ impl Drop for Runner {
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.work);
     }
+}
+
+/// Go and Rust deliver `request.complete` on a task of its own once the response is
+/// written, so its place among the other records, and among other requests'
+/// completions, varies with load. Records compare in order with the completions moved
+/// to the end and sorted.
+fn async_completions_last(records: Value) -> Value {
+    let Value::Array(records) = records else {
+        return records;
+    };
+    let (mut completions, mut rest): (Vec<Value>, Vec<Value>) =
+        records.into_iter().partition(|r| r["method"] == "request.complete");
+    completions.sort_by_key(|r| r.to_string());
+    rest.extend(completions);
+    Value::Array(rest)
 }
 
 /// The generator's `varying` and `maskCreated`: per-request IDs and timestamps become
@@ -610,6 +640,10 @@ fn request_path_plugins_match_go() {
             if let Some(Value::String(exposed)) = want.pointer_mut("/headers/Access-Control-Expose-Headers") {
                 *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
             }
+            let (got, want) = match step["op"].as_str() {
+                Some("records") => (async_completions_last(got), async_completions_last(want)),
+                _ => (got, want),
+            };
             if got != want {
                 failures.push(format!(
                     "{name} step {n} {}\n  go:   {want}\n  rust: {got}",
