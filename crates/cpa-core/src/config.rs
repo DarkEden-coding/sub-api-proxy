@@ -29,6 +29,15 @@ pub use schema::{coerce_typed_scalars, go_bool, go_int};
 /// (nested merges first); explicit keys win, then earlier merged mappings. A merge
 /// value that is not a mapping or a list of mappings is yaml.v3's decode error.
 /// (Aliases are already expanded by the parser.)
+///
+/// ponytail: the parsed value no longer says whether a key was quoted, so a quoted
+/// `<<` key in config.yaml merges here, where yaml.v3 loads it as a plain key. Go's
+/// style-normalizing v8 save clears double quotes only: a double-quoted `"<<"` then
+/// merges a mapping or fails on a scalar, a single-quoted `'<<'` stays a plain key, and
+/// an unknown section archived before the save never merges. A JSON body sent to
+/// `/config.yaml` is the same gap (Go 422, here 400). JSON bodies elsewhere keep `<<`
+/// literal until the completed candidate is expanded. Telling quoted keys apart needs
+/// the yaml-edit syntax tree walked alongside the value.
 pub fn expand_merges(value: &mut Value) -> anyhow::Result<()> {
     const NOT_MAPS: &str = "map merge requires map or sequence of maps as the value";
     match value {
@@ -287,12 +296,17 @@ fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
-        let mut config = Self::parse(&text)?;
+        Self::load_text(path, &std::fs::read_to_string(path)?)
+    }
+
+    /// [`Config::load`] of text already read from `path`, so a caller knows exactly which
+    /// bytes it parsed.
+    pub fn load_text(path: &Path, text: &str) -> anyhow::Result<Self> {
+        let mut config = Self::parse(text)?;
         if !config.management.secret_key.is_empty() && !is_bcrypt(&config.management.secret_key) {
             let hash = bcrypt::hash(&config.management.secret_key, 10)?;
             // Go hashes in memory and persists best-effort (a read-only mount starts).
-            let _ = persist_secret_hash(path, &text, &hash);
+            let _ = persist_secret_hash(path, text, &hash);
             config.management.secret_key = hash.clone();
             if let Some(management) = config.document.get_mut("management").and_then(Value::as_mapping_mut) {
                 management.insert(Value::from("secret-key"), Value::from(hash));
