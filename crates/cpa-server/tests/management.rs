@@ -3139,7 +3139,8 @@ async fn config_shared_upstream_round_trip() {
 
 /// Legacy files whose migration the text form cannot finish alone (a `codex` block
 /// holding a shared `upstream.codex` field, a bare or empty `claude`) keep the comments
-/// of their other sections through a v8 or v0 setting save, and save fully migrated.
+/// of their other sections through a v8 setting save, and save fully migrated; a v0
+/// save leaves them in the legacy layout.
 #[tokio::test]
 async fn legacy_migration_with_shared_upstream_moves_keeps_other_comments() {
     for (tail, check) in [
@@ -3177,6 +3178,11 @@ async fn legacy_migration_with_shared_upstream_moves_keeps_other_comments() {
                 file.contains("management:\n  # keep this comment\n"),
                 "{tail} {at}: {file}"
             );
+            if at.starts_with("/v0/") {
+                // A v0 save keeps a legacy-only file in its layout (Go v8.0.35).
+                assert_eq!(file, format!("{raw}debug: true\n"), "{tail} {at}");
+                continue;
+            }
             // Nothing is left to migrate: the saved values are the canonical ones.
             let saved: serde_yaml_ng::Value = serde_yaml_ng::from_str(&file).unwrap();
             let canonical = cpa_core::config::ConfigDocument::parse(&file).unwrap();
@@ -4245,8 +4251,8 @@ async fn v0_config_yaml_saves_by_submitted_version() {
 /// Go `TestV0SetterSavesByExistingVersion` (v8 cases), `TestV0SaveUpgradesHistoricalV8Layout`
 /// and `TestV8MovedCommentsSurviveV0Saves`: a v0 setter saves an existing v8 file in the
 /// latest layout, and the comments of a moved historical field (and of the ancestors
-/// it leaves empty) survive repeated saves exactly once. The legacy-only case differs
-/// on purpose (docs/DIFFERENCES-FROM-GO.md): cliproxy-rs migrates it on the first save.
+/// it leaves empty) survive repeated saves exactly once. Legacy-only files:
+/// [`v0_setters_keep_a_legacy_layout`].
 #[tokio::test]
 async fn v0_setters_save_v8_files_in_the_latest_layout() {
     for raw in [
@@ -4373,4 +4379,85 @@ async fn config_v8_field_updates_keep_comments() {
             server.abort();
         }
     }
+}
+
+/// Go `TestV0SetterSavesByExistingVersion` (legacy case) and
+/// `TestV0RepeatedSavesKeepLegacyClientAlias`: a v0 setter on a file without v8
+/// sections keeps the legacy layout and its comments, so every setting keeps its
+/// meaning; a legacy `codex-header-defaults` still applies to API-key credentials.
+#[tokio::test]
+async fn v0_setters_keep_a_legacy_layout() {
+    for raw in [
+        "request-retry: 3\ncodex: {response-steering: true}\nxai: {inject-x-search: true}\nrouting: {strategy: fill-first}\n",
+        "request-retry: 3\ncodex: {response-steering: true}\nxai: {inject-x-search: true}\ncodex-header-defaults: {user-agent: legacy-agent}\n",
+    ] {
+        let f = Fixture::from_yaml("v0-legacy-version", |auth, hash| private_config(raw, auth, hash, true));
+        let (base, server) = f.server().await;
+        let (status, text) = call(
+            &base,
+            wreq::Method::PUT,
+            "/v0/management/request-retry",
+            r#"{"value":2}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let file = f.file();
+        assert!(
+            !file.contains("config-version:") && !file.contains("upstream:"),
+            "v0 migrated a legacy-only file: {file}"
+        );
+        let cfg = Config::parse(&file).unwrap();
+        let api = cfg.for_api_key();
+        let d = &api.document;
+        assert_eq!(d["routing"]["retry"]["request-retry"], 2, "{file}");
+        assert_eq!(
+            d["upstream"]["codex"]["response-steering"],
+            serde_yaml_ng::Value::Bool(true),
+            "{file}"
+        );
+        assert_eq!(
+            d["upstream"]["xai"]["inject-x-search"],
+            serde_yaml_ng::Value::Bool(true),
+            "{file}"
+        );
+        if raw.contains("legacy-agent") {
+            let ua = &d["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"];
+            assert_eq!(
+                ua.as_str(),
+                Some("legacy-agent"),
+                "API keys lost the legacy header default: {file}"
+            );
+        }
+        server.abort();
+    }
+    let raw = "# LEGACY DOCUMENT\ncodex:\n  # OPTIMIZE HEAD\n  optimize-multi-agent-v2: true # OPTIMIZE INLINE\n  response-steering: true\nrequest-retry: 3\n";
+    let f = Fixture::from_yaml("v0-legacy-client", |auth, hash| private_config(raw, auth, hash, true));
+    let (base, server) = f.server().await;
+    for retry in [2, 1, 0] {
+        let body = format!(r#"{{"value":{retry}}}"#);
+        let (status, text) = call(&base, wreq::Method::PUT, "/v0/management/request-retry", &body).await;
+        assert_eq!(status, 200, "{text}");
+        let file = f.file();
+        for absent in ["config-version:", "upstream:", "client:"] {
+            assert!(!file.contains(absent), "v0 save changed the legacy layout: {file}");
+        }
+        assert!(file.contains("optimize-multi-agent-v2: true"), "{file}");
+        for marker in ["LEGACY DOCUMENT", "OPTIMIZE HEAD", "OPTIMIZE INLINE"] {
+            assert_eq!(file.matches(marker).count(), 1, "{marker}: {file}");
+        }
+        let cfg = Config::parse(&file).unwrap();
+        let api = cfg.for_api_key();
+        assert_eq!(api.document["routing"]["retry"]["request-retry"], retry, "{file}");
+        assert_eq!(
+            api.document["client"]["codex"]["optimize-multi-agent-v2"],
+            serde_yaml_ng::Value::Bool(true),
+            "{file}"
+        );
+        assert_eq!(
+            api.document["upstream"]["codex"]["response-steering"],
+            serde_yaml_ng::Value::Bool(true),
+            "{file}"
+        );
+    }
+    server.abort();
 }

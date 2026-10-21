@@ -1004,6 +1004,65 @@ pub(crate) fn config_sync(
     response
 }
 
+/// What a v0 save does at its legacy path.
+pub(crate) enum LegacyEdit {
+    Set(serde_json::Value),
+    Delete,
+    /// Rewrite unchanged, as Go saves after a handler that changed nothing.
+    Keep,
+}
+
+/// Go v8.0.35 `SaveConfigPreserveComments` for a file without v8 sections: a v0 save
+/// keeps the legacy layout, so legacy settings keep their scope (a legacy
+/// `codex-header-defaults` still applies to API keys). `None` when the file is in the
+/// v8 layout, for the caller to save through [`config_sync`].
+/// ponytail: only the edited key changes; Go also merges its whole typed legacy render
+/// into the file and drops removed integration keys. Port `mergeMappingPreserve` here
+/// if a difference in the saved file matters.
+pub(crate) fn legacy_sync(state: &Management, path: &[&str], edit: LegacyEdit) -> Option<Response> {
+    let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+    let original = match std::fs::read_to_string(&state.path) {
+        Ok(v) => v,
+        Err(_) => return Some(error(500, "read_failed")),
+    };
+    let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(&original).ok()?;
+    if !raw.is_mapping() || cpa_core::config::is_v8_layout(&raw) {
+        return None;
+    }
+    let mut doc = ConfigDocument::unmigrated(raw);
+    match edit {
+        LegacyEdit::Set(value) => {
+            let value = match serde_yaml_ng::to_value(value) {
+                Ok(v) => v,
+                Err(e) => return Some(invalid_config(StatusCode::BAD_REQUEST, e)),
+            };
+            if doc.update(path, value, false).is_err() {
+                return Some(error(400, "invalid_path"));
+            }
+        }
+        LegacyEdit::Delete => {
+            doc.delete(path);
+        }
+        LegacyEdit::Keep => {}
+    }
+    let text = match doc.render_preserving(&original) {
+        Ok(v) => v,
+        Err(e) => return Some(invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e)),
+    };
+    let cfg = match Config::parse(&text) {
+        Ok(v) => v,
+        Err(e) => return Some(invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e)),
+    };
+    if let Err(e) = ConfigDocument::write(&state.path, &text) {
+        return Some(json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"error": "write_failed", "message": e.to_string()}),
+        ));
+    }
+    state.publish(cfg, None);
+    Some(json(StatusCode::OK, &json!({"status": "ok"})))
+}
+
 /// Go `liveAuthIndexFromManager`: the index each config-backed credential carries.
 fn live_auth_indexes(state: &Management) -> std::collections::HashMap<String, String> {
     state
