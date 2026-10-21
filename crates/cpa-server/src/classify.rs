@@ -548,6 +548,24 @@ mod tests {
         }
     }
 
+    /// Go 56eee6a4 (TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown and the
+    /// shouldRetryAfterError table): a statusless HTTP/2 closed-connection error, bare or
+    /// wrapped as a `url.Error`, is a connection drop: no cooldown, and a retry round.
+    #[test]
+    fn http2_closed_connections_are_transient_like_go() {
+        for message in [
+            "http2: client connection force closed via ClientConn.Close",
+            "http2: client conn is closed",
+            "Post \"https://example.com\": http2: client conn is closed",
+        ] {
+            let e = ExecError::local(0, FailureScope::Model, message);
+            assert!(skips_cooldown(&e), "{message}");
+            assert!(is_retry_round(&e), "{message}");
+        }
+        let other = ExecError::local(0, FailureScope::Model, "http2: server sent GOAWAY");
+        assert!(!skips_cooldown(&other) && !is_retry_round(&other));
+    }
+
     fn upstream(status: u16, body: &str) -> ExecError {
         let mut e = ExecError::local(status, FailureScope::Request, body.to_owned());
         e.headers.insert("content-type", "application/json".parse().unwrap());
