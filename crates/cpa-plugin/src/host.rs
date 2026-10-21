@@ -188,7 +188,8 @@ fn clean_path(path: &Path) -> PathBuf {
 
 /// Go `normalizeProviderID`.
 pub fn normalize_provider(provider: &str) -> String {
-    provider.trim().to_lowercase()
+    use cpa_common::gostr::GoStr;
+    provider.trim().go_lower()
 }
 
 impl Default for Host {
