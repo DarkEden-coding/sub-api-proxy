@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use bytes::Bytes;
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, GoValue};
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -331,7 +332,7 @@ impl Relay {
         let (out, frames) = mpsc::unbounded_channel();
         let (closed, _) = watch::channel(false);
         let session = Arc::new(Session {
-            provider: provider.to_lowercase(),
+            provider: provider.go_lower(),
             relay: Arc::downgrade(self),
             out,
             closed,
@@ -361,7 +362,7 @@ impl Relay {
     }
 
     fn session(&self, provider: &str) -> Option<Arc<Session>> {
-        lock(&self.sessions).get(&provider.trim().to_lowercase()).cloned()
+        lock(&self.sessions).get(&provider.trim().go_lower()).cloned()
     }
 
     /// `Manager.Send`.
