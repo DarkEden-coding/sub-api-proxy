@@ -157,14 +157,6 @@ pub struct Finalization {
     sync_key: Option<String>,
 }
 
-impl Finalization {
-    /// Whether finalizing asks the plugin host which plugins loaded, so the config must
-    /// have reached the host first.
-    pub fn needs_applied_plugins(&self) -> bool {
-        self.statuses[self.next_status..].iter().any(|s| s.needs_load_marking)
-    }
-}
-
 /// A node's Home plugin state across Home lifetimes.
 pub struct HomePlugins {
     node_id: String,
@@ -620,7 +612,6 @@ mod tests {
         let cfg = sync_cfg(true, &dir, "\n    myplugin:\n      enabled: true");
         let mut work = plugins.stage(&cfg, &client).await.unwrap();
         assert_eq!(work.statuses.len(), 1);
-        assert!(work.needs_applied_plugins());
         plugins
             .finalize(&CancellationToken::new(), &client, &mut work)
             .await

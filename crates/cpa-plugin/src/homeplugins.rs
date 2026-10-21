@@ -87,8 +87,9 @@ go_struct! {
 pub trait PluginRuntime: Send + Sync {
     /// Loaded or still loading.
     fn plugin_busy(&self, id: &str) -> bool;
-    /// Detaches and closes the plugin; `false` when nothing was unloaded.
-    fn unload_plugin<'a>(&'a self, id: &'a str) -> BoxFuture<'a, bool>;
+    /// Detaches and closes the plugin; `false` when nothing was unloaded. Cancelling
+    /// `cancel` stops waiting for it (Go `UnloadPluginContext`).
+    fn unload_plugin<'a>(&'a self, id: &'a str, cancel: &'a CancellationToken) -> BoxFuture<'a, bool>;
     /// Active in the current snapshot.
     fn plugin_registered(&self, id: &str) -> bool;
 }
@@ -97,8 +98,8 @@ impl PluginRuntime for crate::Host {
     fn plugin_busy(&self, id: &str) -> bool {
         crate::Host::plugin_busy(self, id)
     }
-    fn unload_plugin<'a>(&'a self, id: &'a str) -> BoxFuture<'a, bool> {
-        Box::pin(crate::Host::unload_plugin(self, id, None))
+    fn unload_plugin<'a>(&'a self, id: &'a str, cancel: &'a CancellationToken) -> BoxFuture<'a, bool> {
+        Box::pin(crate::Host::unload_plugin_until(self, id, cancel))
     }
     fn plugin_registered(&self, id: &str) -> bool {
         crate::Host::plugin_registered(self, id)
@@ -599,7 +600,7 @@ async fn delete_artifact(
         if cancel.is_cancelled() {
             return (first, false, Err(CANCELED.into()));
         }
-        if !runtime.unload_plugin(id).await && runtime.plugin_busy(id) {
+        if !runtime.unload_plugin(id, cancel).await && runtime.plugin_busy(id) {
             return (first, false, Err(crate::store::LOADED_PLUGIN_LOCKED.into()));
         }
     }
@@ -792,6 +793,8 @@ mod tests {
     struct FakeRuntime {
         busy: AtomicBool,
         unloaded: Mutex<Vec<String>>,
+        /// The cancellation each unload received.
+        unload_cancels: Mutex<Vec<CancellationToken>>,
         registered: Vec<&'static str>,
     }
 
@@ -799,8 +802,9 @@ mod tests {
         fn plugin_busy(&self, _id: &str) -> bool {
             self.busy.load(Ordering::SeqCst)
         }
-        fn unload_plugin<'a>(&'a self, id: &'a str) -> BoxFuture<'a, bool> {
+        fn unload_plugin<'a>(&'a self, id: &'a str, cancel: &'a CancellationToken) -> BoxFuture<'a, bool> {
             self.unloaded.lock().unwrap().push(id.to_owned());
+            self.unload_cancels.lock().unwrap().push(cancel.clone());
             self.busy.store(false, Ordering::SeqCst);
             Box::pin(async { true })
         }
@@ -1391,14 +1395,15 @@ mod tests {
 
     #[tokio::test]
     async fn delete_with_report_uses_contextual_unload() {
-        // Go passes the task's context to the unload; here the unload future runs inside
-        // the delete, under the same cancellation token.
+        // Go passes the task's context to the unload: cancelling the delete cancels the
+        // unload it started. The host side is `a_cancelled_home_unload_releases_the_host`.
         let root = tempdir();
         let (goos, goarch) = host_platform();
         write_plugin(&plugin_test_path(&root, &goos, &goarch, "sample", "1.0.0"));
         let runtime = busy_runtime();
+        let cancel = CancellationToken::new();
         let report = delete_with_report(
-            &CancellationToken::new(),
+            &cancel,
             Some(&sync_test_config(&root)),
             Some(&dyn_runtime(&runtime)),
             45,
@@ -1407,6 +1412,13 @@ mod tests {
         .await;
         assert!(report.ok, "{report:?}");
         assert_eq!(*runtime.unloaded.lock().unwrap(), ["sample"]);
+        let received = runtime.unload_cancels.lock().unwrap()[0].clone();
+        assert!(!received.is_cancelled());
+        cancel.cancel();
+        assert!(
+            received.is_cancelled(),
+            "the unload did not get the delete's cancellation"
+        );
     }
 
     #[tokio::test]

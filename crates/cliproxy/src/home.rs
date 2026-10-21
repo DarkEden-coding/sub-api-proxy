@@ -842,13 +842,12 @@ async fn run_lifetimes(
                         // Go `redisqueue.SetEnabled(... || cfg.Home.Enabled)`.
                         rt.usage_queue().configure(true, &cfg);
                         rt.publish_config(cfg);
-                        // Go applies the plugin config with the rest; the load report
-                        // waits for the plugin worker.
-                        if work.needs_applied_plugins() {
-                            tokio::select! {
-                                _ = lifetime.cancelled() => return helpers,
-                                _ = cpa_server::plugins::applied(&rt) => {}
-                            }
+                        // Go applies the plugin config with the rest of the config
+                        // (`applyConfigRuntime`) before it finalizes: load marks, delete
+                        // tasks and the first dispatch all wait for the plugin worker.
+                        tokio::select! {
+                            _ = lifetime.cancelled() => return helpers,
+                            _ = cpa_server::plugins::applied(&rt) => {}
                         }
                         loop {
                             let finalized = tokio::select! {
@@ -1219,6 +1218,8 @@ mod tests {
         let rt = Arc::new(cpa_server::testing::runtime(config, local, executors));
         let dispatcher = Arc::new(Dispatcher::new(&rt));
         rt.set_remote_dispatch(Some(dispatcher.clone()));
+        // main.rs: the plugin worker runs; each lifetime waits for it to apply.
+        cpa_server::plugins::start(&rt).await;
         let shutdown = CancellationToken::new();
         let subscriber = spawn_subscriber(home.config(), rt.clone(), dispatcher, shutdown.clone());
         let task = tokio::spawn(async move {
@@ -5383,8 +5384,15 @@ mod tests {
 
     impl Bare {
         async fn start(home: &FakeHome) -> Self {
-            let guard = ONE_NODE.lock().await;
             let rt = test_runtime();
+            // main.rs: the plugin worker runs; each lifetime waits for it to apply.
+            cpa_server::plugins::start(&rt).await;
+            Self::start_with(home, rt).await
+        }
+
+        /// With `rt`, whose plugin worker the caller started.
+        async fn start_with(home: &FakeHome, rt: Arc<Runtime>) -> Self {
+            let guard = ONE_NODE.lock().await;
             let dispatcher = Arc::new(Dispatcher::new(&rt));
             let shutdown = CancellationToken::new();
             let task = spawn_subscriber(home.config(), rt.clone(), dispatcher.clone(), shutdown.clone());
@@ -5499,6 +5507,167 @@ mod tests {
             Some(&Yaml::from("fill-first"))
         );
         node.stop().await;
+    }
+
+    /// A plugin whose shutdown blocks while `held` is set.
+    struct HeldPlugin(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl cpa_plugin::client::PluginClient for HeldPlugin {
+        fn call(&self, method: &str, _: &[u8]) -> Result<axum::body::Bytes, String> {
+            Ok(axum::body::Bytes::from_static(match method {
+                "plugin.register" | "plugin.reconfigure" => {
+                    br#"{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"n","Version":"1","Author":"a","GitHubRepository":"r"},"capabilities":{"usage_plugin":true}}}"#
+                }
+                _ => br#"{"ok":true,"result":{}}"#,
+            }))
+        }
+        fn shutdown(&self) {
+            let (held, cv) = &*self.0;
+            let mut held = held.lock().unwrap();
+            while *held {
+                held = cv.wait(held).unwrap();
+            }
+        }
+    }
+
+    struct HeldLoader(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl cpa_plugin::host::Loader for HeldLoader {
+        fn open(
+            &self,
+            _: &cpa_plugin::platform::PluginFile,
+            _: Arc<dyn cpa_plugin::client::CallbackHandler>,
+            _: Arc<cpa_plugin::client::CallbackInstance>,
+        ) -> Result<Arc<dyn cpa_plugin::client::PluginClient>, String> {
+            Ok(Arc::new(HeldPlugin(self.0.clone())))
+        }
+    }
+
+    /// Go applies the published config, plugins included, before it finalizes Home
+    /// plugin work (`applyConfigRuntime` in `service_home.go`). While the plugin worker
+    /// cannot apply the config (an unload holds the host), no delete task runs and the
+    /// lifetime does not publish, with plugins disabled and with an unchanged plugin
+    /// sync key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn home_plugin_finalization_waits_for_the_applied_config() {
+        let dir = std::env::temp_dir().join(format!("cpa-home-applied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let platform = cpa_plugin::homeplugins::current_platform();
+        let extension = cpa_plugin::platform::extension(&platform.goos);
+        let artifacts = dir.join(&platform.goos).join(&platform.goarch);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(dir.join(format!("blocker{extension}")), b"").unwrap();
+        let gone = |id: &str| {
+            let path = artifacts.join(format!("{id}{extension}"));
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        let (first, second) = (gone("gone1"), gone("gone2"));
+
+        let held = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let host = cpa_plugin::Host::with_loader(Arc::new(HeldLoader(held.clone())));
+        let rt = Arc::new(
+            cpa_server::testing::runtime(
+                overlay(b"port: 0\n", None).unwrap(),
+                vec![],
+                cpa_exec::Executors {
+                    claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                    codex: Default::default(),
+                    devices: Default::default(),
+                    openai: Default::default(),
+                    google: Default::default(),
+                },
+            )
+            .with_plugin_host(host.clone()),
+        );
+        let enabled = Arc::new(
+            cpa_core::config::Config::parse(&format!(
+                "plugins:\n  enabled: true\n  dir: {}\n  configs:\n    blocker:\n      enabled: true\n",
+                dir.display()
+            ))
+            .unwrap(),
+        );
+        // Loads the blocker straight into the host, then holds the host's apply lock
+        // with an unload whose shutdown blocks.
+        async fn hold(
+            host: &cpa_plugin::Host,
+            held: &(Mutex<bool>, std::sync::Condvar),
+            enabled: &Arc<cpa_core::config::Config>,
+        ) -> tokio::task::JoinHandle<bool> {
+            host.apply_config(enabled.clone()).await;
+            assert!(host.plugin_registered("blocker"));
+            *held.0.lock().unwrap() = true;
+            let unload = tokio::spawn({
+                let host = host.clone();
+                async move { host.unload_plugin("blocker", None).await }
+            });
+            eventually("the unload to hold the host", || !host.plugin_registered("blocker")).await;
+            unload
+        }
+        let release = || {
+            *held.0.lock().unwrap() = false;
+            held.1.notify_all();
+        };
+
+        let disabled = format!("port: 0\nplugins:\n  enabled: false\n  dir: {}\n", dir.display());
+        let tasks = Arc::new(Mutex::new(
+            r#"[{"id":1,"operation":"delete","plugin_id":"gone1"}]"#.to_owned(),
+        ));
+        let home = FakeHome::start({
+            let (config, tasks) = (disabled.clone(), tasks.clone());
+            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+                ("get", Some("config")) => fake::bulk(&config),
+                ("get", Some("plugin-tasks")) => fake::bulk(tasks.lock().unwrap().as_str()),
+                ("get", _) => fake::raw("$-1\r\n"),
+                ("subscribe", _) => fake::raw(ACK),
+                ("ping", _) => fake::raw("+PONG\r\n"),
+                _ => fake::raw(":1\r\n"),
+            }
+        })
+        .await;
+
+        // Plugins disabled.
+        cpa_server::plugins::start(&rt).await;
+        let unload = hold(&host, &held, &enabled).await;
+        let node = Bare::start_with(&home, rt.clone()).await;
+        // ponytail: absence over a fixed window; the release below proves the order.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            first.exists(),
+            "a delete task ran before the plugin worker applied the config"
+        );
+        assert!(
+            node.dispatcher.current().is_none(),
+            "published before the config applied"
+        );
+        release();
+        assert!(unload.await.unwrap());
+        node.published().await;
+        assert!(!first.exists());
+
+        // The same plugin config again: its sync key is unchanged.
+        let pushes = home.count("rpush");
+        let unload = hold(&host, &held, &enabled).await;
+        *tasks.lock().unwrap() = r#"[{"id":2,"operation":"delete","plugin_id":"gone2"}]"#.to_owned();
+        home.push(fake::message(
+            "config",
+            format!("{disabled}routing:\n  strategy: fill-first\n").as_bytes(),
+        ));
+        eventually("the new config to be published", || {
+            rt.config().document.get("routing").and_then(|r| r.get("strategy")) == Some(&Yaml::from("fill-first"))
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            second.exists(),
+            "a delete task ran before the plugin worker applied the config"
+        );
+        assert_eq!(home.count("rpush"), pushes, "finalized before the config applied");
+        release();
+        assert!(unload.await.unwrap());
+        eventually("the second delete", || !second.exists()).await;
+        node.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Go `TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK`: a
