@@ -809,11 +809,12 @@ impl WsCapture {
     }
 
     /// `AppendAPIWebsocketResponse`.
-    async fn response(&self, payload: &[u8]) {
+    /// Records the message and returns its observation, if any.
+    fn response(&self, payload: &[u8]) -> Option<futures_util::future::BoxFuture<'static, ()>> {
         self.sink.record(CaptureEvent::WebsocketResponse(payload));
-        if let Some(websocket) = &self.websocket {
-            websocket.emit(payload).await;
-        }
+        let websocket = self.websocket.clone()?;
+        let payload = payload.to_vec();
+        Some(Box::pin(async move { websocket.emit(&payload).await }))
     }
 }
 
@@ -835,7 +836,9 @@ struct Turn {
     rx: mpsc::Receiver<Read>,
     conn: Arc<Upstream>,
     session: Arc<Session>,
-    _turn: OwnedMutexGuard<()>,
+    _turn: Option<OwnedMutexGuard<()>>,
+    /// The observation of the message being read, while it runs.
+    observing: Option<crate::ws_observation::Observation>,
     apply_patch: apply_patch::State,
     restorer: NamespaceRestorer,
     filter: XSearchFilter,
@@ -859,7 +862,10 @@ struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.conn.deactivate();
+        // An abandoned turn keeps its session until an observation it started returns,
+        // as Go's executor holds the session lock through the synchronous observer.
+        let conn = self.conn.clone();
+        crate::ws_observation::release_after(self.observing.take(), self._turn.take(), move || conn.deactivate());
     }
 }
 
@@ -908,7 +914,7 @@ impl Turn {
             return;
         }
         self.usage.first_byte();
-        self.capture.response(payload).await;
+        crate::ws_observation::observe(&mut self.observing, self.capture.response(payload)).await;
         if let Some(error) = ws_error(payload) {
             self.capture.error("upstream_error", &error);
             crate::openai_compat_http::publish_failure(&self.usage, &error);
@@ -1196,7 +1202,8 @@ impl XaiExecutor {
             rx,
             conn,
             session,
-            _turn: guard,
+            _turn: Some(guard),
+            observing: None,
             apply_patch: prepared.apply_patch,
             restorer: NamespaceRestorer::new(prepared.namespace_tools),
             filter: XSearchFilter::new(prepared.filter_internal_x_search, prepared.client_declared_tools),

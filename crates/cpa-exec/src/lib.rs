@@ -90,6 +90,7 @@ mod upstream;
 pub mod vertex;
 pub mod vertex_auth;
 mod wire;
+mod ws_observation;
 pub mod wsrelay;
 pub mod xai;
 pub mod xai_auth;

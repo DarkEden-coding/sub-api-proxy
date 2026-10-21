@@ -637,7 +637,9 @@ struct Turn {
     rx: mpsc::Receiver<Read>,
     conn: Arc<Upstream>,
     session: Arc<Session>,
-    _turn: OwnedMutexGuard<()>,
+    _turn: Option<OwnedMutexGuard<()>>,
+    /// The observation of the message being read, while it runs.
+    observing: Option<crate::ws_observation::Observation>,
     items: OutputItems,
     saw_delta: bool,
     native: bool,
@@ -662,7 +664,10 @@ struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.conn.deactivate();
+        // An abandoned turn keeps its session until an observation it started returns,
+        // as Go's executor holds the session lock through the synchronous observer.
+        let conn = self.conn.clone();
+        crate::ws_observation::release_after(self.observing.take(), self._turn.take(), move || conn.deactivate());
     }
 }
 
@@ -707,7 +712,7 @@ impl Turn {
             return Frame::Skip;
         }
         self.observe(payload);
-        self.wire.ws_response(payload.as_bytes()).await;
+        crate::ws_observation::observe(&mut self.observing, self.wire.ws_response_observation(payload)).await;
         let raw_len = payload.len();
         let payload = response::restore(payload, self.restore);
         let payload = payload.as_ref();
@@ -1109,7 +1114,8 @@ impl CodexExecutor {
             rx,
             conn,
             session,
-            _turn: guard,
+            _turn: Some(guard),
+            observing: None,
             items: OutputItems::default(),
             saw_delta: false,
             native,
