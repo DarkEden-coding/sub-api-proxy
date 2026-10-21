@@ -270,7 +270,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
 | [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | ported here | L (+205 −156) | shared `upstream` provider settings; API keys see them, only the `oauth.providers` leftovers stay OAuth-only; `/v8/management/config/upstream/...` |
-| [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | to port | M (+212 −46) | historical v8 config aliases |
+| [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | to port | M (+212 −46) | historical v8 config aliases: reads, writes, bodies, comments and the v8-layout check ported; explicit `null` handling waits for the direct v8 save |
 | [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | to port | L (+503 −8) | auth indexes in v8 `api-keys` |
 | [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |
 | [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | to port | S (+20 −7) | v8 API: collection styles and quoted mapping keys |

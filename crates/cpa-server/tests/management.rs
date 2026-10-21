@@ -3044,8 +3044,8 @@ async fn config_writes_render_json_values_as_block_yaml() {
 
 /// Go `TestConfigV8SharedUpstreamRoundTrip` (52d5507d): a historical
 /// `oauth.providers.codex` shared field reads at `upstream/...` without a rewrite,
-/// upstream writes keep the OAuth-only header scope, and a write to the historical
-/// path is refused without touching the file.
+/// upstream writes keep the OAuth-only header scope, and an invalid write to the
+/// historical path is refused without touching the file.
 #[tokio::test]
 async fn config_shared_upstream_round_trip() {
     let f = Fixture::from_yaml("upstream", |auth, hash| {
@@ -3112,13 +3112,13 @@ async fn config_shared_upstream_round_trip() {
         ""
     );
     let before = f.file();
-    // ponytail: 52d5507d refuses the historical path with 400; 3be5fa44 (v8.0.35)
-    // accepts it as an alias and answers 422 only for an invalid value. Ported next.
+    // v8.0.35 (3be5fa44) accepts the historical path as an alias; an invalid value is
+    // still refused.
     request(
         wreq::Method::PUT,
         "oauth/providers/codex/stream-bootstrap-buffering",
-        "true",
-        400,
+        r#""invalid""#,
+        422,
     )
     .await;
     assert_eq!(
@@ -3137,43 +3137,55 @@ async fn config_shared_upstream_round_trip() {
     server.abort();
 }
 
-/// A legacy file whose `codex` block holds a shared `upstream.codex` field keeps the
-/// comments of its other sections when a v8 or v0 setting save migrates it.
+/// Legacy files whose migration the text form cannot finish alone (a `codex` block
+/// holding a shared `upstream.codex` field, a bare or empty `claude`) keep the comments
+/// of their other sections through a v8 or v0 setting save, and save fully migrated.
 #[tokio::test]
-async fn legacy_migration_with_a_shared_codex_field_keeps_other_comments() {
-    let f = Fixture::from_yaml("shared-codex", |auth, hash| {
-        format!(
-            "remote-management:\n  # keep this comment\n  secret-key: '{hash}'\nauth-dir: {}\ncodex: {{response-steering: true}}\n",
-            auth.display()
-        )
-    });
-    let raw = f.file();
-    let (base, server) = f.server().await;
-    let client = wreq::Client::new();
-    for (at, body) in [
-        ("/v8/management/config/routing/retry/request-retry", "3"),
-        ("/v0/management/debug", r#"{"value":true}"#),
+async fn legacy_migration_with_shared_upstream_moves_keeps_other_comments() {
+    for (tail, check) in [
+        (
+            "codex: {response-steering: true}\n",
+            &["upstream", "codex", "response-steering"][..],
+        ),
+        ("claude:\n", &["upstream", "claude"][..]),
+        ("claude: {}\n", &["upstream", "claude"][..]),
     ] {
-        std::fs::write(f.dir.join("config.yaml"), &raw).unwrap();
-        let r = client
-            .put(format!("{base}{at}"))
-            .bearer_auth("fake-management-only")
-            .body(body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 200, "{at}");
-        let file = f.file();
-        assert!(file.contains("management:\n  # keep this comment\n"), "{at}: {file}");
-        let cfg = Config::parse(&file).unwrap();
-        assert_eq!(
-            cfg.document["upstream"]["codex"]["response-steering"],
-            serde_yaml_ng::Value::Bool(true),
-            "{at}: {file}"
-        );
-        assert!(cfg.document.get("codex").is_none(), "{at}: {file}");
+        let f = Fixture::from_yaml("shared-moves", |auth, hash| {
+            format!(
+                "remote-management:\n  # keep this comment\n  secret-key: '{hash}'\nauth-dir: {}\n{tail}",
+                auth.display()
+            )
+        });
+        let raw = f.file();
+        let (base, server) = f.server().await;
+        let client = wreq::Client::new();
+        for (at, body) in [
+            ("/v8/management/config/routing/retry/request-retry", "3"),
+            ("/v0/management/debug", r#"{"value":true}"#),
+        ] {
+            std::fs::write(f.dir.join("config.yaml"), &raw).unwrap();
+            let r = client
+                .put(format!("{base}{at}"))
+                .bearer_auth("fake-management-only")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200, "{tail} {at}");
+            let file = f.file();
+            assert!(
+                file.contains("management:\n  # keep this comment\n"),
+                "{tail} {at}: {file}"
+            );
+            // Nothing is left to migrate: the saved values are the canonical ones.
+            let saved: serde_yaml_ng::Value = serde_yaml_ng::from_str(&file).unwrap();
+            let canonical = cpa_core::config::ConfigDocument::parse(&file).unwrap();
+            assert_eq!(&saved, canonical.value(), "{tail} {at}: {file}");
+            let value = check.iter().try_fold(&saved, |v, k| v.get(*k));
+            assert!(value.is_some_and(|v| !v.is_null()), "{tail} {at}: {file}");
+        }
+        server.abort();
     }
-    server.abort();
 }
 
 /// Go v8.0.35 Sign in with ChatGPT binding (`d50a1995`, `ae3ee3be`) against a local
@@ -3732,4 +3744,565 @@ async fn siwc_binding_flows_follow_go() {
     }
     server.abort();
     upstream.abort();
+}
+
+/// `raw` with this fixture's management key and private auth-dir added, in the v8
+/// layout or, for `legacy`, as legacy root keys (so a legacy file stays legacy).
+fn private_config(raw: &str, auth: &std::path::Path, hash: &str, legacy: bool) -> String {
+    let auth = auth.display();
+    if legacy {
+        return format!("remote-management: {{secret-key: '{hash}'}}\nauth-dir: {auth}\n{raw}");
+    }
+    let mut out = format!("management: {{secret-key: '{hash}'}}\n");
+    if raw.contains("oauth: {") {
+        out += &raw.replacen("oauth: {", &format!("oauth: {{auth-dir: {auth}, "), 1);
+    } else if let Some(line) = raw.lines().find(|l| l.starts_with("oauth:")) {
+        out += &raw.replacen(&format!("{line}\n"), &format!("{line}\n  auth-dir: {auth}\n"), 1);
+    } else {
+        out += raw;
+        out += &format!("oauth:\n  auth-dir: {auth}\n");
+    }
+    out
+}
+
+/// One management request: its status and body.
+async fn call(base: &str, method: wreq::Method, path: &str, body: &str) -> (u16, String) {
+    let r = wreq::Client::new()
+        .request(method, format!("{base}{path}"))
+        .bearer_auth("fake-management-only")
+        .body(body.to_owned())
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.text().await.unwrap())
+}
+
+/// Every saved v8 file is fully canonical: nothing is left for a migration to move.
+fn assert_canonical(file: &str) {
+    let saved: serde_yaml_ng::Value = serde_yaml_ng::from_str(file).unwrap();
+    let canonical = cpa_core::config::ConfigDocument::parse(file).unwrap();
+    assert_eq!(&saved, canonical.value(), "{file}");
+    assert!(file.contains("config-version: 8"), "{file}");
+}
+
+/// Go v8.0.35 `TestConfigV8HistoricalFieldPaths` (3be5fa44): every historical v8 field
+/// path reads, patches, replaces and deletes its canonical field.
+#[tokio::test]
+async fn config_v8_historical_field_paths() {
+    for (historical, current, value) in [
+        (
+            "oauth/providers/codex/disable-codex-cloaking",
+            "upstream/codex/disable-codex-cloaking",
+            "true",
+        ),
+        (
+            "oauth/providers/codex/stream-bootstrap-buffering",
+            "upstream/codex/stream-bootstrap-buffering",
+            "true",
+        ),
+        (
+            "oauth/providers/codex/stream-bootstrap-timeout",
+            "upstream/codex/stream-bootstrap-timeout",
+            r#""10s""#,
+        ),
+        (
+            "oauth/providers/codex/orphan-delegation-compatibility",
+            "upstream/codex/orphan-delegation-compatibility",
+            "true",
+        ),
+        (
+            "oauth/providers/codex/model-level-cooling",
+            "upstream/codex/model-level-cooling",
+            "true",
+        ),
+        (
+            "oauth/providers/codex/response-steering",
+            "upstream/codex/response-steering",
+            "true",
+        ),
+        (
+            "oauth/providers/claude/model-level-cooling",
+            "upstream/claude/model-level-cooling",
+            "true",
+        ),
+        (
+            "oauth/providers/claude/disable-claude-cloak-mode",
+            "upstream/claude/disable-claude-cloak-mode",
+            "true",
+        ),
+        (
+            "oauth/providers/claude/header-defaults/user-agent",
+            "upstream/claude/header-defaults/user-agent",
+            r#""test-agent""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/package-version",
+            "upstream/claude/header-defaults/package-version",
+            r#""0.2.0""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/runtime-version",
+            "upstream/claude/header-defaults/runtime-version",
+            r#""v22""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/os",
+            "upstream/claude/header-defaults/os",
+            r#""Windows""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/arch",
+            "upstream/claude/header-defaults/arch",
+            r#""amd64""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/timeout",
+            "upstream/claude/header-defaults/timeout",
+            r#""300""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/timezone",
+            "upstream/claude/header-defaults/timezone",
+            r#""Asia/Shanghai""#,
+        ),
+        (
+            "oauth/providers/claude/header-defaults/stabilize-device-profile",
+            "upstream/claude/header-defaults/stabilize-device-profile",
+            "true",
+        ),
+        (
+            "oauth/providers/claude/claude-code/disable-cloaking-model-list",
+            "upstream/claude/disable-cloaking-model-list",
+            "false",
+        ),
+        (
+            "oauth/providers/xai/inject-x-search",
+            "upstream/xai/inject-x-search",
+            "true",
+        ),
+        (
+            "oauth/providers/codex/optimize-multi-agent-v2",
+            "client/codex/optimize-multi-agent-v2",
+            "true",
+        ),
+    ] {
+        let f = Fixture::from_yaml("historical-fields", |auth, hash| {
+            private_config("server: {port: 8317}\n", auth, hash, false)
+        });
+        let (base, server) = f.server().await;
+        let at = |p: &str| format!("/v8/management/config/{p}");
+        assert_eq!(
+            call(&base, wreq::Method::PUT, &at(current), value).await.0,
+            200,
+            "{current}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::GET, &at(historical), "").await,
+            (200, value.to_owned()),
+            "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::PATCH, &at(historical), value).await.0,
+            200,
+            "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::PUT, &at(historical), "null").await.0,
+            200,
+            "{historical}"
+        );
+        // ponytail: an explicit null keeps here only because the 6fecc6e typed-saver
+        // emulation (typed_projection) does not see historical request paths; a null
+        // through the canonical path still takes Go's old default. v8.0.35 saves the
+        // validated tree directly, keeping both; that lands with the direct-save PR.
+        assert_eq!(
+            call(&base, wreq::Method::GET, &at(current), "").await,
+            (200, "null".to_owned()),
+            "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::DELETE, &at(historical), "").await.0,
+            200,
+            "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::GET, &at(current), "").await.0,
+            404,
+            "{historical}"
+        );
+        assert_eq!(
+            call(&base, wreq::Method::GET, &at("server/port"), "").await,
+            (200, "8317".to_owned())
+        );
+        assert_canonical(&f.file());
+        server.abort();
+    }
+}
+
+/// Go `TestConfigV8HistoricalProviderSubtrees`: a historical provider subtree shows the
+/// shared and client values it once held, and PATCH merges into, PUT replaces and
+/// DELETE removes all of them, leaving unrelated settings and OAuth scope alone.
+#[tokio::test]
+async fn config_v8_historical_provider_subtrees() {
+    let raw = "upstream: {codex: {response-steering: true, stream-bootstrap-buffering: true}, xai: {inject-x-search: true}}\noauth: {providers: {codex: {header-defaults: {user-agent: oauth-agent}}}}\nclient: {codex: {optimize-multi-agent-v2: true, enable-apply-patch: true}}\n";
+    for (method, path, body, steering, buffering, optimize, agent) in [
+        (
+            wreq::Method::PATCH,
+            "oauth/providers/codex",
+            r#"{"response-steering":false,"header-defaults":{"user-agent":"updated"}}"#,
+            false,
+            true,
+            true,
+            "updated",
+        ),
+        (
+            wreq::Method::PUT,
+            "oauth/providers/codex",
+            r#"{"response-steering":true}"#,
+            true,
+            false,
+            false,
+            "",
+        ),
+        (
+            wreq::Method::DELETE,
+            "oauth/providers/codex",
+            "",
+            false,
+            false,
+            false,
+            "",
+        ),
+        (
+            wreq::Method::PUT,
+            "upstream/codex",
+            r#"{"response-steering":false}"#,
+            false,
+            false,
+            true,
+            "oauth-agent",
+        ),
+    ] {
+        let f = Fixture::from_yaml("historical-subtrees", |auth, hash| {
+            private_config(raw, auth, hash, false)
+        });
+        let original = f.file();
+        let (base, server) = f.server().await;
+        let (status, view) = call(
+            &base,
+            wreq::Method::GET,
+            "/v8/management/config/oauth/providers/codex",
+            "",
+        )
+        .await;
+        let view: Value = serde_json::from_str(&view).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(
+            (&view["response-steering"], &view["optimize-multi-agent-v2"]),
+            (&json!(true), &json!(true)),
+            "{view}"
+        );
+        assert_eq!(f.file(), original, "a historical GET changed the file");
+        let (status, text) = call(&base, method.clone(), &format!("/v8/management/config/{path}"), body).await;
+        assert_eq!(status, 200, "{method} {path}: {text}");
+        let file = f.file();
+        assert_canonical(&file);
+        let cfg = Config::parse(&file).unwrap();
+        let d = &cfg.document;
+        let flag = |v: &serde_yaml_ng::Value| v.as_bool().unwrap_or(false);
+        assert_eq!(
+            (
+                flag(&d["upstream"]["codex"]["response-steering"]),
+                flag(&d["upstream"]["codex"]["stream-bootstrap-buffering"]),
+                flag(&d["client"]["codex"]["optimize-multi-agent-v2"]),
+                d["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"]
+                    .as_str()
+                    .unwrap_or(""),
+            ),
+            (steering, buffering, optimize, agent),
+            "{method} {path}: {file}"
+        );
+        assert!(flag(&d["upstream"]["xai"]["inject-x-search"]) && flag(&d["client"]["codex"]["enable-apply-patch"]));
+        let api = cfg.for_api_key();
+        assert!(
+            api.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"]
+                .as_str()
+                .unwrap_or("")
+                .is_empty()
+        );
+        server.abort();
+    }
+}
+
+/// Go `TestConfigV8HistoricalConfigurationBodies` and
+/// `TestConfigV8HistoricalNullContainerPatch`: whole-config bodies with historical
+/// paths are normalized, a canonical value in the same body wins, and a null
+/// historical container resets its fields.
+#[tokio::test]
+async fn config_v8_historical_configuration_bodies() {
+    for (method, route, body, steering, buffering) in [
+        (
+            wreq::Method::PATCH,
+            "config",
+            r#"{"oauth":{"providers":{"codex":{"response-steering":false}}}}"#,
+            false,
+            true,
+        ),
+        (
+            wreq::Method::PATCH,
+            "config",
+            r#"{"oauth":{"providers":{"codex":{"response-steering":true}}},"upstream":{"codex":{"response-steering":false}}}"#,
+            false,
+            true,
+        ),
+        (
+            wreq::Method::PATCH,
+            "config",
+            r#"{"oauth":{"providers":{"codex":{"response-steering":true}}},"upstream":{"codex":{"response-steering":null}}}"#,
+            false,
+            true,
+        ),
+        (
+            wreq::Method::PUT,
+            "config",
+            r#"{"oauth":{"providers":{"codex":{"response-steering":true}}}}"#,
+            true,
+            false,
+        ),
+        (
+            wreq::Method::PUT,
+            "config.yaml",
+            "# Keep this comment\noauth: {providers: {codex: {response-steering: false}}}\n",
+            false,
+            false,
+        ),
+    ] {
+        let f = Fixture::from_yaml("historical-bodies", |auth, hash| {
+            private_config(
+                "upstream: {codex: {response-steering: true, stream-bootstrap-buffering: true}}\n",
+                auth,
+                hash,
+                false,
+            )
+        });
+        let (base, server) = f.server().await;
+        // Root writes replace the whole file, so the body carries its own access.
+        let body = if method == wreq::Method::PUT {
+            let auth = f.dir.join("auth");
+            let hash = f.rt.config().management.secret_key.clone();
+            if route == "config" {
+                let mut v: Value = serde_json::from_str(body).unwrap();
+                v["management"] = json!({"secret-key": hash});
+                v["oauth"]["auth-dir"] = json!(auth.display().to_string());
+                v.to_string()
+            } else {
+                private_config(body, &auth, &hash, false)
+            }
+        } else {
+            body.to_owned()
+        };
+        let (status, text) = call(&base, method.clone(), &format!("/v8/management/{route}"), &body).await;
+        assert_eq!(status, 200, "{body}: {text}");
+        let file = f.file();
+        assert_canonical(&file);
+        let d = Config::parse(&file).unwrap().document;
+        let flag = |v: &serde_yaml_ng::Value| v.as_bool().unwrap_or(false);
+        assert_eq!(
+            (
+                flag(&d["upstream"]["codex"]["response-steering"]),
+                flag(&d["upstream"]["codex"]["stream-bootstrap-buffering"])
+            ),
+            (steering, buffering),
+            "{body}: {file}"
+        );
+        if route == "config.yaml" {
+            assert!(file.contains("# Keep this comment"), "{file}");
+        }
+        server.abort();
+    }
+    let f = Fixture::from_yaml("historical-null", |auth, hash| {
+        private_config(
+            "upstream: {claude: {model-level-cooling: true, header-defaults: {user-agent: agent, timezone: UTC, stabilize-device-profile: true}}}\n",
+            auth,
+            hash,
+            false,
+        )
+    });
+    let (base, server) = f.server().await;
+    let body = r#"{"oauth":{"providers":{"claude":{"header-defaults":null}}}}"#;
+    assert_eq!(
+        call(&base, wreq::Method::PATCH, "/v8/management/config", body).await.0,
+        200
+    );
+    let d = Config::parse(&f.file()).unwrap().document;
+    let claude = &d["upstream"]["claude"];
+    for field in ["user-agent", "timezone"] {
+        assert!(
+            claude["header-defaults"][field].as_str().unwrap_or("").is_empty(),
+            "{}",
+            f.file()
+        );
+    }
+    assert_eq!(claude["model-level-cooling"], serde_yaml_ng::Value::Bool(true));
+    server.abort();
+}
+
+/// Go `TestLegacyConfigYAMLSavesBySubmittedVersion`: `PUT /v0/management/config.yaml`
+/// keeps a legacy upload as submitted and saves a v8 one in the latest layout.
+#[tokio::test]
+async fn v0_config_yaml_saves_by_submitted_version() {
+    for (body, steering, v8) in [
+        ("# Keep this comment\ncodex: {response-steering: true}\n", true, false),
+        (
+            "# Keep this comment\noauth: {providers: {codex: {response-steering: true}}}\n",
+            true,
+            true,
+        ),
+        (
+            "# Keep this comment\nconfig-version: 8\nupstream: {codex: {response-steering: false}}\n",
+            false,
+            true,
+        ),
+        (
+            "# Keep this comment\nrequest-retry: 3\nupstream: {codex: {response-steering: false}}\n",
+            false,
+            true,
+        ),
+    ] {
+        let f = Fixture::new("v0-yaml-version");
+        let (base, server) = f.server().await;
+        let hash = f.rt.config().management.secret_key.clone();
+        let body = private_config(body, &f.dir.join("auth"), &hash, !v8);
+        let (status, text) = call(&base, wreq::Method::PUT, "/v0/management/config.yaml", &body).await;
+        assert_eq!(status, 200, "{body}: {text}");
+        let file = f.file();
+        if v8 {
+            assert_canonical(&file);
+        } else {
+            assert_eq!(file, body, "v0 changed the submitted legacy layout");
+        }
+        assert!(file.contains("# Keep this comment"), "{file}");
+        let api = f.rt.config();
+        let api = api.for_api_key();
+        assert_eq!(
+            api.document["upstream"]["codex"]["response-steering"].as_bool(),
+            Some(steering),
+            "{file}"
+        );
+        server.abort();
+    }
+}
+
+/// Go `TestV0SetterSavesByExistingVersion` (v8 cases), `TestV0SaveUpgradesHistoricalV8Layout`
+/// and `TestV8MovedCommentsSurviveV0Saves`: a v0 setter saves an existing v8 file in the
+/// latest layout, and the comments of a moved historical field (and of the ancestors
+/// it leaves empty) survive repeated saves exactly once. The legacy-only case differs
+/// on purpose (docs/DIFFERENCES-FROM-GO.md): cliproxy-rs migrates it on the first save.
+#[tokio::test]
+async fn v0_setters_save_v8_files_in_the_latest_layout() {
+    for raw in [
+        "config-version: 8\noauth: {providers: {codex: {response-steering: true, header-defaults: {user-agent: oauth-agent}}, xai: {inject-x-search: true}}}\n",
+        "# Preserve provider settings\noauth: {providers: {codex: {response-steering: true}, xai: {inject-x-search: true}}}\n",
+        "config-version: 8\nupstream: {codex: {response-steering: true}, xai: {inject-x-search: true}}\nrouting: {retry: {request-retry: 3}}\n",
+    ] {
+        let f = Fixture::from_yaml("v0-existing-version", |auth, hash| {
+            private_config(raw, auth, hash, false)
+        });
+        let (base, server) = f.server().await;
+        let (status, text) = call(
+            &base,
+            wreq::Method::PUT,
+            "/v0/management/request-retry",
+            r#"{"value":2}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let file = f.file();
+        assert_canonical(&file);
+        let cfg = Config::parse(&file).unwrap();
+        let api = cfg.for_api_key();
+        assert_eq!(api.document["routing"]["retry"]["request-retry"], 2);
+        assert_eq!(
+            api.document["upstream"]["codex"]["response-steering"],
+            serde_yaml_ng::Value::Bool(true)
+        );
+        assert_eq!(
+            api.document["upstream"]["xai"]["inject-x-search"],
+            serde_yaml_ng::Value::Bool(true)
+        );
+        if raw.starts_with('#') {
+            assert!(file.contains("# Preserve provider settings"), "{file}");
+        }
+        server.abort();
+    }
+    let raw = "# DOCUMENT HEAD\nconfig-version: 8\noauth: # OAUTH INLINE\n  providers: # PROVIDERS INLINE\n    xai: # PROVIDER INLINE\n      # FIELD HEAD\n      inject-x-search: true # FIELD INLINE\n\n      # FIELD FOOT\n\n    # PROVIDER FOOT\nserver:\n  port: 8317 # UNRELATED INLINE\n# DOCUMENT FOOT\n";
+    let f = Fixture::from_yaml("v0-moved-comments", |auth, hash| {
+        let raw = raw.replacen(
+            "oauth: # OAUTH INLINE\n",
+            &format!("oauth: # OAUTH INLINE\n  auth-dir: {}\n", auth.display()),
+            1,
+        );
+        format!("management: {{secret-key: '{hash}'}}\n{raw}")
+    });
+    let (base, server) = f.server().await;
+    for retry in [2, 1, 0] {
+        let (status, body) = call(
+            &base,
+            wreq::Method::PUT,
+            "/v0/management/request-retry",
+            &format!(r#"{{"value":{retry}}}"#),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let file = f.file();
+        assert_canonical(&file);
+        for marker in [
+            "DOCUMENT HEAD",
+            "OAUTH INLINE",
+            "PROVIDERS INLINE",
+            "PROVIDER INLINE",
+            "FIELD HEAD",
+            "FIELD INLINE",
+            "FIELD FOOT",
+            "PROVIDER FOOT",
+            "UNRELATED INLINE",
+            "DOCUMENT FOOT",
+        ] {
+            assert_eq!(file.matches(marker).count(), 1, "{marker}: {file}");
+        }
+    }
+    server.abort();
+}
+
+/// Go `TestConfigV8FieldUpdatesKeepComments`: scalar field updates through the
+/// historical or canonical path keep the field's and its section's comments.
+#[tokio::test]
+async fn config_v8_field_updates_keep_comments() {
+    for method in [wreq::Method::PUT, wreq::Method::PATCH] {
+        for path in [
+            "oauth/providers/codex/response-steering",
+            "upstream/codex/response-steering",
+        ] {
+            let f = Fixture::from_yaml("field-comments", |auth, hash| {
+                format!(
+                    "management: {{secret-key: '{hash}'}}\noauth:\n  auth-dir: {}\n  providers:\n    codex: # PROVIDER INLINE\n      # FIELD HEAD\n      response-steering: true # FIELD INLINE\n\n      # FIELD FOOT\n",
+                    auth.display()
+                )
+            });
+            let (base, server) = f.server().await;
+            for body in ["false", "null", "true"] {
+                let (status, text) = call(&base, method.clone(), &format!("/v8/management/config/{path}"), body).await;
+                assert_eq!(status, 200, "{text}");
+                let file = f.file();
+                for marker in ["PROVIDER INLINE", "FIELD HEAD", "FIELD INLINE", "FIELD FOOT"] {
+                    assert_eq!(
+                        file.matches(marker).count(),
+                        1,
+                        "{method} {path} {body} {marker}: {file}"
+                    );
+                }
+            }
+            server.abort();
+        }
+    }
 }

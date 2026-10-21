@@ -97,6 +97,18 @@ const PATHS: &[(&str, &str)] = &[
     ),
     ("pprof", "observability.pprof"),
 ];
+// Go `v8ClientPaths`: the first historical spelling present wins.
+const CLIENT_PATHS: &[(&str, &str)] = &[
+    (
+        "oauth.providers.codex.optimize-multi-agent-v2",
+        "client.codex.optimize-multi-agent-v2",
+    ),
+    (
+        "providers.codex.optimize-multi-agent-v2",
+        "client.codex.optimize-multi-agent-v2",
+    ),
+    ("codex.optimize-multi-agent-v2", "client.codex.optimize-multi-agent-v2"),
+];
 // Go `v8SharedPaths` (52d5507d): historical v8 spellings of the shared `upstream`
 // settings. A canonical path wins by presence; these precede the legacy roots.
 pub(super) const SHARED_PATHS: &[(&str, &str)] = &[
@@ -223,32 +235,7 @@ impl ConfigDocument {
 
     pub(super) fn from_mapping(mut root: Mapping) -> anyhow::Result<Self> {
         validate_shape(&root)?;
-        // Historical client spelling precedence is ordered, before provider moves.
-        for old in ["oauth.providers.codex", "providers.codex", "codex"] {
-            let old = format!("{old}.optimize-multi-agent-v2");
-            if let Some(value) = lookup(&root, &old).cloned() {
-                remove(&mut root, &old);
-                insert_missing(&mut root, "client.codex.optimize-multi-agent-v2", value)?;
-            }
-        }
-        for (old, current) in SHARED_PATHS {
-            if let Some(value) = lookup(&root, old).cloned() {
-                remove(&mut root, old);
-                insert_missing(&mut root, current, value)?;
-            }
-        }
-        for (old, current) in SHARED_STRUCTS {
-            match lookup(&root, old) {
-                None => continue,
-                Some(Value::Null) => {}
-                Some(Value::Mapping(m)) if m.is_empty() => {}
-                // Fields the schema does not know stay for validation to report.
-                Some(Value::Mapping(_)) => continue,
-                Some(_) => bail!("{old} must be a mapping"),
-            }
-            remove(&mut root, old);
-            insert_missing(&mut root, current, Value::Mapping(Mapping::new()))?;
-        }
+        move_aliases(&mut root)?;
         if let Some(keys) = root.get("api-keys").filter(|v| !v.is_mapping()).cloned() {
             root.remove("api-keys");
             insert_missing(&mut root, "access.api-keys", keys)?;
@@ -321,22 +308,77 @@ impl ConfigDocument {
         if !legacy_client_keys {
             moves.clear();
         }
-        moves.extend(
-            PATHS
-                .iter()
-                .filter(|(old, _)| !old.contains('.'))
-                .map(|(old, new)| super::text::Move { old, new }),
-        );
+        // Text moves in `from_mapping`'s order; aliases go first.
+        let aliases = CLIENT_PATHS.iter().chain(SHARED_PATHS);
+        let mut moves: Vec<_> = aliases
+            .map(|(old, new)| super::text::Move { old, new })
+            .chain(moves)
+            .collect();
+        moves.extend(PATHS.iter().map(|(old, new)| super::text::Move { old, new }));
         let families: Vec<&str> = FAMILIES.iter().map(|(old, _)| *old).collect();
         let text = super::text::migrate(original, &moves, &families, &self.0)?;
         (Self::parse(&text).ok()?.0 == self.0).then_some(text)
+    }
+
+    /// Go `ProjectV8ConfigAliases`: moves canonical values into the historical subtree
+    /// a request names, so a read sees them there and a write there replaces or
+    /// deletes them. Populated canonical containers stay; their fields move one by one.
+    pub fn project_aliases(&mut self, parts: &[&str]) {
+        if parts.is_empty() {
+            return;
+        }
+        let path = parts.join(".");
+        let Some(root) = self.0.as_mapping_mut() else {
+            return;
+        };
+        for (old, current) in CLIENT_PATHS.iter().chain(SHARED_PATHS).chain(SHARED_STRUCTS) {
+            if path != *old && !old.starts_with(&format!("{path}.")) && !path.starts_with(&format!("{old}.")) {
+                continue;
+            }
+            let Some(value) = lookup(root, current).cloned() else {
+                continue;
+            };
+            if value.as_mapping().is_some_and(|m| !m.is_empty()) {
+                continue;
+            }
+            set_path(root, old, value);
+            remove(root, current);
+        }
+    }
+
+    /// Go `NormalizeV8ConfigAliases` for a request body or the edited document: the
+    /// historical v8 spellings move to their canonical paths. A null historical
+    /// container resets its fields, as null canonical leaves, so a PATCH merge cannot
+    /// turn it into a no-op.
+    pub fn normalize_aliases(value: &mut Value) -> anyhow::Result<()> {
+        let Some(root) = value.as_mapping_mut() else {
+            return Ok(());
+        };
+        for (container, _) in SHARED_STRUCTS {
+            if !matches!(lookup(root, container), Some(Value::Null)) {
+                continue;
+            }
+            let prefix = format!("{container}.");
+            for (old, current) in CLIENT_PATHS.iter().chain(SHARED_PATHS) {
+                if old.starts_with(&prefix) && lookup(root, current).is_none() {
+                    set_path(root, current, Value::Null);
+                }
+            }
+            remove(root, container);
+        }
+        move_aliases(root)
     }
 
     /// Go's read-time migration archives unrecognised sections as comments. Returns
     /// the removed `(path, value)` pairs; [`ConfigDocument::render_preserving`] callers
     /// append [`archive_comments`] for them.
     pub fn archive_unknown(&mut self) -> Vec<(String, Value)> {
-        super::schema::archive_unknown(&mut self.0)
+        let archived = super::schema::archive_unknown(&mut self.0);
+        for (section, _) in &archived {
+            // Go `warnUnrecognizedV8Section`.
+            tracing::warn!("unrecognized configuration section {section:?} commented out during v8 migration");
+        }
+        archived
     }
 
     /// Preserve unaffected comments, key order and scalar styles. Changes are applied
@@ -640,6 +682,90 @@ fn merge(dst: &mut Value, src: Value) {
     }
 }
 
+/// Go `NormalizeV8ConfigAliases`' moves: historical client and shared spellings go
+/// to their canonical paths, where a present value wins; an empty or null historical
+/// container becomes an empty canonical one.
+fn move_aliases(root: &mut Mapping) -> anyhow::Result<()> {
+    for (old, current) in CLIENT_PATHS.iter().chain(SHARED_PATHS) {
+        if let Some(value) = lookup(root, old).cloned() {
+            remove(root, old);
+            insert_missing(root, current, value)?;
+        }
+    }
+    for (old, current) in SHARED_STRUCTS {
+        match lookup(root, old) {
+            None => continue,
+            Some(Value::Null) => {}
+            Some(Value::Mapping(m)) if m.is_empty() => {}
+            // Fields the schema does not know stay for validation to report.
+            Some(Value::Mapping(_)) => continue,
+            Some(_) => bail!("{old} must be a mapping"),
+        }
+        remove(root, old);
+        insert_missing(root, current, Value::Mapping(Mapping::new()))?;
+    }
+    Ok(())
+}
+
+/// Sets `path`, replacing any value there and creating missing parent mappings.
+fn set_path(root: &mut Mapping, path: &str, value: Value) {
+    let parts: Vec<_> = path.split('.').collect();
+    let mut map = root;
+    for part in &parts[..parts.len() - 1] {
+        let next = map
+            .entry(Value::from(*part))
+            .or_insert_with(|| Value::Mapping(Mapping::new()));
+        if !next.is_mapping() {
+            *next = Value::Mapping(Mapping::new());
+        }
+        map = next.as_mapping_mut().expect("just made a mapping");
+    }
+    map.insert(Value::from(parts[parts.len() - 1]), value);
+}
+
+/// Go `IsV8ConfigLayout`: a document is v8 by its version, a v8-only section, grouped
+/// `api-keys`, or a v8 path; roots shared with the legacy layout do not count alone.
+pub fn is_v8_layout(root: &Value) -> bool {
+    let mut root = root.clone();
+    if super::expand_merges(&mut root).is_err() {
+        return false;
+    }
+    let Some(map) = root.as_mapping() else {
+        return false;
+    };
+    const SECTIONS: &[&str] = &[
+        "models",
+        "config-version",
+        "server",
+        "management",
+        "access",
+        "credentials",
+        "requests",
+        "oauth",
+        "upstream",
+        "multimedia",
+        "observability",
+    ];
+    if map.keys().any(|k| k.as_str().is_some_and(|k| SECTIONS.contains(&k)))
+        || map.get("api-keys").is_some_and(Value::is_mapping)
+    {
+        return true;
+    }
+    CLIENT_PATHS
+        .iter()
+        .chain(SHARED_PATHS)
+        .chain(SHARED_STRUCTS)
+        .chain(PATHS)
+        .any(|(old, current)| {
+            (old != current && lookup(map, current).is_some())
+                || (old.starts_with("providers.") && lookup(map, old).is_some())
+                || current.strip_prefix("routing.").is_some_and(|rest| {
+                    let child = rest.split('.').next().unwrap_or(rest);
+                    old != current && lookup(map, &format!("routing.{child}")).is_some()
+                })
+        })
+}
+
 fn insert_missing(root: &mut Mapping, path: &str, value: Value) -> anyhow::Result<()> {
     let parts: Vec<_> = path.split('.').collect();
     let mut map = root;
@@ -747,6 +873,20 @@ mod tests {
         let anchored = "defaults: &d {a: 1}\nhost: x\n";
         let doc = ConfigDocument::parse("host: x\n").unwrap();
         assert!(doc.migrated_text(anchored).is_none());
+    }
+
+    /// Go `TestV8MigrationCarriesProviderKeyFootComments` (3be5fa44).
+    #[test]
+    fn migration_keeps_provider_and_field_key_foot_comments_once() {
+        let original = "oauth:\n    providers:\n        xai:\n            inject-x-search: true\n            \
+                        # FIELD KEY FOOT\n        # PROVIDER KEY FOOT\n";
+        let text = ConfigDocument::parse(original)
+            .unwrap()
+            .migrated_text(original)
+            .unwrap();
+        for marker in ["PROVIDER KEY FOOT", "FIELD KEY FOOT"] {
+            assert_eq!(text.matches(marker).count(), 1, "{marker}: {text}");
+        }
     }
 
     #[test]
