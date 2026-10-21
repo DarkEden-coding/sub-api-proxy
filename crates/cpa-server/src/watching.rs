@@ -158,25 +158,31 @@ fn log_auth_changes(before: &Snapshot, after: &Snapshot) {
 }
 
 pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
-    // Go stores its own serialized config snapshot, independently of management
-    // mutations of the published runtime config before their disk event arrives.
-    let (mut previous_config, initial_hash) = {
-        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-        (
-            state.rt.config(),
-            std::fs::read(&state.path)
-                .ok()
-                .map(|data| <Hash>::from(Sha256::digest(data))),
-        )
-    };
     let first = targets(state, None);
-    let state = Arc::downgrade(state);
+    let weak = Arc::downgrade(state);
+    let state = state.clone();
     tokio::spawn(async move {
-        // Off the request threads: setup can block on a slow network path, and on
-        // Windows it waits for the watch thread. A panic leaves the 2-second poll.
-        let mut events = tokio::task::spawn_blocking(move || Events::new(&first))
-            .await
-            .unwrap_or_default();
+        // Off the request threads: reading the file waits for the disk lock, setup can
+        // block on a slow network path, and on Windows it waits for the watch thread. A
+        // panic in the setup leaves the 2-second poll. Go stores its own serialized
+        // config snapshot, independently of management mutations of the published
+        // runtime config before their disk event arrives.
+        let started = tokio::task::spawn_blocking(move || {
+            let snapshot = {
+                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+                let hash = std::fs::read(&state.path)
+                    .ok()
+                    .map(|data| <Hash>::from(Sha256::digest(data)));
+                (state.rt.config(), hash)
+            };
+            let events = catch_unwind(AssertUnwindSafe(|| Events::new(&first))).unwrap_or_default();
+            (snapshot, events)
+        })
+        .await;
+        let Ok(((mut previous_config, initial_hash), mut events)) = started else {
+            return;
+        };
+        let state = weak;
         let mut cache = HashCache::default();
         // The state last reloaded; the first stable observation reloads once, as Go's
         // watcher reloads clients when it starts.
