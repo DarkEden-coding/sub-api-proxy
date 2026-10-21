@@ -627,12 +627,14 @@ fn headers_match(headers: Option<&HeaderMap>, rules: &[(String, String)]) -> boo
 }
 
 /// Go `payloadModelCandidates`: the upstream model, the client's suffix-free model and,
-/// when it has a thinking suffix, the client's model as written (case-insensitive dedup).
+/// when it has a thinking suffix, the client's model as written, deduplicated by
+/// `strings.ToLower` key (σ and ς stay distinct; `İ` and `i` collapse).
 fn model_candidates(model: &str, requested: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let mut add = |v: &str| {
         let v = v.trim();
-        if !v.is_empty() && !out.iter().any(|c| c.go_eq_fold(v)) {
+        if !v.is_empty() && seen.insert(v.go_lower()) {
             out.push(v.to_owned());
         }
     };

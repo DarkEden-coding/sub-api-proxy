@@ -1374,7 +1374,10 @@ fn candidates(requested: &str) -> Vec<String> {
     out
 }
 
-fn resolve_with<'a, I>(requested: &str, entries: I) -> AliasResult
+/// Go's alias resolution over `entries`: `matches(alias, candidate)` is `EqualFold` for
+/// configured models and per-credential aliases, and `strings.ToLower` key equality for
+/// the global OAuth alias table.
+fn resolve_with<'a, I>(requested: &str, entries: I, matches: fn(&str, &str) -> bool) -> AliasResult
 where
     I: Iterator<Item = (&'a str, &'a str, bool)> + Clone,
 {
@@ -1382,7 +1385,7 @@ where
     for candidate in candidates(requested) {
         for (name, alias, force) in entries.clone() {
             let (name, alias) = (name.trim(), alias.trim());
-            if name.is_empty() || alias.is_empty() || !alias.go_eq_fold(&candidate) {
+            if name.is_empty() || alias.is_empty() || !matches(alias, &candidate) {
                 continue;
             }
             if name.go_eq_fold(base) {
@@ -1403,6 +1406,66 @@ where
         }
     }
     AliasResult::default()
+}
+
+fn fold(a: &str, b: &str) -> bool {
+    a.go_eq_fold(b)
+}
+
+fn same_lower(a: &str, b: &str) -> bool {
+    a.go_lower() == b.go_lower()
+}
+
+/// Go `resolveOAuthModelAliasWithResult`: the credential's own aliases first, compared
+/// with `EqualFold`, then the channel's global table, looked up by `strings.ToLower` key
+/// (`resolveUpstreamModelFromAliasTable`), with no `EqualFold` fallback.
+fn resolve_oauth(cfg_aliases: &HashMap<String, Vec<OAuthAlias>>, c: &Credential, requested: &str) -> AliasResult {
+    let Some(channel) = alias_channel(c) else {
+        return AliasResult::default();
+    };
+    fn entries(aliases: &[OAuthAlias]) -> impl Iterator<Item = (&str, &str, bool)> + Clone {
+        aliases
+            .iter()
+            .map(|a| (a.name.as_str(), a.alias.as_str(), a.force_mapping))
+    }
+    let own = attribute_aliases(c);
+    let r = resolve_with(requested, entries(&own), fold);
+    if !r.upstream.is_empty() {
+        return r;
+    }
+    let global = cfg_aliases.get(&channel).map(Vec::as_slice).unwrap_or_default();
+    resolve_with(requested, entries(global), same_lower)
+}
+
+/// Go `lookupAPIKeyUpstreamModel` over the table `compileAPIKeyModelAliasForModels`
+/// builds: each entry with both a name and an alias adds its alias, suffix-free alias,
+/// name and suffix-free name under `strings.ToLower` keys, the first entry winning a key.
+/// The requested model is looked up, then its suffix-free form.
+fn api_key_table_upstream(requested: &str, models: &[ConfigModel]) -> Option<String> {
+    let requested = requested.trim();
+    let base = |s: &'_ str| -> String {
+        let s = s.trim();
+        match suffix_of(s) {
+            Some(_) => s[..s.rfind('(').unwrap()].trim().go_lower(),
+            None => s.go_lower(),
+        }
+    };
+    let mut keys = vec![requested.go_lower()];
+    let requested_base = base(requested);
+    if !requested_base.is_empty() && requested_base != keys[0] {
+        keys.push(requested_base);
+    }
+    keys.into_iter().filter(|k| !k.is_empty()).find_map(|key| {
+        models.iter().find_map(|m| {
+            let (name, alias) = (m.name.trim(), m.alias.trim());
+            if name.is_empty() || alias.is_empty() {
+                return None;
+            }
+            [alias.go_lower(), base(alias), name.go_lower(), base(name)]
+                .contains(&key)
+                .then(|| preserve_suffix(name, requested))
+        })
+    })
 }
 
 /// Go `rewriteModelForAuth`: drop the credential's `prefix/`.
@@ -1436,6 +1499,7 @@ pub fn execution_models(
                 models
                     .iter()
                     .map(|m| (m.name.as_str(), m.alias.as_str(), m.force_mapping)),
+                fold,
             );
             if r.upstream.is_empty() {
                 AliasResult {
@@ -1447,13 +1511,7 @@ pub fn execution_models(
             }
         }
     } else {
-        let aliases = oauth_aliases_for(cfg_aliases, c);
-        resolve_with(
-            requested,
-            aliases
-                .iter()
-                .map(|a| (a.name.as_str(), a.alias.as_str(), a.force_mapping)),
-        )
+        resolve_oauth(cfg_aliases, c, requested)
     };
     let upstream = if configured || alias.upstream.is_empty() {
         requested.to_owned()
@@ -1464,6 +1522,13 @@ pub fn execution_models(
         let pool = alias_pool(&upstream, &models);
         if openai_compat(c) && pool.len() > 1 {
             return (pool, alias);
+        }
+        // Go `applyAPIKeyModelAliasWithRouting`: an API key tries its per-credential
+        // lowercase-keyed table before the `EqualFold` scan; a compat pool does not.
+        if !openai_compat(c)
+            && let Some(upstream) = api_key_table_upstream(&upstream, &models)
+        {
+            return (vec![upstream], alias);
         }
         if let Some(first) = pool.into_iter().next() {
             return (vec![first], alias);
@@ -1509,13 +1574,7 @@ pub fn selection_model(cfg_aliases: &HashMap<String, Vec<OAuthAlias>>, c: &Crede
     if is_api_key(c) || openai_compat(c) {
         return requested.to_owned();
     }
-    let aliases = oauth_aliases_for(cfg_aliases, c);
-    let r = resolve_with(
-        requested,
-        aliases
-            .iter()
-            .map(|a| (a.name.as_str(), a.alias.as_str(), a.force_mapping)),
-    );
+    let r = resolve_oauth(cfg_aliases, c, requested);
     if r.upstream.is_empty() {
         requested.to_owned()
     } else {
@@ -1733,6 +1792,47 @@ mod tests {
         assert!(r.ids().any(|id| id == "devin/οσ"), "{:?}", r.ids().collect::<Vec<_>>());
         assert!(r.client_supports("d.json", "devin/ος"));
         assert_eq!(r.client_model("d.json", "devin/ος").unwrap().id, "devin/οσ");
+    }
+
+    /// Go `applyAPIKeyModelAliasWithRouting`: an API key resolves through its
+    /// `strings.ToLower`-keyed alias table before the `EqualFold` scan, so aliases σ and ς
+    /// stay distinct; `Σ` lowercases to σ.
+    #[test]
+    fn api_key_aliases_use_lowercase_keys_before_fold() {
+        let cfg = Config::parse(
+            "claude-api-key:\n  - api-key: k\n    models: [{name: one, alias: σ}, {name: two, alias: ς}]\n",
+        )
+        .unwrap();
+        let c = crate::config::credentials::from_config(&cfg).remove(0);
+        let upstream = |model: &str| execution_models(&HashMap::new(), &c, model).0;
+        assert_eq!(upstream("ς"), ["two"]);
+        assert_eq!(upstream("σ"), ["one"]);
+        assert_eq!(upstream("Σ(high)"), ["one(high)"]);
+    }
+
+    /// Go `resolveOAuthModelAliasWithResult`: the credential's own aliases match with
+    /// `EqualFold`, the global table by `strings.ToLower` key only.
+    #[test]
+    fn oauth_aliases_fold_per_credential_and_key_globally() {
+        let cfg = Config::parse(
+            "oauth:\n  model-alias:\n    claude:\n      - {name: one, alias: σ}\n      - {name: two, alias: ς}\n",
+        )
+        .unwrap();
+        let aliases = global_aliases(&cfg);
+        let global = file("a.json", serde_json::json!({"type":"claude"}), &[]);
+        assert_eq!(execution_models(&aliases, &global, "ς").0, ["two"]);
+        assert_eq!(selection_model(&aliases, &global, "ς"), "two");
+        assert_eq!(execution_models(&aliases, &global, "σ").0, ["one"]);
+        let own = file(
+            "b.json",
+            serde_json::json!({"type":"claude"}),
+            &[("model_aliases", r#"[{"name":"three","alias":"σ"}]"#)],
+        );
+        assert_eq!(
+            execution_models(&aliases, &own, "ς").0,
+            ["three"],
+            "EqualFold on its own aliases"
+        );
     }
 
     #[test]
