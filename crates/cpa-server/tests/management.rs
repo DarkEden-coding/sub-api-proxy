@@ -4245,10 +4245,10 @@ async fn v0_setters_save_v8_files_in_the_latest_layout() {
         format!("management: {{secret-key: '{hash}'}}\n{raw}")
     });
     let (base, server) = f.server().await;
-    for retry in [2, 1, 0] {
+    for (method, retry) in [(wreq::Method::PUT, 2), (wreq::Method::PATCH, 1), (wreq::Method::PUT, 0)] {
         let (status, body) = call(
             &base,
-            wreq::Method::PUT,
+            method,
             "/v0/management/request-retry",
             &format!(r#"{{"value":{retry}}}"#),
         )
@@ -4256,6 +4256,11 @@ async fn v0_setters_save_v8_files_in_the_latest_layout() {
         assert_eq!(status, 200, "{body}");
         let file = f.file();
         assert_canonical(&file);
+        assert_eq!(
+            Config::parse(&file).unwrap().document["routing"]["retry"]["request-retry"],
+            retry,
+            "{file}"
+        );
         for marker in [
             "DOCUMENT HEAD",
             "OAUTH INLINE",
