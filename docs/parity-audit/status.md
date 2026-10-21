@@ -19,7 +19,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M1 | 151 | 66 | 73 | 12 |
 | M2 | 189 | 71 | 114 | 4 |
 | M3 | 424 | 197 | 211 | 16 |
-| M4 | 589 | 249 | 328 | 12 |
+| M4 | 589 | 248 | 329 | 12 |
 | M5 | 331 | 218 | 110 | 3 |
 | M6 | 267 | 125 | 126 | 16 |
 
@@ -35,7 +35,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | google | 4 | 78 | M3-0353, M3-0354, M3-0360, M3-0361 |
 | openai-xai | 3 | 30 | M3-0356, M3-0359, M6-0217 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
-| manage | 1 | 134 | M4-0526 |
+| manage | 1 | 135 | M4-0526 |
 | tui | 1 | 9 | M4-0521 |
 | home | 0 | 27 | — |
 | realtime | 0 | 8 | — |
@@ -1210,7 +1210,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0226 | requests.payload.filter[].params | covered | read in crates/cpa-common/src/payload.rs, crates/cpa-server/src/management/legacy/view.rs (+1); set in crates/cpa-common/tests/fixtures/payload_go.json, crates/cpa-exec/src/claude/testdata/go_executor.json (+15) |  | heuristic: key name match |
 | M4-0227 | config-version | covered | read in crates/cpa-core/src/config.rs, crates/cpa-core/src/config/text.rs (+1); set in crates/cliproxy/src/main.rs, crates/cliproxy/tests/fixtures/plugin_cli_go.json (+22) |  | heuristic: key name match |
 | M4-0228 | api-keys.<family>[].name | partial | read in crates/cpa-core/src/config/credentials.rs, crates/cpa-core/src/config/sanitize.rs; no test sets it | server | heuristic: key name match |
-| M4-0229 | Legacy/v8/mixed YAML precedence is presence-based, including false/zero/null/empty maps/li… | covered | crates/cpa-core/src/config.rs v8_wins_by_presence_even_when_null_or_empty, legacy_spellings_still_work, null_or_scalar_parents_are_rejected; document.rs tests; manage_go.json config_writes |  |  |
+| M4-0229 | Legacy/v8/mixed YAML precedence is presence-based, including false/zero/null/empty maps/li… | partial | crates/cpa-core/src/config.rs v8_wins_by_presence_even_when_null_or_empty, legacy_spellings_still_work, null_or_scalar_parents_are_rejected; document.rs tests; manage_go.json config_writes | manage | Gap (ponytail in config.rs expand_merges): a quoted << key in config.yaml merges at load, where yaml.v3 loads it as a plain key. Go clears only double-quoted key styles on a v8 save, so a double-quoted "<<" merges a mapping or fails on a scalar after the next save, a single-quoted '<<' stays a plain key, and an unknown section archived before the save never merges. A JSON body sent to /config.yaml is the same gap (Go 422, Rust 400). Other JSON management bodies match Go: << stays literal through the root-shape check and the update, then the completed candidate is expanded, so keys already present win (manage_go.rs config_writes merge_keys_in_json_bodies). |
 | M4-0230 | Codex multi-agent historical paths precedence: client.codex.optimize-multi-agent-v2; then … | partial | crates/cpa-core/src/config/document.rs CLIENT_PATHS, ConfigDocument::project_aliases, normalize_aliases; crates/cpa-exec/src/codex_client_tests.rs settings_read_go_config_paths; tests/management.rs config_v8_historical_field_paths (oauth/providers/codex/optimize-multi-agent-v2), config_v8_historical_provider_subtrees; crates/cpa-server/src/realtime/relay.rs (allow-private-remote-ips read as the inverse); tests/manage_go.rs scenario with both private-IP spellings | manage | The multi-agent precedence (client > oauth.providers > providers > codex) and the v8 read, write and delete aliases follow 3be5fa44. The private-IP relay alias evidence is the manage_go.json recording from before v8.0.35; it is re-recorded with the direct v8 save. |
 | M4-0231 | Normalization/defaults beyond zero values: optional cloud config may be absent/empty/inval… | partial | crates/cliproxy/src/main.rs cloud standby; crates/cpa-server/src/management (bcrypt keys); crates/cpa-core/src/config/trusted.rs | manage | Clamps (queue retention, log sizes, caps) are not tested case by case. |
 
