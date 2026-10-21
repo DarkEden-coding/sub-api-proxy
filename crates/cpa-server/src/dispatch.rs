@@ -2191,6 +2191,8 @@ async fn attempt(
         let mut tracker = start(&lease.credential, &mut req);
         observe(&lease.credential, &mut req);
         let session = session.as_ref();
+        let private = lease.home_private().map(|p| p.attributes.clone()).unwrap_or_default();
+        let private = &private;
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
             let credential = match crate::plugins::model_callbacks::context().filter(|c| !c.proxy_url.is_empty()) {
                 Some(context) => {
@@ -2202,7 +2204,8 @@ async fn attempt(
             };
             let credential = rt.for_executor(&credential);
             if let Some(adapter) = rt.plugin_runtime().executor(&credential, cfg) {
-                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, req).await;
+                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, private, req)
+                    .await;
             }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
@@ -2358,10 +2361,11 @@ fn keep_home(
         return Some(lease);
     };
     let pick = guard.defuse()?;
-    let (credential, route) = (lease.credential.id.clone(), lease.selection.model.clone());
+    let (credential, route) = (lease.credential.clone(), lease.selection.model.clone());
+    let availability = lease.home_private().map(|p| p.availability.clone()).unwrap_or_default();
     match pick.keep(lease) {
         None => {
-            home.keep(pick, &credential, &route, user_key.to_owned());
+            home.keep(pick, &credential, availability, &route, user_key.to_owned());
             None
         }
         Some(lease) => {

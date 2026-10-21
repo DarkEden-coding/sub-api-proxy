@@ -422,6 +422,7 @@ impl Runtime {
                 end: Some(grant.end),
                 releases: releases.clone(),
                 cancel: grant.cancel,
+                private: grant.private,
             }),
             // ponytail: Go's Home dispatch keys its own session aliases on LCP matches
             // (home_session_alias.go); remote picks here carry no LCP binding.
@@ -1010,6 +1011,11 @@ impl Lease {
     /// Whether the credential came from the remote dispatcher (Go Home mode).
     pub fn is_remote(&self) -> bool {
         self.remote.is_some()
+    }
+
+    /// What a Home pick keeps outside the credential's attributes.
+    pub(crate) fn home_private(&self) -> Option<&crate::remote::Private> {
+        self.remote.as_ref().map(|remote| &remote.private)
     }
 
     /// Resolves when the dispatcher cancels this lease's execution.
@@ -4310,6 +4316,7 @@ mod tests {
             })),
             releases: Default::default(),
             cancel: None,
+            private: Default::default(),
         });
         let guard = Probe(dropped.clone());
         let err = ExecError::local(502, FailureScope::Transport, "boom");
@@ -4362,6 +4369,7 @@ mod tests {
             })),
             releases: Default::default(),
             cancel: Some(cancel),
+            private: Default::default(),
         });
         let guard = Probe(dropped.clone());
         let inner = futures_util::stream::iter(vec![Ok(Bytes::from_static(b"a"))])

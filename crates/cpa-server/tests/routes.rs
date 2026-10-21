@@ -1211,6 +1211,7 @@ impl cpa_server::remote::RemoteDispatch for Picks {
                 cancel: None,
                 request_retry: None,
                 user_api_key: key.into(),
+                private: Default::default(),
             })
         })
     }

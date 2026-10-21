@@ -89,6 +89,7 @@ impl RemoteDispatch for FakeHome {
                 cancel: None,
                 request_retry: None,
                 user_api_key: self.user_key.into(),
+                private: Default::default(),
             })
         })
     }

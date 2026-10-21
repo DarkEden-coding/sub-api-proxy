@@ -334,6 +334,7 @@ pub(crate) async fn execute_credential(
     call: &Call,
     adapter: &cpa_plugin::executor::Adapter,
     credential: &cpa_core::credential::Credential,
+    private: &[String],
     req: cpa_core::exec::ExecRequest,
 ) -> Result<cpa_core::exec::ExecResponse, ExecError> {
     let host = rt.plugins();
@@ -378,7 +379,7 @@ pub(crate) async fn execute_credential(
         metadata,
         storage_json: Bytes::from(cpa_plugin::gojson::to_vec(&auth_metadata)),
         auth_metadata,
-        auth_attributes: crate::management::quota::go_attributes(credential),
+        auth_attributes: plugin_attributes(credential, private),
     };
     // The router path's scope (`Scope::new`) with the post-auth headers and path, so
     // nested `host.model.*` calls keep the pin, session and request context.
@@ -705,11 +706,47 @@ impl StreamState {
     }
 }
 
+/// Go `Auth.Attributes` as a plugin executor gets it. `private` names what the Home
+/// dispatcher set itself on a dispatched credential (Go keeps those outside
+/// `Auth.Attributes`); attributes Home sent stay, whatever their names.
+fn plugin_attributes(
+    credential: &cpa_core::credential::Credential,
+    private: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    let mut attributes = crate::management::quota::go_attributes(credential);
+    for key in private {
+        attributes.remove(key);
+    }
+    attributes
+}
+
 #[cfg(test)]
 mod tests {
     use cpa_core::credential::Credential;
 
     use super::*;
+
+    /// A Home credential's dispatcher-set attributes stay out of the plugin request;
+    /// one Home sent itself stays in, even under a name the dispatcher also uses.
+    #[test]
+    fn plugin_attributes_keep_home_sent_ones_and_drop_dispatcher_ones() {
+        let mut c = Credential::relay_session("home-a");
+        for (key, value) in [
+            ("base_url", "http://127.0.0.1:9"),
+            (crate::remote::SESSION, "plugin-owned"),
+            (crate::remote::MODEL_INFO, r#"{"id":"gpt-up"}"#),
+            (crate::remote::PROVIDER, "openai-compatible-probe"),
+        ] {
+            c.attributes.insert(key.into(), value.into());
+        }
+        let private = [crate::remote::MODEL_INFO.to_owned(), crate::remote::PROVIDER.to_owned()];
+        let attributes = plugin_attributes(&c, &private);
+        assert_eq!(
+            attributes.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["base_url", crate::remote::SESSION, "runtime_only"]
+        );
+        assert_eq!(attributes[crate::remote::SESSION], "plugin-owned");
+    }
 
     /// Every provider offered to a model router selects its credential when routed to,
     /// including Kimi files typed with their domain.
