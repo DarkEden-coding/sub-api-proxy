@@ -220,20 +220,23 @@ impl Runner {
                 // Each sync asks every executor plugin, none of which registers models,
                 // for its identifier twice. The watcher's reload comes about 200 ms
                 // after serving starts and can otherwise land in any later step.
+                // The barrier counts this fixture's calls: it does not prove quiescence. A
+                // build that asks fewer times fails here after 10 s; update the count then.
                 let labels = executor_labels(scenario);
-                let mut asked: Vec<String> = Vec::new();
+                let identifiers = json!({"methods": ["executor.identifier"]});
                 let synced = Instant::now() + Duration::from_secs(10);
-                loop {
-                    let records = runner.records(&json!({"methods": ["executor.identifier"]}));
-                    asked.extend(
-                        records
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|r| r["label"].as_str().unwrap().to_owned()),
-                    );
+                let mut asked = loop {
+                    // Non-destructive snapshots, so no call is lost while the recorders
+                    // still append; drained once the count is reached.
+                    let asked: Vec<String> = runner
+                        .read_records(&identifiers, false)
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|r| r["label"].as_str().unwrap().to_owned())
+                        .collect();
                     if labels.iter().all(|l| asked.iter().filter(|a| a == l).count() >= 4) {
-                        break;
+                        break asked;
                     }
                     assert!(
                         Instant::now() < synced,
@@ -241,7 +244,8 @@ impl Runner {
                         scenario["name"]
                     );
                     std::thread::sleep(Duration::from_millis(25));
-                }
+                };
+                runner.records(&identifiers);
                 asked.sort_unstable();
                 asked.dedup();
                 assert_eq!(asked, labels, "{}: startup executor.identifier", scenario["name"]);
@@ -366,7 +370,17 @@ impl Runner {
 
     /// The generator's `records`: every call a recorder received whose method is listed
     /// (a trailing "." matches a prefix), files in name order, then cleared.
+    /// Takes the recorded calls of `args["methods"]`: the record files are read, then
+    /// removed.
     fn records(&self, args: &Value) -> Value {
+        self.read_records(args, true)
+    }
+
+    /// The recorded calls of `args["methods"]` in each recorder's order, recorder files
+    /// in name order. `drain` removes the files after reading them; a call appended
+    /// between the read and the removal is lost, so only a reader that has nothing more
+    /// to wait for drains.
+    fn read_records(&self, args: &Value, drain: bool) -> Value {
         let methods: Vec<&str> = args["methods"]
             .as_array()
             .unwrap()
@@ -389,12 +403,31 @@ impl Runner {
         for name in names {
             let path = self.dir("RECDIR").join(&name);
             let data = std::fs::read_to_string(&path).unwrap();
-            std::fs::remove_file(&path).unwrap();
+            if drain {
+                std::fs::remove_file(&path).unwrap();
+            }
+            // `request.complete` runs on a task of its own, but only once the request's
+            // synchronous hooks are done (Go schedules it after response interception,
+            // sdk/api/handlers/handlers_execution.go): none may follow it.
+            let mut completed = std::collections::HashSet::new();
             for line in data.lines() {
                 let Ok(rec) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
                 let method = rec["method"].as_str().unwrap_or_default();
+                let request_id = serde_json::from_str::<Value>(rec["request"].as_str().unwrap_or_default())
+                    .ok()
+                    .and_then(|r| r["RequestID"].as_str().map(str::to_owned))
+                    .filter(|id| !id.is_empty());
+                if let Some(id) = request_id {
+                    if method == "request.complete" {
+                        completed.insert(id);
+                    } else if (method.starts_with("request.intercept") || method.starts_with("response."))
+                        && completed.contains(&id)
+                    {
+                        panic!("{name}: {method} of request {id} was recorded after its request.complete");
+                    }
+                }
                 if !wanted(method) {
                     continue;
                 }
@@ -418,10 +451,11 @@ impl Drop for Runner {
     }
 }
 
-/// Go and Rust deliver `request.complete` on a task of its own once the response is
-/// written, so its place among the other records, and among other requests'
-/// completions, varies with load. Records compare in order with the completions moved
-/// to the end and sorted.
+/// Go and Rust deliver `request.complete` on a task of its own once the request's
+/// synchronous hooks are done (possibly before the handler writes the response), so its
+/// place among later records, and among other requests' completions, varies with load.
+/// Records compare in order with the completions moved to the end and sorted;
+/// [`Runner::read_records`] checks that no hook follows its own request's completion.
 fn async_completions_last(records: Value) -> Value {
     let Value::Array(records) = records else {
         return records;
