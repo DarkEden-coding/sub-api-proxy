@@ -398,5 +398,30 @@ async fn replay(tag: &str, fixture: &Fixture, expected: impl Fn(&Scenario) -> St
             failures.push(format!("== {tag}/{}\n{}", s.name, diffs.join("\n")));
         }
     }
+    if tag == "speech" {
+        // Past the shared request limit: Go has none by default, reads an identity body
+        // whole and answers its decoded 1 MiB check.
+        let want = fixture
+            .scenarios
+            .iter()
+            .find(|s| s.name == "speech_zstd_decoded_too_large")
+            .expect("the oversize scenario");
+        let res = client
+            .post(format!("{base}/v1/tts"))
+            .header("Authorization", "Bearer client-key-1")
+            .header("Content-Type", "application/json")
+            .body(vec![b' '; cpa_server::MAX_REQUEST_BYTES + 1])
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap();
+        if (status, body.as_str()) != (want.status, want.response.as_str()) {
+            failures.push(format!(
+                "== speech/identity_body_over_request_limit\n  go   {} {}\n  rust {status} {body}",
+                want.status, want.response
+            ));
+        }
+    }
     failures
 }
