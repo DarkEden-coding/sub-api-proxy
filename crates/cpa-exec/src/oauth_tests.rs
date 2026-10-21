@@ -243,22 +243,44 @@ async fn an_unreadable_refresh_answer_is_not_retried() {
         "the 503 is retried once, then no more"
     );
     // A connection dropped before any answer (DoesNotReplayAfterTransportError).
+    let error = refresh_against_raw(b"").await;
+    assert_eq!(error.scope, FailureScope::Transport);
+    // A 200 whose body ends before its Content-Length, then the connection closes.
+    refresh_against_raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"access_token\"",
+    )
+    .await;
+    // A 200 whose gzip body is not gzip.
+    refresh_against_raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot gzip",
+    )
+    .await;
+}
+
+/// Refreshes against a server that answers every connection with `raw` and closes it,
+/// and asserts that exactly one token request was made.
+async fn refresh_against_raw(raw: &'static [u8]) -> ExecError {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/token", listener.local_addr().unwrap());
     let accepted = Arc::new(AtomicUsize::new(0));
     tokio::spawn({
         let accepted = accepted.clone();
         async move {
-            while let Ok((socket, _)) = listener.accept().await {
+            while let Ok((mut socket, _)) = listener.accept().await {
                 accepted.fetch_add(1, Ordering::SeqCst);
+                if !raw.is_empty() {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let _ = socket.write_all(raw).await;
+                }
                 drop(socket);
             }
         }
     });
     let oauth = OAuth::with_endpoints(wreq::Client::new(), &url, &url, &url);
-    let error = oauth.refresh("fake-refresh-dropped").await.unwrap_err();
-    assert_eq!(error.scope, FailureScope::Transport);
-    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    let error = oauth.refresh("fake-refresh-raw").await.unwrap_err();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1, "retried after {error:?}");
+    error
 }
 
 #[tokio::test]

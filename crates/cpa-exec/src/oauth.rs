@@ -236,10 +236,20 @@ impl OAuth {
                 tokio::time::sleep(Duration::from_secs(attempt)).await;
             }
             // Go `isClaudeRefreshRetryable` (c163bae4): only a 5xx answer, never a 429. A
-            // transport or decoding failure is ambiguous: Anthropic may have spent the
-            // single-use refresh token, and a replay would turn it into invalid_grant.
+            // transport, body-read, decompression or decoding failure is ambiguous:
+            // Anthropic may have spent the single-use refresh token, and a replay would
+            // turn it into invalid_grant. Only an error status is Credential-scoped with
+            // the HTTP_FAILURE text; read and decompression failures are Transport or
+            // Request, and the timeout and missing-field errors carry other text.
             match self.refresh_once(refresh).await {
-                Err(error) if error.status >= 500 && error.body == HTTP_FAILURE && attempt < 2 => continue,
+                Err(error)
+                    if error.status >= 500
+                        && error.scope == FailureScope::Credential
+                        && error.body == HTTP_FAILURE
+                        && attempt < 2 =>
+                {
+                    continue;
+                }
                 result => return result,
             }
         }
