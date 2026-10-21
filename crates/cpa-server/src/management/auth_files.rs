@@ -505,9 +505,12 @@ fn int_value(v: &Value) -> Option<i64> {
     }
 }
 
+/// Go `authFileQuotaContext`: the quota plugin selected per provider key.
+type QuotaPlugins = std::collections::HashMap<String, String>;
+
 /// Go `buildAuthFileEntryLocked`. `None` hides the credential (config API keys and
 /// disabled credentials whose file is gone).
-fn entry(state: &Management, c: &Credential, v8: bool) -> Option<BTreeMap<&'static str, Value>> {
+fn entry(state: &Management, c: &Credential, v8: bool, quota: &QuotaPlugins) -> Option<BTreeMap<&'static str, Value>> {
     let runtime = runtime_only(c);
     // Go `buildAuthFileEntryLocked`: runtime-only auths are listed from memory and
     // hidden while disabled; other credentials need a file path.
@@ -561,7 +564,18 @@ fn entry(state: &Management, c: &Credential, v8: bool) -> Option<BTreeMap<&'stat
     if !model_quotas.is_empty() {
         e.insert("model_quotas", Value::Object(model_quotas));
     }
-    if let Some(probe) = c.metadata.get("quota_probe").filter(|v| !v.is_null()) {
+    if let Some(plugin_id) = quota
+        .get(&cpa_plugin::host::normalize_provider(&c.provider))
+        .filter(|id| !id.is_empty())
+    {
+        e.insert("supports_quota", true.into());
+        e.insert("quota_provider", c.provider.clone().into());
+        if v8 {
+            e.insert("quota_plugin_id", plugin_id.clone().into());
+        }
+    }
+    // Go 0c708401: only the v0 quota route runs a declarative `quota_probe`.
+    if !v8 && let Some(probe) = c.metadata.get("quota_probe").filter(|v| !v.is_null()) {
         e.insert("supports_quota", true.into());
         e.insert("quota_probe", super::sorted_keys(probe));
     }
@@ -745,6 +759,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
         q.first("name").trim().to_owned(),
         q.first("auth_index").trim().to_owned(),
     );
+    let quota = state.rt.plugins().quota_provider_plugin_ids().await;
     let observed = go_time(chrono::Utc::now());
     let all = state.rt.store().snapshot();
     // Forget runtime-only credentials whose relay session ended.
@@ -761,7 +776,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     if !paginated {
         let mut files: Vec<(String, Value)> = matching
             .iter()
-            .filter_map(|c| entry(&state, c, v8).map(|e| (list_name(c), entry_value(e))))
+            .filter_map(|c| entry(&state, c, v8, &quota).map(|e| (list_name(c), entry_value(e))))
             .collect();
         files.sort_by_key(|(n, _)| n.to_lowercase());
         return reply_ordered(
@@ -786,7 +801,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     let end = (start + page_size).min(total);
     let files: Vec<Value> = matching[start..end]
         .iter()
-        .filter_map(|c| entry(&state, c, v8).map(entry_value))
+        .filter_map(|c| entry(&state, c, v8, &quota).map(entry_value))
         .collect();
     reply_ordered(
         StatusCode::OK,
