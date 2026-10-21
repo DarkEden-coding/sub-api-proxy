@@ -488,7 +488,7 @@ impl Runtime {
                 let mut revision = current.revision;
                 let mut attempt = patch.clone();
                 loop {
-                    match store.apply_patch(&id, revision, &attempt) {
+                    match store.apply_refresh(&id, revision, &attempt, |c| credentials_changed(&current, c)) {
                         // Edited since the snapshot (the prepare lock does not hold off other
                         // writers). Go 935aa6e3: an edit that changed the credentials wins and
                         // this refresh is dropped; any other edit is merged with it (Go
@@ -502,24 +502,23 @@ impl Runtime {
                         Err(PatchError::Stale { .. }) => {
                             let latest = store.get(&id).ok_or(PatchError::NotFound)?;
                             if credentials_changed(&current, &latest) {
-                                return Ok((latest, false));
+                                return Ok(latest);
                             }
                             attempt = rebase_patch(&current.provider, &current.metadata, &latest.metadata, &patch);
                             if attempt.set.is_empty() && attempt.remove.is_empty() {
-                                return Ok((latest, false));
+                                return Ok(latest);
                             }
                             revision = latest.revision;
                         }
                         other => {
-                            let committed = other?;
+                            let (committed, rotated) = other?;
                             // Go `updateInternal` after a refresh: new tokens clear the
                             // credential's unauthorized cooldowns, keeping live quota
                             // blocks (50d5fe18). Here, so a cancelled caller still does.
-                            let rotated = credentials_changed(&current, &committed);
                             if rotated {
                                 store.recover_unauthorized(&id);
                             }
-                            return Ok((committed, rotated));
+                            return Ok(committed);
                         }
                     }
                 }
@@ -535,22 +534,15 @@ impl Runtime {
                 format!("committing prepared credential: {e:?}"),
             )
         })?;
-        let (committed, rotated) = committed;
-        if rotated {
-            self.refresh_state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .note_refreshed(id, Instant::now());
-        }
         Ok(committed)
     }
 
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
     /// executor reports a refresh credential, prepare it once (due or not) and return the
     /// committed replacement to retry with.
-    // ponytail: refresh goes through `Executors::prepare_forced`. Codex refreshes when not
-    // due; a provider whose prepare only refreshes inside its lead (Claude) cannot recover
-    // a revoked but unexpired token.
+    // ponytail: refresh goes through `Executors::prepare_forced`: Codex refreshes when not
+    // due, and Claude's prepare already refreshed on demand before 50d5fe18. A provider
+    // whose prepare refreshes only inside its lead cannot recover a revoked token here.
     pub async fn refresh_after_unauthorized(&self, credential: &Credential, cfg: &Config) -> Option<Arc<Credential>> {
         if !self.executors.has_refresh_credential(credential) {
             return None;
@@ -593,8 +585,9 @@ impl Runtime {
                 config_changes.borrow_and_update();
                 unauthorized.borrow_and_update();
                 let cfg = rt.config();
-                let snapshot = rt.store.snapshot();
+                // Before the snapshot, so a 401 on a revision newer than it stays.
                 let rejected = rt.store.unauthorized();
+                let snapshot = rt.store.snapshot();
                 let (now, wall) = (Instant::now(), chrono::Utc::now());
                 let horizon = chrono::Duration::from_std(HORIZON).unwrap_or_default();
                 let mut wake: Option<Instant> = None;
@@ -603,30 +596,32 @@ impl Runtime {
                     let mut state = rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner);
                     state.reconcile(&snapshot);
                     let mut jobs = Vec::new();
-                    for (id, (revision, _)) in &rejected {
-                        if !snapshot.iter().any(|c| c.id == *id && c.revision == *revision) {
-                            rt.store.forget_unauthorized(id, *revision);
-                        }
-                    }
+                    rt.store.forget_stale_unauthorized(&rejected, &snapshot);
                     // Far enough ahead that any expiry has passed, near enough for chrono.
                     let eventually = wall + chrono::Duration::days(36_500);
                     for c in snapshot.iter().filter(|c| refresh_candidate(c)) {
                         // Go `scheduleUnauthorizedRefresh`: a rejected token refreshes now,
                         // or after `refreshFailureBackoff` when it was refreshed just before.
-                        if let Some((revision, noted)) = rejected.get(&c.id)
+                        // Its deadline replaces the ordinary one (Go `NextRefreshAfter`).
+                        if let Some((revision, noted)) = rejected.pending.get(&c.id)
                             && *revision == c.revision
                             && rt.executors.has_refresh_credential(c)
                         {
-                            let at = state
-                                .refreshed_at(&c.id)
-                                .filter(|t| noted.saturating_duration_since(*t) < REFRESH_FAILURE_BACKOFF)
+                            let at = rejected
+                                .refreshed
+                                .get(&c.id)
+                                .filter(|(r, t)| {
+                                    *r <= *revision && noted.saturating_duration_since(*t) < REFRESH_FAILURE_BACKOFF
+                                })
                                 .map_or(*noted, |_| *noted + REFRESH_FAILURE_BACKOFF);
                             if at > now {
                                 soonest(at);
                             } else if state.reserve(c, now) {
                                 jobs.push((c.clone(), true));
-                                continue;
+                            } else if let Some(at) = state.retry_at(c).filter(|at| *at > now) {
+                                soonest(at);
                             }
+                            continue;
                         }
                         if rt.executors.needs_prepare_at(c, &cfg, eventually) {
                             soonest(now + HORIZON);
@@ -1129,6 +1124,15 @@ struct Inner {
     epoch: u64,
 }
 
+/// Pending background refreshes after a 401, and the last token rotations.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Rejections {
+    /// The rejected revision of each credential and when the 401 was recorded.
+    pub pending: HashMap<String, (u64, Instant)>,
+    /// The revision each credential's last token rotation committed, and when.
+    pub refreshed: HashMap<String, (u64, Instant)>,
+}
+
 pub struct CredentialStore {
     inner: RwLock<Inner>,
     policy: RwLock<Arc<Policy>>,
@@ -1149,9 +1153,10 @@ pub struct CredentialStore {
     error_events: std::sync::OnceLock<Arc<crate::usage::UsageQueue>>,
     /// Marked on every epoch bump, so background loops sleep until the set changes.
     changed: tokio::sync::watch::Sender<()>,
-    /// Credentials an upstream answered 401, by the revision it rejected, for the
-    /// background refresh (Go `RejectedAccessToken` and `scheduleUnauthorizedRefresh`).
-    unauthorized: Mutex<HashMap<String, (u64, Instant)>>,
+    /// Codex credentials an upstream answered 401, and the last token rotations, for the
+    /// background refresh (Go `RejectedAccessToken`, `scheduleUnauthorizedRefresh` and
+    /// `LastRefreshedAt`).
+    unauthorized: Mutex<Rejections>,
     unauthorized_noted: tokio::sync::watch::Sender<()>,
 }
 
@@ -1646,19 +1651,13 @@ impl CredentialStore {
             );
             // Go MarkResult: a 401 that cools the credential schedules a background
             // refresh of the rejected token (feb63984; the runtime checks for a refresh
-            // credential).
-            if let Outcome::Failure(error) = outcome
-                && crate::classify::is_unauthorized(error)
-                && lease.policy.error_action(&lease.credential, error).cooldown
-            {
-                let mut pending = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
-                let revision = lease.credential.revision;
-                // Go sets `NextRefreshAfter` only when none is pending.
-                if pending.get(&lease.credential.id).is_none_or(|(r, _)| *r != revision) {
-                    pending.insert(lease.credential.id.clone(), (revision, now));
-                    self.unauthorized_noted.send_replace(());
-                }
-            }
+            // credential). A forced cooldown counts even on a request-scoped 401.
+            // ponytail: Codex only for now; other providers (Claude's included) still
+            // refresh after a 401 inline only, until the post-replay port.
+            let rejected = matches!(outcome, Outcome::Failure(error)
+                if lease.credential.provider == "codex"
+                    && crate::classify::names_unauthorized(error)
+                    && lease.policy.error_action(&lease.credential, error).cooldown);
             // Go `publishErrorEvent` after MarkResult (and the availability-neutral record).
             if let (Outcome::Failure(error) | Outcome::Neutral(error), Some(queue)) = (outcome, self.error_events.get())
                 && queue.wants_errors()
@@ -1670,6 +1669,20 @@ impl CredentialStore {
             let changed = before.is_some_and(|before| before != scheduler.records(&lease.credential, now, wall));
             drop(scheduler);
             drop(inner);
+            // After the store lock: a refresh commit holds this lock while it writes.
+            if rejected {
+                let mut state = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
+                let revision = lease.credential.revision;
+                // Go sets `NextRefreshAfter` only when none is pending.
+                if state
+                    .pending
+                    .get(&lease.credential.id)
+                    .is_none_or(|(r, _)| *r != revision)
+                {
+                    state.pending.insert(lease.credential.id.clone(), (revision, now));
+                    self.unauthorized_noted.send_replace(());
+                }
+            }
             if changed {
                 self.persist_cooldowns();
             }
@@ -1683,17 +1696,57 @@ impl CredentialStore {
         self.changed.subscribe()
     }
 
-    /// Credentials an upstream answered 401: the rejected revision and when.
-    pub(crate) fn unauthorized(&self) -> HashMap<String, (u64, Instant)> {
+    /// Pending 401 refreshes and the last rotations. Read it before the credential
+    /// snapshot it is compared with.
+    pub(crate) fn unauthorized(&self) -> Rejections {
         self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Forgets a pending unauthorized refresh unless a 401 on a newer revision replaced it.
     pub(crate) fn forget_unauthorized(&self, id: &str, revision: u64) {
-        let mut pending = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
-        if pending.get(id).is_some_and(|(r, _)| *r <= revision) {
-            pending.remove(id);
+        let mut state = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.pending.get(id).is_some_and(|(r, _)| *r <= revision) {
+            state.pending.remove(id);
         }
+    }
+
+    /// Drops the rejections `seen` (read before `snapshot`) whose credential the snapshot
+    /// replaced or removed. A 401 recorded after `seen` is never touched.
+    pub(crate) fn forget_stale_unauthorized(&self, seen: &Rejections, snapshot: &[Arc<Credential>]) {
+        for (id, (revision, _)) in &seen.pending {
+            if snapshot
+                .iter()
+                .find(|c| c.id == *id)
+                .is_none_or(|c| c.revision > *revision)
+            {
+                self.forget_unauthorized(id, *revision);
+            }
+        }
+        let mut state = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
+        state
+            .refreshed
+            .retain(|id, _| !seen.refreshed.contains_key(id) || snapshot.iter().any(|c| c.id == *id));
+    }
+
+    /// [`Self::apply_patch`] for a token refresh: when `rotated` says the commit replaced
+    /// the tokens, its time is recorded under the same lock that 401s are noted under,
+    /// before any scan can see the new revision without it (Go `LastRefreshedAt`).
+    pub(crate) fn apply_refresh(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        patch: &MetadataPatch,
+        rotated: impl FnOnce(&Credential) -> bool,
+    ) -> Result<(Arc<Credential>, bool), PatchError> {
+        let mut state = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
+        let committed = self.apply_patch(id, expected_revision, patch)?;
+        let rotated = rotated(&committed);
+        if rotated {
+            state
+                .refreshed
+                .insert(id.to_owned(), (committed.revision, Instant::now()));
+        }
+        Ok((committed, rotated))
     }
 
     /// Changes whenever a 401 schedules a background refresh.
@@ -3520,11 +3573,79 @@ mod tests {
             .unwrap()
             .complete(unauthorized());
         assert_eq!(
-            rt.store.unauthorized().get("codex.json").map(|(r, _)| *r),
+            rt.store.unauthorized().pending.get("codex.json").map(|(r, _)| *r),
             Some(rotated.revision)
         );
         quiet(&mut hit).await;
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Which 401s schedule a background refresh: Codex ones that cool the credential,
+    /// including a request-scoped 401 a `*-and-cooldown` rule cools; not Claude's (that
+    /// waits for the post-replay port). A scan whose snapshot predates a newer revision
+    /// keeps the 401 recorded on it.
+    #[test]
+    fn which_401s_schedule_a_background_refresh() {
+        let codex = |note: &str| {
+            let mut c = cred("codex.json", "codex", false);
+            c.metadata.insert("refresh_token".into(), "rt".into());
+            c.metadata.insert("note".into(), note.into());
+            c.metadata.insert(
+                "request_scoped_errors".into(),
+                serde_json::json!([{"status": 401, "match": ["revoked"], "action": "stop-and-cooldown"}]),
+            );
+            c
+        };
+        let mut claude = cred("claude.json", "claude", false);
+        claude.metadata.insert("refresh_token".into(), "rt".into());
+        let store = CredentialStore::new(vec![codex("a"), claude]);
+        let fail = |provider: &str, model: &str, scope, text: &str| {
+            store
+                .select(Selection::new(provider, model))
+                .unwrap()
+                .complete(Outcome::Failure(ExecError::local(401, scope, text)));
+        };
+        let pending = || {
+            let mut ids: Vec<_> = store
+                .unauthorized()
+                .pending
+                .into_iter()
+                .map(|(id, (r, _))| (id, r))
+                .collect();
+            ids.sort();
+            ids
+        };
+        fail("claude", "m", FailureScope::Credential, "unauthorized");
+        fail("codex", "m", FailureScope::Request, "bad request");
+        assert_eq!(pending(), [], "Claude, and an unforced request-scoped 401");
+        fail("codex", "m", FailureScope::Request, "token revoked");
+        let first = store.get("codex.json").unwrap().revision;
+        assert_eq!(pending(), [("codex.json".to_owned(), first)], "a forced cooldown");
+        // The scan's snapshot holds the first revision; a refresh commits a newer one,
+        // which an upstream rejects too, before the scan reads the rejections.
+        let old = store.snapshot();
+        store.reconcile(vec![
+            codex("b"),
+            store.get("claude.json").map(|c| (*c).clone()).unwrap(),
+        ]);
+        let second = store.get("codex.json").unwrap().revision;
+        assert!(second > first);
+        fail("codex", "n", FailureScope::Request, "token revoked");
+        store.forget_stale_unauthorized(&store.unauthorized(), &old);
+        assert_eq!(
+            pending(),
+            [("codex.json".to_owned(), second)],
+            "a stale snapshot keeps it"
+        );
+        store.forget_stale_unauthorized(&store.unauthorized(), &store.snapshot());
+        assert_eq!(pending(), [("codex.json".to_owned(), second)], "still current");
+        let seen = store.unauthorized();
+        store.reconcile(vec![
+            codex("c"),
+            store.get("claude.json").map(|c| (*c).clone()).unwrap(),
+        ]);
+        store.forget_stale_unauthorized(&seen, &store.snapshot());
+        assert_eq!(pending(), [], "replaced");
     }
 
     /// Go `mergeAuthContent` and `CredentialRefreshPatch.Apply` for a refresh that lost
