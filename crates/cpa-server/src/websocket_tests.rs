@@ -764,3 +764,83 @@ async fn pinned_continuation_later_quota_failure_asks_for_replay() {
     .await;
     assert_eq!(frames, [DELTA, "close 1012 upstream requires HTTP replay"]);
 }
+
+/// Go 5dbd92a0 (TestCodexWebsocketsExecutor_UnbufferedUpstreamErrorIsDeliveredBeforeDisconnectNotify
+/// and the issue 6503 conductor tests): a usage-limit error after the response started
+/// loses the session's upstream socket, which closes the client, yet the error's
+/// cooldown is still recorded. Here the error leaves the turn's stream in the same poll
+/// that reports the lost socket, so nothing can cancel the turn in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upstream_error_that_loses_the_socket_still_cools_the_credential() {
+    use futures_util::StreamExt;
+    use wreq::ws::message::Message as WsMessage;
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"r1","status":"in_progress","output":[]}}"#;
+    const DELTA: &str = r#"{"type":"response.output_text.delta","output_index":0,"delta":"hello"}"#;
+    for failure in [
+        r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":600}}"#,
+        r#"{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"The usage limit has been reached","resets_in_seconds":600}}}"#,
+    ] {
+        let upstream = serve(axum::Router::new().fallback(move |ws: WebSocketUpgrade| async move {
+            ws.on_upgrade(move |mut socket: AxSocket| async move {
+                while let Some(Ok(message)) = socket.recv().await {
+                    if !matches!(message, AxMessage::Text(_)) {
+                        continue;
+                    }
+                    for event in [CREATED, DELTA, failure] {
+                        let _ = socket.send(AxMessage::Text(event.into())).await;
+                    }
+                }
+            })
+        }))
+        .await;
+        let dir = std::env::temp_dir().join(format!("cpa-ws-6503-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Config::parse(&format!(
+            "auth-dir: {}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-fixture\n",
+            dir.display()
+        ))
+        .unwrap();
+        let credentials = cpa_core::config::credentials::from_config(&cfg);
+        let executors = Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+        let proxy = serve(router(rt.clone())).await;
+        let mut socket = wreq::Client::new()
+            .websocket(format!("ws://{proxy}/v1/responses"))
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        socket
+            .send(WsMessage::text(
+                r#"{"type":"response.create","model":"gpt-fixture","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+            ))
+            .await
+            .unwrap();
+        let mut frames = Vec::new();
+        while let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+            match frame {
+                WsMessage::Text(text) => frames.push(text.as_str().to_owned()),
+                WsMessage::Close(_) => break,
+                _ => {}
+            }
+        }
+        // Go's disconnect notifier closes the client ahead of the turn's own error.
+        assert_eq!(frames, [CREATED, DELTA], "{failure}");
+        let credential = rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.provider == "codex")
+            .unwrap();
+        assert!(rt.store().blocked(&credential, "gpt-fixture"), "{failure}: not cooling");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
