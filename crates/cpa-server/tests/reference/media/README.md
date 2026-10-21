@@ -11,7 +11,7 @@ namespace anyway:
 # in the CLIProxyAPI tree
 go build -o /tmp/cpa-go-server ./cmd/server
 # in a module that replaces github.com/router-for-me/CLIProxyAPI/v8 with that tree
-cp main.go scenarios.go "$gen/"
+cp *.go "$gen/"
 cd "$gen" && go run . /tmp/cpa-go-server ../../fixtures/media_go.json
 ```
 
@@ -42,7 +42,7 @@ audio bodies are short ASCII stand-ins:
 ```sh
 # in the CLIProxyAPI tree at ae3ee3be
 go build -o /tmp/cpa-go-server-v8.0.35 ./cmd/server
-cp main.go scenarios.go speech.go "$gen/"
+cp *.go "$gen/"
 cd "$gen" && go run . /tmp/cpa-go-server-v8.0.35 ../../fixtures/speech_go.json speech
 ```
 
@@ -51,3 +51,19 @@ model-unavailable 404 runs last because it cools `grok-tts` on both keys. The ru
 records the Grok Shell catalog; the 6fecc6e `models_grok_shell*` expectations take the two
 speech builtins from it (v8.0.35 6a853dce adds them to the xAI catalog).
 
+
+## Passthrough error-header goldens
+
+`fixtures/passthrough_errors_go.json` holds the `errors.go` scenarios, recorded from the
+unmodified Go server at v8.0.35 with its own config (`ErrorsConfig`: one
+OpenAI-compatible provider and `passthrough-headers: true`). An upstream status error
+hands the client no upstream header; a stream that ends before its first payload hands it
+the stream's own headers (Go `streamBootstrapError.Headers()`). Cache-Control is the
+probe header. In `compat_stream_empty` Go also copies the capture server's
+`Content-Length: 0`, which empties its error body; the replay skips that length and body
+(`ADDON_FRAMING`):
+
+```sh
+cp *.go "$gen/"
+cd "$gen" && go run . /tmp/cpa-go-server-v8.0.35 ../../fixtures/passthrough_errors_go.json errors
+```

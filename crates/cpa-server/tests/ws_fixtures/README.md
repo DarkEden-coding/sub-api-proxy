@@ -9,12 +9,14 @@ mock, so nothing reaches OpenAI.
   exposure, completion output restoration, pending tool calls, tool-call repair against
   the shared caches, close-reason truncation). Replayed by
   `src/websocket_requests_tests.rs`.
-- `ws_e2e.json`: thirty-nine scenarios through Go's real `ResponsesWebsocket` handler, auth
+- `ws_e2e.json`: forty scenarios through Go's real `ResponsesWebsocket` handler, auth
   manager, built-in translators and `CodexAutoExecutor`, against a scripted upstream that
   speaks both WebSocket and HTTP SSE. It records the frames and close codes the client
   saw, what upstream received (WebSocket dials and frames, HTTP requests) and the upgrade
   response's `x-codex-turn-state`. Replayed by `tests/ws_e2e.rs`, which masks UUIDs and
-  the prewarm timestamp.
+  the prewarm timestamp. `ws_request_fault_headers` was recorded from v8.0.35 (`ae3ee3be`)
+  on its own (`RSFIX_ONLY`, below): the full v8.0.35 run stops at
+  `steer_oauth_only_skips_api_key`, which v8.0.35 changed.
 
 Scripted upstream closes wait 300 ms after their events. Without that pause Go's
 disconnect notifier races the turn and can close the client before the events are
@@ -28,3 +30,6 @@ cp go/zz_rsfix_ws_test.go /tmp/cpa-ws/sdk/api/handlers/openai/
 (cd /tmp/cpa-ws && RSFIX_OUT=/tmp/rsfix-ws go test -count=1 -run TestRSFixWS ./sdk/api/handlers/openai/)
 cp /tmp/rsfix-ws/*.json .
 ```
+
+To record one scenario, make `TestRSFixWSE2E` in the copy keep only the scenario named
+by `RSFIX_ONLY`, run with `RSFIX_ONLY=<name>`, and splice that element into `ws_e2e.json`.
