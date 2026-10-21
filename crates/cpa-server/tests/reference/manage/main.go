@@ -747,7 +747,6 @@ type output struct {
 	YAMLMerges   []yamlMergeCase   `json:"yaml_merges"`
 	OAuthOnly    []oauthOnlyCase   `json:"oauth_only"`
 	Credentials  []credScenario    `json:"credentials"`
-	Materialized any               `json:"materialized_defaults"`
 	Config       []configScenario  `json:"config_writes"`
 	IPBytes      []ipBytesCase     `json:"client_ip_bytes"`
 	Routes       []routeScenario   `json:"routes"`
@@ -929,10 +928,6 @@ func main() {
 	} {
 		out.IPBytes = append(out.IPBytes, runIPBytes(c))
 	}
-	// Keys Go's saver adds to an otherwise untouched v8 document on any PUT/PATCH.
-	base := runConfig(configScenario{Name: "materialized", YAML: "config-version: 8\nmanagement:\n  secret-key: '$HASH'\n",
-		Steps: []configStep{{Method: http.MethodPatch, Path: "/config", Body: "{}"}}})
-	out.Materialized = base.Steps[0].File
 	out.YAMLBools = yamlBoolCases()
 	out.YAMLMerges = yamlMergeCases()
 	out.TypedScalars = typedScalarCases()
@@ -1412,6 +1407,7 @@ func configScenarios() []configScenario {
 			put("/config/routing/retry/request-retry", `3`),
 			put("/config/routing/session-affinity-subagents", `"off"`),
 			put("/config/observability/logs/request-log", `"YES"`),
+			put("/config/upstream/xai/inject-x-search", `"on"`),
 			put("/config/routing/force-model-prefix", `"yEs"`),
 			put("/config/routing/force-model-prefix", `"true"`),
 			get("/config"),
