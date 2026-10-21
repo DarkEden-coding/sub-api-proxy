@@ -326,15 +326,15 @@ impl Duplex {
 
     async fn serve(&mut self) {
         loop {
-            let stopping = self.failing.is_some();
-            if self.input_ready && !self.done && !stopping {
+            if self.input_ready && !self.done && self.failing.is_none() {
                 self.progress().await;
             }
             let deliver = !self.outbox.is_empty();
             if self.done && !deliver {
                 return;
             }
-            let live = !self.done && !stopping;
+            // After progress(): a failure it raised stops client input at once.
+            let live = !self.done && self.failing.is_none();
             let writable = self.writes.capacity() > 0;
             let read_client =
                 live && self.input_ready && self.deferred_steer.is_none() && writable && self.outbox.len() < OUTBOX;

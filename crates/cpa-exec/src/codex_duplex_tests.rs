@@ -1292,3 +1292,102 @@ async fn a_failure_waits_for_the_observed_message() {
     drop(stream);
     up.finish().await;
 }
+
+/// A failure raised by queued-create progress while a message is observed stops client
+/// input at once: no later client frame is consumed and nothing is output before the
+/// observed message, which the failure then follows.
+#[tokio::test]
+async fn a_progress_failure_stops_client_input_during_an_observation() {
+    const STEER: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"steer"}"#;
+    const CREATED_R2: &str =
+        r#"{"type":"response.created","response":{"id":"r2","previous_response_id":"r1","output":[]}}"#;
+    struct Holding {
+        held: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+    impl cpa_core::exec::WebSocketObserver for Holding {
+        fn response<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a cpa_core::credential::Credential,
+            _: &'a str,
+            payload: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if gjson::get(&String::from_utf8_lossy(payload), "response.id").str() == "r2" {
+                    self.held.notify_one();
+                    let _ = self.release.acquire().await.unwrap();
+                }
+            })
+        }
+    }
+    let go = Arc::new(tokio::sync::Notify::new());
+    let up = {
+        let go = go.clone();
+        Scripted::start(move |mut c: Peer| {
+            let go = go.clone();
+            async move {
+                c.read().await;
+                c.write(r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#)
+                    .await;
+                let create = c.read().await;
+                if get(&create, "type") != "response.create" {
+                    c.error(format!("pending create: {create}"));
+                }
+                let steer = c.read().await;
+                if steer != STEER {
+                    c.error(format!("steer: {steer}"));
+                }
+                go.notified().await;
+                c.write(r#"{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}"#)
+                    .await;
+                c.write(CREATED_R2).await;
+                c.idle().await;
+            }
+        })
+        .await
+    };
+    let client = Client::new("observer-duplex-progress-failure");
+    let observer = Arc::new(Holding {
+        held: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let usage = cpa_core::exec::UsageSink::default().with_websocket(Some(observer.clone()));
+    let mut stream = client
+        .start_with(&up.url, r#"{"model":"gpt-6-astra","input":[]}"#, Format::Codex, usage)
+        .await;
+    assert_eq!(
+        get(&next(&mut stream).await.unwrap().unwrap(), "type"),
+        "response.created"
+    );
+    // A create that stays pending, a steer on r1, and a create for another model queued
+    // behind the steer.
+    client.send(r#"{"type":"response.create","input":[]}"#).await;
+    client.send(STEER).await;
+    client
+        .send(r#"{"type":"response.create","model":"another-model","input":[]}"#)
+        .await;
+    go.notify_one();
+    let accepted = next(&mut stream).await.unwrap().unwrap();
+    assert_eq!(get(&accepted, "type"), "response.steer.accepted");
+    // r2's created event frees the queued create, whose progress fails while r2 is held.
+    tokio::time::timeout(Duration::from_secs(5), observer.held.notified())
+        .await
+        .expect("r2 was not observed");
+    client.input.send(Bytes::from_static(b"not json")).await.unwrap();
+    let early = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
+    assert!(early.is_err(), "output before the observation returned: {early:?}");
+    assert_eq!(
+        client.input.capacity(),
+        0,
+        "a client frame was consumed after the failure"
+    );
+    observer.release.add_permits(10);
+    let created = next(&mut stream).await.expect("the held event").unwrap();
+    assert_eq!(get(&created, "response.id"), "r2");
+    let error = next(&mut stream).await.expect("the deferred failure").unwrap_err();
+    assert!(error.is_replay_required(), "{error}");
+    assert!(next(&mut stream).await.is_none());
+    drop(stream);
+    up.finish().await;
+}
