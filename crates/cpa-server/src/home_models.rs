@@ -73,25 +73,22 @@ pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {
     if raw.is_empty() {
         return Err("home models payload is empty".into());
     }
-    // Go `map[string][]map[string]any`; a null entry is an empty model.
-    let parse_error = |e: serde_json::Error| format!("parse home models payload: {e}");
-    let sections: Option<Map<String, Value>> = serde_json::from_slice(raw).map_err(parse_error)?;
+    // Go `map[string][]map[string]any`, decoded in one pass so every occurrence of a
+    // repeated key is type-checked before a later one replaces it; a null entry is an
+    // empty model.
+    type Sections = std::collections::BTreeMap<String, Option<Vec<Option<Map<String, Value>>>>>;
+    let sections: Option<Sections> =
+        serde_json::from_slice(raw).map_err(|e| format!("parse home models payload: {e}"))?;
     let Some(sections) = sections else {
         return Err("home models payload is not an object".into());
     };
-    // Go unmarshals every section before it looks at any.
-    let mut parsed = Vec::with_capacity(sections.len());
-    for (section, models) in sections {
-        let models: Option<Vec<Option<Map<String, Value>>>> = serde_json::from_value(models).map_err(parse_error)?;
-        parsed.push((section, models));
-    }
     // An error envelope is never a provider section (Go 4d34502f).
-    if parsed.iter().any(|(section, _)| section == "error") {
+    if sections.contains_key("error") {
         return Err("home models payload contains an error envelope".into());
     }
     let mut has_model_records = false;
-    let mut checked = Vec::with_capacity(parsed.len());
-    for (section, models) in parsed {
+    let mut checked = Vec::with_capacity(sections.len());
+    for (section, models) in sections {
         let Some(models) = models else {
             return Err(format!(
                 "home models section {} is null",
@@ -102,7 +99,6 @@ pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {
         let models: Vec<Map<String, Value>> = models.into_iter().map(Option::unwrap_or_default).collect();
         checked.push((section, models));
     }
-    checked.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out: Vec<Entry> = Vec::new();
     for (section, models) in checked {
         let provider = section.trim().to_lowercase();
@@ -375,6 +371,22 @@ mod tests {
         assert_eq!(
             decode(br#"{"claude":[],"codex":null}"#).unwrap_err(),
             r#"home models section "codex" is null"#
+        );
+        // A repeated key: each occurrence is type-checked, the last one is kept.
+        for raw in [r#"{"claude":1,"claude":[]}"#, r#"{"claude":[1],"claude":[]}"#] {
+            assert!(
+                decode(raw.as_bytes())
+                    .unwrap_err()
+                    .starts_with("parse home models payload: "),
+                "{raw}"
+            );
+        }
+        for raw in [r#"{"claude":null,"claude":[]}"#, r#"{"claude":[null],"claude":[]}"#] {
+            assert_eq!(decode(raw.as_bytes()), Ok(Vec::new()), "{raw}");
+        }
+        assert_eq!(
+            decode(br#"{"claude":[],"claude":null}"#).unwrap_err(),
+            r#"home models section "claude" is null"#
         );
     }
 
