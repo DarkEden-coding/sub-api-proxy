@@ -776,20 +776,28 @@ pub async fn edits(
 
 /// `http.Request.ParseMultipartForm` as gin's `c.MultipartForm` calls it.
 pub(crate) fn multipart_form(content_type: &str, body: &[u8]) -> Result<Form, String> {
+    multipart::read_form(body, &multipart_boundary(content_type)?)
+}
+
+/// The boundary of a multipart form, or Go's error for a `Content-Type` that
+/// `ParseMultipartForm` refuses before it reads the body (`multipartReader`, then the
+/// empty-boundary check of the first `NextPart`). The value is kept as sent.
+pub(crate) fn multipart_boundary(content_type: &str) -> Result<String, String> {
     const NOT_MULTIPART: &str = "request Content-Type isn't multipart/form-data";
     if content_type.is_empty() {
         return Err(NOT_MULTIPART.into());
     }
-    let MediaType::Ok(media, params) = multipart::parse_media_type(content_type) else {
+    let MediaType::Ok(media, mut params) = multipart::parse_media_type(content_type) else {
         return Err(NOT_MULTIPART.into());
     };
     if media != "multipart/form-data" {
         return Err(NOT_MULTIPART.into());
     }
-    let Some(boundary) = params.get("boundary") else {
-        return Err("no multipart boundary param in Content-Type".into());
-    };
-    multipart::read_form(body, boundary)
+    match params.remove("boundary") {
+        None => Err("no multipart boundary param in Content-Type".into()),
+        Some(boundary) if boundary.is_empty() => Err("multipart: boundary is empty".into()),
+        Some(boundary) => Ok(boundary),
+    }
 }
 
 /// `imagesEditsFromMultipart`.

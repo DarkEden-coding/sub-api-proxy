@@ -40,6 +40,9 @@ type scenario struct {
 	// PluginAuth adds a frontend auth provider that reads the body the way Go's plugin
 	// host adapter does, after the config keys.
 	PluginAuth bool `json:"plugin_auth,omitempty"`
+	// PadTo pads the body with "p" to this many bytes, so a large body need not be
+	// recorded.
+	PadTo int `json:"pad_to,omitempty"`
 
 	Status      int    `json:"status"`
 	Response    string `json:"response"`
@@ -268,11 +271,44 @@ func scenarios() []scenario {
 		{"bad_query_multipart", "/openai/v1/videos?x=%ZZ", videoType, videoForm},
 		{"bad_media_param", "/openai/v1/videos", urlencoded + "; x", "prompt=p"},
 		{"content_after_subtype", "/openai/v1/videos", urlencoded + " x", "prompt=p"},
+		{"duplicate_param", "/openai/v1/videos", urlencoded + "; charset=a; charset=b", "prompt=p"},
 	} {
 		for _, limit := range []struct{ name, yaml string }{{"limit_off", noLimit}, {"limit_1024", strings.Replace(noLimit, "\n", "\nserver:\n  max-request-body-bytes: 1024\n", 1)}} {
 			add(scenario{Name: "video_form_" + c.name + " " + limit.name, YAML: limit.yaml, Method: "POST", Path: c.path,
 				Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": c.contentType}, Body: c.body})
 		}
+	}
+	// Form types Go refuses before reading: a chunked body one byte over the limit is
+	// never read. A declared Content-Length, or eager request logging, gets the
+	// middleware's 413 first.
+	over := strings.Repeat("p", 65)
+	for _, c := range []struct{ name, contentType string }{
+		{"multipart_content_after_subtype", "multipart/form-data x"},
+		{"multipart_bad_param", "multipart/form-data; x"},
+		{"multipart_duplicate_boundary", "multipart/form-data; boundary=a; boundary=b"},
+		{"multipart_no_boundary", "multipart/form-data"},
+		{"multipart_empty_boundary", `multipart/form-data; boundary=""`},
+		{"urlencoded_duplicate_param", urlencoded + "; charset=a; charset=b"},
+	} {
+		headers := map[string]string{"Authorization": "Bearer test-key", "Content-Type": c.contentType}
+		add(scenario{Name: "video_form_refused_unread " + c.name, YAML: api64(""), Method: "POST", Path: "/openai/v1/videos",
+			Headers: headers, Body: over, Chunked: true})
+	}
+	controls := map[string]string{"Authorization": "Bearer test-key", "Content-Type": "multipart/form-data x"}
+	add(scenario{Name: "video_form_refused_content_length_control", YAML: api64(""), Method: "POST", Path: "/openai/v1/videos",
+		Headers: controls, Body: over})
+	add(scenario{Name: "video_form_refused_request_log_control", YAML: api64(requestLog), Method: "POST", Path: "/openai/v1/videos",
+		Headers: controls, Body: over, Chunked: true})
+
+	// Over parsePostForm's 10 MB without a limit: an unusable media type is answered
+	// before the body is read; a bad parameter is not.
+	for _, c := range []struct{ name, contentType string }{
+		{"content_after_subtype", urlencoded + " x"},
+		{"bad_media_param", urlencoded + "; x"},
+		{"ok", urlencoded},
+	} {
+		add(scenario{Name: "video_form_over_10mb_" + c.name + " limit_off", YAML: noLimit, Method: "POST", Path: "/openai/v1/videos",
+			Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": c.contentType}, Body: "prompt=", PadTo: 10<<20 + 1})
 	}
 	return out
 }
@@ -316,6 +352,9 @@ func main() {
 	for i := range cases {
 		raw := cases[i].Body
 		cases[i].Body = base64.StdEncoding.EncodeToString([]byte(raw))
+		if pad := cases[i].PadTo - len(raw); pad > 0 {
+			raw += strings.Repeat("p", pad)
+		}
 		run(&cases[i], raw)
 	}
 	data, err := json.MarshalIndent(cases, "", "  ")
