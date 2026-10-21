@@ -1520,12 +1520,13 @@ pub fn execution_models(
     };
     if configured && !models.is_empty() {
         let pool = alias_pool(&upstream, &models);
-        if openai_compat(c) && pool.len() > 1 {
+        // Go `executionModelCandidatesWithAlias`: a non-empty compat pool wins. Otherwise
+        // `applyAPIKeyModelAliasWithRouting` tries an API key's lowercase-keyed table
+        // before the `EqualFold` scan.
+        if openai_compat(c) && !pool.is_empty() {
             return (pool, alias);
         }
-        // Go `applyAPIKeyModelAliasWithRouting`: an API key tries its per-credential
-        // lowercase-keyed table before the `EqualFold` scan; a compat pool does not.
-        if !openai_compat(c)
+        if is_api_key(c)
             && let Some(upstream) = api_key_table_upstream(&upstream, &models)
         {
             return (vec![upstream], alias);
@@ -1808,6 +1809,37 @@ mod tests {
         assert_eq!(upstream("ς"), ["two"]);
         assert_eq!(upstream("σ"), ["one"]);
         assert_eq!(upstream("Σ(high)"), ["one(high)"]);
+
+        // go_lower("İ") is i, which EqualFold("i", "İ") does not match.
+        let cfg = Config::parse("claude-api-key:\n  - api-key: k\n    models: [{name: one, alias: i}]\n").unwrap();
+        let c = crate::config::credentials::from_config(&cfg).remove(0);
+        assert_eq!(execution_models(&HashMap::new(), &c, "İ(high)").0, ["one(high)"]);
+
+        // An OpenAI-compatible API key falls back to the table when the EqualFold pool is
+        // empty.
+        let cfg = Config::parse(
+            "openai-compatibility:\n  - name: g\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n    models: [{name: one, alias: i}]\n",
+        )
+        .unwrap();
+        let c = crate::config::credentials::from_config(&cfg).remove(0);
+        assert!(is_api_key(&c));
+        assert_eq!(execution_models(&HashMap::new(), &c, "İ(high)").0, ["one(high)"]);
+        // A single-entry EqualFold pool still wins over the table, which maps σ to the
+        // name σ here.
+        let cfg = Config::parse(
+            "openai-compatibility:\n  - name: g\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n    models: [{name: σ, alias: x}, {name: one, alias: ς}]\n",
+        )
+        .unwrap();
+        let c = crate::config::credentials::from_config(&cfg).remove(0);
+        assert_eq!(execution_models(&HashMap::new(), &c, "σ").0, ["one"]);
+        // A keyless compatible credential has no API-key table.
+        let cfg = Config::parse(
+            "openai-compatibility:\n  - name: g\n    base-url: http://127.0.0.1:9\n    models: [{name: one, alias: i}]\n",
+        )
+        .unwrap();
+        let c = crate::config::credentials::from_config(&cfg).remove(0);
+        assert!(!is_api_key(&c));
+        assert_eq!(execution_models(&HashMap::new(), &c, "İ(high)").0, ["İ(high)"]);
     }
 
     /// Go `resolveOAuthModelAliasWithResult`: the credential's own aliases match with
@@ -1815,7 +1847,7 @@ mod tests {
     #[test]
     fn oauth_aliases_fold_per_credential_and_key_globally() {
         let cfg = Config::parse(
-            "oauth:\n  model-alias:\n    claude:\n      - {name: one, alias: σ}\n      - {name: two, alias: ς}\n",
+            "oauth:\n  model-alias:\n    claude:\n      - {name: one, alias: σ}\n      - {name: two, alias: ς}\n      - {name: four, alias: i}\n",
         )
         .unwrap();
         let aliases = global_aliases(&cfg);
@@ -1833,6 +1865,21 @@ mod tests {
             ["three"],
             "EqualFold on its own aliases"
         );
+        // go_lower("İ") is i, so the global key matches; EqualFold("i", "İ") is false, so
+        // the credential's own alias i does not, and resolution falls through to the
+        // global table.
+        assert_eq!(execution_models(&aliases, &global, "İ").0, ["four"]);
+        let own_i = file(
+            "c.json",
+            serde_json::json!({"type":"claude"}),
+            &[("model_aliases", r#"[{"name":"five","alias":"i"}]"#)],
+        );
+        assert_eq!(execution_models(&aliases, &own_i, "İ").0, ["four"]);
+        // A global lowercase miss does not fall back to EqualFold.
+        let only_sigma = global_aliases(
+            &Config::parse("oauth:\n  model-alias:\n    claude:\n      - {name: one, alias: σ}\n").unwrap(),
+        );
+        assert_eq!(execution_models(&only_sigma, &global, "ς").0, ["ς"]);
     }
 
     #[test]
