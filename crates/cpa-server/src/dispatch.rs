@@ -241,28 +241,7 @@ impl Failure {
                 model,
                 cause,
                 ..
-            } => {
-                let providers = if providers.is_empty() {
-                    "unknown".into()
-                } else {
-                    providers.join(",")
-                };
-                let model = if gojson::trim(model).is_empty() {
-                    "unknown"
-                } else {
-                    gojson::trim(model)
-                };
-                let mut detail = match cause.as_deref().map(upstream_summary).filter(|s| !s.is_empty()) {
-                    Some(summary) => format!(
-                        "no auth available (providers={providers}, model={model}; last upstream error: {summary})"
-                    ),
-                    None => format!("no auth available (providers={providers}, model={model})"),
-                };
-                if format!(",{providers},").contains(",claude,") {
-                    detail.push_str("; check Claude auth/key session and cooldown state via /v0/management/auth-files");
-                }
-                format!("{code}: {detail}")
-            }
+            } => unavailable_text(code, "no auth available", providers, model, cause.as_deref()),
             Failure::Cooldown {
                 model,
                 provider,
@@ -318,6 +297,32 @@ impl Failure {
             _ => None,
         }
     }
+}
+
+/// Go `enrichAuthSelectionError`: a selection error's `code: message` text with the
+/// providers, the model and the last upstream error.
+fn unavailable_text(code: &str, base: &str, providers: &[String], model: &str, cause: Option<&str>) -> String {
+    let providers = if providers.is_empty() {
+        "unknown".into()
+    } else {
+        providers.join(",")
+    };
+    let model = if gojson::trim(model).is_empty() {
+        "unknown"
+    } else {
+        gojson::trim(model)
+    };
+    let mut detail = match cause
+        .map(upstream_summary)
+        .filter(|s| !s.is_empty() && !base.contains(s.as_str()))
+    {
+        Some(summary) => format!("{base} (providers={providers}, model={model}; last upstream error: {summary})"),
+        None => format!("{base} (providers={providers}, model={model})"),
+    };
+    if format!(",{providers},").contains(",claude,") {
+        detail.push_str("; check Claude auth/key session and cooldown state via /v0/management/auth-files");
+    }
+    format!("{code}: {detail}")
 }
 
 fn ceil_seconds(d: Duration) -> u64 {
@@ -1028,6 +1033,15 @@ async fn run_routed(
         exclude: pinned_exclusion.clone(),
         ..Selection::default()
     };
+    if rt.plugins().has_scheduler() {
+        let route_model = selection.model.clone();
+        selection.scheduler = Some(Arc::new(crate::plugins::execution::scheduler_context(
+            &call,
+            &route_model,
+            policy.session_affinity,
+            session.derived.as_deref(),
+        )));
+    }
     let request = ExecRequest {
         operation: call.operation,
         source_format: call.entry,
@@ -1104,6 +1118,10 @@ async fn run_routed(
                         cause,
                     });
                 }
+                Err(AcquireError::Rejected { code, message }) => {
+                    break Some(scheduler_rejection(code, message, &providers, &model));
+                }
+                Err(AcquireError::Scheduler(error)) => break Some(Failure::Exec(error)),
                 Err(AcquireError::Unavailable { retry_after, cause }) => {
                     break Some(Failure::Unavailable {
                         code: if retry_after.is_some() {
@@ -1881,6 +1899,27 @@ fn lifecycle(e: &ExecError) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// A plugin scheduler's reject, Go `&Error{Code, Message}`: an `auth_not_found` or
+/// `auth_unavailable` code is enriched like any selection failure
+/// (`enrichAuthSelectionError`, 503); another code keeps its `code: message` text and,
+/// without a status, answers 500.
+pub(crate) fn scheduler_rejection(code: String, message: String, providers: &[String], model: &str) -> Failure {
+    match code.as_str() {
+        // Request scope: the reject carries no status before enrichment, so it starts no
+        // retry round.
+        "auth_not_found" | "auth_unavailable" => Failure::Exec(ExecError::local(
+            503,
+            cpa_core::exec::FailureScope::Request,
+            unavailable_text(&code, &message, providers, model, None),
+        )),
+        _ => Failure::Exec(ExecError::local(
+            0,
+            cpa_core::exec::FailureScope::Model,
+            format!("{code}: {message}"),
+        )),
+    }
 }
 
 /// Go's `&Error{Code: "auth_not_found", Message: "no auth available"}`.

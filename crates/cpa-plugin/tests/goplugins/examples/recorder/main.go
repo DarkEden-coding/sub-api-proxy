@@ -16,6 +16,8 @@
 // file exists: the file is the complete response envelope, written by the test before
 // the call.
 // <method>.once.json, when present, answers the next call instead and is then removed.
+// While <method>.hold exists, calls of that method wait (up to 10s) before answering, so a
+// test can change host state between the call's record and its answer.
 // executor.execute_stream.script.once.json, {"chunks":["..."],"error":"..."}, makes the
 // next asynchronous stream emit those chunks and close with that error, then is removed.
 //
@@ -86,6 +88,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -226,6 +229,12 @@ func canned(label, method string) ([]byte, int, bool) {
 	mu.Unlock()
 	if base == "" {
 		return nil, 0, false
+	}
+	hold := filepath.Join(base, "respond", label, method+".hold")
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(hold); err != nil {
+			break
+		}
 	}
 	// <method>.once.json answers one call, then is removed.
 	once := filepath.Join(base, "respond", label, method+".once.json")
