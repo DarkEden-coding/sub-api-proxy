@@ -381,6 +381,19 @@ impl Executors {
         self.google.antigravity.models_registered(credentials, cfg);
     }
 
+    /// [`Self::prepare`] for a credential whose access token an upstream rejected, or a
+    /// management refresh: Codex refreshes even when not due (Go marks the token rejected
+    /// or forces the refresh). Other providers prepare as usual.
+    // ponytail: Claude, Kimi, xAI and the rest still refresh only when due, so a revoked
+    // but unexpired token is not replaced, where Go's Claude executor refreshes on every
+    // Refresh call. Widening that changes the Claude refresh trigger (live cache check).
+    pub async fn prepare_forced(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
+        match credential.provider.as_str() {
+            "codex" => self.codex.refresh_now(credential, cfg).await,
+            _ => self.prepare(credential, cfg).await,
+        }
+    }
+
     /// Prepares `credential` and returns the metadata change to commit.
     pub async fn prepare(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
         match credential.provider.as_str() {

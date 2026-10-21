@@ -32,8 +32,9 @@ pub const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/devicea
 pub const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const DEFAULT_PLAN: &str = "free";
-/// `CodexAuthenticator.RefreshLead`.
-pub const REFRESH_LEAD: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+/// Go `CodexOuterRefreshLead` (`CodexAuthenticator.RefreshLead`): well ahead of the
+/// nominal 10-day token expiry, since upstream can invalidate tokens early.
+pub const REFRESH_LEAD: chrono::TimeDelta = chrono::TimeDelta::hours(96);
 
 pub fn redirect_uri(port: u16) -> String {
     format!("http://localhost:{port}/auth/callback")
@@ -611,7 +612,7 @@ fn parse_time(value: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
-/// `Manager.shouldRefresh` with the Codex lead (24h). Without an expiry, `last_refresh`
+/// `Manager.shouldRefresh` with the Codex lead (96h). Without an expiry, `last_refresh`
 /// older than the lead (or missing) is due.
 // ponytail: refresh_interval_seconds overrides and unauthorized/invalid-grant lifecycle
 // gating live in the runtime scheduler (M4-0027).

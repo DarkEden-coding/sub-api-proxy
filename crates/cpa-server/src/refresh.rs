@@ -15,6 +15,8 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct RefreshState {
     entries: HashMap<String, Entry>,
+    /// The last refresh that rotated each credential's tokens (Go `LastRefreshedAt`).
+    refreshed: HashMap<String, Instant>,
 }
 
 impl RefreshState {
@@ -62,6 +64,14 @@ impl RefreshState {
         entry.next = now + Duration::from_secs(seconds);
     }
 
+    pub fn note_refreshed(&mut self, id: &str, now: Instant) {
+        self.refreshed.insert(id.to_owned(), now);
+    }
+
+    pub fn refreshed_at(&self, id: &str) -> Option<Instant> {
+        self.refreshed.get(id).copied()
+    }
+
     /// When a reserved or backed-off credential may be tried again.
     pub fn retry_at(&self, c: &Credential) -> Option<Instant> {
         self.entries.get(&c.id).map(|e| e.next)
@@ -70,6 +80,7 @@ impl RefreshState {
     pub fn reconcile(&mut self, credentials: &[std::sync::Arc<Credential>]) {
         let ids: std::collections::HashSet<&str> = credentials.iter().map(|c| c.id.as_str()).collect();
         self.entries.retain(|id, _| ids.contains(id.as_str()));
+        self.refreshed.retain(|id, _| ids.contains(id.as_str()));
     }
 }
 
