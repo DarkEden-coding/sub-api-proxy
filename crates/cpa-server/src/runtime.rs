@@ -2518,12 +2518,10 @@ mod tests {
         }
     }
 
-    /// Go 7c2133e2, 08e5762a and f75ea073 fence model publications against superseded
-    /// credential snapshots (model_registration_publication_regression_test,
-    /// model_registration_issue6718_test, service_batch_model_registration_test). Here the
-    /// registry is derived from the current credential set on use, so a prefix change, a
-    /// removal, a disable and a re-registration show at once, and a request result alone
-    /// does not rebuild it.
+    /// Sequential cache invalidation of the derived registry: after a prefix change, a
+    /// disable, a removal or a re-registration the next use rebuilds it, and a request
+    /// result alone does not. This is not Go's publication fence (7c2133e2, 08e5762a,
+    /// f75ea073): a build already in flight still returns its older snapshot.
     #[test]
     fn the_registry_follows_the_latest_credentials() {
         let rt = crate::testing::runtime(
@@ -2559,6 +2557,8 @@ mod tests {
         assert!(supports("new") && !supports("old"), "a superseded prefix");
         rt.store.reconcile(vec![with("new", true)]);
         assert!(!rt.registry().has_client("a.json"), "disabled");
+        rt.store.reconcile(vec![with("new", false)]);
+        assert!(supports("new"), "enabled again");
         rt.store.reconcile(Vec::new());
         assert!(!rt.registry().has_client("a.json"), "removed");
         rt.store.reconcile(vec![with("fresh", false)]);
