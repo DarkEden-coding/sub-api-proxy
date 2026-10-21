@@ -210,13 +210,13 @@
   "status": 401
  },
  "GET /v0/management/anthropic-auth-url": {
-  "body": "{\"state\":\"179b49688b7e613990bfd103b4e32e92\",\"status\":\"ok\",\"url\":\"https://claude.",
+  "body": "{\"state\":\"e5e1c3b5d36a45dbaa19af896bd8c33e\",\"status\":\"ok\",\"url\":\"https://claude.",
   "id": "M5-0217",
   "routed": true,
   "status": 200
  },
  "GET /v0/management/antigravity-auth-url": {
-  "body": "{\"state\":\"56ca63f330e0dce982f0932a41e81d34\",\"status\":\"ok\",\"url\":\"https://account",
+  "body": "{\"state\":\"79f8ff93d66f9ecb5d542c815b26d876\",\"status\":\"ok\",\"url\":\"https://account",
   "id": "M5-0219",
   "routed": true,
   "status": 200
@@ -234,7 +234,7 @@
   "status": 200
  },
  "GET /v0/management/auth-files": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T19:03:02.218489232Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T23:58:10.535294495Z\"}",
   "id": "M5-0207",
   "routed": true,
   "status": 200
@@ -264,7 +264,7 @@
   "status": 200
  },
  "GET /v0/management/codex-auth-url": {
-  "body": "{\"state\":\"59dd642e245b762c27dfb4f95c5aa659\",\"status\":\"ok\",\"url\":\"https://auth.op",
+  "body": "{\"state\":\"087b107dac8e3692e6d325ae08363fc4\",\"status\":\"ok\",\"url\":\"https://auth.op",
   "id": "M5-0218",
   "routed": true,
   "status": 200
@@ -276,7 +276,7 @@
   "status": 200
  },
  "GET /v0/management/config.yaml": {
-  "body": "host: 127.0.0.1\nport: 40987\nauth-dir: /tmp/parity-probe-jt_y6uz8/auth\napi-keys:\n",
+  "body": "host: 127.0.0.1\nport: 49771\nauth-dir: /tmp/parity-probe-lei_krql/auth\napi-keys:\n",
   "id": "M5-0086",
   "routed": true,
   "status": 200
@@ -288,7 +288,7 @@
   "status": 200
  },
  "GET /v0/management/devin-auth-url": {
-  "body": "{\"state\":\"4fba527b3464626ca0149aefc4ffe905\",\"status\":\"ok\",\"url\":\"https://app.dev",
+  "body": "{\"state\":\"f1c52b84a89e9fd4d69fc0f304b75bc6\",\"status\":\"ok\",\"url\":\"https://app.dev",
   "id": "M5-0223",
   "routed": true,
   "status": 200
@@ -468,7 +468,7 @@
   "status": 200
  },
  "GET /v0/management/request-error-logs": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T190246-05ae76",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T235754-67baac",
   "id": "M5-0147",
   "routed": true,
   "status": 200
@@ -606,7 +606,7 @@
   "status": 200
  },
  "GET /v8/management/config.yaml": {
-  "body": "access:\n  api-keys:\n    - probe-client-key\nserver:\n  host: 127.0.0.1\n  port: 409",
+  "body": "access:\n  api-keys:\n    - probe-client-key\nserver:\n  host: 127.0.0.1\n  port: 497",
   "id": "M5-0047",
   "routed": true,
   "status": 200
@@ -618,7 +618,7 @@
   "status": 404
  },
  "GET /v8/management/credentials": {
-  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T19:02:49.42345109Z\"}",
+  "body": "{\"files\":[],\"observed_at\":\"2026-10-20T23:57:57.858930408Z\"}",
   "id": "M5-0064",
   "routed": true,
   "status": 200
@@ -660,7 +660,7 @@
   "status": 400
  },
  "GET /v8/management/observability/logs/errors": {
-  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T190246-05ae76",
+  "body": "{\"files\":[{\"name\":\"error-backend-api-codex-alpha-search-2026-10-20T235754-67baac",
   "id": "M5-0059",
   "routed": true,
   "status": 200
@@ -1032,10 +1032,10 @@
   "status": 401
  },
  "POST /v1/audio/speech": {
-  "body": "",
+  "body": "{\"error\":\"Invalid API key\"}",
   "id": "M3-0365",
-  "routed": false,
-  "status": 404
+  "routed": true,
+  "status": 401
  },
  "POST /v1/chat/completions": {
   "body": "{\"error\":\"Invalid API key\"}",
@@ -1158,10 +1158,10 @@
   "status": 401
  },
  "POST /v1/tts": {
-  "body": "",
+  "body": "{\"error\":\"Invalid API key\"}",
   "id": "M3-0366",
-  "routed": false,
-  "status": 404
+  "routed": true,
+  "status": 401
  },
  "POST /v1/videos": {
   "body": "{\"error\":\"Invalid API key\"}",

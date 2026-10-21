@@ -23,7 +23,7 @@ Columns:
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
 | Codex | 19 | 0 | 19 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
-| xAI | 8 | 0 | 8 | 0 | 0 | 0 |
+| xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 0 | 22 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **19** | **205** | **0** | **61** | **3** |
+| **All** | **288** | **21** | **203** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -189,9 +189,9 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`6a853dce`](https://github.com/router-for-me/CLIProxyAPI/commit/6a853dce) | feat(xai): expose Grok TTS on /v1/audio/speech | yes | to port | L (+376 −9) | Grok TTS on `/v1/audio/speech` |
+| [`6a853dce`](https://github.com/router-for-me/CLIProxyAPI/commit/6a853dce) | feat(xai): expose Grok TTS on /v1/audio/speech | yes | ported here | L (+376 −9) | Grok TTS on `/v1/audio/speech` and `/v1/tts`; v8.0.35 route goldens (`tests/fixtures/speech_go.json`) |
 | [`57bde351`](https://github.com/router-for-me/CLIProxyAPI/commit/57bde351) | fix(executor): preserve upstream usage on apply patch failures | yes | to port | M (+53 −19) | upstream usage kept on apply_patch failures (xAI and Meta) |
-| [`306c9bd8`](https://github.com/router-for-me/CLIProxyAPI/commit/306c9bd8) | fix(routing): restrict speech-only models to speech endpoints and refine xAI error scoping | yes | to port | M (+113 −5) | speech-only models limited to speech routes; xAI error scoping |
+| [`306c9bd8`](https://github.com/router-for-me/CLIProxyAPI/commit/306c9bd8) | fix(routing): restrict speech-only models to speech endpoints and refine xAI error scoping | yes | ported here | M (+113 −5) | speech-only models limited to speech routes; xAI error scoping |
 | [`90654da5`](https://github.com/router-for-me/CLIProxyAPI/commit/90654da5) | feat(xai): dynamically fetch latest Grok CLI version from npm registry with fallback | yes | to port | M (+200 −3) | Grok CLI version fetched from npm at startup |
 | [`34e73c75`](https://github.com/router-for-me/CLIProxyAPI/commit/34e73c75) | fix(xai): add proxy support and semver validation to Grok CLI updater | yes | to port | M (+131 −32) | proxy and semver checks for the version fetch |
 | [`76c87ce9`](https://github.com/router-for-me/CLIProxyAPI/commit/76c87ce9) | fix(xai): reset terminal error on websocket connection configuration | yes | to port | S (+1 −0) | WebSocket terminal error reset |
