@@ -401,17 +401,7 @@ fn config_and_file_credentials_match_go_synthesizers() {
             .iter()
             .map(|c| go_shape(c, &root))
             .collect();
-        let mut want: Vec<Value> = case["file"].as_array().unwrap().iter().map(go_expected).collect();
-        // Pending, not a config save (executors worker): since Go 94d1a9a0 and b015f208 a
-        // file credential's own `excluded_models` no longer gain the config's
-        // `oauth-excluded-models`. Until that lands, Rust still merges them as 6fecc6e
-        // did; this pins the old values, so the port shows up here as a failure.
-        if name == "oauth_files" {
-            assert_eq!(want[0]["attributes"]["excluded_models"], "haiku-z", "{name}");
-            assert!(want[2]["attributes"].get("excluded_models").is_none(), "{name}");
-            want[0]["attributes"]["excluded_models"] = json!("haiku-z,opus-x,sonnet-y");
-            want[2]["attributes"]["excluded_models"] = json!("opus-x,sonnet-y");
-        }
+        let want: Vec<Value> = case["file"].as_array().unwrap().iter().map(go_expected).collect();
         assert_eq!(got, want, "{name}: file credentials");
         compared += got.len();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1218,9 +1208,6 @@ mod creds {
             (true, 88) => request("GET", "/credentials", None),
             (true, 0) => request("GET", "/credentials", None),
             (true, 1) => request("GET", "/credentials?name=claude-a.json", None),
-            (true, 28) => request("POST", "/credentials?name=bad.json", None),
-            (true, 49) => request("POST", "/credentials", None),
-            (true, 70 | 71) => request("PATCH", "/credentials/fields", Some("$CFGID")),
             (true, 82) => request("GET", "/routing/model-definitions/claude", None),
             _ => {}
         }
@@ -1248,8 +1235,6 @@ mod creds {
         }
         let mut response = step["response"].take();
         let response = &mut response;
-        let status = step["status"].clone();
-        let mut new_status = None;
         match (name, i) {
             // Go 0c708401: auth-file lists drop `quota_probe` and `supports_quota`.
             // Plugin worker.
@@ -1268,25 +1253,6 @@ mod creds {
                 file.insert("quota_probe".into(), json!({"kind": "fake"}));
                 file.insert("supports_quota".into(), json!(true));
                 step.as_object_mut().unwrap().remove("raw_json");
-            }
-            // Go 1a28c61e: an upload that isn't JSON answers 400. Management auth
-            // files; follow-up.
-            ("credential_inventory_and_edits", 28 | 49) => {
-                assert_eq!(status, 400, "{at}");
-                assert!(
-                    response["error"].as_str().unwrap().starts_with("invalid auth file: "),
-                    "{at}"
-                );
-                new_status = Some(json!(500));
-            }
-            // Go d69962e4 (safe Modify): fields on a config credential, which has no auth
-            // file, answer 404. Management auth files; follow-up.
-            ("credential_inventory_and_edits", 70 | 71) => {
-                assert_eq!(status, 404, "{at}");
-                assert_eq!(*response, json!({"error": "auth file not found"}), "{at}");
-                new_status = Some(json!(200));
-                *response = json!({"status": "ok"});
-                step["raw_json"] = json!(r#"{"status":"ok"}"#);
             }
             // Go f62d4d28 and a19a8ecd: the Claude catalog adds claude-haiku-5-5 and
             // changes six models' thinking metadata. Models catalog owner.
@@ -1337,9 +1303,6 @@ mod creds {
             _ => {}
         }
         step["response"] = response.take();
-        if let Some(status) = new_status {
-            step["status"] = status;
-        }
         step
     }
 

@@ -865,8 +865,9 @@ fn resync(state: &Management) {
     state.publish((*state.rt.config()).clone(), None);
 }
 
-/// Go `writeAuthFile`: validate as Go's `buildAuthFromFileData` does, then persist.
-fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(), String> {
+/// Go `writeAuthFile`: validate as Go's `buildAuthFromFileData` does, then persist. An
+/// invalid file is the client's error (`Err((true, _))`, Go `errInvalidAuthFile`, 400).
+fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(), (bool, String)> {
     let cfg = state.rt.config();
     let base = Path::new(name)
         .file_name()
@@ -875,10 +876,21 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
     let dst = std::path::absolute(cfg.auth_dir.join(&base)).unwrap_or_else(|_| cfg.auth_dir.join(&base));
     let meta = match serde_json::from_slice::<Map<String, Value>>(data) {
         Ok(m) => m,
-        Err(e) => return Err(format!("invalid auth file: {e}")),
+        Err(e) => return Err((true, format!("invalid auth file: {e}"))),
     };
+    // Loading tolerates invalid exclusion rules, so they are rejected here (Go 1a28c61e),
+    // after Go's `NormalizeCredentialMetadata`, so an error names the canonical key.
+    let mut canonical = meta.clone();
+    for (alias, canon) in ALIASES {
+        if let Some(v) = canonical.remove(*alias) {
+            canonical.entry(*canon).or_insert(v);
+        }
+    }
+    if let (_, Some(e)) = credentials::excluded_models_from_metadata(&canonical) {
+        return Err((true, format!("invalid auth file: {e}")));
+    }
     let synthesized = credentials::from_file(&cfg, &cfg.auth_dir, &dst, data)
-        .map_err(|e| format!("invalid auth file: invalid weight in {base}: {e}"))?;
+        .map_err(|e| (true, format!("invalid auth file: invalid weight in {base}: {e}")))?;
     // Go writes the upload as sent, then its file store rewrites it unless it is
     // already JSON-equal to the canonical form: canonical metadata keys plus the
     // auth's disabled flag, in `json.Marshal` key order with no trailing newline.
@@ -895,13 +907,13 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
     let bytes = if persisted == uploaded {
         data.to_vec()
     } else {
-        serde_json::to_vec(&persisted).map_err(|e| e.to_string())?
+        serde_json::to_vec(&persisted).map_err(|e| (false, e.to_string()))?
     };
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     if v8 {
         state.oauth.invalidate_siwc(&dst);
     }
-    write_file(&dst, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
+    write_file(&dst, &bytes).map_err(|e| (false, format!("failed to write file: {e}")))?;
     {
         let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
         if synthesized.is_none() {
@@ -938,9 +950,7 @@ pub(crate) async fn upload(
             if !ends_json(&name) {
                 return Err((true, "file must be .json".into()));
             }
-            store_file(&state, &name, &part.data, v8)
-                .map(|()| name)
-                .map_err(|e| (false, e))
+            store_file(&state, &name, &part.data, v8).map(|()| name)
         };
         return match files.len() {
             0 => fail(StatusCode::BAD_REQUEST, "no files uploaded"),
@@ -996,7 +1006,8 @@ pub(crate) async fn upload(
     let result = tokio::task::spawn_blocking(move || store_file(&state, &name, &body, v8)).await;
     match result {
         Ok(Ok(())) => reply(StatusCode::OK, [("status", "ok".into())]),
-        Ok(Err(msg)) => fail(StatusCode::INTERNAL_SERVER_ERROR, msg),
+        Ok(Err((true, msg))) => fail(StatusCode::BAD_REQUEST, msg),
+        Ok(Err((false, msg))) => fail(StatusCode::INTERNAL_SERVER_ERROR, msg),
         Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }
@@ -1188,7 +1199,7 @@ fn patch_error(e: Option<PatchError>) -> Response {
 }
 
 /// Go `syncAuthFileMetadataFields`: attributes that mirror the patched metadata roots.
-/// Used for config-backed credentials, which are not re-synthesized after a patch.
+/// Used for runtime-only credentials, which are not re-synthesized after a patch.
 fn sync_patched_attributes(c: &mut Credential, roots: &[String]) {
     let touched = |r: &str| roots.iter().any(|x| x == r);
     let text = |c: &Credential, key: &str| c.metadata.get(key).and_then(Value::as_str).map(|s| s.trim().to_owned());
@@ -1198,6 +1209,18 @@ fn sync_patched_attributes(c: &mut Credential, roots: &[String]) {
             && let Some(v) = text(c, key)
         {
             c.attributes.insert(key.into(), v);
+        }
+    }
+    if touched("excluded_models") {
+        // Go `ApplyAuthExcludedModelsMeta`: only the credential's own rules.
+        let (rules, _) = credentials::excluded_models_from_metadata(&c.metadata);
+        let mut rules: Vec<String> = rules.iter().map(|r| r.to_lowercase()).collect();
+        rules.sort();
+        rules.dedup();
+        if rules.is_empty() {
+            c.attributes.remove("excluded_models");
+        } else {
+            c.attributes.insert("excluded_models".into(), rules.join(","));
         }
     }
     if touched("headers") {
@@ -1513,6 +1536,11 @@ fn apply_fields(
     else {
         return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
     };
+    // Go d69962e4 and 3e309fb4: config credentials are edited through the config
+    // endpoints, not as auth files.
+    if matches!(target.source, Source::Config { .. }) {
+        return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
+    }
     // Start from Go's normalized metadata so aliases persist under canonical names.
     let mut meta = target.metadata.clone();
     for (alias, canon) in ALIASES {
@@ -1524,6 +1552,21 @@ fn apply_fields(
     for (path, value) in fields {
         if path.is_empty() {
             return Some(fail(StatusCode::BAD_REQUEST, "field name is required"));
+        }
+        if root(path) == "excluded_models" {
+            if path != "excluded_models" {
+                return Some(fail(
+                    StatusCode::BAD_REQUEST,
+                    "excluded_models does not support nested fields",
+                ));
+            }
+            let strings = value.as_array().is_some_and(|l| l.iter().all(Value::is_string));
+            if !value.is_null() && !strings {
+                return Some(fail(
+                    StatusCode::BAD_REQUEST,
+                    "excluded_models must be a string array or null",
+                ));
+            }
         }
         if path == "weight" {
             if value.is_null() {
@@ -1570,9 +1613,8 @@ fn apply_fields(
     } else {
         None
     };
-    if matches!(target.source, Source::Config { .. } | Source::Runtime) {
-        // Go updates config API keys and runtime-only auths in memory only (no file,
-        // no config write).
+    if matches!(target.source, Source::Runtime) {
+        // Go updates runtime-only auths in memory only (no file, no config write).
         let mut next = Credential::clone(&target);
         next.metadata = meta;
         sync_patched_attributes(&mut next, &roots);

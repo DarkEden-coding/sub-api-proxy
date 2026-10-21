@@ -307,6 +307,60 @@ fn sanitized(cfg: &Config, family: &str) -> Vec<Key> {
     keys
 }
 
+/// Go `ExtractExcludedModelsFromMetadata`: a credential file's own excluded models from
+/// `excluded_models`, else the `excluded-models` alias. A string is split on commas; an
+/// array keeps its string entries. Any other type, or a non-string entry, also returns
+/// the error a write entry point rejects (the valid entries are still returned).
+pub fn excluded_models_from_metadata(meta: &Map<String, Json>) -> (Vec<String>, Option<String>) {
+    let (key, raw) = match meta.get("excluded_models") {
+        Some(raw) => ("excluded_models", raw),
+        None => match meta.get("excluded-models") {
+            Some(raw) => ("excluded-models", raw),
+            None => return (Vec::new(), None),
+        },
+    };
+    let mut invalid = None;
+    let entries: Vec<&str> = match raw {
+        Json::Null => return (Vec::new(), None),
+        Json::String(s) => s.split(',').collect(),
+        Json::Array(items) => items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                if item.is_string() {
+                    return item.as_str();
+                }
+                invalid
+                    .get_or_insert_with(|| format!("metadata {key}[{index}] must be a string, got {}", go_type(item)));
+                None
+            })
+            .collect(),
+        other => {
+            let error = format!("metadata {key} must be a string array, got {}", go_type(other));
+            return (Vec::new(), Some(error));
+        }
+    };
+    let rules = entries
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (rules, invalid)
+}
+
+/// Go's `%T` of a decoded JSON value.
+fn go_type(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "<nil>",
+        Json::Bool(_) => "bool",
+        Json::Number(_) => "float64",
+        Json::String(_) => "string",
+        Json::Array(_) => "[]interface {}",
+        Json::Object(_) => "map[string]interface {}",
+    }
+}
+
 /// Go `ApplyAuthExcludedModelsMeta`: lowercase de-duplicated sorted union.
 fn excluded_union(lists: &[&[String]]) -> Vec<String> {
     let mut set: Vec<String> = lists
@@ -967,8 +1021,10 @@ pub fn parse_weight(value: &Json) -> Result<i64, String> {
 }
 
 /// Builds one auth-file credential as Go's `FileSynthesizer` does. `Ok(None)` is a
-/// silently ignored file; `Err` is a skipped file worth a warning.
-pub fn from_file(cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Result<Option<Credential>, String> {
+/// silently ignored file; `Err` is a skipped file worth a warning. The config (Go's
+/// synthesis context) no longer shapes a file credential: global excluded models apply
+/// at registration (Go b015f208).
+pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Result<Option<Credential>, String> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -1028,18 +1084,15 @@ pub fn from_file(cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Res
     if let Some(aliases) = oauth_aliases(meta.get("model_aliases")) {
         attrs.insert("model_aliases".into(), aliases);
     }
-    let per_account: Vec<String> = match meta.get("excluded_models") {
-        Some(Json::Array(list)) => list
-            .iter()
-            .filter_map(Json::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    };
-    let global = oauth_excluded(cfg).remove(&provider).unwrap_or_default();
-    let combined = excluded_union(&[&per_account, &global]);
+    // Invalid rules must not drop the credential: keep the valid entries and warn (Go
+    // 1a28c61e). Only the credential's own rules are stored; the global
+    // `oauth-excluded-models` apply at registration when there are none (Go b015f208).
+    let (per_account, invalid) = excluded_models_from_metadata(&meta);
+    if let Some(error) = invalid {
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        tracing::warn!(%error, "ignoring invalid excluded models in auth file {file}");
+    }
+    let combined = excluded_union(&[&per_account]);
     if !combined.is_empty() {
         attrs.insert("excluded_models".into(), combined.join(","));
     }
@@ -1544,5 +1597,93 @@ mod tests {
         assert_eq!(api_key_config_proxy(&cfg, second), "direct");
         let compat = creds.iter().find(|c| c.attributes.contains_key("compat_name")).unwrap();
         assert_eq!(api_key_config_proxy(&cfg, compat), "http://one.example.invalid:1");
+    }
+
+    /// Go `TestExtractExcludedModelsFromMetadata`.
+    #[test]
+    fn excluded_models_read_from_credential_metadata() {
+        let read = |json: &str| {
+            let meta: Map<String, Json> = serde_json::from_str(json).unwrap();
+            excluded_models_from_metadata(&meta)
+        };
+        let ok = |json: &str, want: &[&str]| {
+            assert_eq!(
+                read(json),
+                (want.iter().map(|s| s.to_string()).collect(), None),
+                "{json}"
+            )
+        };
+        ok("{}", &[]);
+        ok(r#"{"excluded_models":null}"#, &[]);
+        ok(r#"{"excluded_models":[" a ","","b"]}"#, &["a", "b"]);
+        ok(
+            r#"{"excluded_models":" gemini-pro-agent , ,gemini-3-flash"}"#,
+            &["gemini-pro-agent", "gemini-3-flash"],
+        );
+        ok(r#"{"excluded_models":"  "}"#, &[]);
+        ok(r#"{"excluded-models":"a,b"}"#, &["a", "b"]);
+        ok(r#"{"excluded_models":[],"excluded-models":["legacy"]}"#, &[]);
+        for (json, want, error) in [
+            (
+                r#"{"excluded_models":123}"#,
+                &[][..],
+                "metadata excluded_models must be a string array, got float64",
+            ),
+            (
+                r#"{"excluded-models":true}"#,
+                &[],
+                "metadata excluded-models must be a string array, got bool",
+            ),
+            (
+                r#"{"excluded_models":{}}"#,
+                &[],
+                "metadata excluded_models must be a string array, got map[string]interface {}",
+            ),
+            (
+                r#"{"excluded_models":["a",123," b ",false]}"#,
+                &["a", "b"],
+                "metadata excluded_models[1] must be a string, got float64",
+            ),
+            (
+                r#"{"excluded_models":[null]}"#,
+                &[],
+                "metadata excluded_models[0] must be a string, got <nil>",
+            ),
+        ] {
+            let want: Vec<String> = want.iter().map(|s: &&str| s.to_string()).collect();
+            assert_eq!(read(json), (want, Some(error.to_owned())), "{json}");
+        }
+    }
+
+    /// Go `TestSynthesizeAuthFileKeepsCredentialWithInvalidExcludedModels` and
+    /// `TestSynthesizeAuthFileDoesNotPersistGlobalOAuthExclusions`: a file credential
+    /// stores only its own rules, normalized, and invalid rules never drop it.
+    #[test]
+    fn file_credentials_store_only_their_own_excluded_models() {
+        let cfg = Config::parse("oauth:\n  excluded-models:\n    claude: [global-model]\n").unwrap();
+        let rules = |raw: &str| {
+            let c = from_file(&cfg, Path::new("/auth"), Path::new("/auth/a.json"), raw.as_bytes())
+                .unwrap()
+                .expect("the credential still loads");
+            c.attributes.get("excluded_models").cloned()
+        };
+        for raw in [
+            r#"{"type":"claude"}"#,
+            r#"{"type":"claude","excluded_models":[]}"#,
+            r#"{"type":"claude","excluded_models":[" ","\t"]}"#,
+            r#"{"type":"claude","excluded_models":123}"#,
+            r#"{"type":"claude","excluded_models":{"x":1}}"#,
+            r#"{"type":"claude","excluded_models":[null]}"#,
+        ] {
+            assert_eq!(rules(raw), None, "{raw}: global rules apply at registration");
+        }
+        let own = |raw: &str, want: &str| assert_eq!(rules(raw).as_deref(), Some(want), "{raw}");
+        own(r#"{"type":"claude","excluded_models":["Own-Model"]}"#, "own-model");
+        own(r#"{"type":"claude","excluded_models":["Model-A",null,1]}"#, "model-a");
+        own(
+            r#"{"type":"claude","excluded_models":"Model-B,model-a, MODEL-B"}"#,
+            "model-a,model-b",
+        );
+        own(r#"{"type":"claude","excluded-models":["Alias-*"]}"#, "alias-*");
     }
 }
