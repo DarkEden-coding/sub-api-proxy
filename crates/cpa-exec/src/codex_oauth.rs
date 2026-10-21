@@ -194,6 +194,7 @@ pub struct CodexOAuth {
     token_url: String,
     device_usercode_url: String,
     device_token_url: String,
+    siwc_token_url: String,
     refreshes: Refreshes,
     retry_delay: Duration,
 }
@@ -210,9 +211,20 @@ impl CodexOAuth {
             token_url: token.into(),
             device_usercode_url: usercode.into(),
             device_token_url: device_token.into(),
+            siwc_token_url: crate::codex_siwc::TOKEN_URL.into(),
             refreshes: Arc::default(),
             retry_delay: Duration::from_secs(1),
         }
+    }
+
+    /// The Sign in with ChatGPT token endpoint, for local mocks.
+    pub fn with_siwc_token_url(mut self, url: &str) -> Self {
+        self.siwc_token_url = url.into();
+        self
+    }
+
+    pub(crate) fn siwc_token_url(&self) -> &str {
+        &self.siwc_token_url
     }
 
     /// Tests shorten Go's 1s-per-attempt refresh backoff.
@@ -230,7 +242,12 @@ impl CodexOAuth {
     /// Posts a form or JSON body as Go's `http.Client.Do` does (Go net/http headers,
     /// redirects followed, transparent gzip). Returns the status and a bounded body;
     /// transport faults never echo URLs or payloads.
-    async fn post(&self, url: &str, content_type: &str, body: Vec<u8>) -> Result<(u16, bytes::Bytes), ExecError> {
+    pub(crate) async fn post(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<(u16, bytes::Bytes), ExecError> {
         let failed = || ExecError::local(502, FailureScope::Transport, "codex oauth request failed");
         let mut headers = crate::proxy::GoHeaders::new();
         headers.set("Content-Type", content_type);
