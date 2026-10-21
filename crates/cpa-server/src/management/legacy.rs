@@ -799,10 +799,12 @@ pub(crate) async fn vertex_import(
 mod tests {
     use super::*;
 
-    /// A v0 setter chooses its writer and writes under one `disk` lock: an upload that
-    /// arrives after the setter saw a v8 file waits, and then replaces the file, so the
-    /// uploaded legacy file is never migrated (its `codex-header-defaults` stays shared).
-    #[tokio::test]
+    /// A v0 setter chooses its writer and writes under one `disk` lock. At the point
+    /// where it has chosen the v8 writer, a legacy `config.yaml` upload starts; it must
+    /// not get in before the setter writes. If it could (the lock released between the
+    /// layout check and the write), the setter would then migrate the uploaded legacy
+    /// file and its `codex-header-defaults` would become OAuth-only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_v0_save_holds_the_disk_lock_from_layout_to_write() {
         let dir = std::env::temp_dir().join(format!("cpa-v0-race-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -822,32 +824,41 @@ mod tests {
             },
         ));
         let state = Management::with_options(rt, path.clone(), Default::default());
-        let (seen_tx, seen) = std::sync::mpsc::channel();
-        let (release, release_rx) = std::sync::mpsc::channel::<()>();
-        let release_rx = std::sync::Mutex::new(release_rx);
-        *super::super::AFTER_LAYOUT.lock().unwrap() = Some((
-            path.clone(),
-            Box::new(move || {
-                seen_tx.send(()).unwrap();
-                release_rx.lock().unwrap().recv().unwrap();
-            }),
-        ));
-        let setter = tokio::spawn(field_route(
+        let upload =
+            format!("auth-dir: {auth}\nrequest-retry: 3\ncodex-header-defaults: {{user-agent: legacy-agent}}\n");
+        let (upload_tx, upload_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let handle = tokio::runtime::Handle::current();
+        let hook = {
+            let (state, upload) = (state.clone(), upload.clone());
+            move || {
+                let task = handle.spawn(put_config_yaml(State(state), Bytes::from(upload)));
+                upload_tx.send(task).unwrap();
+                // Unlocked here, the upload finishes well within this window; locked, it
+                // cannot write until the setter has.
+                let raced = finished_rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+                assert!(!raced, "the upload wrote between the layout check and the write");
+            }
+        };
+        *super::super::AFTER_LAYOUT.lock().unwrap() = Some((path.clone(), Box::new(hook)));
+        let setter = field_route(
             State(state.clone()),
             OriginalUri("/v0/management/request-retry".parse().unwrap()),
             Method::PUT,
             Bytes::from(r#"{"value":2}"#),
-        ));
-        tokio::task::spawn_blocking(move || seen.recv().unwrap()).await.unwrap();
-        let upload =
-            format!("auth-dir: {auth}\nrequest-retry: 3\ncodex-header-defaults: {{user-agent: legacy-agent}}\n");
-        let uploading = tokio::spawn(put_config_yaml(State(state.clone()), Bytes::from(upload.clone())));
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!uploading.is_finished(), "the upload waits for the setter's save");
-        release.send(()).unwrap();
-        assert_eq!(setter.await.unwrap().status(), StatusCode::OK);
-        assert_eq!(uploading.await.unwrap().status(), StatusCode::OK);
-        *super::super::AFTER_LAYOUT.lock().unwrap() = None;
+        );
+        let setter = tokio::time::timeout(std::time::Duration::from_secs(10), setter);
+        let watcher = tokio::task::spawn_blocking(move || {
+            let task = upload_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the hook ran");
+            let status = tokio::runtime::Handle::current().block_on(task).unwrap().status();
+            let _ = finished_tx.send(());
+            status
+        });
+        let saved = setter.await.expect("the setter finished");
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(watcher.await.unwrap(), StatusCode::OK);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), upload);
         let cfg = state.rt.config();
         let api = cfg.for_api_key();

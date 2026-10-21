@@ -4464,24 +4464,28 @@ async fn v0_setters_keep_a_legacy_layout() {
 
 /// A v0 legacy save works on Go's flattened tree: an inherited (`<<`) setting can be
 /// deleted, and a setter below an inherited parent keeps its untouched siblings. A key
-/// edited into the file as plaintext is saved and published hashed, as Go saves its
-/// in-memory, hashed config.
+/// edited into the file as plaintext is saved and published hashed, whether the save
+/// sets, deletes or keeps a value, as Go saves its in-memory, hashed config.
 #[tokio::test]
 async fn v0_legacy_saves_expand_merges_and_hash_the_key() {
-    let f = Fixture::from_yaml("v0-legacy-merge", |auth, hash| {
-        private_config(
-            "<<:\n  oauth-excluded-models:\n    codex: [blocked-model]\n  quota-exceeded:\n    switch-project: true\n    switch-preview-model: true\n",
-            auth,
-            hash,
-            true,
-        )
-    });
+    let merged = |name: &str| {
+        Fixture::from_yaml(name, |auth, hash| {
+            private_config(
+                "<<:\n  oauth-excluded-models:\n    codex: [blocked-model]\n  quota-exceeded:\n    switch-project: true\n    switch-preview-model: true\n",
+                auth,
+                hash,
+                true,
+            )
+        })
+    };
+    let f = merged("v0-legacy-merge-delete");
     let (base, server) = f.server().await;
-    assert!(
+    let excluded = |f: &Fixture| {
         f.rt.config().document["oauth"]["excluded-models"]
             .get("codex")
             .is_some()
-    );
+    };
+    assert!(excluded(&f));
     let (status, text) = call(
         &base,
         wreq::Method::DELETE,
@@ -4495,12 +4499,12 @@ async fn v0_legacy_saves_expand_merges_and_hash_the_key() {
         !file.contains("blocked-model") && !file.contains("config-version:"),
         "{file}"
     );
-    assert!(
-        f.rt.config().document["oauth"]["excluded-models"]
-            .get("codex")
-            .is_none(),
-        "{file}"
-    );
+    assert!(!excluded(&f), "{file}");
+    server.abort();
+
+    // A fresh merged file: the edit lands under the inherited parent itself.
+    let f = merged("v0-legacy-merge-sibling");
+    let (base, server) = f.server().await;
     let (status, text) = call(
         &base,
         wreq::Method::PATCH,
@@ -4509,50 +4513,75 @@ async fn v0_legacy_saves_expand_merges_and_hash_the_key() {
     )
     .await;
     assert_eq!(status, 200, "{text}");
-    let d = Config::parse(&f.file()).unwrap().document;
+    let file = f.file();
+    let d = Config::parse(&file).unwrap().document;
     assert_eq!(
         d["quota-exceeded"]["switch-project"],
         serde_yaml_ng::Value::Bool(false),
-        "{}",
-        f.file()
+        "{file}"
     );
     assert_eq!(
         d["quota-exceeded"]["switch-preview-model"],
         serde_yaml_ng::Value::Bool(true),
-        "{}",
-        f.file()
+        "{file}"
     );
+    assert!(file.contains("blocked-model"), "{file}");
     server.abort();
 
-    let f = Fixture::from_yaml("v0-legacy-secret", |auth, hash| {
-        private_config("request-retry: 3\n", auth, hash, true)
-    });
-    let (base, server) = f.server().await;
-    // Hand-edited after startup, before any reload (the fixture runs no watcher).
-    let hash = f.rt.config().management.secret_key.clone();
-    std::fs::write(
-        f.dir.join("config.yaml"),
-        f.file().replace(&hash, "fake-management-only"),
-    )
-    .unwrap();
-    let (status, text) = call(
-        &base,
-        wreq::Method::PUT,
-        "/v0/management/request-retry",
-        r#"{"value":2}"#,
-    )
-    .await;
-    assert_eq!(status, 200, "{text}");
-    let file = f.file();
-    let saved = Config::parse(&file).unwrap().management.secret_key;
-    assert!(bcrypt::verify("fake-management-only", &saved).unwrap(), "{file}");
-    let live = f.rt.config().management.secret_key.clone();
-    assert!(bcrypt::verify("fake-management-only", &live).unwrap(), "{live}");
-    assert_eq!(
-        call(&base, wreq::Method::GET, "/v0/management/request-retry", "")
-            .await
-            .0,
-        200
-    );
-    server.abort();
+    for (name, method, route, body) in [
+        (
+            "set",
+            wreq::Method::PUT,
+            "/v0/management/request-retry",
+            r#"{"value":2}"#,
+        ),
+        (
+            "delete",
+            wreq::Method::DELETE,
+            "/v0/management/oauth-excluded-models?provider=codex",
+            "",
+        ),
+        (
+            "keep",
+            wreq::Method::PUT,
+            "/v0/management/oauth-excluded-models",
+            r#"{"codex":["blocked-model"]}"#,
+        ),
+    ] {
+        let f = Fixture::from_yaml(&format!("v0-legacy-secret-{name}"), |auth, hash| {
+            private_config(
+                "request-retry: 3\noauth-excluded-models:\n  codex: [blocked-model]\n",
+                auth,
+                hash,
+                true,
+            )
+        });
+        let (base, server) = f.server().await;
+        // Hand-edited after startup, before any reload (the fixture runs no watcher).
+        let hash = f.rt.config().management.secret_key.clone();
+        std::fs::write(
+            f.dir.join("config.yaml"),
+            f.file().replace(&hash, "fake-management-only"),
+        )
+        .unwrap();
+        let (status, text) = call(&base, method, route, body).await;
+        assert_eq!(status, 200, "{name}: {text}");
+        let file = f.file();
+        assert_eq!(file.contains("blocked-model"), name != "delete", "{name}: {file}");
+        let saved = Config::parse(&file).unwrap().management.secret_key;
+        assert!(
+            bcrypt::verify("fake-management-only", &saved).unwrap(),
+            "{name}: {file}"
+        );
+        let live = f.rt.config().management.secret_key.clone();
+        assert!(bcrypt::verify("fake-management-only", &live).unwrap(), "{name}: {live}");
+        assert_eq!(
+            call(&base, wreq::Method::GET, "/v0/management/request-retry", "")
+                .await
+                .0,
+            200,
+            "{name}"
+        );
+        server.abort();
+    }
 }

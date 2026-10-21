@@ -1023,11 +1023,13 @@ pub(crate) struct V8Edit<'a> {
     pub value: Option<Value>,
 }
 
-/// Test pause point once [`v0_save`] has chosen a layout, for the config file it names.
+/// Test hook run once, for the config file it names, when [`v0_save`] has chosen the v8
+/// writer and not yet written: the boundary where an unlocked save would let another
+/// writer in.
 #[cfg(test)]
 pub(crate) static AFTER_LAYOUT: Mutex<Option<(PathBuf, LayoutHook)>> = Mutex::new(None);
 #[cfg(test)]
-pub(crate) type LayoutHook = Box<dyn Fn() + Send>;
+pub(crate) type LayoutHook = Box<dyn FnOnce() + Send>;
 
 /// Go v8.0.35 `SaveConfigPreserveComments`: a v0 save keeps a file without v8 sections
 /// in its legacy layout, so legacy settings keep their scope (a legacy
@@ -1054,13 +1056,20 @@ pub(crate) fn v0_save(state: &Management, legacy: &[&str], edit: LegacyEdit, v8:
     if !root.is_mapping() {
         return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, "expected root mapping node");
     }
-    #[cfg(test)]
-    if let Some((path, hook)) = AFTER_LAYOUT.lock().unwrap().as_ref()
-        && *path == state.path
-    {
-        hook();
-    }
     if cpa_core::config::is_v8_layout(&root) {
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut slot = AFTER_LAYOUT.lock().unwrap_or_else(PoisonError::into_inner);
+                match slot.as_ref() {
+                    Some((path, _)) if *path == state.path => slot.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, hook)) = hook {
+                hook();
+            }
+        }
         return match v8.value {
             Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes()),
             None => config_sync_locked(state, v8.path, Method::DELETE, &[], b""),
