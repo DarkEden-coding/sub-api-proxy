@@ -337,7 +337,11 @@ impl Runtime {
         }
         let id = lease.credential.id.clone();
         match self.prepare_credential(&id, cfg, None).await {
-            Ok(current) => lease.credential = current,
+            Ok(current) => {
+                lease.credential = current;
+                // Go stamps the dispatch after preparing the credential.
+                lease.redispatch();
+            }
             Err(error) => {
                 lease.complete(Outcome::Failure(error.clone()));
                 return Err(AcquireError::Prepare { id, error });
@@ -362,12 +366,10 @@ impl Runtime {
             credential = self.prepare_credential(id, cfg, None).await.ok()?;
         }
         // Outside selection: the lease answers no bounded window or probe reservation.
-        let picked = self
-            .store
-            .scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .outside_selection_generation();
+        let (picked, seq) = {
+            let mut scheduler = self.store.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
+            (scheduler.outside_selection_generation(), scheduler.dispatch())
+        };
         Some(Lease {
             store: self.store.clone(),
             credential: Arc::new(prepare(&credential)),
@@ -377,6 +379,7 @@ impl Runtime {
             policy: self.policy(),
             reported: false,
             picked,
+            seq,
             remote: None,
             lcp: None,
         })
@@ -413,6 +416,7 @@ impl Runtime {
             policy: self.policy(),
             reported: false,
             picked: 0,
+            seq: 0,
             remote: Some(crate::remote::RemoteEnd {
                 end: Some(grant.end),
                 releases: releases.clone(),
@@ -907,6 +911,8 @@ pub struct Lease {
     /// The scheduler generation at the pick (`Scheduler::reserve_probe`): bounded
     /// windows opened or probes reserved after it are not answered by this attempt.
     picked: u32,
+    /// The upstream dispatch stamp (`Scheduler::dispatch`); 0 for remote leases.
+    seq: u64,
     /// A credential from the remote dispatcher: its lease ends there, not in the local
     /// scheduler.
     remote: Option<crate::remote::RemoteEnd>,
@@ -933,6 +939,19 @@ impl Lease {
             .as_ref()
             .and_then(|remote| remote.cancel.as_ref())
             .is_some_and(|signal| *signal.borrow())
+    }
+
+    /// A new upstream dispatch on this lease (a refresh-and-retry): a cooldown recorded
+    /// before it no longer predates this attempt (Go `nextExecutionSeq` per dispatch).
+    pub(crate) fn redispatch(&mut self) {
+        if self.remote.is_none() {
+            self.seq = self
+                .store
+                .scheduler
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dispatch();
+        }
     }
 
     pub fn complete(mut self, outcome: Outcome) {
@@ -1358,9 +1377,9 @@ impl CredentialStore {
             };
             let (c, m) = eligible.iter().find(|(c, _)| c.id == picked.id).unwrap();
             let generation = scheduler.reserve_probe(c, m, now);
-            (Arc::clone(c), lcp, generation)
+            (Arc::clone(c), lcp, generation, scheduler.dispatch())
         };
-        let (credential, lcp, picked) = credential;
+        let (credential, lcp, picked, seq) = credential;
         let execution_model = admit(&credential).unwrap_or_else(|| selection.model.clone());
         Ok(Lease {
             store: self.clone(),
@@ -1371,6 +1390,7 @@ impl CredentialStore {
             policy,
             reported: false,
             picked,
+            seq,
             remote: None,
             lcp,
         })
@@ -1512,7 +1532,15 @@ impl CredentialStore {
                 .is_some();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
             let before = persist.then(|| scheduler.records(&lease.credential, now, wall));
-            scheduler.record_picked(&lease.credential, model, outcome, &lease.policy, lease.picked, now);
+            scheduler.record_dispatched(
+                &lease.credential,
+                model,
+                outcome,
+                &lease.policy,
+                lease.picked,
+                lease.seq,
+                now,
+            );
             scheduler.session_result(
                 &lease.credential,
                 &lease.selection,
@@ -2518,6 +2546,50 @@ mod tests {
         assert!(store.select(selection.clone()).is_none(), "still reserved");
         second.complete(Outcome::Cancelled);
         assert!(store.select(selection).is_some(), "its own cancellation frees it");
+    }
+
+    /// Go 35af74f9 (TestManager_Issue6643_InFlightSuccessesKeepFreshQuotaCooldown):
+    /// successes of requests dispatched before a 429 was recorded, whether picked by
+    /// selection or by the credits fallback outside it, leave the cooldown; a lease
+    /// dispatched again after it (a refresh-and-retry) clears it.
+    #[tokio::test]
+    async fn successes_dispatched_before_a_cooldown_keep_it() {
+        let rt = Arc::new(crate::testing::runtime(
+            Config::parse("").unwrap(),
+            vec![cred("a.json", "claude", false)],
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let selection = Selection::new("claude", "m");
+        let cfg = rt.config();
+        let in_flight = rt.store.select(selection.clone()).unwrap();
+        let credits = rt
+            .lease_credential("a.json", selection.clone(), &cfg, Credential::clone)
+            .await
+            .unwrap();
+        let mut retried = rt.store.select(selection.clone()).unwrap();
+        let mut quota = ExecError::local(429, FailureScope::Model, "rate limited");
+        quota.retry_after = Some(Duration::from_secs(3600));
+        rt.store
+            .select(selection.clone())
+            .unwrap()
+            .complete(Outcome::Failure(quota));
+        assert!(rt.store.select(selection.clone()).is_none(), "cooling");
+        in_flight.complete(Outcome::Success);
+        assert!(rt.store.select(selection.clone()).is_none(), "a stale success keeps it");
+        credits.complete(Outcome::Success);
+        assert!(
+            rt.store.select(selection.clone()).is_none(),
+            "a stale credits success keeps it"
+        );
+        retried.redispatch();
+        retried.complete(Outcome::Success);
+        assert!(rt.store.select(selection).is_some(), "a later dispatch clears it");
     }
 
     /// A request picked before a bounded window opened succeeds after it (a stream that

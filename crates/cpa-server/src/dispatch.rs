@@ -2211,6 +2211,9 @@ async fn attempt(
             }
         };
         tracing::trace!(target: "cpa_latency", stage = "selected");
+        // Each pooled model is its own upstream dispatch, stamped right before it runs:
+        // after preparation and the after-auth interceptor (Go `nextExecutionSeq`).
+        lease.redispatch();
         let mut executed = execute(lease.credential.clone(), req.clone()).await;
         // Go `tryRefreshAfterUnauthorized`: one refresh-and-retry per credential. Home
         // credentials never refresh here (Go home_unauthorized_refresh): the 401 goes to
@@ -2226,6 +2229,7 @@ async fn attempt(
                 t.fail(error);
             }
             lease.credential = current;
+            lease.redispatch();
             tracker = start(&lease.credential, &mut req);
             observe(&lease.credential, &mut req);
             executed = execute(lease.credential.clone(), req).await;
