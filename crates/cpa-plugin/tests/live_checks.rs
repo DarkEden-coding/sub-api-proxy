@@ -159,6 +159,21 @@ async fn fusing_a_plugin_drops_its_thinking_provider() {
     assert_eq!(host.thinking_provider("t"), None);
 }
 
+/// Fusing the last translator plugin restores the registry's no-hook fast path.
+#[tokio::test]
+async fn fusing_the_last_translator_plugin_turns_the_hooks_off() {
+    let a = Script {
+        caps: r#""request_normalizer":true"#,
+        results: BTreeMap::new(),
+        fuse_on: None,
+    };
+    let (host, _) = host_with("hooks", [("a", a)].into()).await;
+    host.install_translator_hooks();
+    assert!(cpa_translate::hooks::current().is_some());
+    host.fuse("a", "RequestNormalizer.NormalizeRequest", "test");
+    assert!(cpa_translate::hooks::current().is_none());
+}
+
 #[tokio::test]
 async fn a_stale_executor_provider_replaced_by_a_builtin_one_is_kept() {
     for builtin_took_over in [false, true] {

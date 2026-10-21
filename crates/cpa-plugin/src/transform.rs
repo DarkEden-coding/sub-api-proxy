@@ -140,16 +140,19 @@ impl Host {
         !self.hook_records(|r| r.plugin.caps.response_translator).is_empty()
     }
 
-    /// Whether an active plugin offers a request or response translator or normalizer.
+    /// Whether an active, unfused plugin offers a request or response translator or
+    /// normalizer.
     fn has_translator_hooks(&self) -> bool {
-        self.active_records().iter().any(|r| {
-            let c = &r.plugin.caps;
-            c.request_translator
-                || c.request_normalizer
-                || c.response_translator
-                || c.response_before_translator
-                || c.response_after_translator
-        })
+        !self
+            .hook_records(|r| {
+                let c = &r.plugin.caps;
+                c.request_translator
+                    || c.request_normalizer
+                    || c.response_translator
+                    || c.response_before_translator
+                    || c.response_after_translator
+            })
+            .is_empty()
     }
 
     /// Go `sdktranslator.SetPluginHooks(host)`: the translation registry calls this host's

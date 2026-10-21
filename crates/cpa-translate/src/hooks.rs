@@ -77,7 +77,9 @@ fn response<'a>(from: &'a str, to: &'a str, ctx: &'a ResponseCtx<'a>, stream: bo
 }
 
 /// Go `TranslateNonStream` around a registered transform: the before-normalizers, the
-/// transform, then the after-normalizers unless the transform failed (Go's nil body).
+/// transform, then the after-normalizers unless the transform failed. Go skips them only
+/// for a nil body, which its translators return on a tool-input failure (an `Err` here);
+/// an empty body (Go `[]byte{}`) still goes through them.
 pub(crate) fn non_stream(
     from: &str,
     to: &str,

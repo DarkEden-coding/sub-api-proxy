@@ -298,6 +298,7 @@ impl Host {
         // Go `thinking.UnregisterPluginProviders`.
         state.thinking_providers.retain(|_, owner| owner != id);
         drop(state);
+        self.publish_translator_hooks();
         tracing::error!(plugin_id = %id, method = %what, "pluginhost: plugin panic recovered: {panic}");
     }
 
