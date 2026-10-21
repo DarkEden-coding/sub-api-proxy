@@ -2363,6 +2363,53 @@ mod tests {
         }
     }
 
+    /// Go 7c2133e2, 08e5762a and f75ea073 fence model publications against superseded
+    /// credential snapshots (model_registration_publication_regression_test,
+    /// model_registration_issue6718_test, service_batch_model_registration_test). Here the
+    /// registry is derived from the current credential set on use, so a prefix change, a
+    /// removal, a disable and a re-registration show at once, and a request result alone
+    /// does not rebuild it.
+    #[test]
+    fn the_registry_follows_the_latest_credentials() {
+        let rt = crate::testing::runtime(
+            Config::parse("").unwrap(),
+            Vec::new(),
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        );
+        let with = |prefix: &str, disabled: bool| {
+            let mut c = cred("a.json", "claude", disabled);
+            c.metadata.insert("prefix".into(), prefix.into());
+            c
+        };
+        rt.store.reconcile(vec![with("old", false)]);
+        let model = cpa_core::registry::dynamic::models_for(&rt.config(), &HashMap::new(), &with("", false), 0)
+            .first()
+            .map(|spec| spec.id.clone())
+            .expect("a Claude catalog model");
+        let supports = |prefix: &str| rt.registry().client_supports("a.json", &format!("{prefix}/{model}"));
+        assert!(supports("old"));
+        let built = rt.registry();
+        rt.store
+            .select(Selection::new("claude", &model))
+            .unwrap()
+            .complete(Outcome::Success);
+        assert!(Arc::ptr_eq(&built, &rt.registry()), "a result does not rebuild it");
+        rt.store.reconcile(vec![with("new", false)]);
+        assert!(supports("new") && !supports("old"), "a superseded prefix");
+        rt.store.reconcile(vec![with("new", true)]);
+        assert!(!rt.registry().has_client("a.json"), "disabled");
+        rt.store.reconcile(Vec::new());
+        assert!(!rt.registry().has_client("a.json"), "removed");
+        rt.store.reconcile(vec![with("fresh", false)]);
+        assert!(supports("fresh") && !supports("new"), "re-registered");
+    }
+
     #[test]
     fn standalone_admission_reads_attributes_first() {
         let mut c = cred("a.json", "claude", false);
