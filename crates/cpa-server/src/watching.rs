@@ -311,14 +311,24 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 },
                 _ => {}
             }
-            // What the reload read, not what was observed before it: a write landing in
-            // between is reloaded when it is next observed (Go records the parsed config's
-            // `SourceHash` and forgets the hash of an incomplete auth read). Applied once
-            // either way: a failed config load retries on its next change, as Go retries
-            // on its next file event, rather than every tick.
-            applied = Some(read.unwrap_or(current));
+            // Applied once either way: a failed config load retries on its next change,
+            // as Go retries on its next file event, rather than every tick.
+            applied = Some(record(&mut cache, current, read));
         }
     })
+}
+
+/// What a reload applied: what it read, not what was observed before it, so a write
+/// landing in between is reloaded when it is next observed (Go records the parsed
+/// config's `SourceHash` and forgets the hash of an incomplete auth read). When the two
+/// differ, cached hashes may be the stale ones (a same-size write with the same
+/// modification time, or a lasting read denial), so the next observation reads afresh.
+fn record(cache: &mut HashCache, observed: Snapshot, read: Option<Snapshot>) -> Snapshot {
+    let read = read.unwrap_or_else(|| observed.clone());
+    if read != observed {
+        *cache = HashCache::default();
+    }
+    read
 }
 
 /// What the watch should cover: the config file, the auth folder of the published
@@ -438,28 +448,31 @@ fn reload_config(
         config: observed.config,
         auth: BTreeMap::new(),
     };
-    let (mut config, config_error, accepted) = match read_config.then(|| std::fs::metadata(&state.path)) {
+    // Recorded as the observation records it: the hash of the bytes read, `None` when
+    // the read fails.
+    let (mut config, config_error, accepted) = match read_config.then(|| std::fs::read(&state.path)) {
         None => ((*state.rt.config()).clone(), None, false),
         Some(Err(error)) => {
             read.config = None;
-            ((*state.rt.config()).clone(), Some(ReloadError::Missing(error)), false)
+            let error = if std::fs::metadata(&state.path).is_err() {
+                ReloadError::Missing(error)
+            } else {
+                ReloadError::Invalid(error.into())
+            };
+            ((*state.rt.config()).clone(), Some(error), false)
         }
-        // Go ignores an empty config write.
-        Some(Ok(meta)) if meta.len() == 0 => {
-            read.config = Some(Sha256::digest(b"").into());
-            ((*state.rt.config()).clone(), None, false)
-        }
-        Some(Ok(_)) => {
-            read.config = None;
-            let loaded = std::fs::read(&state.path)
-                .map_err(anyhow::Error::from)
-                .and_then(|data| {
-                    read.config = Some(Sha256::digest(&data).into());
-                    Config::load_text(&state.path, std::str::from_utf8(&data)?)
-                });
+        Some(Ok(data)) => {
+            read.config = Some(Sha256::digest(&data).into());
+            let loaded = (!data.is_empty()).then(|| {
+                std::str::from_utf8(&data)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|text| Config::load_text(&state.path, text))
+            });
             match loaded {
-                Ok(config) => (config, None, true),
-                Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
+                // Go ignores an empty config write.
+                None => ((*state.rt.config()).clone(), None, false),
+                Some(Ok(config)) => (config, None, true),
+                Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
             }
         }
     };
@@ -552,19 +565,27 @@ mod tests {
     /// 7484a521 forgets the hash of an incomplete read). Go
     /// `TestReloadConfigIfChangedSerializesConcurrentReloads_Issue6631` has no Rust
     /// interleaving: one watcher task reloads, under the disk lock.
+    /// One watcher reload as `start` makes it: reload what was observed, then record
+    /// what was applied.
+    fn step(state: &Management, cache: &mut HashCache, read_config: bool, observed: &Snapshot) -> Snapshot {
+        let (_, read) = reload_config(state, read_config, observed);
+        record(cache, observed.clone(), Some(read))
+    }
+
     #[tokio::test]
     async fn the_watcher_records_what_its_reload_read_not_what_it_observed() {
         let (state, dir) = state();
-        let look = |state: &Management| observe(state, &mut HashCache::default());
+        let mut cache = HashCache::default();
         let config = |port| format!("port: {port}\noauth: {{auth-dir: {}}}\n", dir.display());
         std::fs::write(&state.path, config(9001)).unwrap();
-        let observed = look(&state);
+        let observed = observe(&state, &mut cache);
         std::fs::write(&state.path, config(9002)).unwrap(); // Lands before the reload reads.
-        let (result, applied) = reload_config(&state, true, &observed);
-        assert_eq!(result.unwrap().unwrap().port, 9002);
+        let applied = step(&state, &mut cache, true, &observed);
+        assert_eq!(state.rt.config().port, 9002);
         std::fs::write(&state.path, config(9001)).unwrap(); // Restores the observed bytes.
-        assert!(look(&state) != applied, "the restore must be reloaded");
-        reload(&state).unwrap();
+        let restored = observe(&state, &mut cache);
+        assert!(restored != applied, "the restore must be reloaded");
+        step(&state, &mut cache, true, &restored);
         assert_eq!(state.rt.config().port, 9001);
 
         let file = dir.join("a.json");
@@ -577,19 +598,84 @@ mod tests {
         std::fs::write(&file, account("a@example.com")).unwrap();
         reload(&state).unwrap();
         std::fs::write(&file, account("b@example.com")).unwrap();
-        let observed = look(&state);
+        let observed = observe(&state, &mut cache);
         std::fs::write(&file, "").unwrap(); // Truncated before the scan.
-        let (_, applied) = reload_config(&state, false, &observed);
+        let applied = step(&state, &mut cache, false, &observed);
         assert_eq!(email(&state), "a@example.com"); // Kept while incomplete.
         std::fs::write(&file, account("b@example.com")).unwrap(); // Finished after it.
-        let finished = look(&state);
+        let finished = observe(&state, &mut cache);
         assert!(
             finished == observed && finished != applied,
             "the finished write must be reloaded"
         );
-        let (_, applied) = reload_config(&state, false, &finished);
+        let applied = step(&state, &mut cache, false, &finished);
         assert_eq!(email(&state), "b@example.com");
-        assert!(look(&state) == applied, "nothing left to reload");
+        assert!(observe(&state, &mut cache) == applied, "nothing left to reload");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A config whose metadata reads as empty but whose contents cannot be read is
+    /// recorded as the observation sees it, unreadable, so it does not reload every
+    /// tick; it reloads once it changes.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_unreadable_empty_config_converges() {
+        let (state, dir) = state();
+        let mut cache = HashCache::default();
+        let port = state.rt.config().port;
+        std::fs::remove_file(&state.path).unwrap();
+        // Zero bytes by its metadata, and every read fails (EIO), even for root.
+        std::os::unix::fs::symlink("/proc/self/mem", &state.path).unwrap();
+        let observed = observe(&state, &mut cache);
+        assert_eq!(observed.config, None);
+        let applied = step(&state, &mut cache, true, &observed);
+        assert!(observe(&state, &mut cache) == applied, "no reload without a change");
+        assert_eq!(state.rt.config().port, port);
+        std::fs::remove_file(&state.path).unwrap();
+        std::fs::write(
+            &state.path,
+            format!("port: 9005\noauth: {{auth-dir: {}}}\n", dir.display()),
+        )
+        .unwrap();
+        let changed = observe(&state, &mut cache);
+        assert!(changed != applied);
+        step(&state, &mut cache, true, &changed);
+        assert_eq!(state.rt.config().port, 9005);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A cached hash can be stale when a same-size write keeps the metadata (Windows has
+    /// no inode or change time): once the reload read something else, the next
+    /// observation reads afresh and agrees with it instead of reloading every tick.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_cached_hash_does_not_reload_forever() {
+        let (state, dir) = state();
+        let mut cache = HashCache::default();
+        let file = dir.join("a.json");
+        std::fs::write(&file, r#"{"type":"codex","email":"b@example.com"}"#).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // Not racy, and cached for an earlier same-size write with the same metadata.
+        let meta = std::fs::metadata(&file).unwrap();
+        cache.0.insert(file.clone(), (Stat::of(&meta), [7; 32]));
+        let observed = observe(&state, &mut cache);
+        assert_eq!(observed.auth[&file], [7; 32]);
+        let applied = step(&state, &mut cache, false, &observed);
+        assert!(
+            state
+                .rt
+                .store()
+                .snapshot()
+                .iter()
+                .any(|c| c.str("email") == Some("b@example.com"))
+        );
+        assert!(observe(&state, &mut cache) == applied, "converges after one reload");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
