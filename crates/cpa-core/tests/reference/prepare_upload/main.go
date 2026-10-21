@@ -32,8 +32,10 @@ type result struct {
 	Result any `json:"result"`
 	// Verifies: the prepared file's effective secret is the bcrypt hash of Plain.
 	Verifies bool `json:"verifies"`
-	// EffectiveSame: the prepared file decodes to the same Config, secret aside.
-	EffectiveSame bool `json:"effective_same"`
+	// EffectiveSame: the prepared file decodes to the same Config, secret aside,
+	// including the json:"-" Host, Port and RemoteManagement; null when the input
+	// does not decode.
+	EffectiveSame *bool `json:"effective_same"`
 }
 
 const plain = "upload-plaintext-secret"
@@ -62,16 +64,23 @@ func masked(v any) any {
 	return v
 }
 
-func effective(data []byte) (string, string) {
+// effective is the decoded Config with its secret blanked, and the secret; ok is
+// false when data does not decode.
+func effective(data []byte) (snapshot, secret string, ok bool) {
 	var cfg config.Config
 	if yaml.Unmarshal(data, &cfg) != nil {
-		return "", "undecodable"
+		return "", "", false
 	}
-	secret := cfg.RemoteManagement.SecretKey
+	secret = cfg.RemoteManagement.SecretKey
 	cfg.RemoteManagement.SecretKey = ""
-	out, err := json.Marshal(cfg)
+	out, err := json.Marshal(struct {
+		Config           config.Config
+		Host             string
+		Port             int
+		RemoteManagement config.RemoteManagement
+	}{cfg, cfg.Host, cfg.Port, cfg.RemoteManagement})
 	must(err)
-	return secret, string(out)
+	return string(out), secret, true
 }
 
 func main() {
@@ -108,6 +117,17 @@ func main() {
 		{"decimal secret beside a hex copy", "management:\n  secret-key: '31'\ncopy: 0x1F\n", "31"},
 		{"unquoted hex secret", "management:\n  secret-key: 0x1F\n", "0x1F"},
 		{"unquoted boolean secret", "management:\n  secret-key: yes\n", "yes"},
+		// Tagged scalars: a custom tag keeps the text, !!binary decodes base64.
+		{"tagged copy of the secret", "management:\n  secret-key: secret\ncopy: !keep secret\n", "secret"},
+		{"tagged mapping hiding a copy", "management:\n  secret-key: secret\ncopy: !keep {nested: [secret]}\n", "secret"},
+		{"tagged secret", "management:\n  secret-key: !keep secret\n", "secret"},
+		{"binary secret", "management:\n  secret-key: !!binary c2VjcmV0\n", "secret"},
+		{"binary secret beside its base64 copy", "management:\n  secret-key: !!binary c2VjcmV0\ncopy: c2VjcmV0\n", "secret"},
+		{"binary secret beside its decoded copy", "management:\n  secret-key: !!binary c2VjcmV0\ncopy: secret\n", "secret"},
+		{"invalid binary secret", "management:\n  secret-key: !!binary 'c2VjcmV0!'\n", ""},
+		// The re-emitted tree must keep every other scalar's text.
+		{"aliased hex secret", "management:\n  secret-key: &key 0x1F\ncopy: *key\n", "0x1F"},
+		{"merge key beside a hex value", "defaults: &management\n  secret-key: " + plain + "\nmanagement:\n  <<: *management\nport: 0x1F9D\n", plain},
 		// bcrypt's 72-byte limit and Go's looksLikeBcrypt.
 		{"71 bytes", "management:\n  secret-key: " + strings.Repeat("a", 71) + "\n", strings.Repeat("a", 71)},
 		{"72 bytes", "management:\n  secret-key: " + strings.Repeat("a", 72) + "\n", strings.Repeat("a", 72)},
@@ -139,6 +159,13 @@ func main() {
 		{"historical alias beside upstream", "oauth:\n  providers:\n    codex:\n      model-level-cooling: true\nupstream:\n  codex:\n    model-level-cooling: false\n", ""},
 		{"scalar at a struct path", "tls: 5\nserver:\n  tls:\n    enable: false\n", ""},
 		{"empty legacy struct, v8 struct present", "tls: {}\nserver:\n  tls:\n    enable: true\n", ""},
+		{"declared claude header leaf overridden", "claude-header-defaults:\n  client-request-id: 'off'\nupstream:\n  claude:\n    header-defaults:\n      client-request-id: 'on'\n", ""},
+		{"undeclared nested antigravity field", "antigravity:\n  signature-cache-enabled: false\noauth:\n  providers:\n    antigravity:\n      signature-cache-enabled: true\n", ""},
+		{"empty legacy discovery interfaces", "discovery:\n  interfaces: {}\nserver:\n  discovery:\n    interfaces: {}\n", ""},
+		// uint16 relay ports fail to decode even with the relay disabled.
+		{"relay port above uint16", "management:\n  secret-key: " + plain + "\ncodex:\n  live-media-relay:\n    udp-port-min: 65536\n", plain},
+		{"negative relay port", "management:\n  secret-key: " + plain + "\noauth:\n  providers:\n    codex:\n      live-media-relay:\n        udp-port-max: -1\n", plain},
+		{"server port above uint16", "port: 70000\n", ""},
 	}
 	dir, err := os.MkdirTemp("", "cpa-prepare-")
 	must(err)
@@ -158,10 +185,12 @@ func main() {
 		if yaml.Unmarshal(data, &doc) == nil {
 			r.Result = masked(doc)
 		}
-		secret, after := effective(data)
-		_, before := effective([]byte(c.yaml))
+		after, secret, _ := effective(data)
+		if before, _, ok := effective([]byte(c.yaml)); ok {
+			same := before == after
+			r.EffectiveSame = &same
+		}
 		r.Verifies = c.plain != "" && bcrypt.CompareHashAndPassword([]byte(secret), []byte(c.plain)) == nil
-		r.EffectiveSame = before == after
 		out = append(out, r)
 	}
 	data, err := json.MarshalIndent(out, "", "  ")

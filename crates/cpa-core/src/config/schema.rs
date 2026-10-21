@@ -98,15 +98,6 @@ pub fn coerce_typed_scalars(value: &mut Value) {
     walk(value, &SCHEMA);
 }
 
-/// Whether the v8 schema declares `path`, and if so whether it is a struct.
-pub(super) fn declared(path: &str) -> Option<bool> {
-    let mut schema = &*SCHEMA;
-    for part in path.split('.') {
-        schema = schema.get("fields")?.get(part)?;
-    }
-    Some(schema.get("fields").is_some())
-}
-
 pub(super) fn is_struct(path: &str) -> bool {
     let mut schema = &*SCHEMA;
     for part in path.split('.') {

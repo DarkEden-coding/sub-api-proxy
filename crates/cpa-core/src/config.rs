@@ -295,7 +295,24 @@ fn with_secret_hash(text: &str, hash: &str) -> anyhow::Result<String> {
     // An anchored key edited in place would also change every alias of it.
     let updated = match in_place.flatten().filter(|t| expanded(t).is_ok_and(|v| v == want)) {
         Some(t) => t,
-        None => serde_yaml_ng::to_string(&want)?,
+        None => {
+            let t = serde_yaml_ng::to_string(&want)?;
+            // The re-emitted tree writes parsed values (`0x1F` becomes `31`); Go keeps
+            // each node's text. Refuse rather than change another setting.
+            let others = |t: &str| -> anyhow::Result<Value> {
+                let mut tree = scalar_texts(t)?;
+                expand_merges(&mut tree)?;
+                if let Some(m) = tree.get_mut(parent).and_then(Value::as_mapping_mut) {
+                    m.remove("secret-key");
+                }
+                Ok(tree)
+            };
+            anyhow::ensure!(
+                others(text)? == others(&t)?,
+                "rewriting the config file would change the text of another setting"
+            );
+            t
+        }
     };
     let stored = scalar_texts(&updated).ok().map(|tree| effective_secret(&tree));
     anyhow::ensure!(stored.as_deref() == Some(hash), "secret key not updated");
@@ -325,7 +342,18 @@ fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     decode(text).context("failed to parse config file")?;
     let mut tree = scalar_texts(text).context("failed to parse config file")?;
     expand_merges(&mut tree).context("failed to parse config file")?;
-    let secret = effective_secret(&tree);
+    let mut secret = effective_secret(&tree);
+    if binary_secret(text, &tree) {
+        // yaml.v3 decodes a `!!binary` scalar into a string field; Go's StdEncoding
+        // skips line breaks.
+        use base64::Engine as _;
+        let payload: String = secret.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        secret = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .context("failed to parse config file: !!binary value contains invalid base64 data")?;
+    }
     let mut prepared = text.to_owned();
     if !secret.is_empty() && !is_bcrypt(&secret) {
         // bcrypt 0.19's non-truncating hash also refuses exactly 72 bytes; Go does not.
@@ -371,9 +399,26 @@ fn effective_secret(tree: &Value) -> String {
     }
 }
 
+/// Whether the effective `secret-key` of a [`scalar_texts`] tree is written with the
+/// `!!binary` tag. ponytail: only a literal key is checked, not one reached through an
+/// alias or merge.
+fn binary_secret(text: &str, tree: &Value) -> bool {
+    let v8 = tree
+        .as_mapping()
+        .and_then(|m| lookup(m, "management.secret-key"))
+        .is_some();
+    let parent = if v8 { "management" } else { "remote-management" };
+    let Ok(file) = text.parse::<yaml_edit::YamlFile>() else {
+        return false;
+    };
+    let node = file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key"));
+    matches!(node, Some(yaml_edit::YamlNode::TaggedNode(t)) if t.tag().as_deref() == Some("!!binary"))
+}
+
 /// `text` as a tree whose scalars are their decoded text, as yaml.v3's `Node.Value`
-/// holds it (`0x1F` stays `0x1F`, `'31'` is `31`), and whose nulls stay null. Keys are
-/// kept as parsed; aliases are expanded, merges are not.
+/// holds it (`0x1F` stays `0x1F`, `'31'` is `31`, `!!binary c2VjcmV0` is `c2VjcmV0`),
+/// and whose nulls stay null. Custom tags are dropped. Keys are kept as parsed;
+/// aliases are expanded, merges are not.
 fn scalar_texts(text: &str) -> anyhow::Result<Value> {
     use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
     struct Shaped<'a>(&'a Value);
@@ -386,11 +431,22 @@ fn scalar_texts(text: &str) -> anyhow::Result<Value> {
                 Value::Mapping(map) => d.deserialize_map(Entries(map)),
                 Value::Sequence(items) => d.deserialize_seq(Items(items)),
                 Value::Null => IgnoredAny::deserialize(d).map(|_| Value::Null),
-                // ponytail: a custom-tagged node keeps its parsed value; Go compares
-                // its text. Configs do not use custom tags.
-                Value::Tagged(_) => IgnoredAny::deserialize(d).map(|_| self.0.clone()),
+                // A custom tag reaches serde as an enum variant; Go reads the node.
+                Value::Tagged(tagged) => d.deserialize_any(Untagged(&tagged.value)),
                 _ => String::deserialize(d).map(Value::String),
             }
+        }
+    }
+    struct Untagged<'a>(&'a Value);
+    impl<'de> Visitor<'de> for Untagged<'_> {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a tagged node")
+        }
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<Value, A::Error> {
+            use serde::de::VariantAccess as _;
+            let (IgnoredAny, variant) = access.variant()?;
+            variant.newtype_variant_seed(Shaped(self.0))
         }
     }
     impl<'de> Visitor<'de> for Entries<'_> {
@@ -451,6 +507,7 @@ fn decode(text: &str) -> anyhow::Result<(Mapping, ConfigDocument)> {
     let mut document = ConfigDocument::from_mapping(root.clone())?;
     document.coerce_typed_scalars();
     schema::validate(document.value(), false)?;
+    validate::decoded(document.value())?;
     Ok((root, document))
 }
 

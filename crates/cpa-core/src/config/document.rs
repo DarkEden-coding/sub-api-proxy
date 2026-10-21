@@ -655,67 +655,39 @@ impl ConfigDocument {
     }
 }
 
+/// Go's `buildV8Paths` output for v8.0.35, in its order: the declared legacy leaves
+/// and structs, each with its v8 path. Regenerate with
+/// `tests/reference/legacy_paths/main.go`.
+#[derive(serde::Deserialize)]
+struct LegacyPaths {
+    leaves: Vec<(String, String)>,
+    structs: Vec<(String, String)>,
+}
+
+static LEGACY: std::sync::LazyLock<LegacyPaths> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("legacy_paths.json")).expect("legacy_paths.json is valid")
+});
+
 /// The (legacy, v8) pairs Go's non-migrating `NormalizeConfigLayout` checks, in its
-/// order: the private-IP alias, the historical v8 aliases, the declared legacy leaves
-/// (each claimed by the first [`PATHS`] entry that covers it), the client key list,
-/// empty or null legacy structs whose v8 struct is present, then the key families.
-/// Declared means the v8 schema has the setting, as Go's walk of its `Config` type
-/// does; a same-spelled field Go does not declare is not an override.
+/// order: the private-IP alias, the historical v8 aliases, Go's declared legacy
+/// leaves, the empty or null legacy structs whose v8 struct is present, then the key
+/// families. A same-spelled field Go does not declare is not an override.
 fn conflict_candidates(root: &Mapping) -> Vec<(String, String)> {
-    let present = |path: &str| lookup(root, path).is_some();
     let pair = |old: &str, new: &str| (old.to_owned(), new.to_owned());
     let mut out = vec![pair(
         "codex.live-media-relay.allow-private-remote-ips",
         "oauth.providers.codex.live-media-relay.disable-private-remote-ips",
     )];
     out.extend(CLIENT_PATHS.iter().chain(SHARED_PATHS).map(|(old, new)| pair(old, new)));
-    let mut structs = Vec::new();
-    fn walk(
-        root: &Mapping,
-        claim: usize,
-        old: String,
-        new: String,
-        leaves: &mut Vec<(String, String)>,
-        structs: &mut Vec<(String, String)>,
-    ) {
-        let first = PATHS
-            .iter()
-            .position(|(p, _)| old == *p || old.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')));
-        let Some(value) = lookup(root, &old).filter(|_| first == Some(claim)) else {
-            return;
+    out.extend(LEGACY.leaves.iter().cloned());
+    let structs = LEGACY.structs.iter().map(|(old, new)| (old.as_str(), new.as_str()));
+    for (old, new) in structs.chain(SHARED_STRUCTS.iter().copied()) {
+        let empty = match lookup(root, old) {
+            Some(Value::Null) => true,
+            Some(Value::Mapping(m)) => m.is_empty(),
+            _ => false,
         };
-        match (super::schema::declared(&new), value) {
-            (Some(false), _) => leaves.push((old, new)),
-            (Some(true), Value::Mapping(children)) if !children.is_empty() => {
-                for key in children.keys().filter_map(Value::as_str) {
-                    walk(
-                        root,
-                        claim,
-                        format!("{old}.{key}"),
-                        format!("{new}.{key}"),
-                        leaves,
-                        structs,
-                    );
-                }
-            }
-            (Some(true), Value::Null | Value::Mapping(_)) if lookup(root, &new).is_some() => structs.push((old, new)),
-            _ => {}
-        }
-    }
-    for (i, (old, new)) in PATHS.iter().enumerate() {
-        walk(root, i, (*old).to_owned(), (*new).to_owned(), &mut out, &mut structs);
-    }
-    out.push(pair("api-keys", "access.api-keys"));
-    out.extend(structs);
-    // PATHS moves the legacy Claude structs by their leaves; Go's struct paths also
-    // hold the containers themselves.
-    let claude = [("claude", "upstream.claude"), ("claude-code", "upstream.claude")];
-    for (old, new) in claude.iter().chain(SHARED_STRUCTS) {
-        let empty = matches!(lookup(root, old), Some(Value::Null))
-            || lookup(root, old)
-                .and_then(Value::as_mapping)
-                .is_some_and(Mapping::is_empty);
-        if empty && present(new) {
+        if empty && lookup(root, new).is_some() {
             out.push(pair(old, new));
         }
     }

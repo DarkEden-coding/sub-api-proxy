@@ -2,6 +2,10 @@
 //! recorded by `tests/reference/prepare_upload/main.go`: the outcome, the error, whether
 //! the file was left alone, the prepared file's content (bcrypt hashes masked) and
 //! whether its secret is the hash of the expected plaintext.
+//!
+//! Where re-emitting the alias-expanded tree would change another scalar's text, Rust
+//! refuses and Go re-encodes (docs/DIFFERENCES-FROM-GO.md); those cases expect Rust's
+//! refusal.
 use serde_json::Value as Json;
 use serde_yaml_ng::Value;
 
@@ -13,6 +17,10 @@ fn masked(v: Json) -> Json {
         v => v,
     }
 }
+
+const REWRITE_REFUSED: &[&str] = &["aliased hex secret", "merge key beside a hex value"];
+const REWRITE_REFUSAL: &str =
+    "failed to update remote management key: rewriting the config file would change the text of another setting";
 
 #[test]
 fn prepare_for_upload_matches_go() {
@@ -30,6 +38,16 @@ fn prepare_for_upload_matches_go() {
         let result = cpa_core::config::prepare_for_upload(&path);
         let saved = std::fs::read_to_string(&path).unwrap();
         let mut fail = |what: String| failures.push(format!("{name}: {what}"));
+        if REWRITE_REFUSED.contains(&name) {
+            match &result {
+                Err(e) if format!("{e:#}") == REWRITE_REFUSAL => {}
+                other => fail(format!("{other:?}, expected the rewrite refusal")),
+            }
+            if saved != yaml {
+                fail("changed".into());
+            }
+            continue;
+        }
         match (&result, go_error.is_empty()) {
             (Ok(()), true) => {}
             (Err(e), false) => {
@@ -58,7 +76,8 @@ fn prepare_for_upload_matches_go() {
                 case["unchanged"]
             ));
         }
-        if !case["result"].is_null() {
+        // An unchanged file is the input, which Go's generic decode reads.
+        if !case["result"].is_null() && saved != yaml {
             let mut doc: Value = serde_yaml_ng::from_str(&saved).unwrap();
             cpa_core::config::expand_merges(&mut doc).unwrap();
             let got = masked(serde_json::to_value(&doc).unwrap());
@@ -79,7 +98,7 @@ fn prepare_for_upload_matches_go() {
             }
         }
         assert!(
-            case["effective_same"].as_bool().unwrap(),
+            case["effective_same"].as_bool() != Some(false),
             "{name}: the recording changed Go's config"
         );
     }
