@@ -726,11 +726,19 @@ pub(crate) async fn config(
     OriginalUri(uri): OriginalUri,
     method: Method,
     headers: HeaderMap,
-    body: Result<Bytes, BytesRejection>,
+    body: axum::body::Body,
 ) -> Response {
-    let body = match body {
-        Ok(body) => body,
-        Err(rejection) => return error(read_status(&rejection).as_u16(), "invalid_body"),
+    // Go reads the body only for writes other than DELETE, after the If-Match check.
+    let body = if matches!(method, Method::GET | Method::DELETE) {
+        Ok(Bytes::new())
+    } else {
+        axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+            if crate::body_limit::is_too_large(&e) {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        })
     };
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
@@ -739,7 +747,7 @@ pub(crate) async fn config(
         .iter()
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
         .collect();
-    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
+    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, body.as_deref().map_err(|s| *s)))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
 }
@@ -811,7 +819,7 @@ pub(crate) fn config_sync(
     path: &str,
     method: Method,
     if_match: &[String],
-    body: &[u8],
+    body: Result<&[u8], StatusCode>,
 ) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     config_sync_locked(state, path, method, if_match, body, false)
@@ -825,7 +833,7 @@ fn config_sync_locked(
     path: &str,
     method: Method,
     if_match: &[String],
-    body: &[u8],
+    body: Result<&[u8], StatusCode>,
     typed: bool,
 ) -> Response {
     let original = match std::fs::read_to_string(&state.path) {
@@ -921,6 +929,10 @@ fn config_sync_locked(
             return error(404, "not_found");
         }
     } else {
+        let body = match body {
+            Ok(body) => body,
+            Err(status) => return error(status.as_u16(), "invalid_body"),
+        };
         if !yaml && serde_json::from_slice::<serde::de::IgnoredAny>(body).is_err() {
             return error(400, "invalid_json");
         }
@@ -1003,7 +1015,7 @@ fn config_sync_locked(
         return response;
     }
     let basis = if yaml {
-        match std::str::from_utf8(body) {
+        match std::str::from_utf8(body.unwrap_or_default()) {
             Ok(v) => v.to_owned(),
             Err(_) => return error(400, "invalid_body"),
         }
@@ -1107,8 +1119,8 @@ pub(crate) fn v0_save(
             }
         }
         return match v8.value {
-            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes(), true),
-            None => config_sync_locked(state, v8.path, Method::DELETE, &[], b"", true),
+            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], Ok(value.to_string().as_bytes()), true),
+            None => config_sync_locked(state, v8.path, Method::DELETE, &[], Ok(b""), true),
         };
     }
     let mut doc = ConfigDocument::unmigrated(root);

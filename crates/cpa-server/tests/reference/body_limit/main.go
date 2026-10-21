@@ -169,6 +169,9 @@ func scenarios() []scenario {
 		add(scenario{Name: "zstd_decoded_over_limit " + path, YAML: zstdYAML, Method: "POST", Path: path, Headers: zstdHeaders, Body: compressed})
 	}
 	add(scenario{Name: "zstd_decoded_over_limit_request_log", YAML: zstdYAML + requestLog, Method: "POST", Path: "/v1/responses", Headers: zstdHeaders, Body: compressed})
+	for _, path := range []string{"/v1/images/generations", "/v1/images/edits"} {
+		add(scenario{Name: "zstd_decoded_over_limit " + path, YAML: zstdYAML, Method: "POST", Path: path, Headers: zstdHeaders, Body: compressed})
+	}
 	exact := zstdBytes(`{"model":"gpt-5","input":"` + strings.Repeat("z", 100) + `"}`)
 	add(scenario{Name: "zstd_decoded_at_limit", YAML: zstdYAML, Method: "POST", Path: "/v1/responses", Headers: zstdHeaders, Body: exact})
 
@@ -228,6 +231,24 @@ func scenarios() []scenario {
 	for _, path := range []string{"/v1/realtime/client_secrets", "/v1/realtime/sessions", "/v1/realtime/calls", "/v1/live", "/v1/realtime/calls/rtc_1/hangup"} {
 		add(scenario{Name: "realtime_chunked " + path, YAML: api64(""), Method: "POST", Path: path, Headers: auth, Body: big, Chunked: true})
 	}
+	// Go reads the v8 config body only for writes other than DELETE.
+	add(scenario{Name: "management_chunked GET /v8/management/config", YAML: mgmtYAML, Method: "GET", Path: "/v8/management/config", Headers: mgmt, Body: strings.Repeat(" ", 33), Chunked: true})
+	add(scenario{Name: "management_chunked DELETE /v8/management/config/server/max-request-body-bytes", YAML: mgmtYAML, Method: "DELETE",
+		Path: "/v8/management/config/server/max-request-body-bytes", Headers: mgmt, Body: strings.Repeat(" ", 33), Chunked: true})
+	// Known differences (docs/DIFFERENCES-FROM-GO.md): Go's JSON binder decodes the first
+	// value from the permitted prefix, and Go's multipart reader reports either the limit
+	// or a parse error depending on where the limit falls.
+	add(scenario{Name: "json_first_value_within_limit /v0/management/plugins/demo/quota", YAML: mgmtYAML, Method: "POST", Path: "/v0/management/plugins/demo/quota",
+		Headers: mgmt, Body: "{}" + strings.Repeat(" ", 64), Chunked: true})
+	fileForm, fileType := form(nil, `{"type":"claude","access_token":"`+strings.Repeat("t", 2048)+`"}`)
+	kiB := strings.Replace(mgmtYAML, "max-request-body-bytes: 32", "max-request-body-bytes: 1024", 1)
+	for _, path := range []string{"/v0/management/auth-files", "/v8/management/credentials", "/v0/management/vertex/import", "/v8/management/oauth/import?provider=vertex"} {
+		add(scenario{Name: "multipart_file_data_over_limit " + path, YAML: kiB, Method: "POST", Path: path,
+			Headers: map[string]string{"Authorization": "Bearer mgmt-secret", "Content-Type": fileType}, Body: fileForm, Chunked: true})
+	}
+	imageForm, imageType := form([][2]string{{"model", "gpt-image-1"}, {"prompt", "p"}}, "")
+	add(scenario{Name: "multipart_headers_over_limit /v1/images/edits", YAML: exactYAML, Method: "POST", Path: "/v1/images/edits",
+		Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}, Body: imageForm, Chunked: true})
 	add(scenario{Name: "management_content_length_over_limit", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config", Headers: mgmt, Body: oversized})
 	add(scenario{Name: "management_unauthenticated_chunked", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config",
 		Headers: map[string]string{"Content-Type": "application/json"}, Body: oversized, Chunked: true})

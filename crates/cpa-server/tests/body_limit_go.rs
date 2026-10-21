@@ -101,6 +101,24 @@ const STATUS_ONLY: &[&str] = &[
     "management_multipart_chunked /v0/management/auth-files",
     "management_multipart_chunked /v0/management/vertex/import",
     "management_multipart_chunked /v8/management/oauth/import?provider=vertex",
+    // The answer carries a per-run bcrypt hash and temporary path; Go reads no body.
+    "management_chunked GET /v8/management/config",
+];
+
+/// Where Go and cliproxy-rs differ on purpose (docs/DIFFERENCES-FROM-GO.md), with
+/// cliproxy-rs's status. Go's JSON binders decode the first value from the permitted
+/// prefix; Go's multipart reader reports the limit or a parse error depending on where
+/// the limit falls in the form. cliproxy-rs reads these bodies whole first.
+const DIFFERS: &[(&str, u16)] = &[
+    ("json_first_value_within_limit /v0/management/plugins/demo/quota", 413),
+    ("multipart_file_data_over_limit /v0/management/auth-files", 400),
+    ("multipart_file_data_over_limit /v8/management/credentials", 400),
+    ("multipart_file_data_over_limit /v0/management/vertex/import", 400),
+    (
+        "multipart_file_data_over_limit /v8/management/oauth/import?provider=vertex",
+        400,
+    ),
+    ("multipart_headers_over_limit /v1/images/edits", 413),
 ];
 
 #[tokio::test]
@@ -154,7 +172,12 @@ async fn body_limit_answers_match_go() {
         // failure is a plain-text 400 where gin's handlers write their own JSON 400
         // (docs/DIFFERENCES-FROM-GO.md).
         let status_only = STATUS_ONLY.contains(&name);
-        if status_only && got.0 != want.0 || !status_only && got != want {
+        if let Some(&(_, ours)) = DIFFERS.iter().find(|(n, _)| *n == name) {
+            assert_ne!(want.0, ours, "{name}: Go now agrees; drop it from DIFFERS");
+            if got.0 != ours {
+                failures.push(format!("{name}: got {got:?}, want our documented {ours}"));
+            }
+        } else if status_only && got.0 != want.0 || !status_only && got != want {
             failures.push(format!("{name}: got {got:?}, want {want:?}"));
         }
         // Go reads at most the limit plus one byte; frames arrive whole here.
@@ -201,5 +224,55 @@ async fn a_published_limit_applies_to_the_next_request() {
     std::fs::write(&path, format!("{text}server:\n  max-request-body-bytes: 29\n")).unwrap();
     rt.publish_config(Config::load(&path).unwrap());
     assert_eq!(send(app).await, 413);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Go stores the middleware's limit on the request: a reload while the body is still
+/// arriving does not change the limit its decoding applies.
+#[tokio::test]
+async fn a_reload_during_a_request_keeps_its_limit() {
+    use futures_util::StreamExt as _;
+    let dir = std::env::temp_dir().join(format!("cpa-body-limit-mid-{}", std::process::id()));
+    let yaml = "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n";
+    let (app, rt) = app(&dir, yaml, false);
+    let decoded = format!(r#"{{"model":"gpt-5","input":"{}"}}"#, "z".repeat(512));
+    let compressed = zstd::encode_all(decoded.as_bytes(), 3).unwrap();
+    assert!(compressed.len() < 128);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (Ok::<_, std::io::Error>(chunk), rx))
+    });
+    let request = axum::http::Request::post("/v1/responses")
+        .header("authorization", "Bearer test-key")
+        .header("content-type", "application/json")
+        .header("content-encoding", "zstd")
+        .body(Body::from_stream(stream.boxed()))
+        .unwrap();
+    let response = tokio::spawn(app.oneshot(request));
+    let (head, tail) = compressed.split_at(compressed.len() / 2);
+    tx.send(Bytes::copy_from_slice(head)).await.unwrap();
+    // The handler has taken the first half, so the middleware has run.
+    while tx.capacity() < tx.max_capacity() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let path = dir.join("config.yaml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("max-request-body-bytes: 128", "max-request-body-bytes: 0");
+    std::fs::write(&path, text).unwrap();
+    rt.publish_config(Config::load(&path).unwrap());
+    assert_eq!(rt.config().max_request_body_bytes(), None);
+    tx.send(Bytes::copy_from_slice(tail)).await.unwrap();
+    drop(tx);
+    let response = response.await.unwrap().unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        (status, String::from_utf8_lossy(&body).as_ref()),
+        (
+            413,
+            r#"{"error":{"message":"Invalid request: http: request body too large","type":"invalid_request_error"}}"#
+        )
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

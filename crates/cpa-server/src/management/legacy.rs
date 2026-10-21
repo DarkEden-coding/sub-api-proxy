@@ -955,7 +955,7 @@ mod tests {
                     "/v8/management/config/access/api-keys",
                     Method::PUT,
                     &[],
-                    br#"["a","b","c"]"#,
+                    Ok(br#"["a","b","c"]"#),
                 );
                 let _ = done_tx.send(());
                 res.status()

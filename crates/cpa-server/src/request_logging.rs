@@ -130,6 +130,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
     let eager = enabled || (!multipart && length.is_some_and(|n| n > 0 && n <= SMALL_BODY));
     let mut request_body = Vec::new();
     if eager {
+        let limit = request.extensions().get::<crate::body_limit::Limit>().and_then(|l| l.0);
         let body = std::mem::replace(request.body_mut(), Body::empty());
         let bytes = match axum::body::to_bytes(body, usize::MAX).await {
             Ok(bytes) => bytes,
@@ -145,9 +146,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
             }
         };
         *request.body_mut() = Body::from(bytes.clone());
-        request_body = decode(bytes.to_vec(), request.headers(), true, config.max_request_body_bytes())
-            .await
-            .0;
+        request_body = decode(bytes.to_vec(), request.headers(), true, limit).await.0;
     }
     let deferred = if !eager && !multipart && length != Some(0) && !request.body().is_end_stream() {
         Spool::new(&state.dir, "request-body").ok().map(|spool| {

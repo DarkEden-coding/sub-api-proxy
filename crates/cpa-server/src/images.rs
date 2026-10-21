@@ -671,13 +671,15 @@ pub async fn generations(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if disabled(&rt) {
         return not_found();
     }
-    let body = match body {
-        Ok(body) => body,
+    let body = match body.map(|body| crate::openai::read_body(&headers, body, limit.0)) {
+        Ok(Ok(body)) => body,
+        Ok(Err(response)) => return *response,
         Err(rejection) => return read_failed(&rejection),
     };
     if !gj::std_valid(&body) {
@@ -731,6 +733,7 @@ pub async fn edits(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if disabled(&rt) {
@@ -748,7 +751,12 @@ pub async fn edits(
             cpa_common::gostr::quote(&lowered)
         ));
     }
+    // Go decodes Content-Encoding for JSON edits only (`ReadRequestBody`).
     let body = match body {
+        Ok(body) if json => match crate::openai::read_body(&headers, body, limit.0) {
+            Ok(body) => body,
+            Err(response) => return *response,
+        },
         Ok(body) => body,
         Err(rejection) => return read_failed(&rejection),
     };

@@ -107,6 +107,7 @@ fn decode_zstd(raw: &[u8], limit: Option<u64>) -> Result<Bytes, Option<String>> 
     Ok(Bytes::from(out))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_completions(
     State(rt): State<Arc<Runtime>>,
     Extension(caller): Extension<Caller>,
@@ -114,10 +115,11 @@ pub async fn chat_completions(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let mut body = match body {
-        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
+        Ok(body) => match read_body(&headers, body, limit.0) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -188,6 +190,7 @@ fn responses_shaped(body: &[u8]) -> bool {
     keys.messages.is_none() && (keys.input.is_some() || keys.instructions.is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn completions(
     State(rt): State<Arc<Runtime>>,
     Extension(caller): Extension<Caller>,
@@ -195,10 +198,11 @@ pub async fn completions(
     matched: Option<MatchedPath>,
     original: OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
+        Ok(body) => match read_body(&headers, body, limit.0) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -416,6 +420,7 @@ impl Writer for ChatSse {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn responses(
     State(rt): State<Arc<Runtime>>,
     Extension(caller): Extension<Caller>,
@@ -423,10 +428,11 @@ pub async fn responses(
     matched: Option<MatchedPath>,
     original: OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
+        Ok(body) => match read_body(&headers, body, limit.0) {
             Ok(body) => body,
             Err(response) => return *response,
         },
@@ -989,6 +995,7 @@ impl Writer for ResponsesSse {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn compact(
     State(rt): State<Arc<Runtime>>,
     Extension(caller): Extension<Caller>,
@@ -996,10 +1003,11 @@ pub async fn compact(
     matched: Option<MatchedPath>,
     original: OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => match read_body(&headers, body, rt.config().max_request_body_bytes()) {
+        Ok(body) => match read_body(&headers, body, limit.0) {
             Ok(body) => body,
             Err(response) => return *response,
         },
