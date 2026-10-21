@@ -2006,8 +2006,9 @@ impl CredentialStore {
                 if unchanged(existing, cred) {
                     continue;
                 }
-                let on_disk: Option<[u8; 32]> = std::fs::read(path)
-                    .ok()
+                // The scan's own rule: a FIFO or device in the file's place is never read
+                // (it could block or never end) and counts as a changed file.
+                let on_disk: Option<[u8; 32]> = cpa_core::config::credentials::read_regular(path)
                     .filter(|data| !data.is_empty())
                     .map(|data| Sha256::digest(&data).into());
                 if on_disk.as_ref() != Some(seen) {
@@ -3061,12 +3062,26 @@ mod tests {
             "a deleted file's snapshot was applied"
         );
         std::fs::create_dir(&path).unwrap();
-        store.reconcile_scanned(deleted.credentials, &deleted.read);
+        store.reconcile_scanned(deleted.credentials.clone(), &deleted.read);
         assert_eq!(
             current().revision,
             before.revision,
             "an unreadable file's snapshot was applied"
         );
+        // A FIFO in its place is not opened (reading one blocks until a writer appears).
+        #[cfg(unix)]
+        {
+            std::fs::remove_dir(&path).unwrap();
+            let fifo = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: valid NUL-terminated path in this test's private directory.
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            let done = spawn_bounded({
+                let store = store.clone();
+                move || store.reconcile_scanned(deleted.credentials, &deleted.read)
+            });
+            done.recv_timeout(BOUND).expect("the freshness check opened the FIFO");
+            assert_eq!(current().revision, before.revision, "a FIFO's snapshot was applied");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
