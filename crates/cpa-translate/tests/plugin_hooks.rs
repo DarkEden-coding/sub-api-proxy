@@ -31,8 +31,8 @@ impl PluginHooks for Log {
         Some(br#"{"translated":true}"#.to_vec())
     }
     fn normalize_response_before(&self, r: &Response<'_>, body: Vec<u8>) -> Vec<u8> {
-        let deep = hooks::inherited().map_or(String::new(), |b| format!(" inherited={b:?}"));
-        self.push(format!("before {}->{} stream={}{deep}", r.from, r.to, r.stream));
+        let refused = if hooks::parent_refused() { " refused" } else { "" };
+        self.push(format!("before {}->{} stream={}{refused}", r.from, r.to, r.stream));
         body
     }
     fn translate_response(&self, r: &Response<'_>, _: &[u8]) -> Option<Vec<u8>> {
@@ -131,7 +131,7 @@ fn hooks_follow_the_registry_order() {
     );
 
     // On a deep-stack thread the worker yields while it joins, and the hook call on that
-    // thread may block directly.
+    // thread is not refused.
     let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
     let deep_ctx = ResponseCtx {
         model: "m",
@@ -142,7 +142,7 @@ fn hooks_follow_the_registry_order() {
     sse.event(b"data: {\"id\":\"a\"}\n\n").unwrap();
     let rounds = calls();
     assert_eq!(rounds[0], "yield", "{rounds:?}");
-    assert_eq!(rounds[1], "before openai->openai stream=true inherited=Direct");
+    assert_eq!(rounds[1], "before openai->openai stream=true");
 
     hooks::publish(false, false);
     assert!(cpa_translate::go_stream_between("openai", "acme", &rctx).is_none());

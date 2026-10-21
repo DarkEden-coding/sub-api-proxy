@@ -565,12 +565,12 @@ pub(crate) fn deep_stack<T: Send>(levels: usize, f: impl FnOnce() -> Result<T, E
     let mut f = Some(f);
     // Plugin hooks may run on the new thread and call back into the async runtime, so
     // the join happens where the runtime can still make progress (see hooks::deep_stack).
-    hooks::deep_stack(|blocking| {
+    hooks::deep_stack(|refused| {
         let f = f.take().expect("deep_stack runs its closure once");
         std::thread::scope(|scope| {
             let worker = std::thread::Builder::new().stack_size(size).spawn_scoped(scope, || {
                 ON_DEEP_STACK.with(|flag| flag.set(true));
-                hooks::inherit(blocking);
+                hooks::inherit(refused);
                 f()
             });
             match worker {

@@ -497,6 +497,8 @@ impl Host {
                         state.retired.entry(file.id.clone()).or_default().push(old);
                         state.fused.remove(&file.id);
                         remove_runtime_state(&mut state, &file.id);
+                        // Unfused: the hooks may have work again before the final commit.
+                        self.publish_translator_hooks(&state, &self.snapshot());
                     }
                     state.loaded.insert(file.id.clone(), lp);
                 }
@@ -719,7 +721,9 @@ impl Host {
         }
         let plugin = match self.call_register(id, &item).await {
             Some(plugin) => {
-                self.state().fused.remove(id);
+                let mut state = self.state();
+                state.fused.remove(id);
+                self.publish_translator_hooks(&state, &self.snapshot());
                 plugin
             }
             None => previous?,

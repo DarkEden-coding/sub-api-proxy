@@ -360,57 +360,11 @@ async fn plugin_translator_hooks_run_around_translation() {
     env.finish().await;
 }
 
-/// A hook that calls back into the host (`host.http.do`) while a stream with deeply
-/// nested JSON is translated on a deep-stack thread, on a one-worker runtime: the worker
-/// yields while it joins that thread, so the callback and the stream both finish.
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn plugin_hook_callbacks_finish_on_a_deep_stack() {
-    let upstream = {
-        let chunk = r#"data: {"id":"r","object":"chat.completion.chunk","created":1,"model":"up-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#;
-        let stream = format!("{chunk}\n\n{chunk}\n\ndata: [DONE]\n\n");
-        let router = axum::Router::new()
-            .route("/ping", axum::routing::get(|| async { "pong" }))
-            .fallback(move || {
-                let stream = stream.clone();
-                async move { ([("content-type", "text/event-stream")], stream) }
-            });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        url
-    };
-    let ping = format!("{upstream}/ping");
-    let Some(env) = env(
-        "plugin-hook-deep-stack",
-        &[("hooks", "response_before_translator")],
-        &format!(
-            "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a}}]\n    models: [{{name: up-model}}]\n"
-        ),
-        &[],
-        |records| {
-            let dir = records.join("respond").join("hooks");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("response.normalize_before.json"),
-                json!({"ok":true,"result":{},"host_calls":[{"method":"host.http.do","request":{"method":"GET","url":ping}}]})
-                    .to_string(),
-            )
-            .unwrap();
-        },
-    )
-    .await
-    else {
-        return;
-    };
-    // More than 256 levels: every stream event runs on a deep-stack thread.
-    let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
-    let body = format!(
-        r#"{{"model":"up-model","stream":true,"metadata":{{"deep":{deep}}},"messages":[{{"role":"user","content":"hi"}}]}}"#
-    );
-    // The client runs on its own runtime, so a stalled server fails the test instead of
-    // hanging it.
-    let url = format!("http://{}/v1/chat/completions", env.proxy);
-    let (status, text) = std::thread::spawn(move || {
+/// POSTs a chat request from a client on its own runtime, so a stalled server fails the
+/// test instead of hanging it.
+fn post_on_own_runtime(proxy: SocketAddr, body: String) -> (u16, String) {
+    let url = format!("http://{proxy}/v1/chat/completions");
+    std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -434,7 +388,74 @@ async fn plugin_hook_callbacks_finish_on_a_deep_stack() {
             })
     })
     .join()
-    .unwrap();
+    .unwrap()
+}
+
+/// An OpenAI-compatible upstream answering chat (streamed when asked) and `/ping`.
+async fn chat_and_ping_upstream() -> String {
+    let chunk = r#"data: {"id":"r","object":"chat.completion.chunk","created":1,"model":"up-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#;
+    let stream = format!("{chunk}\n\n{chunk}\n\ndata: [DONE]\n\n");
+    let router = axum::Router::new()
+        .route("/ping", axum::routing::get(|| async { "pong" }))
+        .fallback(move |body: String| {
+            let stream = stream.clone();
+            async move {
+                if body.contains(r#""stream":true"#) {
+                    ([("content-type", "text/event-stream")], stream)
+                } else {
+                    (
+                        [("content-type", "application/json")],
+                        r#"{"id":"r","object":"chat.completion","created":1,"model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_owned(),
+                    )
+                }
+            }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    url
+}
+
+/// A request body nested more than 256 levels deep: every stream event of its response
+/// is translated on a deep-stack thread.
+fn deep_stream_body() -> String {
+    let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
+    format!(
+        r#"{{"model":"up-model","stream":true,"metadata":{{"deep":{deep}}},"messages":[{{"role":"user","content":"hi"}}]}}"#
+    )
+}
+
+/// A hook that calls back into the host (`host.http.do`) while a stream with deeply
+/// nested JSON is translated on a deep-stack thread, on a one-worker runtime: the worker
+/// yields while it joins that thread, so the callback and the stream both finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plugin_hook_callbacks_finish_on_a_deep_stack() {
+    let upstream = chat_and_ping_upstream().await;
+    let ping = format!("{upstream}/ping");
+    let Some(env) = env(
+        "plugin-hook-deep-stack",
+        &[("hooks", "response_before_translator")],
+        &format!(
+            "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a}}]\n    models: [{{name: up-model}}]\n"
+        ),
+        &[],
+        |records| {
+            let dir = records.join("respond").join("hooks");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("response.normalize_before.json"),
+                json!({"ok":true,"result":{},"host_calls":[{"method":"host.http.do","request":{"method":"GET","url":ping}}]})
+                    .to_string(),
+            )
+            .unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let body = deep_stream_body();
+    let (status, text) = post_on_own_runtime(env.proxy, body);
     assert_eq!(status, 200, "{text}");
     assert_eq!(text.matches(r#""content":"ok""#).count(), 2, "{text}");
     let callbacks = calls(&env.records, "hooks", "host_callback");
@@ -444,6 +465,66 @@ async fn plugin_hook_callbacks_finish_on_a_deep_stack() {
             .iter()
             .all(|c| c["ok"] == true && c["result"]["StatusCode"] == 200),
         "{callbacks:?}"
+    );
+    env.finish().await;
+}
+
+/// Callback re-entry on a deep-stack thread: a response hook there calls
+/// `host.model.execute`, whose `block_on` dispatches and translates on that thread, and a
+/// request normalizer in that dispatch calls `host.http.do`. The thread is inside a
+/// runtime by then, so the nested call yields like a worker instead of calling directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn plugin_hook_callbacks_nest_on_a_deep_stack() {
+    let upstream = chat_and_ping_upstream().await;
+    let ping = format!("{upstream}/ping");
+    let inner = json!({"model":"up-model","messages":[{"role":"user","content":"inner"}]}).to_string();
+    let Some(env) = env(
+        "plugin-hook-deep-nested",
+        &[("hooks", "response_before_translator"), ("norm", "request_normalizer")],
+        &format!(
+            "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a}}]\n    models: [{{name: up-model}}]\n"
+        ),
+        &[],
+        |records| {
+            let respond = records.join("respond");
+            for label in ["hooks", "norm"] {
+                std::fs::create_dir_all(respond.join(label)).unwrap();
+            }
+            // Only the first stream frame calls the model, so the inner dispatch's own
+            // response hook does not recurse.
+            std::fs::write(
+                respond.join("hooks").join("response.normalize_before.once.json"),
+                json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute","request":{
+                    "entry_protocol":"openai","model":"up-model",
+                    "body":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &inner)}}]})
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                respond.join("norm").join("request.normalize.json"),
+                json!({"ok":true,"result":{},"host_calls":[{"method":"host.http.do","request":{"method":"GET","url":ping}}]})
+                    .to_string(),
+            )
+            .unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (status, text) = post_on_own_runtime(env.proxy, deep_stream_body());
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(text.matches(r#""content":"ok""#).count(), 2, "{text}");
+    let model = calls(&env.records, "hooks", "host_callback");
+    assert_eq!(model.len(), 1, "{model:?}");
+    assert_eq!(model[0]["result"]["status_code"], 200, "{model:?}");
+    // Each dispatch normalizes its original and its working payload: two calls on a
+    // worker for the outer request, two on the deep thread for the inner one.
+    let http = calls(&env.records, "norm", "host_callback");
+    assert_eq!(http.len(), 4, "{http:?}");
+    assert!(
+        http.iter().all(|c| c["ok"] == true && c["result"]["StatusCode"] == 200),
+        "{http:?}"
     );
     env.finish().await;
 }

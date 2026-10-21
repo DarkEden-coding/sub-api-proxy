@@ -106,7 +106,8 @@ pub(crate) fn runtime_blocking() -> cpa_translate::hooks::Blocking {
 }
 
 /// Runs `f` in `block_in_place`. False, without running `f`, where Tokio forbids it (a
-/// `LocalSet` on a multi-thread runtime).
+/// `LocalSet` on a multi-thread runtime); Tokio's rejection is a panic, which the panic
+/// hook still reports.
 pub(crate) fn yield_while(f: &mut dyn FnMut()) -> bool {
     let mut ran = false;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -236,7 +237,14 @@ impl GuardedClient {
         }
         let _release = Release(self);
         let call = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.call(method, request)));
-        let result = match cpa_translate::hooks::inherited().unwrap_or_else(runtime_blocking) {
+        // Judged at every call: a deep-stack thread can enter a runtime later (a host
+        // callback's `block_on`), where it must yield like a worker.
+        let mode = if cpa_translate::hooks::parent_refused() {
+            Blocking::Refuse
+        } else {
+            runtime_blocking()
+        };
+        let result = match mode {
             Blocking::Direct => call(),
             Blocking::Yield => {
                 let mut out = None;

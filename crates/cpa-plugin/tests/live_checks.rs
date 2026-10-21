@@ -22,6 +22,8 @@ struct Script {
     caps: &'static str,
     results: BTreeMap<&'static str, &'static str>,
     fuse_on: Option<(&'static str, &'static str)>,
+    /// Runs when a given method is called, before the plugin answers.
+    on_call: Option<(&'static str, fn())>,
 }
 
 struct ScriptClient {
@@ -33,6 +35,11 @@ struct ScriptClient {
 
 impl PluginClient for ScriptClient {
     fn call(&self, method: &str, _: &[u8]) -> Result<Bytes, String> {
+        if let Some((on, run)) = self.script.on_call
+            && on == method
+        {
+            run();
+        }
         if method == "plugin.register" || method == "plugin.reconfigure" {
             return Ok(Bytes::from(format!(
                 r#"{{"ok":true,"result":{{"schema_version":6,"metadata":{{"Name":"{}","Version":"1","Author":"t","GitHubRepository":"r"}},"capabilities":{{{}}}}}}}"#,
@@ -110,11 +117,13 @@ async fn chained_hooks_skip_a_plugin_fused_by_an_earlier_call() {
         caps: r#""request_normalizer":true,"request_interceptor":true,"response_stream_interceptor":true"#,
         results: [("request.normalize", r#"{"Body":"YQ=="}"#)].into(),
         fuse_on: Some(("request.normalize", "b")),
+        on_call: None,
     };
     let b = Script {
         caps: a.caps,
         results: [("request.normalize", r#"{"Body":"Yg=="}"#)].into(),
         fuse_on: None,
+        on_call: None,
     };
     let (host, log) = host_with("chain", [("a", a), ("b", b)].into()).await;
     let out = host.normalize_request("openai", "claude", "m", Bytes::from_static(b"{}"), false);
@@ -136,11 +145,13 @@ async fn quota_lookup_skips_a_provider_fused_while_describing() {
         caps: r#""quota_provider":true"#,
         results: [("quota.describe", r#"{"supported_providers":["y"]}"#)].into(),
         fuse_on: Some(("quota.describe", "b")),
+        on_call: None,
     };
     let b = Script {
         caps: r#""quota_provider":true"#,
         results: [("quota.describe", r#"{"supported_providers":["x"]}"#)].into(),
         fuse_on: None,
+        on_call: None,
     };
     let (host, log) = host_with("quota", [("a", a), ("b", b)].into()).await;
     assert!(host.quota_provider_record("x").await.is_none());
@@ -153,6 +164,7 @@ async fn fusing_a_plugin_drops_its_thinking_provider() {
         caps: r#""thinking_applier":true"#,
         results: [("thinking.identifier", r#"{"identifier":"T"}"#)].into(),
         fuse_on: None,
+        on_call: None,
     };
     let (host, _) = host_with("thinking", [("a", a)].into()).await;
     assert_eq!(host.thinking_provider("t").as_deref(), Some("a"));
@@ -169,6 +181,7 @@ async fn fusing_the_last_translator_plugin_turns_the_hooks_off() {
         // "X": a body for every normalize_before call.
         results: [("response.normalize_before", r#"{"Body":"WA=="}"#)].into(),
         fuse_on: None,
+        on_call: None,
     };
     let (host, _) = host_with("hooks", [("a", a)].into()).await;
     host.install_translator_hooks();
@@ -192,10 +205,57 @@ async fn transform_calls_are_refused_on_a_current_thread_runtime() {
         caps: r#""response_before_translator":true"#,
         results: [("response.normalize_before", r#"{"Body":"WA=="}"#)].into(),
         fuse_on: None,
+        on_call: None,
     };
     let (host, log) = host_with("refuse", [("a", a)].into()).await;
     let t = cpa_plugin::transform::ResponseTransform::default();
     assert_eq!(host.normalize_response_before(&t, Bytes::from_static(b"body")), "body");
+    assert!(calls(&log).is_empty());
+}
+
+/// Replacing a fused translator plugin unfuses it at once: the hooks have work again
+/// while a later plugin is still registering, before the final snapshot commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacing_a_fused_translator_plugin_turns_the_hooks_back_on() {
+    static SEEN: Mutex<Option<bool>> = Mutex::new(None);
+    let a = Script {
+        caps: r#""response_before_translator":true"#,
+        ..Default::default()
+    };
+    let z = Script {
+        on_call: Some(("plugin.reconfigure", || {
+            *SEEN.lock().unwrap() = Some(cpa_translate::hooks::current().is_some());
+        })),
+        ..Default::default()
+    };
+    let (host, _) = host_with("unfuse", [("a", a), ("z", z)].into()).await;
+    host.install_translator_hooks();
+    host.fuse("a", "ResponseNormalizer.NormalizeResponseBefore", "test");
+    assert!(cpa_translate::hooks::current().is_none());
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("live-unfuse-{}", std::process::id()));
+    std::fs::write(dir.join(format!("a-v2{}", platform::extension(platform::goos()))), b"").unwrap();
+    host.apply_config(host.config().unwrap()).await;
+    assert_eq!(*SEEN.lock().unwrap(), Some(true), "hooks available while z registers");
+    assert!(cpa_translate::hooks::current().is_some());
+}
+
+/// Inside a `LocalSet` Tokio forbids `block_in_place`, so a transform call is refused
+/// there too instead of panicking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transform_calls_are_refused_in_a_local_set() {
+    let a = Script {
+        caps: r#""response_before_translator":true"#,
+        results: [("response.normalize_before", r#"{"Body":"WA=="}"#)].into(),
+        ..Default::default()
+    };
+    let (host, log) = host_with("localset", [("a", a)].into()).await;
+    let out = tokio::task::LocalSet::new()
+        .run_until(async {
+            let t = cpa_plugin::transform::ResponseTransform::default();
+            host.normalize_response_before(&t, Bytes::from_static(b"body"))
+        })
+        .await;
+    assert_eq!(out, "body");
     assert!(calls(&log).is_empty());
 }
 
@@ -206,6 +266,7 @@ async fn a_stale_executor_provider_replaced_by_a_builtin_one_is_kept() {
             caps: r#""executor":true,"executor_model_scope":"both","executor_input_formats":["openai"],"executor_output_formats":["openai"]"#,
             results: [("executor.identifier", r#"{"identifier":"p"}"#)].into(),
             fuse_on: None,
+            on_call: None,
         };
         let (host, _) = host_with("executor", [("a", a)].into()).await;
         let changes = host.register_executors(&|_| false, &|_| Vec::new()).await.unwrap();
@@ -237,6 +298,7 @@ async fn a_builtin_provider_catalog_reserves_its_models_from_plugin_executors() 
             )]
             .into(),
             fuse_on: None,
+            on_call: None,
         };
         let models = if extra_model {
             r#"{"Provider":"plugin-provider","Models":[{"ID":"shared-model"},{"ID":"plugin-only"}]}"#
@@ -251,6 +313,7 @@ async fn a_builtin_provider_catalog_reserves_its_models_from_plugin_executors() 
             ]
             .into(),
             fuse_on: None,
+            on_call: None,
         };
         let (host, _) = host_with("catalog-priority", [("catalog", catalog), ("comp", competitor)].into()).await;
         let native = move |p: &str| native_executor && p == "native-provider";

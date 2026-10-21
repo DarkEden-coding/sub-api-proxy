@@ -64,8 +64,8 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static HOOKS: RwLock<Option<Arc<dyn PluginHooks>>> = RwLock::new(None);
 
 thread_local! {
-    /// [`Blocking`] passed from the thread that started a deep-stack thread.
-    static INHERITED: Cell<Option<Blocking>> = const { Cell::new(None) };
+    /// The thread that started this deep-stack thread refuses plugin calls.
+    static PARENT_REFUSED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Installs (or removes) the hooks. They run once [`publish`] turns them on.
@@ -92,39 +92,46 @@ pub fn current() -> Option<Arc<dyn PluginHooks>> {
     installed()
 }
 
-/// The [`Blocking`] a deep-stack thread inherited from the worker that started it.
-pub fn inherited() -> Option<Blocking> {
-    INHERITED.with(Cell::get)
+/// Whether the thread that started this deep-stack thread refuses plugin calls, so this
+/// one must too. Otherwise a thread judges each call from its own runtime state.
+pub fn parent_refused() -> bool {
+    PARENT_REFUSED.with(Cell::get)
 }
 
 /// Runs `run` (which starts a deep-stack thread and joins it) so a plugin call on that
-/// thread cannot deadlock the runtime: a worker yields while it joins, and the thread
-/// learns how it may block. `run` gets the [`Blocking`] for the new thread.
-pub(crate) fn deep_stack<T>(mut run: impl FnMut(Option<Blocking>) -> T) -> T {
+/// thread cannot deadlock the runtime: a worker yields while it joins. `run` gets whether
+/// the new thread must refuse plugin calls.
+pub(crate) fn deep_stack<T>(mut run: impl FnMut(bool) -> T) -> T {
     let hooks = if ENABLED.load(Ordering::Acquire) {
         installed()
     } else {
         None
     };
     let Some(hooks) = hooks else {
-        return run(None);
+        return run(parent_refused());
     };
-    match inherited().unwrap_or_else(|| hooks.blocking()) {
+    let mode = if parent_refused() {
+        Blocking::Refuse
+    } else {
+        hooks.blocking()
+    };
+    match mode {
         Blocking::Yield => {
             let mut out = None;
-            if hooks.yield_while(&mut || out = Some(run(Some(Blocking::Direct)))) {
+            if hooks.yield_while(&mut || out = Some(run(false))) {
                 out.expect("yield_while ran the join")
             } else {
-                run(Some(Blocking::Refuse))
+                run(true)
             }
         }
-        mode => run(Some(mode)),
+        Blocking::Direct => run(false),
+        Blocking::Refuse => run(true),
     }
 }
 
-/// Sets the [`Blocking`] a deep-stack thread inherited.
-pub(crate) fn inherit(mode: Option<Blocking>) {
-    INHERITED.with(|cell| cell.set(mode));
+/// Marks a deep-stack thread whose starting thread refuses plugin calls.
+pub(crate) fn inherit(refused: bool) {
+    PARENT_REFUSED.with(|cell| cell.set(refused));
 }
 
 /// Go `sdktranslator.NormalizeRequest`, for callers that translate without the
