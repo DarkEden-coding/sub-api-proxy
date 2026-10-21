@@ -1120,34 +1120,204 @@ async fn config_key_toggle_edits_only_the_target_key_in_the_current_file() {
     server.abort();
 }
 
-/// Go edits config API keys in memory only: attributes follow the patched metadata
-/// and config.yaml is not written.
+/// Go d69962e4 and 3e309fb4: a config API key is not an auth file, so the fields patch
+/// does not find it (404) and changes nothing, in memory or in config.yaml.
 #[tokio::test]
-async fn config_key_field_patch_updates_memory_only() {
+async fn config_key_field_patch_is_not_found() {
     let f = Fixture::from_yaml("cfgfields", |auth, hash| {
         format!(
-            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\napi-keys:\n  claude:\n    - keys:\n        - api-key: fake-k\n",
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\napi-keys:\n  claude:\n    - excluded-models: [config-*]\n      keys:\n        - api-key: fake-k\n",
             auth.display()
         )
     });
-    let id = f.rt.store().snapshot()[0].id.clone();
-    let before = f.file();
+    let before = f.rt.store().snapshot()[0].clone();
+    let file = f.file();
     let (base, server) = f.server().await;
     let r = wreq::Client::new()
         .patch(format!("{base}/v8/management/credentials/fields"))
         .bearer_auth("fake-management-only")
-        .json(&json!({"name": id, "note": " updated ", "priority": "3", "headers": {"X-B": "2"}, "disabled": "true"}))
+        .json(&json!({"name": before.id, "note": " updated ", "excluded_models": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"error": "auth file not found"})
+    );
+    let after = f.rt.store().snapshot()[0].clone();
+    assert_eq!(
+        (&after.attributes, &after.metadata),
+        (&before.attributes, &before.metadata)
+    );
+    assert_eq!(f.file(), file, "config.yaml must not change");
+    server.abort();
+}
+
+/// Go `TestCodexExcludedModelsCredentialPriorityAfterPatchAndReload` (b015f208,
+/// 94d1a9a0): a credential's own excluded models replace the global
+/// `oauth.excluded-models`; with none, the current global list applies, so a later
+/// config change reaches the same credential without rewriting it.
+#[tokio::test]
+async fn credential_excluded_models_take_priority_over_the_global_list() {
+    let empty = Config::parse("").unwrap();
+    let probe = std::path::Path::new("/auth/codex.json");
+    let probe =
+        cpa_core::config::credentials::from_file(&empty, probe.parent().unwrap(), probe, br#"{"type":"codex"}"#)
+            .unwrap()
+            .unwrap();
+    let models = cpa_core::registry::dynamic::models_for(&empty, &Default::default(), &probe, 0);
+    let (global, own) = (models[0].id.clone(), models[models.len() - 1].id.clone());
+    let f = Fixture::from_yaml("excl-priority", |auth, hash| {
+        std::fs::write(auth.join("codex.json"), r#"{"type":"codex"}"#).unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n  excluded-models:\n    codex: ['{global}']\n",
+            auth.display()
+        )
+    });
+    let id = f.rt.store().snapshot()[0].id.clone();
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let available = |stage: &str, want_global: bool, want_own: bool| {
+        let registry = f.rt.registry();
+        let got = (
+            registry.client_supports(&id, &global),
+            registry.client_supports(&id, &own),
+        );
+        assert_eq!(got, (want_global, want_own), "{stage}");
+    };
+    let patch = |rules: Value| {
+        client
+            .patch(format!("{base}/v8/management/credentials/fields"))
+            .bearer_auth("fake-management-only")
+            .json(&json!({"name": "codex.json", "excluded_models": rules}))
+            .send()
+    };
+    available("global fallback", false, true);
+    assert_eq!(patch(json!([own.to_uppercase()])).await.unwrap().status(), 200);
+    available("credential override", true, false);
+    assert_eq!(patch(json!([])).await.unwrap().status(), 200);
+    available("empty falls back to the global list", false, true);
+    let cred = f.rt.store().snapshot().into_iter().find(|c| c.id == id).unwrap();
+    assert!(
+        !cred.attributes.contains_key("excluded_models"),
+        "global rules are not copied in"
+    );
+    let r = client
+        .put(format!("{base}/v8/management/config/oauth/excluded-models/codex"))
+        .bearer_auth("fake-management-only")
+        .body(json!([own]).to_string())
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    let cred = f.rt.store().snapshot().into_iter().find(|c| c.id == id).unwrap();
-    assert_eq!(cred.attributes.get("note").map(String::as_str), Some("updated"));
-    assert_eq!(cred.attributes.get("priority").map(String::as_str), Some("3"));
-    assert_eq!(cred.attributes.get("header:X-B").map(String::as_str), Some("2"));
-    assert_eq!(cred.attributes.get("api_key").map(String::as_str), Some("fake-k"));
-    assert!(cred.disabled);
-    assert_eq!(f.file(), before, "config.yaml must not change");
+    available("updated global list", true, false);
+    server.abort();
+}
+
+/// Go `auth_files_excluded_models_test` (1a28c61e, 3e309fb4): the fields patch takes a
+/// string array or null and stores only the credential's normalized rules; any other
+/// shape, and an upload with invalid rules, is a 400 that changes nothing.
+#[tokio::test]
+async fn excluded_models_writes_are_validated() {
+    let f = Fixture::from_yaml("excl-writes", |auth, hash| {
+        std::fs::write(
+            auth.join("credential.json"),
+            r#"{"type":"codex","excluded-models":["old-*"]}"#,
+        )
+        .unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n  excluded-models:\n    codex: [global-*]\n",
+            auth.display()
+        )
+    });
+    let auth = f.dir.join("auth");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let patch = |fields: &str| {
+        client
+            .patch(format!("{base}/v8/management/credentials/fields"))
+            .bearer_auth("fake-management-only")
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"name":"credential.json",{fields}}}"#))
+            .send()
+    };
+    let current = || {
+        f.rt.store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.id == "credential.json")
+            .unwrap()
+    };
+    for (fields, want) in [
+        (
+            r#""excluded_models":[" Local-* ","LOCAL-*","b-*"]"#,
+            Some("b-*,local-*"),
+        ),
+        (r#""excluded-models":["alias-*"]"#, Some("alias-*")),
+        (r#""excluded_models":[],"excluded-models":["alias-*"]"#, None),
+        (r#""excluded_models":["x"]"#, Some("x")),
+        (r#""excluded_models":[" ","\t"]"#, None),
+        (r#""excluded_models":["y"]"#, Some("y")),
+        (r#""excluded_models":null"#, None),
+    ] {
+        let r = patch(fields).await.unwrap();
+        assert_eq!(r.status(), 200, "{fields}");
+        let c = current();
+        assert_eq!(
+            c.attributes.get("excluded_models").map(String::as_str),
+            want,
+            "{fields}"
+        );
+        assert!(
+            !c.metadata.contains_key("excluded-models"),
+            "{fields}: legacy alias retained"
+        );
+    }
+    let before = (
+        current().metadata.clone(),
+        std::fs::read(auth.join("credential.json")).unwrap(),
+    );
+    for fields in [
+        r#""excluded_models":123"#,
+        r#""excluded-models":true"#,
+        r#""excluded_models":{}"#,
+        r#""excluded_models":["codex-new",null]"#,
+        r#""excluded_models":[42,false]"#,
+        r#""excluded_models":[["codex-new"]]"#,
+        r#""excluded_models":"codex-new""#,
+        r#""excluded-models":"codex-new""#,
+        r#""excluded_models.child":["codex-new"]"#,
+        r#""excluded-models.0":"codex-new""#,
+    ] {
+        let r = patch(&format!(r#""abc":true,{fields}"#)).await.unwrap();
+        assert_eq!(r.status(), 400, "{fields}");
+        let after = (
+            current().metadata.clone(),
+            std::fs::read(auth.join("credential.json")).unwrap(),
+        );
+        assert_eq!(after, before, "{fields}: a rejected patch changes nothing");
+    }
+    for content in [
+        r#"{"type":"codex","excluded_models":123}"#,
+        r#"{"type":"gemini-cli","excluded_models":123}"#,
+        r#"{"type":"codex","excluded_models":["codex-new",1]}"#,
+    ] {
+        let r = client
+            .post(format!("{base}/v8/management/credentials?name=bad.json"))
+            .bearer_auth("fake-management-only")
+            .body(content)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "{content}");
+        let error = r.json::<Value>().await.unwrap()["error"].as_str().unwrap().to_owned();
+        assert!(
+            error.starts_with("invalid auth file: metadata excluded_models"),
+            "{error}"
+        );
+        assert!(!auth.join("bad.json").exists(), "{content}: nothing is written");
+    }
     server.abort();
 }
 
@@ -1183,7 +1353,7 @@ async fn credential_models_come_from_registrations() {
     };
     assert_eq!(models(client.clone(), base.clone(), id.clone()).await, ["sonnet"]);
     let r = client
-        .patch(format!("{base}/v8/management/credentials/fields"))
+        .patch(format!("{base}/v8/management/credentials/status"))
         .bearer_auth("fake-management-only")
         .json(&json!({"name": id, "disabled": true}))
         .send()
@@ -1483,31 +1653,31 @@ async fn config_reloads_never_publish_a_value_older_than_a_save() {
     server.abort();
 }
 
-/// A config-backed field patch invalidates the cached registry: a new prefix is
-/// routable at once.
+/// An auth-file field patch invalidates the cached registry: a new prefix is routable
+/// at once.
 #[tokio::test]
-async fn config_key_prefix_patch_refreshes_the_registry() {
-    let f = Fixture::from_yaml("cfgprefix", |auth, hash| {
+async fn file_credential_prefix_patch_refreshes_the_registry() {
+    let f = Fixture::from_yaml("fileprefix", |auth, hash| {
+        std::fs::write(auth.join("claude.json"), r#"{"type":"claude"}"#).unwrap();
         format!(
-            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\napi-keys:\n  claude:\n    - models: [{{name: claude-sonnet-4-6, alias: sonnet}}]\n      keys:\n        - api-key: fake-k\n",
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
             auth.display()
         )
     });
-    let id = f.rt.store().snapshot()[0].id.clone();
     assert!(
-        !f.rt.registry().ids().any(|m| m == "new/sonnet"),
+        !f.rt.registry().ids().any(|m| m.starts_with("new/")),
         "warm cache without the prefix"
     );
     let (base, server) = f.server().await;
     let r = wreq::Client::new()
         .patch(format!("{base}/v8/management/credentials/fields"))
         .bearer_auth("fake-management-only")
-        .json(&json!({"name": id, "prefix": "new"}))
+        .json(&json!({"name": "claude.json", "prefix": "new"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    assert!(f.rt.registry().ids().any(|m| m == "new/sonnet"));
+    assert!(f.rt.registry().ids().any(|m| m.starts_with("new/")));
     server.abort();
 }
 
