@@ -15,6 +15,7 @@ use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::credential::{Credential, MetadataPatch, Source};
 use cpa_core::exec::{ExecError, ExecStream, FailureScope};
@@ -918,9 +919,10 @@ pub fn standalone_admission<'a>(
         }
         let (models, _) = crate::registry::execution_models(&HashMap::new(), c, route);
         let model = models.into_iter().next().unwrap_or_default();
-        let key = crate::scheduler::canonical_model(&model).to_lowercase();
+        // Go lowercases model IDs and patterns with `strings.ToLower`.
+        let key = crate::scheduler::canonical_model(&model).go_lower();
         let excluded: Vec<String> = match c.attributes.get("excluded_models").filter(|v| !v.trim().is_empty()) {
-            Some(list) => list.split(',').map(|p| p.trim().to_lowercase()).collect(),
+            Some(list) => list.split(',').map(|p| p.trim().go_lower()).collect(),
             None => c
                 .metadata
                 .get("excluded_models")
@@ -928,7 +930,7 @@ pub fn standalone_admission<'a>(
                 .map(|l| {
                     l.iter()
                         .filter_map(|v| v.as_str())
-                        .map(|p| p.trim().to_lowercase())
+                        .map(|p| p.trim().go_lower())
                         .collect()
                 })
                 .unwrap_or_default(),

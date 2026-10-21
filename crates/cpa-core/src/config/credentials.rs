@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use super::Config;
 use crate::credential::{Credential, Source};
+use crate::gostr::GoStr;
 
 const WEIGHT_MAX: i64 = 1_000_000;
 
@@ -102,7 +103,7 @@ pub fn normalize_excluded(models: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     models
         .iter()
-        .map(|m| m.trim().to_lowercase())
+        .map(|m| m.trim().go_lower())
         .filter(|m| !m.is_empty() && seen.insert(m.clone()))
         .collect()
 }
@@ -366,7 +367,7 @@ fn excluded_union(lists: &[&[String]]) -> Vec<String> {
     let mut set: Vec<String> = lists
         .iter()
         .flat_map(|l| l.iter())
-        .map(|m| m.trim().to_lowercase())
+        .map(|m| m.trim().go_lower())
         .filter(|m| !m.is_empty())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -499,7 +500,7 @@ fn base_draft(ids: &mut Ids, kind: &str, source: &str, k: &Key, parts: &[&str]) 
 
 /// Go `util.OpenAICompatibleProviderKey`.
 pub fn openai_compat_provider(name: &str) -> String {
-    let name = name.trim().to_lowercase();
+    let name = name.trim().go_lower();
     if name.is_empty() {
         "openai-compatibility".into()
     } else if name == "openai-compatibility" || name.starts_with("openai-compatible-") {
@@ -595,7 +596,7 @@ fn synthesize(cfg: &Config) -> Vec<(Credential, Option<KeyLocation>)> {
         if k.rebuild_mid_system_message {
             d.attrs.insert("rebuild_mid_system_message".into(), "true".into());
         }
-        let profile = k.fingerprint_profile.trim().to_lowercase();
+        let profile = k.fingerprint_profile.trim().go_lower();
         if !profile.is_empty() {
             d.attrs.insert("fingerprint_profile".into(), profile);
         }
@@ -708,7 +709,7 @@ pub fn openai_compat_names(cfg: &Config) -> Vec<String> {
         .iter()
         .filter_map(Value::as_mapping)
         .filter(|g| !text(g.get("base-url")).trim().is_empty() && !boolean(g.get("disabled")).unwrap_or(false))
-        .map(|g| text(g.get("name")).trim().to_lowercase())
+        .map(|g| text(g.get("name")).trim().go_lower())
         .filter(|name| !name.is_empty())
         .collect()
 }
@@ -731,7 +732,7 @@ fn openai_compat(cfg: &Config, ids: &mut Ids) -> Vec<Credential> {
         let provider_name = if name.is_empty() {
             "openai-compatibility".to_owned()
         } else {
-            name.to_lowercase()
+            name.go_lower()
         };
         let provider = openai_compat_provider(&provider_name);
         let group_key = Key {
@@ -851,7 +852,7 @@ pub fn resolve_api_key_entry(cfg: &Config, family: &str, c: &Credential) -> Opti
         return None;
     }
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let fold = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+    let fold = |a: &str, b: &str| a.trim().go_eq_fold(b.trim());
     let (key, base) = (attr("api_key"), attr("base_url"));
     let matches = |e: &ApiKeyEntry| {
         let (k, b) = (e.api_key.trim(), e.base_url.trim());
@@ -894,7 +895,7 @@ pub fn resolve_api_key_entry(cfg: &Config, family: &str, c: &Credential) -> Opti
 /// matches; callers check that the credential is an API key.
 pub fn api_key_config_proxy(cfg: &Config, c: &Credential) -> String {
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let fold = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
+    let fold = |a: &str, b: &str| a.go_eq_fold(b);
     let (key, base) = (attr("api_key"), attr("base_url"));
     let compat = attr("compat_name");
     if !compat.is_empty() || fold(c.provider.trim(), "openai-compatibility") {
@@ -926,7 +927,7 @@ pub fn api_key_config_proxy(cfg: &Config, c: &Credential) -> String {
         }
         return String::new();
     }
-    let family = match c.provider.trim().to_lowercase().as_str() {
+    let family = match c.provider.trim().go_lower().as_str() {
         "gemini" => "gemini",
         "gemini-interactions" => "interactions",
         "claude" => "claude",
@@ -1041,7 +1042,7 @@ pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Re
         .and_then(Json::as_str)
         .unwrap_or_default()
         .trim()
-        .to_lowercase();
+        .go_lower();
     if provider.is_empty() || provider == "gemini" || provider == "gemini-cli" {
         return Ok(None);
     }
@@ -1100,7 +1101,7 @@ pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Re
     if let Some(p) = meta
         .get("fingerprint_profile")
         .and_then(Json::as_str)
-        .map(|s| s.trim().to_lowercase())
+        .map(|s| s.trim().go_lower())
         && !p.is_empty()
     {
         attrs.insert("fingerprint_profile".into(), p);
@@ -1201,9 +1202,9 @@ fn oauth_aliases(raw: Option<&Json>) -> Option<String> {
         .filter_map(|e| {
             let name = e.get("name")?.as_str()?.trim();
             let alias = e.get("alias")?.as_str()?.trim();
-            (!name.is_empty() && !alias.is_empty() && !name.eq_ignore_ascii_case(alias)).then_some((name, alias, e))
+            (!name.is_empty() && !alias.is_empty() && !name.go_eq_fold(alias)).then_some((name, alias, e))
         })
-        .filter(|(_, alias, _)| seen.insert(alias.to_lowercase()))
+        .filter(|(_, alias, _)| seen.insert(alias.go_lower()))
         .map(|(name, alias, e)| {
             let mut out = Map::new();
             out.insert("name".into(), name.into());
@@ -1261,7 +1262,7 @@ fn kimi_attributes(provider: &str, meta: &Map<String, Json>, attrs: &mut BTreeMa
 
 /// Go `IsKimiAIDomain` / `IsKimiComDomain`.
 fn kimi_domain(s: &str) -> Option<&'static str> {
-    let d = s.trim().to_lowercase();
+    let d = s.trim().go_lower();
     if matches!(d.as_str(), "kimi.ai" | "ai" | "kimi-ai") || d.ends_with(".kimi.ai") {
         Some(KIMI_AI)
     } else if matches!(d.as_str(), "kimi.com" | "com" | "kimi") || d.ends_with(".kimi.com") {
@@ -1273,7 +1274,7 @@ fn kimi_domain(s: &str) -> Option<&'static str> {
 
 /// Go `isKimiAIHost` / `isKimiComHost`: a URL Go cannot parse classifies as neither.
 fn kimi_url_domain(raw: &str) -> Option<&'static str> {
-    let host = super::go_url::parse(raw.trim())?.hostname().trim().to_lowercase();
+    let host = super::go_url::parse(raw.trim())?.hostname().trim().go_lower();
     if host == KIMI_AI || host.ends_with(".kimi.ai") {
         Some(KIMI_AI)
     } else if host == KIMI_COM || host.ends_with(".kimi.com") {
@@ -1319,7 +1320,7 @@ pub fn oauth_excluded(cfg: &Config) -> HashMap<String, Vec<String>> {
         .and_then(Value::as_mapping)
     {
         for (provider, models) in map {
-            let provider = text(Some(provider)).trim().to_lowercase();
+            let provider = text(Some(provider)).trim().go_lower();
             let models = normalize_excluded(&strings(Some(models)));
             if !provider.is_empty() && !models.is_empty() {
                 out.insert(provider, models);
@@ -1364,7 +1365,7 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
     };
     for entry in entries.flatten() {
         let path: PathBuf = entry.path();
-        if !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json") {
+        if !entry.file_name().to_string_lossy().go_lower().ends_with(".json") {
             continue;
         }
         let Some(data) = read_regular(&path) else { continue };
@@ -1458,7 +1459,7 @@ pub fn auth_index(c: &Credential) -> String {
     let seed = if !attr("auth_index_seed").is_empty() {
         format!("auth_index_seed:{}", attr("auth_index_seed"))
     } else {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let mut file = match &c.source {
             Source::File(p) => p.display().to_string(),
             Source::Config { .. } | Source::Runtime => String::new(),
@@ -1471,11 +1472,11 @@ pub fn auth_index(c: &Credential) -> String {
         if file.is_empty() {
             file = c.id.trim().to_owned();
         }
-        if file.to_lowercase().ends_with(".json") {
+        if file.go_lower().ends_with(".json") {
             let abs = std::path::absolute(&file).unwrap_or_else(|_| PathBuf::from(&file));
             let kind = c
                 .str("type")
-                .map(|t| t.trim().to_lowercase())
+                .map(|t| t.trim().go_lower())
                 .filter(|t| !t.is_empty())
                 .unwrap_or(provider);
             format!("{kind}:{}", clean(&abs).display())
@@ -1653,6 +1654,20 @@ mod tests {
             let want: Vec<String> = want.iter().map(|s: &&str| s.to_string()).collect();
             assert_eq!(read(json), (want, Some(error.to_owned())), "{json}");
         }
+    }
+
+    /// Go's synthesizer lowercases with `strings.ToLower`, which maps U+0130 (İ) to a
+    /// plain `i`; Rust's `to_lowercase` would give `i` plus a combining dot. Expected
+    /// values are Go's: `strings.ToLower("HİGH") == "high"`.
+    #[test]
+    fn file_type_and_exclusions_lowercase_like_go() {
+        let cfg = Config::default();
+        let raw = r#"{"type":"HİGH","excluded_models":["MİNİ"]}"#;
+        let c = from_file(&cfg, Path::new("/auth"), Path::new("/auth/a.json"), raw.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.provider, "high");
+        assert_eq!(c.attributes.get("excluded_models").map(String::as_str), Some("mini"));
     }
 
     /// Go `TestSynthesizeAuthFileKeepsCredentialWithInvalidExcludedModels` and

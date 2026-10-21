@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
+use cpa_common::gostr::GoStr;
 use cpa_core::credential::Credential;
 use cpa_core::exec::ExecError;
 #[cfg(test)]
@@ -496,7 +497,7 @@ impl Policy {
     /// enabled entry (config order) named by the credential's `compat_name`,
     /// `provider_key` or provider.
     fn provider_cooling(&self, c: &Credential) -> Option<bool> {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
         let (compat_name, mut provider_key) = (attr("compat_name"), attr("provider_key"));
         if provider.is_empty()
@@ -508,10 +509,9 @@ impl Policy {
             provider_key = &provider;
         }
         let candidates = [compat_name, provider_key, provider.as_str()];
-        // ponytail: ASCII case folding; Go's EqualFold also folds non-ASCII names.
         self.compat_disable_cooling
             .iter()
-            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.eq_ignore_ascii_case(name)))
+            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.go_eq_fold(name)))
             .and_then(|(_, disable)| *disable)
     }
 
@@ -520,7 +520,7 @@ impl Policy {
             metadata(c, "request_scoped_errors").and_then(|v| serde_json::from_value(v.clone()).ok());
         let rules = file_rules.as_ref().filter(|r| !r.is_empty()).or_else(|| {
             oauth(c)
-                .then(|| self.oauth_request_scoped_errors.get(&c.provider))
+                .then(|| self.oauth_request_scoped_errors.get(&c.provider.trim().go_lower()))
                 .flatten()
         });
         if let Some(rules) = rules {
@@ -3774,6 +3774,54 @@ mod tests {
             Some(Duration::from_secs(60)),
             "unlisted statuses ignore hint"
         );
+    }
+
+    /// Go matches openai-compatibility groups by `EqualFold` against the credential's
+    /// compat name, provider key and provider (`resolveOpenAICompatConfig`), where σ and ς
+    /// are equal. Group `ΟΣ` now registers `openai-compatible-οσ` (Go `strings.ToLower`),
+    /// and the earlier group `openai-compatible-ος` still supplies its proxy and its
+    /// disable-cooling setting.
+    #[test]
+    fn compat_groups_match_with_go_equal_fold() {
+        let cfg = cpa_core::config::Config::parse(
+            "openai-compatibility:\n  - name: openai-compatible-ος\n    base-url: http://127.0.0.1:9\n    disable-cooling: true\n    api-key-entries: [{api-key: k, proxy-url: 'http://127.0.0.1:8080'}]\n  - name: ΟΣ\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n",
+        )
+        .unwrap();
+        let creds = cpa_core::config::credentials::from_config(&cfg);
+        let c = creds
+            .iter()
+            .find(|c| c.attributes.get("compat_name").is_some_and(|n| n == "ΟΣ"))
+            .unwrap();
+        assert_eq!(cpa_core::registry::dynamic::provider_key(c), "openai-compatible-οσ");
+        assert_eq!(
+            cpa_core::config::credentials::api_key_config_proxy(&cfg, c),
+            "http://127.0.0.1:8080"
+        );
+        let mut policy = crate::management::policy(&cfg);
+        policy.compat_disable_cooling = compat_cooling(&cfg);
+        assert_eq!(policy.provider_cooling(c), Some(true));
+    }
+
+    /// OAuth request-scoped-error channels and the credential provider they are looked up
+    /// by are both Go `strings.ToLower` (U+0130 becomes a plain `i`): rules keyed `HİGH`
+    /// apply to a `"type":"HİGH"` file credential.
+    #[test]
+    fn oauth_rule_channels_lowercase_like_go() {
+        let cfg = cpa_core::config::Config::parse(
+            "oauth:\n  request-scoped-errors:\n    HİGH:\n      - {status: 503, match: [boom], action: stop}\n",
+        )
+        .unwrap();
+        let c = cpa_core::config::credentials::from_file(
+            &cfg,
+            std::path::Path::new("/auth"),
+            std::path::Path::new("/auth/a.json"),
+            r#"{"type":"HİGH","access_token":"t"}"#.as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        let action =
+            crate::management::policy(&cfg).error_action(&c, &ExecError::local(503, FailureScope::Request, "boom"));
+        assert!(action.matched && action.stop);
     }
 
     /// Go matches rules against a local missing-thread error's structured body, which
