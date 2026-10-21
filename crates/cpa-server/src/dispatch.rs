@@ -989,7 +989,7 @@ async fn run_routed(
         providers: providers.clone(),
         model: call.selection_model.clone().unwrap_or_else(|| model.clone()),
         session: session.id.clone(),
-        session_parent: session.parent.clone(),
+        session_parent: session.parent,
         session_fork: session.fork,
         exclude: pinned_exclusion.clone(),
         ..Selection::default()
@@ -1000,7 +1000,7 @@ async fn run_routed(
             &call,
             &route_model,
             policy.session_affinity,
-            &session,
+            session.derived.as_deref(),
         )));
     }
     let request = ExecRequest {

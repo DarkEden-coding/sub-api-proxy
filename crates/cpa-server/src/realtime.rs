@@ -324,7 +324,18 @@ async fn select_oauth(
         session_parent: bound(parent),
         session_fork: fork,
         exclude,
-        scheduler: crate::plugins::provider_scheduler_context(rt, "codex", headers),
+        // Go selects with an empty model; an existing call's selection names its
+        // credential and call (sideband.go:381-388, capabilities.go:80-87).
+        scheduler: crate::plugins::provider_scheduler_context(
+            rt,
+            "codex",
+            headers,
+            "",
+            &[("pinned_auth_id", pinned), ("execution_session_id", execution_session)]
+                .into_iter()
+                .filter_map(|(k, v)| Some((k, v?)))
+                .collect::<Vec<_>>(),
+        ),
         ..Selection::default()
     };
     rt.acquire(selection, cfg, policy, &rt.registry())

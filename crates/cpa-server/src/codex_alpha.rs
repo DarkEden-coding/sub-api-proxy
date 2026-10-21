@@ -139,7 +139,13 @@ async fn alpha_search(
         session_parent: bound(parent),
         session_fork: fork,
         exclude,
-        scheduler: crate::plugins::provider_scheduler_context(&rt, "codex", &selection_headers),
+        scheduler: crate::plugins::provider_scheduler_context(
+            &rt,
+            "codex",
+            &selection_headers,
+            if policy.session_affinity { &model } else { "" },
+            &[],
+        ),
         ..Selection::default()
     };
     // ponytail: one selection, no failover or outcome recording, as in Go; plugin model

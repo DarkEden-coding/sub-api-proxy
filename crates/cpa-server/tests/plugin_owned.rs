@@ -54,6 +54,18 @@ async fn env(
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
 ) -> Option<Env> {
+    env_with(name, plugins, extra_yaml, auths, prepare, Default::default()).await
+}
+
+/// [`env`] with a Codex executor (for Codex live endpoints on a local mock).
+async fn env_with(
+    name: &str,
+    plugins: &[(&str, &str)],
+    extra_yaml: &str,
+    auths: &[(&str, &str)],
+    prepare: impl FnOnce(&Path),
+    codex: cpa_exec::codex::CodexExecutor,
+) -> Option<Env> {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -86,7 +98,7 @@ async fn env(
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex: Default::default(),
+            codex,
             devices: Default::default(),
             openai: Default::default(),
             google: Default::default(),
@@ -583,6 +595,28 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
     let yaml = format!(
         "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    priority: 5\n    api-key-entries: [{{api-key: k-a}}, {{api-key: k-b}}]\n    models: [{{name: up-model}}]\n  - name: low\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-low}}]\n    models: [{{name: up-model}}]\n"
     );
+    // Codex live calls answer 201 with the `Thread-Id` as the call ID.
+    let live_upstream = {
+        let handler = |headers: axum::http::HeaderMap| async move {
+            let id = headers["thread-id"].to_str().unwrap().to_owned();
+            (
+                axum::http::StatusCode::CREATED,
+                [
+                    ("location", format!("/v1/live/{id}")),
+                    ("content-type", "application/sdp".to_owned()),
+                ],
+                "v=0",
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
     for across in [false, true] {
         // The second run also turns session affinity on.
         let (caps, yaml) = if across {
@@ -593,7 +627,15 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
         } else {
             ("scheduler", yaml.clone())
         };
-        let Some(env) = env(
+        let codex = cpa_exec::codex::CodexExecutor::with_client(
+            wreq::Client::new(),
+            cpa_exec::codex_oauth::CodexOAuth::new(wreq::Client::new()),
+        )
+        .with_live_endpoints(
+            format!("{live_upstream}/backend-api/codex/realtime/calls"),
+            format!("ws{}/v1", live_upstream.trim_start_matches("http")),
+        );
+        let Some(env) = env_with(
             &format!("plugin-scheduler-{across}"),
             &[("sched", caps)],
             &yaml,
@@ -602,6 +644,7 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
                 r#"{"type":"codex","access_token":"at-FAKE","account_id":"acct-FAKE"}"#,
             )],
             |_| {},
+            codex,
         )
         .await
         else {
@@ -619,6 +662,37 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
             std::fs::write(dir.join(file), envelope.to_string()).unwrap();
         };
         let picks = || calls(&env.records, "sched", "scheduler.pick");
+        // Alpha Search selects one provider (Go `pickNextLegacy`), which the request
+        // names, and returns a reject unenriched with Go's 503 fallback status.
+        let alpha = || async {
+            respond(
+                "scheduler.pick",
+                true,
+                json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+            );
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let alpha = wreq::Client::new()
+                .post(format!("http://{}/backend-api/codex/alpha/search", env.proxy))
+                .header("x-custom", "v")
+                .body(r#"{"id":"s-1","model":"gpt-5.5","query":"q"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(alpha.status().as_u16(), 503);
+            assert_eq!(alpha.text().await.unwrap(), r#"{"error":"quota_hold: wait"}"#);
+            let pick = picks().pop().expect("the scheduler was asked");
+            assert_eq!(pick["Provider"], "codex");
+            assert_eq!(pick["Providers"], json!(["codex"]));
+            assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+            // The synthesized session header (Go `Header.Set` casing).
+            assert_eq!(pick["Options"]["Headers"]["X-Session-Id"], json!(["s-1"]));
+            assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+            assert!(
+                pick["Options"]["Metadata"].get("canonical_session_id").is_none(),
+                "no Enrich"
+            );
+            pick
+        };
         let send_full = || async {
             let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
             seen.lock().unwrap().clear();
@@ -714,6 +788,11 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
             drop(guard);
             let lookup: Value = serde_json::from_slice(&lookup).unwrap();
             assert_eq!(lookup["result"]["status"], "unsupported", "{lookup}");
+            // Under session affinity Alpha's selector argument is the route model.
+            assert_eq!(
+                alpha().await["Options"]["Metadata"]["session_affinity_model"],
+                "gpt-5.5"
+            );
             env.finish().await;
             continue;
         }
@@ -756,28 +835,7 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
         assert!(body.contains("quota_hold: wait"), "{body}");
         assert!(seen.lock().unwrap().is_empty(), "a reject sends nothing");
 
-        // Alpha Search selects one provider (Go `pickNextLegacy`), which the request
-        // names, and returns the reject unenriched with Go's 503 fallback status.
-        respond(
-            "scheduler.pick",
-            true,
-            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
-        );
-        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
-        let alpha = wreq::Client::new()
-            .post(format!("http://{}/backend-api/codex/alpha/search", env.proxy))
-            .header("x-custom", "v")
-            .body(r#"{"id":"s-1","model":"gpt-5.5","query":"q"}"#)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(alpha.status().as_u16(), 503);
-        assert_eq!(alpha.text().await.unwrap(), r#"{"error":"quota_hold: wait"}"#);
-        let pick = picks().pop().expect("the scheduler was asked");
-        assert_eq!(pick["Provider"], "codex");
-        assert_eq!(pick["Providers"], json!(["codex"]));
-        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
-        assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+        assert_eq!(alpha().await["Options"]["Metadata"]["session_affinity_model"], "");
 
         // So does realtime, with Go's empty local model; any reject is a 503.
         respond(
@@ -801,6 +859,88 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
         assert_eq!(pick["Model"], "");
         assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
         assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+        assert_eq!(pick["Options"]["Metadata"]["session_affinity_model"], "");
+        assert!(pick["Options"]["Metadata"].get("pinned_auth_id").is_none());
+
+        // An existing call's selection (here a hangup) names its credential and call.
+        let codex_id = env
+            .rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.provider == "codex")
+            .unwrap()
+            .id
+            .clone();
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":codex_id}}),
+        );
+        let created = wreq::Client::new()
+            .post(format!("http://{}/v1/live", env.proxy))
+            .header("content-type", "application/json")
+            .header("thread-id", "call-1")
+            .body(r#"{"sdp":"v=0"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status().as_u16(), 201, "{}", created.text().await.unwrap());
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let hangup = wreq::Client::new()
+            .post(format!("http://{}/v1/realtime/calls/call-1/hangup", env.proxy))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hangup.status().as_u16(), 503);
+        let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+        assert_eq!(meta["pinned_auth_id"], codex_id.as_str(), "{meta}");
+        assert_eq!(meta["execution_session_id"], "call-1", "{meta}");
+        assert_eq!(meta["session_affinity_model"], "", "{meta}");
+
+        // A session Go's `ExtractSessionInfo` sees but `hasExplicitSession` does not
+        // (`metadata.sessionID`) leaves only the derived identity, and a prompt cache key
+        // is canonical without its conversation alias as a parent.
+        for (body, canonical) in [
+            (
+                r#"{"model":"up-model","metadata":{"sessionID":"x"},"messages":[{"role":"user","content":"hi"}]}"#,
+                None,
+            ),
+            (
+                r#"{"model":"up-model","prompt_cache_key":"p1","conversation":{"id":"c1"},"messages":[{"role":"user","content":"hi"}]}"#,
+                Some("pck:p1"),
+            ),
+        ] {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+            match canonical {
+                None => {
+                    assert!(meta.get("canonical_session_id").is_none(), "{meta}");
+                    assert!(
+                        meta["derived_session_id"].as_str().is_some_and(|d| !d.is_empty()),
+                        "{meta}"
+                    );
+                }
+                Some(canonical) => {
+                    assert_eq!(meta["canonical_session_id"], canonical, "{meta}");
+                    assert!(meta.get("parent_session_id").is_none(), "{meta}");
+                    assert!(meta.get("derived_session_id").is_none(), "{meta}");
+                }
+            }
+        }
 
         // An explicit session is canonical, with its parent; no derived identity.
         let _ = std::fs::remove_file(env.records.join("sched.jsonl"));

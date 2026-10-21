@@ -240,26 +240,30 @@ pub struct SchedulerContext {
 }
 
 /// Go `pickNextLegacy`'s scheduler options for a single-provider selection (Codex
-/// realtime and Alpha Search): the selection headers, and the provider as the session
-/// affinity provider. `None` without an active plugin scheduler.
+/// realtime and Alpha Search): the selection headers, the route's own metadata
+/// (`metadata`, such as a realtime call's pinned credential and execution session), the
+/// provider as the session affinity provider and `affinity_model` (Go
+/// `selectionArgForSelector`: the route model under session affinity, else empty).
+/// These routes do not run `session.Enrich`. `None` without an active plugin scheduler.
 pub(crate) fn provider_scheduler_context(
     rt: &Runtime,
     provider: &str,
     headers: &HeaderMap,
+    affinity_model: &str,
+    metadata: &[(&str, &str)],
 ) -> Option<Arc<SchedulerContext>> {
     if !rt.plugins().has_scheduler() {
         return None;
     }
-    let mut metadata = cpa_plugin::gojson::Metadata::new();
-    metadata.insert(
-        "session_affinity_provider".into(),
-        serde_json::Value::String(provider.into()),
-    );
+    let string = |s: &str| serde_json::Value::String(s.to_owned());
+    let mut out: cpa_plugin::gojson::Metadata = metadata.iter().map(|(k, v)| ((*k).to_owned(), string(v))).collect();
+    out.insert("session_affinity_provider".into(), string(provider));
+    out.insert("session_affinity_model".into(), string(affinity_model));
     Some(Arc::new(SchedulerContext {
         stream: false,
         options: cpa_plugin::api::SchedulerOptions {
             headers: go_request_header(headers),
-            metadata,
+            metadata: out,
         },
     }))
 }

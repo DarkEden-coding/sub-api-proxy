@@ -434,29 +434,36 @@ fn attempt_error(status: u16, message: impl Into<String>) -> ExecError {
 /// What a plugin scheduler learns about a handler request (Go `schedulerOptions` at
 /// `pickNextMixedLegacy`): the client headers, and the execution metadata with the
 /// session-affinity namespace `mixed` and, under session affinity, the route model.
-/// ponytail: Go's conductor also adds the canonical and parent session IDs before the
-/// pick; add them here if a scheduler needs session identity.
 pub(crate) fn scheduler_context(
     call: &Call,
     model: &str,
     session_affinity: bool,
-    session: &crate::session::Session,
+    derived: Option<&str>,
 ) -> super::SchedulerContext {
     let mut metadata = execution_metadata(call, model);
-    // Go `session.Enrich`: an explicit session (or the execution session) is canonical,
-    // with its parent when that differs; otherwise only the derived identity is named.
-    match (session.explicit, session.id.as_deref()) {
-        (true, Some(id)) => {
-            metadata.insert("canonical_session_id".into(), Value::String(id.to_owned()));
-            if let Some(parent) = session.parent.as_deref().filter(|p| *p != id) {
-                metadata.insert("parent_session_id".into(), Value::String(parent.to_owned()));
+    // Go `session.Enrich` (its branches, not the affinity resolver's): a client-named
+    // session (`hasExplicitSession`) is canonical with its parent; otherwise the
+    // execution session is; otherwise only the derived identity is named.
+    let bound = |s: &str| Value::String(cpa_common::session::bound_session_identity(s));
+    let execution = call
+        .execution_session
+        .as_deref()
+        .map(cpa_common::session::normalize_explicit_id)
+        .unwrap_or_default();
+    if cpa_common::session::has_explicit_session(&call.headers, &call.body) {
+        let execution = (!execution.is_empty()).then_some(execution.as_str());
+        if let Some(info) = cpa_common::session::extract_session_info(&call.headers, &call.body, execution)
+            .filter(|info| !info.session_id.is_empty())
+        {
+            metadata.insert("canonical_session_id".into(), bound(&info.session_id));
+            if !info.parent_session_id.is_empty() && info.parent_session_id != info.session_id {
+                metadata.insert("parent_session_id".into(), bound(&info.parent_session_id));
             }
         }
-        _ => {
-            if let Some(derived) = session.derived.as_deref().filter(|d| !d.is_empty()) {
-                metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
-            }
-        }
+    } else if !execution.is_empty() {
+        metadata.insert("canonical_session_id".into(), bound(&format!("execution:{execution}")));
+    } else if let Some(derived) = derived.filter(|d| !d.is_empty()) {
+        metadata.insert("derived_session_id".into(), Value::String(derived.to_owned()));
     }
     metadata.insert("session_affinity_provider".into(), Value::String("mixed".into()));
     let affinity_model = if session_affinity {
