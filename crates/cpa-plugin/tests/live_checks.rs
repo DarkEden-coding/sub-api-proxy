@@ -4,99 +4,15 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
-use cpa_core::config::Config;
 use cpa_plugin::Host;
-use cpa_plugin::client::{CallbackHandler, CallbackInstance, PluginClient};
-use cpa_plugin::host::Loader;
-use cpa_plugin::platform::{self, PluginFile};
+use cpa_plugin::testing::scripted::{Log, Script};
 
-type Log = Arc<Mutex<Vec<String>>>;
-
-/// One scripted plugin: its capabilities, canned results per method, and an optional
-/// plugin it fuses when a given method is called.
-#[derive(Clone, Default)]
-struct Script {
-    caps: &'static str,
-    results: BTreeMap<&'static str, &'static str>,
-    fuse_on: Option<(&'static str, &'static str)>,
-}
-
-struct ScriptClient {
-    id: String,
-    script: Script,
-    host: Arc<OnceLock<Host>>,
-    log: Log,
-}
-
-impl PluginClient for ScriptClient {
-    fn call(&self, method: &str, _: &[u8]) -> Result<Bytes, String> {
-        if method == "plugin.register" || method == "plugin.reconfigure" {
-            return Ok(Bytes::from(format!(
-                r#"{{"ok":true,"result":{{"schema_version":6,"metadata":{{"Name":"{}","Version":"1","Author":"t","GitHubRepository":"r"}},"capabilities":{{{}}}}}}}"#,
-                self.id, self.script.caps
-            )));
-        }
-        self.log.lock().unwrap().push(format!("{} {method}", self.id));
-        if let Some((on, victim)) = self.script.fuse_on
-            && on == method
-        {
-            self.host.get().unwrap().fuse(victim, method, "test");
-        }
-        let result = self.script.results.get(method).copied().unwrap_or("{}");
-        Ok(Bytes::from(format!(r#"{{"ok":true,"result":{result}}}"#)))
-    }
-    fn shutdown(&self) {}
-}
-
-struct ScriptLoader {
-    scripts: BTreeMap<&'static str, Script>,
-    host: Arc<OnceLock<Host>>,
-    log: Log,
-}
-
-impl Loader for ScriptLoader {
-    fn open(
-        &self,
-        file: &PluginFile,
-        _: Arc<dyn CallbackHandler>,
-        _: Arc<CallbackInstance>,
-    ) -> Result<Arc<dyn PluginClient>, String> {
-        Ok(Arc::new(ScriptClient {
-            id: file.id.clone(),
-            script: self.scripts[file.id.as_str()].clone(),
-            host: self.host.clone(),
-            log: self.log.clone(),
-        }))
-    }
-}
-
-/// A host with the scripted plugins loaded; `a` has priority 5, `b` priority 1.
+/// [`cpa_plugin::testing::scripted::host_with`] under this test binary's temp dir.
 async fn host_with(name: &str, scripts: BTreeMap<&'static str, Script>) -> (Host, Log) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("live-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut yaml = format!("plugins:\n  enabled: true\n  dir: {}\n  configs:\n", dir.display());
-    for (i, id) in scripts.keys().enumerate() {
-        std::fs::write(dir.join(format!("{id}{}", platform::extension(platform::goos()))), b"").unwrap();
-        yaml.push_str(&format!(
-            "    {id}:\n      enabled: true\n      priority: {}\n",
-            5 - 4 * i
-        ));
-    }
-    let slot = Arc::new(OnceLock::new());
-    let log: Log = Arc::default();
-    let host = Host::with_loader(Arc::new(ScriptLoader {
-        scripts,
-        host: slot.clone(),
-        log: log.clone(),
-    }));
-    let _ = slot.set(host.clone());
-    host.apply_config(Arc::new(Config::parse(&yaml).unwrap())).await;
-    log.lock().unwrap().clear();
-    (host, log)
+    cpa_plugin::testing::scripted::host_with(&dir, scripts).await
 }
 
 fn calls(log: &Log) -> Vec<String> {
@@ -267,5 +183,94 @@ async fn a_builtin_provider_catalog_reserves_its_models_from_plugin_executors() 
             "after removal: native_executor={native_executor}"
         );
         assert_eq!(changes.register.len(), 1);
+    }
+}
+
+fn quota(identifier: &'static str, describe: &'static str) -> Script {
+    Script {
+        caps: r#""quota_provider":true"#,
+        results: [("quota.identifier", identifier), ("quota.describe", describe)].into(),
+        fuse_on: None,
+    }
+}
+
+/// Every key maps to the plugin `quota_provider_record` selects for it.
+async fn assert_selects(host: &Host, got: &std::collections::HashMap<String, String>) {
+    for (provider, plugin_id) in got {
+        assert!(host.has_quota_provider_for_plugin(plugin_id), "{provider}: {plugin_id}");
+        let record = host.quota_provider_record(provider).await;
+        assert_eq!(record.map(|r| r.id).as_deref(), Some(plugin_id.as_str()), "{provider}");
+    }
+}
+
+/// Go `TestQuotaProviderPluginIDsMatchesQuotaProviderRecordPrecedence`: first-pass
+/// matches (quota identifier, plugin ID, auth identifier) beat described providers,
+/// and within a pass the earlier plugin wins.
+#[tokio::test]
+async fn quota_provider_plugin_ids_matches_quota_provider_record_precedence() {
+    let mut bar_auth = quota(r#"{"identifier":"m-quota"}"#, "{}");
+    bar_auth.caps = r#""quota_provider":true,"auth_provider":true"#;
+    bar_auth.results.insert("auth.identifier", r#"{"identifier":" Bar "}"#);
+    let (host, _) = host_with(
+        "quota-ids",
+        [
+            (
+                "a-multi",
+                quota(
+                    r#"{"identifier":"multi-quota"}"#,
+                    r#"{"supported_providers":[" FOO ","bar"]}"#,
+                ),
+            ),
+            ("b-foo", quota(r#"{"identifier":"foo"}"#, "{}")),
+            ("m-bar-auth", bar_auth),
+            ("z-foo", quota(r#"{"identifier":"foo"}"#, "{}")),
+        ]
+        .into(),
+    )
+    .await;
+    let got = host.quota_provider_plugin_ids().await;
+    let want: std::collections::HashMap<String, String> = [
+        ("multi-quota", "a-multi"),
+        ("a-multi", "a-multi"),
+        ("foo", "b-foo"),
+        ("b-foo", "b-foo"),
+        ("bar", "m-bar-auth"),
+        ("m-quota", "m-bar-auth"),
+        ("m-bar-auth", "m-bar-auth"),
+        ("z-foo", "z-foo"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    assert_eq!(got, want);
+    assert_selects(&host, &got).await;
+}
+
+/// Go `TestQuotaProviderPluginIDsSkipsPluginsFusedDuringDescribe`: a plugin fused while
+/// describing loses its keys to the next healthy candidate.
+#[tokio::test]
+async fn quota_provider_plugin_ids_skips_plugins_fused_during_describe() {
+    for healthy in [r#"{"identifier":"foo"}"#, r#"{"identifier":"healthy-quota"}"#] {
+        let mut broken = quota(r#"{"identifier":"foo"}"#, "{}");
+        broken.fuse_on = Some(("quota.describe", "a-broken"));
+        let (host, _) = host_with(
+            "quota-fused",
+            [
+                ("a-broken", broken),
+                ("b-healthy", quota(healthy, r#"{"supported_providers":["foo"]}"#)),
+            ]
+            .into(),
+        )
+        .await;
+        let initial = host.quota_provider_record("foo").await;
+        assert_eq!(initial.map(|r| r.id).as_deref(), Some("a-broken"), "{healthy}");
+        let got = host.quota_provider_plugin_ids().await;
+        assert!(host.is_fused("a-broken"), "{healthy}");
+        assert_eq!(got.get("foo").map(String::as_str), Some("b-healthy"), "{healthy}");
+        assert!(
+            !got.contains_key("a-broken"),
+            "{healthy}: the fused plugin's own key stays"
+        );
+        assert_selects(&host, &got).await;
     }
 }

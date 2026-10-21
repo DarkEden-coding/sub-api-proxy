@@ -4850,3 +4850,116 @@ async fn v0_legacy_saves_expand_merges_and_hash_the_key() {
         server.abort();
     }
 }
+
+/// Go `TestAuthFilesListV8_QuotaPluginIDAndNoQuotaProbe` (0c708401, 3d61c954): v8 lists
+/// name the quota plugin the host selects for each credential's provider (a first-pass
+/// identifier match beats an earlier plugin's described providers), and hide the
+/// declarative `quota_probe`, which only the v0 quota route runs. v0 lists keep the
+/// probe and never name the plugin.
+#[tokio::test]
+async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
+    use cpa_plugin::testing::scripted::{Script, host_with};
+    let quota = |identifier: &'static str, describe: &'static str| Script {
+        caps: r#""quota_provider":true"#,
+        results: [("quota.identifier", identifier), ("quota.describe", describe)].into(),
+        fuse_on: None,
+    };
+    let dir = std::env::temp_dir().join(format!("manage-quota-plugins-{}", std::process::id()));
+    let (host, _) = host_with(
+        &dir,
+        [
+            (
+                "a-multi-quota",
+                quota(
+                    r#"{"identifier":"multi-quota"}"#,
+                    r#"{"supported_providers":["foo","bar"]}"#,
+                ),
+            ),
+            ("z-foo-quota", quota(r#"{"identifier":"foo"}"#, "{}")),
+        ]
+        .into(),
+    )
+    .await;
+    let auth = std::env::temp_dir().join(format!("manage-quota-auth-{}", std::process::id()));
+    std::fs::create_dir_all(&auth).unwrap();
+    for (name, body) in [
+        ("foo.json", r#"{"type":"foo"}"#),
+        ("bar.json", r#"{"type":"bar"}"#),
+        (
+            "probe.json",
+            r#"{"type":"custom","quota_probe":{"url":"https://api.example.invalid/quota"}}"#,
+        ),
+    ] {
+        std::fs::write(auth.join(name), body).unwrap();
+    }
+    let path = auth.join("config.yaml");
+    let hash = bcrypt::hash("fake-management-only", 4).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        ),
+    )
+    .unwrap();
+    let cfg = Config::load(&path).unwrap();
+    let rt = Arc::new(
+        cpa_server::testing::runtime(
+            cfg.clone(),
+            cpa_core::config::credentials::load(&cfg),
+            Executors {
+                claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        )
+        .with_plugin_host(host),
+    );
+    let state = Management::new(rt, path);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            management::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let list = |path: &'static str| {
+        let base = base.clone();
+        async move {
+            let listed: Value = wreq::Client::new()
+                .get(format!("{base}{path}"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let files = listed["files"].as_array().unwrap().clone();
+            move |name: &str| files.iter().find(|f| f["name"] == name).unwrap().clone()
+        }
+    };
+    let v8 = list("/v8/management/credentials").await;
+    assert_eq!(v8("foo.json")["quota_plugin_id"], "z-foo-quota");
+    assert_eq!(v8("bar.json")["quota_plugin_id"], "a-multi-quota");
+    assert_eq!(v8("bar.json")["supports_quota"], true);
+    assert_eq!(v8("bar.json")["quota_provider"], "bar");
+    let probe = v8("probe.json");
+    assert!(probe.get("supports_quota").is_none(), "{probe}");
+    assert!(probe.get("quota_probe").is_none(), "{probe}");
+
+    let v0 = list("/v0/management/auth-files").await;
+    let probe = v0("probe.json");
+    assert_eq!(probe["supports_quota"], true);
+    assert_eq!(probe["quota_probe"]["url"], "https://api.example.invalid/quota");
+    assert_eq!(v0("bar.json")["supports_quota"], true);
+    assert!(v0("bar.json").get("quota_plugin_id").is_none());
+    server.abort();
+    let _ = std::fs::remove_dir_all(&auth);
+    let _ = std::fs::remove_dir_all(&dir);
+}
