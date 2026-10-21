@@ -259,7 +259,8 @@ impl Rejection {
 /// `selectOAuth`: `SelectAuthByKind(codex, "", oauth)`, optionally pinned to one
 /// credential (`PinnedAuthMetadataKey`). Session affinity follows the request's session
 /// identity. The lease records no outcome (Go marks none for live traffic). In Home mode
-/// it is `SelectHomeAuthByKind(codex, model, oauth)`, a pick of the given `kind`.
+/// it is `SelectHomeAuthByKind(codex, model, oauth)`, a pick of the given `kind`, and
+/// also yields the client key Home authenticated (empty locally).
 #[allow(clippy::too_many_arguments)]
 async fn select_oauth(
     rt: &Arc<Runtime>,
@@ -270,7 +271,7 @@ async fn select_oauth(
     execution_session: Option<&str>,
     model: &str,
     kind: &'static str,
-) -> Result<Lease, Rejection> {
+) -> Result<(Lease, String), Rejection> {
     if let Some(remote) = rt.remote_dispatch() {
         let (primary, parent, fork) = session_hierarchy(headers, body, execution_session);
         let bound = |s: String| (!s.is_empty()).then(|| cpa_common::session::bound_session_identity(&s));
@@ -403,14 +404,17 @@ async fn select_oauth(
                 retry_after: None,
             },
         })
+        .map(|lease| (lease, String::new()))
 }
 
 /// Go `ReportHomeUnauthorized(ctx, selected, "codex", model, body)` from a live handler,
 /// whose context holds the request ID, the session hierarchy (Home's canonical session
-/// replaces it on the record) and the authenticated principal.
+/// replaces it on the record), the authenticated principal and the client key this
+/// request's own Home pick returned (`home_key`; empty when it made none).
 fn report_unauthorized(
     rt: &Runtime,
     principal: &Principal,
+    home_key: &str,
     credential: &Credential,
     model: &str,
     body: &[u8],
@@ -426,7 +430,7 @@ fn report_unauthorized(
             },
             session_id,
             request_id: crate::observability::current_request_id().unwrap_or_default(),
-            api_key: principal.key.clone(),
+            api_key: crate::usage_record::home_unauthorized_key(&principal.key, home_key),
             access_provider: principal.provider.clone(),
             ..Default::default()
         },

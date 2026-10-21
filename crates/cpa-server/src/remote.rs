@@ -225,16 +225,18 @@ impl Refusal {
 /// Go `SelectHomeAuthByKind` and `SelectHomeAuthWithCredentialPolicy`: one Home pick for
 /// a handler outside the dispatch loop. A pick `accept` refuses is released, and the
 /// release acknowledged, before the next pick, which excludes it; refusing the same
-/// credential twice ends the selection.
+/// credential twice ends the selection. Also returns the client key Home authenticated
+/// (Go `setHomeUserAPIKeyOnGinContext`: the last non-empty one of these picks).
 pub(crate) async fn select(
     rt: &crate::Runtime,
     remote: &dyn RemoteDispatch,
     selection: crate::runtime::Selection,
     request: RemoteRequest,
     accept: impl Fn(&Credential) -> bool,
-) -> Result<crate::runtime::Lease, Refusal> {
+) -> Result<(crate::runtime::Lease, String), Refusal> {
     let releases = PendingReleases::default();
     let mut tried: Vec<String> = Vec::new();
+    let mut home_key = String::new();
     let mut count = request.count.max(1);
     loop {
         let pick = RemoteRequest {
@@ -242,7 +244,7 @@ pub(crate) async fn select(
             excluded: tried.clone(),
             ..request.clone()
         };
-        let (lease, _, _) = rt
+        let (lease, _, user_key) = rt
             .acquire_remote(remote, selection.clone(), pick, &releases)
             .await
             .map_err(|failed| Refusal {
@@ -256,9 +258,12 @@ pub(crate) async fn select(
                     RemoteErrorKind::Plain => None,
                 },
             })?;
+        if !user_key.trim().is_empty() {
+            home_key = user_key.trim().to_owned();
+        }
         let credential = lease.credential.clone();
         if accept(&credential) {
-            return Ok(lease);
+            return Ok((lease, home_key));
         }
         // Go `endHomeSelectionBeforeRedispatch`.
         drop(lease);

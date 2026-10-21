@@ -1424,6 +1424,19 @@ fn sessions(client: &Client) -> (String, String) {
 }
 
 /// Go `usageQueuePlugin.HandleUsage`: the queued `queuedUsageDetail` JSON.
+/// Go `usage.APIKeyFromContext` for a Home 401 record: the key the access middleware
+/// set wins; otherwise the key this request's Home pick authenticated
+/// (`setHomeUserAPIKeyOnGinContext`).
+pub(crate) fn home_unauthorized_key(principal: &str, home_key: &str) -> String {
+    let principal = principal.trim();
+    if principal.is_empty() {
+        home_key.trim()
+    } else {
+        principal
+    }
+    .to_owned()
+}
+
 /// Go `usage.IsNativeAccessProvider`: CPA's own client-key providers.
 pub(crate) fn is_native_access_provider(provider: &str) -> bool {
     use cpa_common::gostr::GoStr;

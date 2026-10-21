@@ -30,6 +30,24 @@ pub(crate) fn context() -> Option<Context> {
     CONTEXT.try_with(Clone::clone).ok()
 }
 
+/// The usage identity a request-bound callback scope carries: the call's caller, or the
+/// parent scope's for a nested call, whose own caller is empty.
+pub(crate) fn usage_identity(caller: Option<&Caller>, inherited: &RequestScope) -> (String, String) {
+    match caller.filter(|c| !c.principal.is_empty() || !c.provider.is_empty()) {
+        Some(c) => (c.principal.clone(), c.provider.clone()),
+        None => (inherited.api_key.clone(), inherited.access_provider.clone()),
+    }
+}
+
+/// Inside a nested `host.model.*` call, the parent request's usage identity (Go restores
+/// the parent callback context). Usage records only: the nested call's caller stays
+/// empty.
+pub(crate) fn nested_usage_identity() -> Option<(String, String)> {
+    CONTEXT
+        .try_with(|c| (c.scope.api_key.clone(), c.scope.access_provider.clone()))
+        .ok()
+}
+
 pub(crate) fn skip_plugin() -> String {
     CONTEXT.try_with(|c| c.skip_plugin.clone()).unwrap_or_default()
 }

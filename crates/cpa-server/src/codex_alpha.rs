@@ -156,12 +156,15 @@ async fn alpha_search(
     // ponytail: one selection, no failover or outcome recording, as in Go; plugin model
     // routing is not ported.
     if let Some(remote) = rt.remote_dispatch() {
-        let lease = match home_lease(&rt, remote.as_ref(), selection, &headers).await {
-            Ok(lease) => lease,
+        let (lease, home_key) = match home_lease(&rt, remote.as_ref(), selection, &headers).await {
+            Ok(picked) => picked,
             Err(response) => return *response,
         };
         let facts = crate::usage_record::Facts {
-            client,
+            client: crate::usage_record::Client {
+                api_key: crate::usage_record::home_unauthorized_key(&client.api_key, &home_key),
+                ..client
+            },
             format: cpa_core::format::Format::OpenAIResponse,
             alias: String::new(),
             reasoning_effort: String::new(),
@@ -235,7 +238,7 @@ async fn home_lease(
     remote: &dyn crate::remote::RemoteDispatch,
     selection: Selection,
     headers: &HeaderMap,
-) -> Result<crate::runtime::Lease, Box<Response>> {
+) -> Result<(crate::runtime::Lease, String), Box<Response>> {
     let request = crate::remote::RemoteRequest {
         model: selection.model.clone(),
         session_id: selection.session.clone().unwrap_or_default(),

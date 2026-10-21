@@ -57,6 +57,7 @@ struct Scope(RequestScope);
 impl Scope {
     fn new(trace: &Trace, call: &Call) -> Self {
         let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
+        let (api_key, access_provider) = super::model_callbacks::usage_identity(Some(&call.caller), &inherited);
         Self(RequestScope {
             request_id: trace.request_id(),
             capture: trace.capture(),
@@ -66,6 +67,8 @@ impl Scope {
             pinned_auth_id: call.pinned(),
             execution_session: call.execution_session.clone(),
             request_path: call.request_path.clone(),
+            api_key,
+            access_provider,
         })
     }
 }
@@ -380,6 +383,7 @@ pub(crate) async fn execute_credential(
     // The router path's scope (`Scope::new`) with the post-auth headers and path, so
     // nested `host.model.*` calls keep the pin, session and request context.
     let inherited = super::model_callbacks::context().map(|c| c.scope).unwrap_or_default();
+    let (api_key, access_provider) = super::model_callbacks::usage_identity(Some(&call.caller), &inherited);
     let scope = Scope(RequestScope {
         request_id: crate::observability::current_request_id().unwrap_or_default(),
         capture: req.capture().clone(),
@@ -389,6 +393,8 @@ pub(crate) async fn execute_credential(
         pinned_auth_id: call.pinned(),
         execution_session: call.execution_session.clone(),
         request_path: req.request_path.clone(),
+        api_key,
+        access_provider,
     });
     if !stream {
         let resp = if count {
