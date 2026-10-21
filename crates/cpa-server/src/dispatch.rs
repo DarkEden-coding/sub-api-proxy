@@ -2298,10 +2298,13 @@ async fn attempt(
         };
         // A credential-wide quota ends this credential's model pool.
         let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
-        // Go returns a stopping bootstrap failure as is; any other one goes on as a
+        // Go returns a stopping bootstrap failure as is: an error, not a stream, so the
+        // handler's bootstrap retries never see it. Any other one goes on as a
         // `streamBootstrapError`, whose `Headers()` are the stream's.
         let mut fault = fault;
-        if !stop && let Some(headers) = &fault.bootstrap {
+        if stop {
+            fault.bootstrap = None;
+        } else if let Some(headers) = &fault.bootstrap {
             fault.error.addon = Some(headers.clone());
         }
         if last_here {
