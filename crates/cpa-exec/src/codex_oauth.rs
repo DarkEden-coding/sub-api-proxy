@@ -5,6 +5,7 @@
 //! Executors never persist: refresh returns a [`MetadataPatch`] that the runtime commits.
 //! Only the explicit login commands write a credential file.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -641,7 +642,7 @@ pub fn credential_file_name(email: &str, plan: &str, account_hash: &str) -> Stri
         .trim()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
-        .map(str::to_lowercase)
+        .map(GoStr::go_lower)
         .collect();
     let plan = plan.join("-");
     let hash = account_hash.trim();

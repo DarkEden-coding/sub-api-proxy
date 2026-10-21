@@ -3,6 +3,7 @@
 //! codex_executor_request.go, codex_websockets_request.go, helps/codex_input_ids.go,
 //! helps/codex_tool_schema.go, openai_responses_signature.go).
 
+use cpa_core::gostr::GoStr;
 use std::time::Duration;
 
 use cpa_core::config::Config;
@@ -120,7 +121,7 @@ impl Settings {
         if let Some(resolved) = &req.resolved_model {
             return resolved.is_compat();
         }
-        let fold = |a: &str, b: &str| !b.is_empty() && a.to_lowercase() == b.to_lowercase();
+        let fold = |a: &str, b: &str| !b.is_empty() && a.go_lower() == b.go_lower();
         let requested = req.model.trim();
         let base = base_model(&req.model);
         let target = base.trim();

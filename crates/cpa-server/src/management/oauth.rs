@@ -7,6 +7,7 @@
 //! files in auth-dir; cliproxy-rs keeps the callback with the pending session in
 //! memory, so nothing extra appears in the watched directory.
 
+use cpa_core::gostr::GoStr;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -75,7 +76,7 @@ impl Sessions {
     }
 
     fn register(&self, state: &str, provider: &str) {
-        let (state, provider) = (state.trim(), provider.trim().to_lowercase());
+        let (state, provider) = (state.trim(), provider.trim().go_lower());
         if state.is_empty() || provider.is_empty() {
             return;
         }
@@ -98,7 +99,7 @@ impl Sessions {
 
     /// Go `RegisterPlugin`: `false` when the state is unusable or already registered.
     pub(super) fn register_plugin(&self, state: &str, provider: &str, metadata: cpa_plugin::gojson::Metadata) -> bool {
-        let (state, provider) = (state.trim(), provider.trim().to_lowercase());
+        let (state, provider) = (state.trim(), provider.trim().go_lower());
         if state.is_empty() || provider.is_empty() || !valid_state(state) {
             return false;
         }
@@ -168,9 +169,9 @@ impl Sessions {
     }
 
     fn is_pending(&self, state: &str, provider: &str) -> bool {
-        let provider = provider.trim().to_lowercase();
+        let provider = provider.trim().go_lower();
         self.lock().get(state.trim()).is_some_and(|s| {
-            !s.completed && s.status.is_empty() && (provider.is_empty() || s.provider.eq_ignore_ascii_case(&provider))
+            !s.completed && s.status.is_empty() && (provider.is_empty() || s.provider.go_eq_fold(&provider))
         })
     }
 
@@ -208,7 +209,7 @@ impl Sessions {
         if s.siwc.is_some() {
             return Delivery::RequiresV8;
         }
-        if s.completed || !s.status.is_empty() || !s.provider.eq_ignore_ascii_case(&provider) {
+        if s.completed || !s.status.is_empty() || !s.provider.go_eq_fold(&provider) {
             return Delivery::NotPending;
         }
         s.callback = Some(Callback {
@@ -319,7 +320,7 @@ pub(super) fn valid_state(state: &str) -> bool {
 
 /// Go `NormalizeOAuthCallbackProvider`: the built-in aliases, else a plugin-style name.
 pub(super) fn normalize_callback_provider(provider: &str) -> Option<String> {
-    let p = provider.trim().to_lowercase();
+    let p = provider.trim().go_lower();
     let builtin = match p.as_str() {
         "anthropic" | "claude" => Some("anthropic"),
         "codex" | "openai" => Some("codex"),
@@ -451,10 +452,10 @@ pub(crate) async fn auth_url(State(state): State<Arc<Management>>, RawQuery(raw)
     let raw_query = raw.clone();
     let q = Query::parse(raw);
     let webui = matches!(
-        q.first("is_webui").trim().to_lowercase().as_str(),
+        q.first("is_webui").trim().go_lower().as_str(),
         "1" | "true" | "yes" | "on"
     );
-    match q.first("provider").trim().to_lowercase().as_str() {
+    match q.first("provider").trim().go_lower().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
         "claude" => start_claude(state, webui).await,
         "codex" => start_codex(state, webui).await,
@@ -492,7 +493,7 @@ pub(crate) async fn import(
     body: Bytes,
 ) -> Response {
     let query = Query::parse(raw);
-    match query.first("provider").trim().to_lowercase().as_str() {
+    match query.first("provider").trim().go_lower().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
         "vertex" => import_vertex(state, &query, &headers, &body).await,
         _ => fail(StatusCode::NOT_FOUND, "provider_not_found"),
@@ -1525,7 +1526,7 @@ fn handle_callback(state: &Management, req: CallbackRequest) -> Response {
     if !status.is_empty() {
         return status_error(StatusCode::CONFLICT, &status);
     }
-    if !session_provider.eq_ignore_ascii_case(&canonical) {
+    if !session_provider.go_eq_fold(&canonical) {
         return status_error(StatusCode::BAD_REQUEST, "provider does not match state");
     }
     // A plugin reads its callback from the auth directory, where Go writes every one.

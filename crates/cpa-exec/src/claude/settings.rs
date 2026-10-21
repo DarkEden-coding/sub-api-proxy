@@ -4,6 +4,7 @@
 //! (Go v8.0.35 52d5507d); their older spellings are already moved there.
 
 use cpa_core::config::Config;
+use cpa_core::gostr::GoStr;
 use serde_yaml_ng::Value;
 
 #[derive(Debug, Clone, Default)]
@@ -86,10 +87,8 @@ impl Settings {
             return None;
         }
         self.keys.iter().find(|k| {
-            k.api_key.trim().eq_ignore_ascii_case(api_key)
-                && (base_url.is_empty()
-                    || k.base_url.trim().is_empty()
-                    || k.base_url.trim().eq_ignore_ascii_case(base_url))
+            k.api_key.trim().go_eq_fold(api_key)
+                && (base_url.is_empty() || k.base_url.trim().is_empty() || k.base_url.trim().go_eq_fold(base_url))
         })
     }
 }

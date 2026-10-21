@@ -340,6 +340,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use cpa_core::gostr::GoStr;
     use cpa_home::fake::{self, FakeHome, Reply};
 
     use super::*;
@@ -359,7 +360,7 @@ mod tests {
             let pushes = Arc::new(AtomicUsize::new(0));
             let home = FakeHome::start({
                 let statuses = statuses.clone();
-                move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+                move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                     ("ping", _) => fake::raw("+PONG\r\n"),
                     ("get", Some("plugin-sync")) if sync.starts_with('-') => fake::raw(sync),
                     ("get", Some("plugin-sync")) => fake::bulk(sync),
@@ -634,7 +635,7 @@ mod tests {
 
     /// Hangs every status push.
     async fn hanging_home() -> FakeHome {
-        FakeHome::start(|args| match args[0].to_lowercase().as_str() {
+        FakeHome::start(|args| match args[0].go_lower().as_str() {
             "ping" => fake::raw("+PONG\r\n"),
             "rpush" => Reply::Hang,
             _ => fake::raw("$-1\r\n"),

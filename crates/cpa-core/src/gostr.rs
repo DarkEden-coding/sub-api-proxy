@@ -1,5 +1,5 @@
 //! Go's table-driven rune functions: `unicode.ToLower`, `unicode.ToUpper`,
-//! `strings.ToLower`, `strings.EqualFold` and `strconv.IsPrint`. They run on Go's own
+//! `strings.ToLower`, `strings.ToUpper`, `strings.EqualFold` and `strconv.IsPrint`. They run on Go's own
 //! Unicode tables (gostr_tables.rs, generated from Go 1.26), so results do not drift
 //! with Rust's Unicode version or its full (multi-character) case mappings.
 //! `cpa_common::gostr` re-exports them next to the rest of its Go string helpers.
@@ -66,6 +66,8 @@ fn simple_fold(r: u32) -> u32 {
 pub trait GoStr {
     /// `strings.ToLower`: rune-wise simple lowercase (no context, no expansion).
     fn go_lower(&self) -> String;
+    /// `strings.ToUpper`: rune-wise simple uppercase (`ß` stays `ß`).
+    fn go_upper(&self) -> String;
     /// `strings.EqualFold`: simple Unicode case folding.
     fn go_eq_fold(&self, other: &str) -> bool;
 }
@@ -73,6 +75,10 @@ pub trait GoStr {
 impl GoStr for str {
     fn go_lower(&self) -> String {
         self.chars().map(to_lower_rune).collect()
+    }
+
+    fn go_upper(&self) -> String {
+        self.chars().map(to_upper_rune).collect()
     }
 
     fn go_eq_fold(&self, other: &str) -> bool {
@@ -130,6 +136,7 @@ mod tests {
         assert_eq!("HİGH".go_lower(), "high", "U+0130 lowercases to plain i in Go");
         assert_eq!("ΣΑΣ".go_lower(), "σασ", "no final-sigma context in Go");
         assert_eq!("ǅ".go_lower(), "ǆ");
+        assert_eq!("straße ǆ ı".go_upper(), "STRAßE Ǆ I", "no SS expansion in Go");
         assert!("\u{17f}".go_eq_fold("s") && "S".go_eq_fold("\u{17f}"));
         assert!("\u{212a}".go_eq_fold("k"));
         assert!("ς".go_eq_fold("Σ") && "σ".go_eq_fold("ς"));

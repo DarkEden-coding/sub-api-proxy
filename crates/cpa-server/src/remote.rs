@@ -5,6 +5,7 @@
 //! reports back. The dispatcher owns cooldowns and retry limits; nothing is recorded in
 //! the local scheduler.
 
+use cpa_core::gostr::GoStr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ pub fn selection_provider(credential: &Credential) -> String {
         .get(PROVIDER)
         .map_or(credential.provider.as_str(), String::as_str)
         .trim()
-        .to_lowercase()
+        .go_lower()
 }
 
 /// One credential request (Go's RPOP request fields).

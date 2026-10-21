@@ -4,6 +4,7 @@
 //! `cpa-home`; this module wires it to the runtime through
 //! [`cpa_server::remote::RemoteDispatch`].
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -544,7 +545,7 @@ fn executor_key(provider: &str, label: &str, attributes: &BTreeMap<String, Strin
     if provider.trim().eq_ignore_ascii_case("openai-compatibility") {
         return cpa_core::config::credentials::openai_compat_provider(label.trim());
     }
-    match provider.trim().to_lowercase().as_str() {
+    match provider.trim().go_lower().as_str() {
         "kimi.com" => "kimi".into(),
         "kimi.ai" => "kimi-ai".into(),
         other => other.to_owned(),
@@ -576,7 +577,7 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let provider = text("provider").to_lowercase();
+    let provider = text("provider").go_lower();
     let label = text("label");
     let key = executor_key(&provider, &label, &attributes);
     if provider.is_empty() || key.is_empty() {
@@ -995,7 +996,7 @@ mod tests {
     /// status reports, so a node's Home plugin finalization succeeds.
     async fn fake_home(handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static) -> FakeHome {
         FakeHome::start(
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some(cpa_home::client::KEY_PLUGIN_TASKS)) => fake::raw("$-1\r\n"),
                 ("rpush", Some(cpa_home::client::KEY_PLUGIN_STATUS)) => fake::raw(":1\r\n"),
                 _ => handler(args),
@@ -1096,7 +1097,7 @@ mod tests {
         kv: std::collections::HashMap<String, String>,
     ) -> FakeHome {
         let replies = Mutex::new(std::collections::VecDeque::from(replies));
-        fake_home(with_kv(kv, move |args| match args[0].to_lowercase().as_str() {
+        fake_home(with_kv(kv, move |args| match args[0].go_lower().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1119,7 +1120,7 @@ mod tests {
         handler: impl Fn(&[String]) -> Reply + Send + Sync + 'static,
     ) -> impl Fn(&[String]) -> Reply + Send + Sync + 'static {
         let kv = Mutex::new(kv);
-        move |args| match args[0].to_lowercase().as_str() {
+        move |args| match args[0].go_lower().as_str() {
             "get" if args[1].starts_with("cpa:") => kv
                 .lock()
                 .unwrap()
@@ -1410,7 +1411,7 @@ mod tests {
             r#"{{"model":"claude-upstream","auth_index":"cred-1","concurrency":{{"accounted":true,"credential_id":"cred-1","model":"claude-upstream"}},"auth":{{"id":"cred-1","provider":"claude","attributes":{{"api_key":"sk-home-fake","base_url":"{upstream}"}}}}}}"#
         );
         let home = fake_home(with_kv(Default::default(), move |args| {
-            match args[0].to_lowercase().as_str() {
+            match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\ncredentials:\n  concurrency:\n    cpa-flush-interval: 20ms\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -1473,7 +1474,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn home_errors_reach_the_client_and_the_gate_closes_without_home() {
-        let home = fake_home(|args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(|args| match args[0].go_lower().as_str() {
             "get" => fake::bulk("port: 0\n"),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -1511,7 +1512,7 @@ mod tests {
         };
         let replies = Mutex::new(vec![auth("cred-2", "sk-good"), auth("cred-1", "sk-bad")]);
         let home = fake_home(with_kv(Default::default(), move |args| {
-            match args[0].to_lowercase().as_str() {
+            match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -1714,7 +1715,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn model_routes_serve_the_home_catalog() {
         let catalog = r#"{"xai":[{"id":"grok-4","display_name":"Grok 4","context_length":256000,"owned_by":"xai"}],"claude":[{"id":"claude-x","owned_by":"anthropic","created":1700000000}]}"#;
-        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].go_lower().as_str() {
             "get" if args[1] == "config" => fake::bulk("port: 0\n"),
             "get" if args[1].contains("x-bad") => {
                 fake::bulk(r#"{"error":{"type":"no_credentials","message":"who are you"}}"#)
@@ -1870,7 +1871,7 @@ mod tests {
                             return;
                         }
                         seen.extend_from_slice(&buf[..n]);
-                        let text = String::from_utf8_lossy(&seen).to_lowercase();
+                        let text = String::from_utf8_lossy(&seen).go_lower();
                         if let Some(end) = text.find("\r\n\r\n") {
                             let length = text
                                 .lines()
@@ -3387,7 +3388,7 @@ mod tests {
             Reply::Bytes(bytes) => bytes,
             _ => unreachable!(),
         }));
-        fake_home(move |args| match args[0].to_lowercase().as_str() {
+        fake_home(move |args| match args[0].go_lower().as_str() {
             "get" => fake::bulk(config),
             "subscribe" => fake::raw(ACK),
             "ping" => fake::raw("+PONG\r\n"),
@@ -3797,7 +3798,7 @@ mod tests {
             let base_url = upstream.base.clone();
             let home = fake_home({
                 let calls = calls.clone();
-                move |args| match args[0].to_lowercase().as_str() {
+                move |args| match args[0].go_lower().as_str() {
                     "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\nmax-retry-credentials: 1\n"),
                     "subscribe" => fake::raw(ACK),
                     "ping" => fake::raw("+PONG\r\n"),
@@ -3950,7 +3951,7 @@ mod tests {
         ] {
             let upstream = ContractUpstream::start(vec![("home-retry-a", bad_gateway())]).await;
             let pick = contract_pick("home-retry-a", &upstream.base, None, &Value::Null);
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk(config),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -4020,7 +4021,7 @@ mod tests {
             let done_by_home = done.clone();
             // The Claude executor keeps its session IDs in Home KV.
             let home = fake_home(with_kv(Default::default(), move |args| {
-                match args[0].to_lowercase().as_str() {
+                match args[0].go_lower().as_str() {
                     "get" => fake::bulk(config),
                     "subscribe" => fake::raw(ACK),
                     "ping" => fake::raw("+PONG\r\n"),
@@ -4138,7 +4139,7 @@ mod tests {
                     .to_string()
                 }
             };
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\nmax-retry-interval: 1\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -4354,7 +4355,7 @@ mod tests {
             let pick = pick.clone();
             let minted = refreshed.to_string().contains("sk-meta-home-fake");
             let refreshed = refreshed.to_string();
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" if args[1].starts_with('{') => fake::bulk(&refreshed),
                 "get" => fake::bulk("port: 0\nrequest-retry: 0\n"),
                 "subscribe" => fake::raw(ACK),
@@ -5016,7 +5017,7 @@ mod tests {
     async fn home_busy_skips_outer_retries() {
         for stream in [false, true] {
             let busy = r#"{"error":{"type":"credential_concurrency_exceeded","message":"busy","retryable":true,"retry_after_ms":20000}}"#;
-            let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+            let home = fake_home(move |args| match args[0].go_lower().as_str() {
                 "get" => fake::bulk("port: 0\nrequest-retry: 1\nmax-retry-interval: 30\n"),
                 "subscribe" => fake::raw(ACK),
                 "ping" => fake::raw("+PONG\r\n"),
@@ -5336,7 +5337,7 @@ mod tests {
             let home = Arc::new(
                 fake_home({
                     let (subscriptions, allow_second) = (subscriptions.clone(), allow_second.clone());
-                    move |args| match args[0].to_lowercase().as_str() {
+                    move |args| match args[0].go_lower().as_str() {
                         "get" if args[1] == "config" => fake::bulk(Self::CONFIG),
                         "subscribe" => {
                             let n = subscriptions.fetch_add(1, Ordering::SeqCst) + 1;
@@ -5433,7 +5434,7 @@ mod tests {
     ) -> FakeHome {
         let pushes = std::sync::atomic::AtomicUsize::new(0);
         FakeHome::start(
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some("config")) => fake::bulk(config),
                 ("get", _) => fake::raw("$-1\r\n"),
                 ("subscribe", _) => fake::raw(ACK),
@@ -5621,7 +5622,7 @@ mod tests {
         ));
         let home = FakeHome::start({
             let (config, tasks) = (disabled.clone(), tasks.clone());
-            move |args| match (args[0].to_lowercase().as_str(), args.get(1).map(String::as_str)) {
+            move |args| match (args[0].go_lower().as_str(), args.get(1).map(String::as_str)) {
                 ("get", Some("config")) => fake::bulk(&config),
                 ("get", Some("plugin-tasks")) => fake::bulk(tasks.lock().unwrap().as_str()),
                 ("get", _) => fake::raw("$-1\r\n"),
@@ -5771,7 +5772,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pre_ack_failures_back_off_and_stop_on_shutdown() {
         let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
-        let home = fake_home(move |args| match args[0].to_lowercase().as_str() {
+        let home = fake_home(move |args| match args[0].go_lower().as_str() {
             "get" if args[1] == "config" => {
                 let _ = attempt_tx.send(std::time::Instant::now());
                 fake::raw("-ERR unavailable\r\n")

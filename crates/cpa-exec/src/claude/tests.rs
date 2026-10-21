@@ -1,5 +1,6 @@
 use super::*;
 use cpa_core::exec::Caller;
+use cpa_core::gostr::GoStr;
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -1483,7 +1484,7 @@ async fn request_logs_follow_go_capture_sites() {
             .unwrap()
             .1
             .split(',')
-            .map(str::to_lowercase)
+            .map(GoStr::go_lower)
             .collect();
         let mut sent: Vec<String> = wire
             .lock()

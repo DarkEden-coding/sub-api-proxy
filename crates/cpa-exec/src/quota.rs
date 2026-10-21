@@ -1,5 +1,6 @@
 //! Anthropic shared-window vs model/entitlement rejection (helps/claude_ratelimit.go).
 
+use cpa_core::gostr::GoStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cpa_core::exec::{ExecError, FailureScope};
@@ -81,7 +82,7 @@ pub(crate) fn classify(mut error: ExecError, model_level_cooling: bool) -> ExecE
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| String::from_utf8_lossy(&error.body).into_owned())
-            .to_lowercase();
+            .go_lower();
         error.scope = if !model_level_cooling && shared_rejection(&error.headers) {
             FailureScope::Credential
         } else if message.contains("fast request rejected")
@@ -175,7 +176,7 @@ fn per_minute_body(body: &[u8]) -> bool {
             }
         }
     }
-    kind == "rate_limit_error" && MESSAGES.contains(&message.trim().to_lowercase().as_str())
+    kind == "rate_limit_error" && MESSAGES.contains(&message.trim().go_lower().as_str())
 }
 
 /// The values encoding/json decodes into the struct field `name`, in key order: keys
