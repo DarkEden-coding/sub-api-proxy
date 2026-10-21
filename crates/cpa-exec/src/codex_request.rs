@@ -121,7 +121,7 @@ impl Settings {
         if let Some(resolved) = &req.resolved_model {
             return resolved.is_compat();
         }
-        let fold = |a: &str, b: &str| !b.is_empty() && a.go_lower() == b.go_lower();
+        let fold = |a: &str, b: &str| !b.is_empty() && a.go_eq_fold(b);
         let requested = req.model.trim();
         let base = base_model(&req.model);
         let target = base.trim();
@@ -1405,6 +1405,15 @@ mod tests {
         assert!(!settings(&other).is_compat(&request("upstream")));
         credential.attributes.clear();
         assert!(!settings(&credential).is_compat(&request("upstream")), "standalone");
+
+        // Config models compare names and aliases with Go's EqualFold: İ does not fold to
+        // i, while σ and ς fold together.
+        let keyed = |name: &str| Settings {
+            key_models: vec![serde_json::json!({"name": name, "is-compat": true})],
+            ..Settings::default()
+        };
+        assert!(!keyed("mİ").is_compat(&request("mi")), "dotted İ is not i");
+        assert!(keyed("ος").is_compat(&request("ΟΣ")), "final sigma folds");
     }
 
     #[test]

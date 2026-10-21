@@ -62,8 +62,8 @@ fn simple_fold(r: u32) -> u32 {
     }
 }
 
-/// One allocation of the input's size: simple case mappings rarely change a rune's
-/// UTF-8 length.
+/// Preallocates the input's length; usually one allocation, though a few simple
+/// mappings grow a rune's UTF-8 length (`Ⱥ` to `ⱥ` and `ȿ` to `Ȿ` go from 2 to 3 bytes).
 fn map_runes(s: &str, f: fn(char) -> char) -> String {
     let mut out = String::with_capacity(s.len());
     out.extend(s.chars().map(f));

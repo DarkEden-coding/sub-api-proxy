@@ -1126,7 +1126,7 @@ pub(crate) fn parse_dimension_groups(groups: &[Vec<u8>]) -> Option<(i64, i64, i6
             }
             _ => {}
         });
-        if String::from_utf8_lossy(title).as_ref().go_lower() == "token usage" {
+        if String::from_utf8_lossy(title).go_eq_fold("Token Usage") {
             for (key, value) in &metrics {
                 match key.as_slice() {
                     b"input_tokens" => {
