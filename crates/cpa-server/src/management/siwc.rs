@@ -341,13 +341,18 @@ pub(super) fn callback(state: &Arc<Management>, req: &CallbackRequest, query: Op
         // The credential's preparation lock, which every outer token refresh holds from
         // its read to its commit: the binding lands before or after a refresh, so it
         // never makes a rotated outer token stale (Go keeps both through its mutation
-        // gate). Held across the commit.
+        // gate). Owned and moved into the commit, so a cancel that aborts this task while
+        // the commit runs does not release it.
         let lock = worker.rt.store().prepare_lock(&task_flow.target_id);
-        let Ok(_prepared) = tokio::time::timeout_at(task_flow.deadline.into(), lock.lock()).await else {
+        let Ok(prepared) = tokio::time::timeout_at(task_flow.deadline.into(), lock.lock_owned()).await else {
             return;
         };
         let w = worker.clone();
-        let _ = tokio::task::spawn_blocking(move || commit(&w, &sid, &task_flow, tokens.ok())).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            let _prepared = prepared;
+            commit(&w, &sid, &task_flow, tokens.ok())
+        })
+        .await;
     });
     *flow.exchange.lock().unwrap_or_else(PoisonError::into_inner) = Some(task.abort_handle());
     ok
@@ -504,33 +509,12 @@ mod tests {
     /// (what a v8 upload does) is the target it registers, never the file it replaced.
     #[tokio::test]
     async fn a_bind_reads_its_target_only_under_the_disk_lock() {
-        let dir = std::env::temp_dir().join(format!("cpa-siwc-start-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("codex.json");
-        let codex = |account: &str| {
-            format!(r#"{{"type":"codex","account_id":"{account}","access_token":"a","refresh_token":"r"}}"#)
-        };
-        std::fs::write(&file, codex("old")).unwrap();
-        let path = dir.join("config.yaml");
-        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
-        let cfg = cpa_core::config::Config::load(&path).unwrap();
-        let rt = Arc::new(crate::testing::runtime(
-            cfg.clone(),
-            cpa_core::config::credentials::from_auth_dir(&cfg),
-            cpa_exec::Executors {
-                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
-                codex: Default::default(),
-                devices: Default::default(),
-                openai: Default::default(),
-                google: Default::default(),
-            },
-        ));
-        let state = Management::new(rt, path);
+        let (dir, file, state) = fixture(None);
         // A writer holds `disk` until told to replace the target and publish it.
         let (locked_tx, locked) = tokio::sync::oneshot::channel();
         let (go, go_rx) = std::sync::mpsc::channel::<()>();
         let writer = tokio::task::spawn_blocking({
-            let (state, file, new) = (state.clone(), file.clone(), codex("new"));
+            let (state, file, new) = (state.clone(), file.clone(), codex_file("new"));
             move || {
                 let _held = state.disk.lock().unwrap();
                 locked_tx.send(()).unwrap();
@@ -550,12 +534,113 @@ mod tests {
         writer.await.unwrap();
         let response = started.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .oauth
+                .siwc(&started_state(response).await)
+                .unwrap()
+                .account
+                .as_deref(),
+            Some("new")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A cancel that aborts the exchange task while its commit runs leaves the commit
+    /// holding the preparation lock: an outer refresh cannot read the credential until
+    /// the commit returns, so the binding never makes its rotated tokens stale.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_binding_holds_the_preparation_lock_through_its_commit() {
+        let app = axum::Router::new().route(
+            "/api/accounts/oauth/token",
+            axum::routing::post(|| async {
+                r#"{"access_token":"siwc-at","refresh_token":"siwc-rt","id_token":"siwc-id","scope":"openid chatgpt.tokens.use.direct","expires_in":3600}"#
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (dir, _file, state) = fixture(Some(base));
+        let response = bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)).await;
+        let sid = started_state(response).await;
+        // Hold `disk` so the commit pauses at its start, holding the preparation lock.
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let state = state.clone();
+            move || {
+                let _disk = state.disk.lock().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        held.recv().unwrap();
+        let req = CallbackRequest {
+            state: sid.clone(),
+            code: "c".into(),
+            client_id: "oaiapp_issued".into(),
+            ..Default::default()
+        };
+        assert_eq!(callback(&state, &req, None).unwrap().status(), StatusCode::OK);
+        let lock = state.rt.store().prepare_lock("codex.json");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock.try_lock().is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the commit takes the preparation lock");
+        state.oauth.siwc(&sid).unwrap().cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), lock.clone().lock_owned())
+                .await
+                .is_err(),
+            "the paused commit still holds the preparation lock"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), lock.lock_owned())
+            .await
+            .expect("released once the commit returns");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn codex_file(account: &str) -> String {
+        format!(r#"{{"type":"codex","account_id":"{account}","access_token":"a","refresh_token":"r"}}"#)
+    }
+
+    async fn started_state(response: Response) -> String {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let sid = serde_json::from_slice::<Value>(&body).unwrap()["state"]
+        serde_json::from_slice::<Value>(&body).unwrap()["state"]
             .as_str()
             .unwrap()
-            .to_owned();
-        assert_eq!(state.oauth.siwc(&sid).unwrap().account.as_deref(), Some("new"));
-        std::fs::remove_dir_all(dir).unwrap();
+            .to_owned()
+    }
+
+    /// A private auth dir holding `codex.json` for account "old".
+    fn fixture(login_base: Option<String>) -> (PathBuf, PathBuf, Arc<Management>) {
+        let dir = std::env::temp_dir().join(format!("cpa-siwc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("codex.json");
+        std::fs::write(&file, codex_file("old")).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            cpa_core::config::credentials::from_auth_dir(&cfg),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let options = crate::management::Options {
+            login_base,
+            ..Default::default()
+        };
+        (dir, file, Management::with_options(rt, path, options))
     }
 }
