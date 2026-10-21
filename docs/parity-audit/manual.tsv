@@ -864,7 +864,7 @@ M6-0233			home
 M6-0234			home	
 M6-0235			home	
 M6-0236			home	
-M6-0237	partial	crates/cliproxy/src/home.rs Home dispatch/session and WebSocket binding	home	All eleven pinned-WebSocket reuse and invalidation cases are not reproduced.
+M6-0237	partial	10/11 cases: crates/cpa-server/src/home_session.rs SessionHome::auth and a_remembered_home_credential_is_a_view_not_a_selection; src/websocket.rs session_credential and pin_matches; crates/cliproxy/src/home.rs failed_rpops_are_home_unavailable_and_fence_only_when_ambiguous, a_pooled_codex_socket_keeps_its_home_pick	home	TestHomeRuntimeAuthsClearWhenHomeDisabled has no counterpart: Home mode is fixed at launch, and a session's view of its Home credentials ends with its connection. Go's abort-before-pending-ends ordering holds by construction (the client fences inside the RPOP) rather than through a hook.
 M6-0218	covered	crates/cliproxy/src/tui/client.rs ports all four named Go client cases (auth, errors and list extraction)		
 M6-0243	partial	crates/cpa-plugin/src/abi.rs (envelopes_match_go_bytes)	plugins	Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md.
 M6-0244	partial	crates/cpa-plugin/src/api.rs, gojson (model_info_round_trips_go_field_names, scheduler and quota decode tests)	plugins	Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md.

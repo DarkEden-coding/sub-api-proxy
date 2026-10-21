@@ -11,8 +11,10 @@
 //! The next turn of the same session runs on a still-active pick instead of asking
 //! Home again.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use cpa_core::credential::Credential;
 use cpa_core::exec::{Retainable, SessionLease};
 
 use crate::runtime::Lease;
@@ -177,6 +179,10 @@ pub struct SessionHome {
     kept: Mutex<Option<Kept>>,
     /// Home's request-retry limit with the session's latest fresh pick.
     granted_retry: Mutex<Option<i64>>,
+    /// Every Home credential a pooled socket kept for this session, by ID (Go
+    /// `homeRuntimeAuths` for one session): the turn loop's view of its pin, which the
+    /// local store does not hold. Kept until the connection ends.
+    auths: Mutex<HashMap<String, Arc<Credential>>>,
 }
 
 impl SessionHome {
@@ -192,11 +198,16 @@ impl SessionHome {
 
     /// Go `retainHomeWebsocketSelection`: a pick kept for a previous turn ends
     /// (`target_replaced`).
-    pub(crate) fn keep(&self, pick: Arc<Pick>, credential: &str, route: &str, user_key: String) {
+    /// The session remembers the credential (Go `rememberHomeRuntimeAuth`).
+    pub(crate) fn keep(&self, pick: Arc<Pick>, credential: &Arc<Credential>, route: &str, user_key: String) {
         let request_retry = *self.granted_retry.lock().unwrap_or_else(PoisonError::into_inner);
+        self.auths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(credential.id.clone(), credential.clone());
         let previous = self.slot().replace(Kept {
             pick,
-            credential: credential.to_owned(),
+            credential: credential.id.clone(),
             route: crate::scheduler::canonical_model(route).to_owned(),
             user_key,
             request_retry,
@@ -263,10 +274,62 @@ impl SessionHome {
         }
     }
 
+    /// Go `GetExecutionSessionAuthByID`: a Home credential this session kept.
+    pub(crate) fn auth(&self, id: &str) -> Option<Arc<Credential>> {
+        self.auths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
     /// The downstream connection ended (Go `CloseExecutionSession`).
     pub(crate) fn close(&self) {
+        self.auths.lock().unwrap_or_else(PoisonError::into_inner).clear();
         if let Some(kept) = self.slot().take() {
             kept.pick.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go `TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthWithoutSelection`,
+    /// `TestPickNextViaHomeRejectsSessionScopedAuthCache` and
+    /// `TestCloseExecutionSessionClearsHomeRuntimeAuthForSession`: a remembered Home
+    /// credential stays visible to its session's turn loop after its pick ended, but no
+    /// turn runs on it without a live pick; closing one session forgets only its own.
+    /// Dispatch never reads the view, so a tried, excluded, non-first or non-WebSocket
+    /// pin cannot select it either (`TestPickNextViaHomeDoesNotReuseTriedPinnedWebsocketAuth`,
+    /// `TestPickNextViaHomeDoesNotReusePinnedWebsocketAuthAfterFirstHomeAttempt`,
+    /// `TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth`).
+    #[test]
+    fn a_remembered_home_credential_is_a_view_not_a_selection() {
+        let credential = Arc::new(Credential::relay_session("home-auth-1"));
+        let (one, two) = (SessionHome::default(), SessionHome::default());
+        for session in [&one, &two] {
+            session.keep(Arc::default(), &credential, "gpt-5", String::new());
+        }
+        let releases = crate::remote::PendingReleases::default();
+        let tried = ["home-auth-1".to_owned()];
+        for (first_pick, excluded) in [(true, &[][..]), (true, &tried[..]), (false, &[][..])] {
+            assert!(
+                one.reuse(first_pick, "gpt-5", excluded, Some("home-auth-1"), &releases)
+                    .is_none()
+            );
+            one.keep(Arc::default(), &credential, "gpt-5", String::new());
+        }
+        assert_eq!(
+            one.auth("home-auth-1").map(|c| c.id.clone()).as_deref(),
+            Some("home-auth-1")
+        );
+
+        one.close();
+        assert!(one.auth("home-auth-1").is_none());
+        assert!(two.auth("home-auth-1").is_some(), "another session keeps its own");
+        two.close();
+        assert!(two.auth("home-auth-1").is_none());
     }
 }

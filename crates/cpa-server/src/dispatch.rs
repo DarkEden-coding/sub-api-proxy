@@ -2357,7 +2357,7 @@ fn keep_home(
         return Some(lease);
     };
     let pick = guard.defuse()?;
-    let (credential, route) = (lease.credential.id.clone(), lease.selection.model.clone());
+    let (credential, route) = (lease.credential.clone(), lease.selection.model.clone());
     match pick.keep(lease) {
         None => {
             home.keep(pick, &credential, &route, user_key.to_owned());

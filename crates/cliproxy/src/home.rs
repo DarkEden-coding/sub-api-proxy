@@ -3014,7 +3014,8 @@ mod tests {
     /// Go `bindExecutionLifecycle` and `retainedHomeSessionSelection`: a Responses
     /// WebSocket turn on a Home Codex key with upstream WebSockets leaves its pick with
     /// the pooled socket. The pick outlives the response, the next turn runs on it
-    /// without another pick, and Home draining it closes the socket before the release.
+    /// without another pick (natively, as a continuation), and Home draining it closes the
+    /// socket before the release.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pooled_codex_socket_keeps_its_home_pick() {
         use futures_util::StreamExt;
@@ -3026,11 +3027,23 @@ mod tests {
             )
         };
         let home = scripted(
-            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\n",
+            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s",
             vec![pick("cred-ws"), pick("cred-spare")],
         )
         .await;
-        let (base, rt, shutdown, task) = node_with(&home, cpa_exec::codex::CodexExecutor::new().unwrap()).await;
+        // A local Codex key (Go synthesizes one from a key in Home's config) puts the model
+        // in the registry, so the session keeps its pin on the Home credential (Go
+        // `responsesWebsocketPinnedAuthMatchesModel` with a Home runtime auth).
+        let keys = overlay(b"codex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n", None).unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+            codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let local = cpa_core::config::credentials::from_config(&keys);
+        let (base, rt, shutdown, task) = node_full(&home, executors, local).await;
         eventually("dispatch published", || {
             rt.remote_dispatch().is_some_and(|d| d.available())
         })
@@ -3045,8 +3058,15 @@ mod tests {
             .await
             .unwrap();
         let turn = r#"{"type":"response.create","model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+        // Go `GetExecutionSessionAuthByID`: the kept Home auth stays the session's pin, so
+        // a continuation of upstream state passes through natively on it instead of
+        // asking the client to replay over HTTP.
+        let continuation = r#"{"type":"response.create","model":"gpt-5-codex","previous_response_id":"r1","input":[{"type":"message","role":"user","content":"more"}]}"#;
         for round in 0..2 {
-            socket.send(Message::text(turn)).await.unwrap();
+            socket
+                .send(Message::text(if round == 0 { turn } else { continuation }))
+                .await
+                .unwrap();
             loop {
                 let next = tokio::time::timeout(Duration::from_secs(5), socket.next())
                     .await
@@ -4910,6 +4930,31 @@ mod tests {
             assert!(!matches!(error.kind, RemoteErrorKind::Busy { .. }), "{reply}");
             assert_eq!(picker.fenced(), fenced, "{reply}");
             assert_eq!(picker.in_flight(), 0, "the scope ended: {reply}");
+        }
+    }
+
+    /// Go `TestPickNextViaHomeClassifiesTransportErrorsAsHomeUnavailable`,
+    /// `TestPickNextViaHomeAbortsBeforeEndingPendingDispatch`,
+    /// `TestPickNextViaHomeDoesNotAbortDeterministicDispatchFailure` and
+    /// `TestPickNextViaHomeAbortsAmbiguousTransport`: a failed RPOP is `home_unavailable`
+    /// (503). Only a connection lost after the command was sent fences the client, which
+    /// happens inside the RPOP, before the pending dispatch ends; the registry then drains.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_rpops_are_home_unavailable_and_fence_only_when_ambiguous() {
+        for (reply, fenced) in [
+            (Reply::Close, true),
+            (fake::raw("-ERR Home transport failed\r\n"), false),
+        ] {
+            let home = sequenced("port: 0\n", vec![reply], Default::default()).await;
+            let picker = Picker::new(&home).await;
+            let error = match picker.pick().await {
+                Ok(_) => panic!("the pick succeeded"),
+                Err(error) => error,
+            };
+            assert_eq!((&*error.code, error.error.status), ("home_unavailable", 503));
+            assert_eq!(picker.fenced(), fenced);
+            assert_eq!(picker.in_flight(), 0, "the pending dispatch ended");
+            picker.registry.drain(Duration::from_secs(1)).await.unwrap();
         }
     }
 

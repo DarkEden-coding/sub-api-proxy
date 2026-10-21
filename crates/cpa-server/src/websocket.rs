@@ -37,6 +37,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_core::exec::{Caller, ExecError, ExecSession, ExecStream, Operation};
@@ -764,10 +765,19 @@ impl Connection {
     }
 
     fn credential(&self, id: &str) -> Option<Arc<Credential>> {
+        self.session_credential(id).map(|(credential, _)| credential)
+    }
+
+    /// Go `sessionAuthByIDWithSource`: the store's current view first, then a Home
+    /// credential this session kept (the flag).
+    fn session_credential(&self, id: &str) -> Option<(Arc<Credential>, bool)> {
         if id.is_empty() {
             return None;
         }
-        self.rt.store().get(id)
+        match self.rt.store().get(id) {
+            Some(credential) => Some((credential, false)),
+            None => self.home.auth(id).map(|credential| (credential, true)),
+        }
     }
 
     /// `responsesWebsocketProviderSetForModel`: providers that registered the model
@@ -832,26 +842,29 @@ impl Connection {
         !available.is_empty() && available.iter().all(|c| self.rt.executors.session_upstream(c))
     }
 
-    /// `responsesWebsocketPinnedAuthMatchesModel` for credentials the store still holds.
-    fn pin_matches(&self, credential: &Credential, model: &str) -> bool {
+    /// `responsesWebsocketPinnedAuthMatchesModel`. A Home credential (`home` holds the
+    /// model key it was pinned for) is in no local registry or scheduler: it matches
+    /// while enabled and pinned for the same model key.
+    fn pin_matches(&self, credential: &Credential, model: &str, home: Option<&str>) -> bool {
         let (providers, key) = self.providers(model);
-        providers.contains(&provider_key(credential))
-            && self.usable(credential, &key)
-            && self.rt.registry().client_supports(&credential.id, &key)
+        if !providers.contains(&provider_key(credential)) {
+            return false;
+        }
+        match home {
+            Some(pinned_key) => !credential.disabled && pinned_key.trim().go_eq_fold(key.trim()),
+            None => self.usable(credential, &key) && self.rt.registry().client_supports(&credential.id, &key),
+        }
     }
 
     /// Drops a pin whose credential no longer serves the model, or restores the pin
     /// remembered for the model's only provider.
     fn revalidate_pin(&mut self, model: &str) {
-        if let Some(pinned) = self.credential(&self.pinned) {
-            let current = self
-                .pinned_by_provider
+        let keep = self.session_credential(&self.pinned).is_some_and(|(pinned, home)| {
+            self.pinned_by_provider
                 .get(&provider_key(&pinned))
-                .is_some_and(|(id, _)| *id == self.pinned);
-            if !current || !self.pin_matches(&pinned, model) {
-                self.pinned.clear();
-            }
-        } else {
+                .is_some_and(|(id, key)| *id == self.pinned && self.pin_matches(&pinned, model, home.then_some(key)))
+        });
+        if !keep {
             self.pinned.clear();
         }
         if !self.pinned.is_empty() {
@@ -859,8 +872,8 @@ impl Connection {
         }
         if let [provider] = self.providers(model).0.as_slice() {
             let remembered = self.pinned_by_provider.get(provider).cloned();
-            match remembered.and_then(|(id, _)| self.credential(&id).map(|c| (id, c))) {
-                Some((id, c)) if self.pin_matches(&c, model) => self.pinned = id,
+            match remembered.and_then(|(id, key)| self.session_credential(&id).map(|c| (id, key, c))) {
+                Some((id, key, (c, home))) if self.pin_matches(&c, model, home.then_some(&key)) => self.pinned = id,
                 _ => {
                     self.pinned_by_provider.remove(provider);
                 }
