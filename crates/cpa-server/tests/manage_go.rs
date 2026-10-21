@@ -665,7 +665,9 @@ mod config_writes {
     }
 
     /// Where Go's file holds a plaintext key, Rust's file must hold a hash of it.
-    fn same_key(go: &Value, rust: &Value, verified: &mut HashSet<String>) -> Result<(), String> {
+    /// `verified` caches (plaintext, hash) pairs, so a hash kept across a rotation to a
+    /// new plaintext is checked again.
+    fn same_key(go: &Value, rust: &Value, verified: &mut HashSet<(String, String)>) -> Result<(), String> {
         for at in SECRETS {
             if let Some(plain) = go
                 .pointer(at)
@@ -673,11 +675,12 @@ mod config_writes {
                 .filter(|k| k.starts_with("fake-"))
             {
                 let hash = rust.pointer(at).and_then(Value::as_str).unwrap_or_default();
-                if !verified.contains(hash) {
+                let pair = (plain.to_owned(), hash.to_owned());
+                if !verified.contains(&pair) {
                     if !bcrypt::verify(plain, hash).unwrap_or(false) {
                         return Err(format!("{at}: {hash:?} is not a hash of {plain:?}"));
                     }
-                    verified.insert(hash.to_owned());
+                    verified.insert(pair);
                 }
             }
         }
