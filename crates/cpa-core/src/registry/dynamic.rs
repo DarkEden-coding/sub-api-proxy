@@ -265,7 +265,7 @@ fn openai_compat(c: &Credential) -> bool {
     ["compat_name", "provider_key"]
         .iter()
         .any(|k| c.attributes.get(*k).is_some_and(|v| !v.trim().is_empty()))
-        || c.provider.eq_ignore_ascii_case("openai-compatibility")
+        || c.provider.trim().go_eq_fold("openai-compatibility")
 }
 
 /// The provider key a credential registers and is scheduled under.
@@ -366,7 +366,7 @@ fn sanitize_aliases(entries: Vec<OAuthAlias>) -> Vec<OAuthAlias> {
             e.display_name = e.display_name.trim().to_owned();
             (!e.name.is_empty()
                 && !e.alias.is_empty()
-                && !e.name.eq_ignore_ascii_case(&e.alias)
+                && !e.name.go_eq_fold(&e.alias)
                 && seen.insert(e.alias.go_lower()))
             .then_some(e)
         })
@@ -623,8 +623,9 @@ fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
     let mut out: Vec<Spec> = models
         .into_iter()
         .filter(|m| {
-            let id = m.id.trim();
-            !id.is_empty() && !BUILTINS.iter().any(|(b, ..)| b.eq_ignore_ascii_case(id))
+            // Go `upsertModelInfos` compares `strings.ToLower` keys.
+            let id = m.id.trim().go_lower();
+            !id.is_empty() && !BUILTINS.iter().any(|(b, ..)| b.go_lower() == id)
         })
         .collect();
     out.extend(BUILTINS.iter().map(|(id, created, display, description)| Spec {
@@ -810,7 +811,7 @@ fn apply_aliases(aliases: &[OAuthAlias], models: Vec<Spec>) -> Vec<Spec> {
         let mut added = false;
         for entry in entries {
             let mapped = entry.alias.trim();
-            if mapped.is_empty() || mapped.eq_ignore_ascii_case(&id) || !seen.insert(mapped.go_lower()) {
+            if mapped.is_empty() || mapped.go_eq_fold(&id) || !seen.insert(mapped.go_lower()) {
                 continue;
             }
             let mut clone = model.clone();
@@ -836,10 +837,10 @@ fn apply_aliases(aliases: &[OAuthAlias], models: Vec<Spec>) -> Vec<Spec> {
 
 fn rewrite_name(name: &str, old: &str, new: &str) -> String {
     let trimmed = name.trim();
-    if trimmed.is_empty() || old.eq_ignore_ascii_case(new) {
+    if trimmed.is_empty() || old.go_eq_fold(new) {
         return name.to_owned();
     }
-    if trimmed.eq_ignore_ascii_case(old) {
+    if trimmed.go_eq_fold(old) {
         return new.to_owned();
     }
     if let Some(prefix) = trimmed.strip_suffix(old).filter(|p| p.ends_with('/')) {
@@ -1215,7 +1216,7 @@ impl Registry {
             && self
                 .clients
                 .get(client)
-                .is_some_and(|c| c.models.keys().any(|id| id.eq_ignore_ascii_case(model)))
+                .is_some_and(|c| c.models.keys().any(|id| id.go_eq_fold(model)))
     }
 
     /// Whether `client` registered anything (unregistered credentials never route).
@@ -1228,12 +1229,7 @@ impl Registry {
         let c = self.clients.get(client)?;
         c.models
             .get(model)
-            .or_else(|| {
-                c.models
-                    .iter()
-                    .find(|(id, _)| id.eq_ignore_ascii_case(model))
-                    .map(|(_, m)| m)
-            })
+            .or_else(|| c.models.iter().find(|(id, _)| id.go_eq_fold(model)).map(|(_, m)| m))
             .cloned()
     }
 
@@ -1386,10 +1382,10 @@ where
     for candidate in candidates(requested) {
         for (name, alias, force) in entries.clone() {
             let (name, alias) = (name.trim(), alias.trim());
-            if name.is_empty() || alias.is_empty() || !alias.eq_ignore_ascii_case(&candidate) {
+            if name.is_empty() || alias.is_empty() || !alias.go_eq_fold(&candidate) {
                 continue;
             }
-            if name.eq_ignore_ascii_case(base) {
+            if name.go_eq_fold(base) {
                 if !force {
                     return AliasResult::default();
                 }
@@ -1483,7 +1479,7 @@ fn alias_pool(requested: &str, models: &[ConfigModel]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         for m in models {
             let (name, alias) = (m.name.trim(), m.alias.trim());
-            if alias.is_empty() || !alias.eq_ignore_ascii_case(&candidate) {
+            if alias.is_empty() || !alias.go_eq_fold(&candidate) {
                 continue;
             }
             let resolved = preserve_suffix(if name.is_empty() { &candidate } else { name }, requested);
@@ -1498,7 +1494,7 @@ fn alias_pool(requested: &str, models: &[ConfigModel]) -> Vec<String> {
     for candidate in candidates(requested) {
         if let Some(m) = models
             .iter()
-            .find(|m| !m.name.trim().is_empty() && m.name.trim().eq_ignore_ascii_case(&candidate))
+            .find(|m| !m.name.trim().is_empty() && m.name.trim().go_eq_fold(&candidate))
         {
             return vec![preserve_suffix(m.name.trim(), requested)];
         }
@@ -1719,6 +1715,24 @@ mod tests {
                 .collect();
             assert_eq!(ids, ["m1"], "{asked}");
         }
+    }
+
+    /// The Devin catalog keys IDs with Go `strings.ToLower` (`ΟΣ` becomes `devin/οσ`,
+    /// where Rust's `to_lowercase` would give a final sigma), and admission compares with
+    /// Go `EqualFold` (`ClientSupportsModel`), where σ and ς are equal: a request for
+    /// `devin/ος` reaches the credential. This test alone in this binary loads the
+    /// process-wide Devin catalog.
+    #[test]
+    fn devin_admission_folds_final_sigma_like_go() {
+        assert_eq!(
+            crate::registry::devin::global().load(r#"{"devin":[{"id":"ΟΣ"}]}"#.as_bytes(), "test"),
+            Ok(true)
+        );
+        let c = file("d.json", serde_json::json!({"type":"devin"}), &[]);
+        let r = Registry::build(&Config::default(), std::slice::from_ref(&c));
+        assert!(r.ids().any(|id| id == "devin/οσ"), "{:?}", r.ids().collect::<Vec<_>>());
+        assert!(r.client_supports("d.json", "devin/ος"));
+        assert_eq!(r.client_model("d.json", "devin/ος").unwrap().id, "devin/οσ");
     }
 
     #[test]

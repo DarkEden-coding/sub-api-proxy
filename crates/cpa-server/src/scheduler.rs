@@ -497,7 +497,7 @@ impl Policy {
     /// enabled entry (config order) named by the credential's `compat_name`,
     /// `provider_key` or provider.
     fn provider_cooling(&self, c: &Credential) -> Option<bool> {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
         let (compat_name, mut provider_key) = (attr("compat_name"), attr("provider_key"));
         if provider.is_empty()
@@ -509,10 +509,9 @@ impl Policy {
             provider_key = &provider;
         }
         let candidates = [compat_name, provider_key, provider.as_str()];
-        // ponytail: ASCII case folding; Go's EqualFold also folds non-ASCII names.
         self.compat_disable_cooling
             .iter()
-            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.eq_ignore_ascii_case(name)))
+            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.go_eq_fold(name)))
             .and_then(|(_, disable)| *disable)
     }
 
@@ -3775,6 +3774,32 @@ mod tests {
             Some(Duration::from_secs(60)),
             "unlisted statuses ignore hint"
         );
+    }
+
+    /// Go matches openai-compatibility groups by `EqualFold` against the credential's
+    /// compat name, provider key and provider (`resolveOpenAICompatConfig`), where σ and ς
+    /// are equal. Group `ΟΣ` now registers `openai-compatible-οσ` (Go `strings.ToLower`),
+    /// and the earlier group `openai-compatible-ος` still supplies its proxy and its
+    /// disable-cooling setting.
+    #[test]
+    fn compat_groups_match_with_go_equal_fold() {
+        let cfg = cpa_core::config::Config::parse(
+            "openai-compatibility:\n  - name: openai-compatible-ος\n    base-url: http://127.0.0.1:9\n    disable-cooling: true\n    api-key-entries: [{api-key: k, proxy-url: 'http://127.0.0.1:8080'}]\n  - name: ΟΣ\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n",
+        )
+        .unwrap();
+        let creds = cpa_core::config::credentials::from_config(&cfg);
+        let c = creds
+            .iter()
+            .find(|c| c.attributes.get("compat_name").is_some_and(|n| n == "ΟΣ"))
+            .unwrap();
+        assert_eq!(cpa_core::registry::dynamic::provider_key(c), "openai-compatible-οσ");
+        assert_eq!(
+            cpa_core::config::credentials::api_key_config_proxy(&cfg, c),
+            "http://127.0.0.1:8080"
+        );
+        let mut policy = crate::management::policy(&cfg);
+        policy.compat_disable_cooling = compat_cooling(&cfg);
+        assert_eq!(policy.provider_cooling(c), Some(true));
     }
 
     /// OAuth request-scoped-error channels and the credential provider they are looked up

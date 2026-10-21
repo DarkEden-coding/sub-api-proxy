@@ -852,7 +852,7 @@ pub fn resolve_api_key_entry(cfg: &Config, family: &str, c: &Credential) -> Opti
         return None;
     }
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let fold = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+    let fold = |a: &str, b: &str| a.trim().go_eq_fold(b.trim());
     let (key, base) = (attr("api_key"), attr("base_url"));
     let matches = |e: &ApiKeyEntry| {
         let (k, b) = (e.api_key.trim(), e.base_url.trim());
@@ -895,7 +895,7 @@ pub fn resolve_api_key_entry(cfg: &Config, family: &str, c: &Credential) -> Opti
 /// matches; callers check that the credential is an API key.
 pub fn api_key_config_proxy(cfg: &Config, c: &Credential) -> String {
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let fold = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
+    let fold = |a: &str, b: &str| a.go_eq_fold(b);
     let (key, base) = (attr("api_key"), attr("base_url"));
     let compat = attr("compat_name");
     if !compat.is_empty() || fold(c.provider.trim(), "openai-compatibility") {
@@ -1202,7 +1202,7 @@ fn oauth_aliases(raw: Option<&Json>) -> Option<String> {
         .filter_map(|e| {
             let name = e.get("name")?.as_str()?.trim();
             let alias = e.get("alias")?.as_str()?.trim();
-            (!name.is_empty() && !alias.is_empty() && !name.eq_ignore_ascii_case(alias)).then_some((name, alias, e))
+            (!name.is_empty() && !alias.is_empty() && !name.go_eq_fold(alias)).then_some((name, alias, e))
         })
         .filter(|(_, alias, _)| seen.insert(alias.go_lower()))
         .map(|(name, alias, e)| {

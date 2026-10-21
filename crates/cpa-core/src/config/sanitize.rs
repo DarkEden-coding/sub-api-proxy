@@ -60,7 +60,7 @@ fn model_alias(map: &Value) -> Value {
             .flatten()
             .filter_map(|e| {
                 let (name, alias) = (s(e.get("name")), s(e.get("alias")));
-                if name.is_empty() || alias.is_empty() || name.eq_ignore_ascii_case(&alias) {
+                if name.is_empty() || alias.is_empty() || name.go_eq_fold(&alias) {
                     return None;
                 }
                 if !seen.insert(alias.go_lower()) {

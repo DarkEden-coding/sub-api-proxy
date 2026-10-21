@@ -21,6 +21,7 @@ use cpa_core::config::Config;
 use http::HeaderMap;
 use serde_yaml_ng::Value as Yaml;
 
+use crate::gostr::GoStr;
 use crate::json::{self, GoValue, Kind, Res};
 
 /// One request's context for payload rules (Go's parameters to
@@ -631,7 +632,7 @@ fn model_candidates(model: &str, requested: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |v: &str| {
         let v = v.trim();
-        if !v.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(v)) {
+        if !v.is_empty() && !out.iter().any(|c| c.go_eq_fold(v)) {
             out.push(v.to_owned());
         }
     };
