@@ -28,16 +28,16 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 8 | 12 | 0 | 2 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 3 | 12 | 0 | 0 | 0 |
+| Config and Management API | 15 | 8 | 7 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
-| Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
+| Usage and logging | 3 | 1 | 2 | 0 | 0 | 0 |
 | Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
 | Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **36** | **186** | **0** | **63** | **3** |
+| **All** | **288** | **42** | **180** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -271,19 +271,19 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 |---|---|---|---|---|---|
 | [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | ported here | L (+205 −156) | shared `upstream` provider settings; API keys see them, only the `oauth.providers` leftovers stay OAuth-only; `/v8/management/config/upstream/...` |
 | [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | ported here | M (+212 −46) | historical v8 config aliases: reads, writes, bodies, comments, the v8-layout check and the direct v8 save (explicit `null` kept) ported; Go's `parse config payload: ` message prefix and the whole typed render of a legacy v0 save remain partial under M5-0308 |
-| [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | to port | L (+503 −8) | auth indexes in v8 `api-keys` |
+| [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | ported here | L (+503 −8) | auth indexes in v8 `api-keys`, replayed from a Go-recorded fixture (M5-0307, tests/management.rs v8_api_keys_carry_auth_indexes_and_writes_drop_them) |
 | [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |
-| [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | to port | S (+20 −7) | v8 API: collection styles and quoted mapping keys |
+| [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | ported here | S (+20 −7) | values written through the v8 API render as block collections with plain keys, and empty lists stay `[]` (tests/management.rs config_writes_render_json_values_as_block_yaml). Untouched text keeps its style, an approved difference (DIFFERENCES-FROM-GO.md, config writes) |
 | [`0c708401`](https://github.com/router-for-me/CLIProxyAPI/commit/0c708401) | fix(management): resolve v8 plugin quota contract gaps | yes | to port | M (+64 −41) | v8 plugin quota contract |
 | [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | to port | S (+3 −1) | `quota_plugin_id` on v8 auth files |
 | [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | ported here | M (+48 −43) | root `requests.tls-handshake-timeout-seconds` with the flat legacy spelling |
 | [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
 | [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |
-| [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | to port | M (+74 −3) | ETag/If-Match optimistic concurrency and CORS headers for v8 configuration |
+| [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | ported here | M (+74 −3) | ETag/If-Match on v8 config writes and the exposed ETag header (M5-0309, M5-0315, tests/management.rs config_writes_honour_if_match_against_the_file_etag); `?value=` masked in access logs (observability.rs go_access_and_redaction_goldens) |
 | [`d69962e4`](https://github.com/router-for-me/CLIProxyAPI/commit/d69962e4) | feat(management): add safe Modify method for auth records with epoch validation and locking | yes | to port | M (+112 −53) | add safe Modify method for auth records with epoch validation and locking. Partly ported: Modify applies an edit to the record as it is now; a fields patch on a config credential answers 404 (with 3e309fb4). The registration-epoch check is not ported |
-| [`50cfd238`](https://github.com/router-for-me/CLIProxyAPI/commit/50cfd238) | feat(management): add support for static and plugin model definitions retrieval by channel | yes | to port | S (+33 −1) | channel-selectable static and plugin model definitions |
-| [`d50a1995`](https://github.com/router-for-me/CLIProxyAPI/commit/d50a1995) | feat(management): add v8 SIWC credential binding | yes | to port | L (+837 −16) | SIWC prepare, complete and bind routes, one-time state and credential binding |
-| [`ae3ee3be`](https://github.com/router-for-me/CLIProxyAPI/commit/ae3ee3be) | fix(management): reject legacy SIWC callbacks and symlink targets | yes | to port | S (+16 −1) | reject SIWC on legacy callback and refuse symlink credential targets; keep with d50a1995 |
+| [`50cfd238`](https://github.com/router-for-me/CLIProxyAPI/commit/50cfd238) | feat(management): add support for static and plugin model definitions retrieval by channel | yes | ported here | S (+33 −1) | channel-selectable static and plugin model definitions, all four Go cases (M5-0311) |
+| [`d50a1995`](https://github.com/router-for-me/CLIProxyAPI/commit/d50a1995) | feat(management): add v8 SIWC credential binding | yes | to port | L (+837 −16) | partly ported with #82: prepare, complete and bind routes, one-time state and credential binding (M5-0312, M5-0313, M5-0318, M3-0422; tests/management.rs siwc_binding_flows_follow_go). Gaps: case-insensitive and aliased mutation paths (TestSIWCMutationPathAliases), the bind route with management disabled and in Home mode, registration-epoch fencing (with M5-0304), and the commit-survives-expiry case, checked only by inspection |
+| [`ae3ee3be`](https://github.com/router-for-me/CLIProxyAPI/commit/ae3ee3be) | fix(management): reject legacy SIWC callbacks and symlink targets | yes | ported here | S (+16 −1) | legacy callback rejected for a SIWC state (/codex/callback answers 409) and symlink credential targets refused (M5-0313, M5-0318) |
 
 ## Plugins
 
@@ -325,7 +325,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 |---|---|---|---|---|---|
 | [`611ebba4`](https://github.com/router-for-me/CLIProxyAPI/commit/611ebba4) | refactor(executor): unify model reporting and replay logs | no | to port | M (+52 −144) | shared model observation; log wording |
 | [`37fe2608`](https://github.com/router-for-me/CLIProxyAPI/commit/37fe2608) | feat(usage): propagate access provider and native key metadata to usage records | yes | to port | M (+243 −5) | access provider and native key in usage records |
-| [`4337f1f0`](https://github.com/router-for-me/CLIProxyAPI/commit/4337f1f0) | fix(logging): escape request path in access log to prevent log injection | yes | to port | S (+1 −1) | quote/escape the request path before writing an access-log record |
+| [`4337f1f0`](https://github.com/router-for-me/CLIProxyAPI/commit/4337f1f0) | fix(logging): escape request path in access log to prevent log injection | yes | ported here | S (+1 −1) | the access-log path is quoted with Go `%q` (observability.rs go_access_and_redaction_goldens: TestGinLogrusLoggerEscapesEncodedNewlineInPath, TestGinLogrusLoggerKeepsMaskedQueryReadable) |
 
 ## Antigravity
 

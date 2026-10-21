@@ -3275,6 +3275,22 @@ async fn config_writes_render_json_values_as_block_yaml() {
         file.contains("  api-keys: [fake-client]\n"),
         "untouched text keeps its style: {file}"
     );
+    // A whole-config PUT is all JSON: block collections and plain keys throughout, and
+    // the saved file loads.
+    let root = format!(
+        r#"{{"config-version":8,"management":{{"secret-key":"fake-management-only"}},"server":{{"port":8317}},"api-keys":{{"openai-compatibility":{}}}}}"#,
+        compat("3")
+    );
+    let r = send(wreq::Method::PUT, "/config", &root).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let file = f.file();
+    assert!(file.contains(&block.replace('N', "3")), "{file}");
+    for quoted in ["\"config-version\":", "\"server\":", "\"api-keys\":", "[{", "{\""] {
+        assert!(!file.contains(quoted), "{quoted} in {file}");
+    }
+    let loaded = cpa_core::config::Config::parse(&file).unwrap();
+    let compat = &loaded.document["api-keys"]["openai-compatibility"][0];
+    assert_eq!(compat["headers"]["User-Agent"].as_str(), Some("$User-Agent"));
     server.abort();
 }
 
