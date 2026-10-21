@@ -846,13 +846,22 @@ pub async fn create(
 ) -> Response {
     use axum::extract::FromRequest as _;
     use cpa_exec::openai_compat_multipart::{MediaType, parse_media_type};
-    // Go `parsePostForm` answers an unusable urlencoded media type without reading the
-    // body.
-    if content_type(&headers) == "application/x-www-form-urlencoded" {
-        let raw_type = String::from_utf8_lossy(headers[header::CONTENT_TYPE].as_bytes());
-        if let MediaType::Invalid(reason) = parse_media_type(&raw_type) {
-            return failed(400, XAI_MODEL, &format!("Invalid request: {reason}"));
-        }
+    // Go answers these form types without reading the body: `parsePostForm` an unusable
+    // urlencoded media type, `ParseMultipartForm` a multipart type or boundary it refuses.
+    let raw_type = headers
+        .get(header::CONTENT_TYPE)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let refused = match content_type(&headers).as_str() {
+        "application/x-www-form-urlencoded" => match parse_media_type(&raw_type) {
+            MediaType::Invalid(reason) => Some(reason.to_owned()),
+            _ => None,
+        },
+        "multipart/form-data" => crate::images::multipart_boundary(&raw_type).err(),
+        _ => None,
+    };
+    if let Some(reason) = refused {
+        return failed(400, XAI_MODEL, &format!("Invalid request: {reason}"));
     }
     let body = Bytes::from_request(client_request, &()).await;
     let raw = match (content_type(&headers).as_str(), body) {
