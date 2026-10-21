@@ -380,11 +380,13 @@ impl Dispatcher {
         // Go decodes the auth's runtime state with the reply: a mistyped field or an
         // unparsable time fails it.
         let response = match DispatchResponse::parse(&raw) {
-            Ok(response) if cpa_server::remote::Availability::decode(&response.auth).is_ok() => response,
-            Ok(_) => {
-                end_scope(&scope);
-                return Err(reject(502, "invalid_auth", "home returned invalid auth payload"));
-            }
+            Ok(response) => match cpa_server::remote::Availability::decode(&response.auth) {
+                Ok(_) => response,
+                Err(message) => {
+                    end_scope(&scope);
+                    return Err(reject(502, "invalid_auth", message));
+                }
+            },
             Err(message) => {
                 end_scope(&scope);
                 return Err(reject(502, "invalid_auth", message));

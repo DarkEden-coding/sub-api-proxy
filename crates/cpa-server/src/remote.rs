@@ -93,8 +93,13 @@ impl State {
 impl Availability {
     /// Go's `json.Unmarshal` into `coreauth.Auth` for these fields: `null` or absent
     /// keeps the default, any other mistyped value or unparsable time fails the whole
-    /// reply (Home's `invalid_auth`). `None` when everything is the default.
-    pub fn decode(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, ()> {
+    /// reply (Home's `invalid_auth`, with this message). `None` when everything is the
+    /// default.
+    pub fn decode(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, &'static str> {
+        Self::decode_fields(auth).map_err(|()| "home returned invalid auth payload")
+    }
+
+    fn decode_fields(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, ()> {
         use serde_json::Value;
         let state = State::decode(auth)?;
         let model_states = match auth.get("model_states") {
@@ -155,8 +160,9 @@ fn go_time(raw: &str) -> Option<Option<(i64, u32)>> {
         while b.get(i).is_some_and(u8::is_ascii_digit) {
             i += 1;
         }
-        for k in start..start + 9 {
-            nanos = nanos * 10 + if k < i { u32::from(b[k] - b'0') } else { 0 };
+        let fraction = &b[start..i];
+        for k in 0..9 {
+            nanos = nanos * 10 + fraction.get(k).map_or(0, |d| u32::from(d - b'0'));
         }
     }
     let offset = match b.get(i)? {
