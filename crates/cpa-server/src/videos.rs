@@ -810,15 +810,22 @@ pub async fn create(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let raw = match (content_type(&headers).as_str(), &body) {
-        (_, Err(rejection)) => Err(crate::claude::read_error(rejection)),
+    let raw = match (content_type(&headers).as_str(), body) {
+        (_, Err(rejection)) => Err(crate::claude::read_error(&rejection)),
         ("multipart/form-data" | "application/x-www-form-urlencoded", Ok(body)) => {
-            Ok(create_request_from_form(&headers, body))
+            Ok(create_request_from_form(&headers, &body))
         }
-        (_, Ok(body)) if gj::std_valid(body) => Ok(body.to_vec()),
-        (_, Ok(_)) => Err((400, "body must be valid JSON".to_owned())),
+        // Go `readVideosCreateRequest`: `ReadRequestBody`, then the JSON check.
+        (_, Ok(body)) => crate::openai::decode_body(&headers, body, limit.0).and_then(|body| {
+            if gj::std_valid(&body) {
+                Ok(body.to_vec())
+            } else {
+                Err((400, "body must be valid JSON".to_owned()))
+            }
+        }),
     };
     let raw = match raw {
         Ok(raw) => raw,
@@ -872,10 +879,12 @@ pub async fn native_post(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let body = match body {
-        Ok(body) => body,
+    let body = match body.map(|body| crate::openai::read_body(&headers, body, limit.0)) {
+        Ok(Ok(body)) => body,
+        Ok(Err(response)) => return *response,
         Err(rejection) => return read_failed(&rejection),
     };
     if !gj::std_valid(&body) {

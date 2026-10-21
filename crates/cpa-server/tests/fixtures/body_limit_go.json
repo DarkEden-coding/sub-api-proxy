@@ -344,7 +344,7 @@
     "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_5384fff6c25a47739e6f0f1c1502a6b2\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_18847045af0246e08be41f3de12f347b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -376,7 +376,7 @@
     "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_36a9e7a3d9f0485b86dc4a9e403c03e3\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_2032ea9236234dc381fde8bd0b966449\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -392,7 +392,7 @@
     "body_b64": "cHJvbXB0PXBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_77149089cba14e00b7a62862b76b20ec\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_cdc9fe6844e54a70bc65265b26089b07\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -496,6 +496,91 @@
     "status": 413,
     "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
     "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/generations",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/generations",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/extensions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/extensions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_404d997d629f444d9f159ac98ed2726b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "content_type": "application/json",
     "read": 53
   },
   {
@@ -1215,7 +1300,7 @@
     "body_b64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
     "chunked": true,
     "status": 200,
-    "response": "{\"config-version\":8,\"management\":{\"allow-remote\":true,\"secret-key\":\"$2a$10$P4.BZGrJPic6Cl55Gp.GL.Q/GeBoQqwgLAboAKV2889fcP8NrsWQ6\"},\"oauth\":{\"auth-dir\":\"/tmp/cpa-body-limit-3692828827/auth\"},\"server\":{\"max-request-body-bytes\":32}}",
+    "response": "{\"config-version\":8,\"management\":{\"allow-remote\":true,\"secret-key\":\"$2a$10$.tVo1nMz0N/YKbIYK.MyfuK7x/GdIi0b.r3kZ8X042sTmlRb2ACmC\"},\"oauth\":{\"auth-dir\":\"/tmp/cpa-body-limit-764382021/auth\"},\"server\":{\"max-request-body-bytes\":32}}",
     "content_type": "application/json; charset=utf-8",
     "read": 0
   },
@@ -1329,6 +1414,22 @@
     "status": 400,
     "response": "{\"error\":{\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\",\"type\":\"invalid_request_error\"}}",
     "content_type": "application/json; charset=utf-8",
+    "read": 31
+  },
+  {
+    "name": "multipart_headers_over_limit /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnANCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_15ebe724cbd44701a0202f4fcc7ee3b3\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\"}}",
+    "content_type": "application/json",
     "read": 31
   },
   {

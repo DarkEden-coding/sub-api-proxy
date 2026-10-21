@@ -106,19 +106,46 @@ const STATUS_ONLY: &[&str] = &[
 ];
 
 /// Where Go and cliproxy-rs differ on purpose (docs/DIFFERENCES-FROM-GO.md), with
-/// cliproxy-rs's status. Go's JSON binders decode the first value from the permitted
-/// prefix; Go's multipart reader reports the limit or a parse error depending on where
-/// the limit falls in the form. cliproxy-rs reads these bodies whole first.
-const DIFFERS: &[(&str, u16)] = &[
-    ("json_first_value_within_limit /v0/management/plugins/demo/quota", 413),
-    ("multipart_file_data_over_limit /v0/management/auth-files", 400),
-    ("multipart_file_data_over_limit /v8/management/credentials", 400),
-    ("multipart_file_data_over_limit /v0/management/vertex/import", 400),
+/// cliproxy-rs's status and body. Go's first-value JSON decoders decode the first value
+/// from the permitted prefix; Go's multipart reader reports the limit or a parse error
+/// depending on where the limit falls in the form. cliproxy-rs reads these bodies whole
+/// first.
+const DIFFERS: &[(&str, u16, &str)] = &[
+    (
+        "json_first_value_within_limit /v0/management/plugins/demo/quota",
+        413,
+        r#"{"error":"invalid request body"}"#,
+    ),
+    (
+        "multipart_file_data_over_limit /v0/management/auth-files",
+        400,
+        r#"{"error":"invalid multipart form: http: request body too large"}"#,
+    ),
+    (
+        "multipart_file_data_over_limit /v8/management/credentials",
+        400,
+        r#"{"error":"invalid multipart form: http: request body too large"}"#,
+    ),
+    (
+        "multipart_file_data_over_limit /v0/management/vertex/import",
+        400,
+        "Failed to buffer the request body: http: request body too large",
+    ),
     (
         "multipart_file_data_over_limit /v8/management/oauth/import?provider=vertex",
         400,
+        "Failed to buffer the request body: http: request body too large",
     ),
-    ("multipart_headers_over_limit /v1/images/edits", 413),
+    (
+        "multipart_headers_over_limit /v1/images/edits",
+        413,
+        r#"{"error":{"message":"Invalid request: http: request body too large","type":"invalid_request_error"}}"#,
+    ),
+    (
+        "multipart_headers_over_limit /openai/v1/videos",
+        413,
+        r#"{"object":"video","status":"failed","progress":0,"id":"video_<id>","model":"grok-imagine-video","error":{"code":"invalid_request_error","message":"Invalid request: http: request body too large"}}"#,
+    ),
 ];
 
 #[tokio::test]
@@ -172,10 +199,10 @@ async fn body_limit_answers_match_go() {
         // failure is a plain-text 400 where gin's handlers write their own JSON 400
         // (docs/DIFFERENCES-FROM-GO.md).
         let status_only = STATUS_ONLY.contains(&name);
-        if let Some(&(_, ours)) = DIFFERS.iter().find(|(n, _)| *n == name) {
-            assert_ne!(want.0, ours, "{name}: Go now agrees; drop it from DIFFERS");
-            if got.0 != ours {
-                failures.push(format!("{name}: got {got:?}, want our documented {ours}"));
+        if let Some(&(_, status, body)) = DIFFERS.iter().find(|(n, ..)| *n == name) {
+            assert_ne!(want.0, status, "{name}: Go now agrees; drop it from DIFFERS");
+            if (got.0, got.2.as_str()) != (status, normalize(body).as_str()) {
+                failures.push(format!("{name}: got {got:?}, want our documented {status} {body}"));
             }
         } else if status_only && got.0 != want.0 || !status_only && got != want {
             failures.push(format!("{name}: got {got:?}, want {want:?}"));
@@ -275,4 +302,47 @@ async fn a_reload_during_a_request_keeps_its_limit() {
         )
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Go checks a v8 config write's `If-Match` before it reads the body: a stale write
+/// fails at once, even while the body is still arriving.
+#[tokio::test]
+async fn a_stale_config_write_fails_before_its_body_is_read() {
+    struct Open(Arc<AtomicU64>);
+    impl HttpBody for Open {
+        type Data = Bytes;
+        type Error = std::io::Error;
+        fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            // One byte, then the stream stays open.
+            if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"{")))))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+    for limit in ["32", "0"] {
+        let dir = std::env::temp_dir().join(format!("cpa-body-limit-stale-{limit}-{}", std::process::id()));
+        let yaml = format!(
+            "config-version: 8\nserver:\n  max-request-body-bytes: {limit}\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n"
+        );
+        let (app, _) = app(&dir, &yaml, false);
+        let polls = Arc::new(AtomicU64::new(0));
+        let mut request = axum::http::Request::put("/v8/management/config")
+            .header("authorization", "Bearer mgmt-secret")
+            .header("content-type", "application/json")
+            .header("if-match", "\"definitely-stale\"")
+            .body(Body::new(Open(polls.clone())))
+            .unwrap();
+        let peer: SocketAddr = "192.0.2.1:1234".parse().unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(peer));
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(request))
+            .await
+            .expect("answered without waiting for the body")
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 412, "limit {limit}");
+        assert!(response.headers().contains_key("etag"));
+        assert_eq!(polls.load(Ordering::Relaxed), 0, "limit {limit}: the body was polled");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

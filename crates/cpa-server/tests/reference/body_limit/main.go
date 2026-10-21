@@ -169,7 +169,7 @@ func scenarios() []scenario {
 		add(scenario{Name: "zstd_decoded_over_limit " + path, YAML: zstdYAML, Method: "POST", Path: path, Headers: zstdHeaders, Body: compressed})
 	}
 	add(scenario{Name: "zstd_decoded_over_limit_request_log", YAML: zstdYAML + requestLog, Method: "POST", Path: "/v1/responses", Headers: zstdHeaders, Body: compressed})
-	for _, path := range []string{"/v1/images/generations", "/v1/images/edits"} {
+	for _, path := range []string{"/v1/images/generations", "/v1/images/edits", "/v1/videos", "/v1/videos/generations", "/v1/videos/edits", "/v1/videos/extensions", "/openai/v1/videos"} {
 		add(scenario{Name: "zstd_decoded_over_limit " + path, YAML: zstdYAML, Method: "POST", Path: path, Headers: zstdHeaders, Body: compressed})
 	}
 	exact := zstdBytes(`{"model":"gpt-5","input":"` + strings.Repeat("z", 100) + `"}`)
@@ -247,8 +247,10 @@ func scenarios() []scenario {
 			Headers: map[string]string{"Authorization": "Bearer mgmt-secret", "Content-Type": fileType}, Body: fileForm, Chunked: true})
 	}
 	imageForm, imageType := form([][2]string{{"model", "gpt-image-1"}, {"prompt", "p"}}, "")
-	add(scenario{Name: "multipart_headers_over_limit /v1/images/edits", YAML: exactYAML, Method: "POST", Path: "/v1/images/edits",
-		Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}, Body: imageForm, Chunked: true})
+	for _, path := range []string{"/v1/images/edits", "/openai/v1/videos"} {
+		add(scenario{Name: "multipart_headers_over_limit " + path, YAML: exactYAML, Method: "POST", Path: path,
+			Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}, Body: imageForm, Chunked: true})
+	}
 	add(scenario{Name: "management_content_length_over_limit", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config", Headers: mgmt, Body: oversized})
 	add(scenario{Name: "management_unauthenticated_chunked", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config",
 		Headers: map[string]string{"Content-Type": "application/json"}, Body: oversized, Chunked: true})

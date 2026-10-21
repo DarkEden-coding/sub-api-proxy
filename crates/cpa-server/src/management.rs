@@ -728,10 +728,27 @@ pub(crate) async fn config(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
-    // Go reads the body only for writes other than DELETE, after the If-Match check.
+    // gin's *path parameter is the decoded path.
+    let path = percent_decode(uri.path());
+    let if_match: Vec<_> = headers
+        .get_all(header::IF_MATCH)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    // Go reads the body only for writes other than DELETE, after the file read and the
+    // If-Match check. They run again under the disk lock before the write.
     let body = if matches!(method, Method::GET | Method::DELETE) {
         Ok(Bytes::new())
     } else {
+        let check = {
+            let (state, method, if_match) = (state.clone(), method.clone(), if_match.clone());
+            tokio::task::spawn_blocking(move || precondition(&state, &method, &if_match).err())
+        };
+        match check.await {
+            Ok(Some(response)) => return *response,
+            Ok(None) => {}
+            Err(_) => return error(500, "internal_error"),
+        }
         axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
             if crate::body_limit::is_too_large(&e) {
                 StatusCode::PAYLOAD_TOO_LARGE
@@ -740,13 +757,6 @@ pub(crate) async fn config(
             }
         })
     };
-    // gin's *path parameter is the decoded path.
-    let path = percent_decode(uri.path());
-    let if_match: Vec<_> = headers
-        .get_all(header::IF_MATCH)
-        .iter()
-        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
-        .collect();
     tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, body.as_deref().map_err(|s| *s)))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
@@ -825,6 +835,23 @@ pub(crate) fn config_sync(
     config_sync_locked(state, path, method, if_match, body, false)
 }
 
+/// The config file and its `ETag`, or Go's answer when the file cannot be read or a
+/// write's `If-Match` names another version.
+fn precondition(
+    state: &Management,
+    method: &Method,
+    if_match: &[String],
+) -> Result<(String, HeaderValue), Box<Response>> {
+    let original = std::fs::read_to_string(&state.path).map_err(|_| Box::new(error(500, "read_failed")))?;
+    let etag = config_etag(original.as_bytes());
+    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
+        let mut response = error(412, "precondition_failed");
+        response.headers_mut().insert(header::ETAG, etag);
+        return Err(Box::new(response));
+    }
+    Ok((original, etag))
+}
+
 /// [`config_sync`] for a caller already holding `state.disk`. `typed` saves the written
 /// values as Go's typed v0 saver does (`SaveConfigPreserveComments`); a v8 write saves
 /// the validated tree as written (Go v8.0.35).
@@ -836,16 +863,10 @@ fn config_sync_locked(
     body: Result<&[u8], StatusCode>,
     typed: bool,
 ) -> Response {
-    let original = match std::fs::read_to_string(&state.path) {
+    let (original, etag) = match precondition(state, &method, if_match) {
         Ok(v) => v,
-        Err(_) => return error(500, "read_failed"),
+        Err(response) => return *response,
     };
-    let etag = config_etag(original.as_bytes());
-    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
-        let mut response = error(412, "precondition_failed");
-        response.headers_mut().insert(header::ETAG, etag);
-        return response;
-    }
     let mut doc = match ConfigDocument::parse(&original) {
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),

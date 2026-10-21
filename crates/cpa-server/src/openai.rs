@@ -55,6 +55,18 @@ fn call(req: Request, entry: Format, model: String, body: Bytes, stream: bool, a
 // ponytail: decode errors carry the zstd crate's reason, not klauspost/compress's, and
 // the decoded size is bounded by MAX_REQUEST_BYTES (Go reads it unbounded).
 pub(crate) fn read_body(headers: &HeaderMap, raw: Bytes, limit: Option<u64>) -> Result<Bytes, Box<Response>> {
+    decode_body(headers, raw, limit).map_err(|(status, reason)| {
+        Box::new(respond::error_detail(
+            status,
+            &format!("Invalid request: {reason}"),
+            "invalid_request_error",
+        ))
+    })
+}
+
+/// [`read_body`]'s decoding, failing with the status and Go's error text, for handlers
+/// that render the failure in their own shape.
+pub(crate) fn decode_body(headers: &HeaderMap, raw: Bytes, limit: Option<u64>) -> Result<Bytes, (u16, String)> {
     let encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)
         .map(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
@@ -73,19 +85,12 @@ pub(crate) fn read_body(headers: &HeaderMap, raw: Bytes, limit: Option<u64>) -> 
         }
         Ok(body)
     };
-    let invalid = |status, message: &str| {
-        Box::new(respond::error_detail(
-            status,
-            &format!("Invalid request: {message}"),
-            "invalid_request_error",
-        ))
-    };
     match decode() {
         Ok(body) => Ok(body),
         // Go returns the limit error before its valid-JSON fallback.
-        Err(None) => Err(invalid(413, crate::body_limit::MESSAGE)),
+        Err(None) => Err((413, crate::body_limit::MESSAGE.to_owned())),
         Err(_) if serde_json::from_slice::<serde::de::IgnoredAny>(&raw).is_ok() => Ok(raw),
-        Err(Some(e)) => Err(invalid(400, &e)),
+        Err(Some(e)) => Err((400, e)),
     }
 }
 
