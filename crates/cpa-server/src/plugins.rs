@@ -664,6 +664,7 @@ pub(crate) fn go_values(raw_query: &str) -> cpa_plugin::gojson::Header {
 /// startup, before serving (Go applies plugins before the server starts).
 pub async fn start(rt: &Arc<Runtime>) {
     model_callbacks::attach(rt);
+    rt.plugins().install_translator_hooks();
     let mut rx = rt.plugin_runtime().latest.subscribe();
     rx.mark_unchanged();
     sync(rt, rt.config()).await;

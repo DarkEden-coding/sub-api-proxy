@@ -29,15 +29,7 @@ pub const NATIVE_THINKING_PROVIDERS: [&str; 11] = [
 ];
 
 /// One response-side hook call's inputs.
-#[derive(Debug, Clone, Default)]
-pub struct ResponseTransform<'a> {
-    pub from: &'a str,
-    pub to: &'a str,
-    pub model: &'a str,
-    pub original_request: &'a [u8],
-    pub translated_request: &'a [u8],
-    pub stream: bool,
-}
+pub type ResponseTransform<'a> = cpa_translate::hooks::Response<'a>;
 
 impl Host {
     /// Records with a hook; each call rechecks [`Host::live`].
@@ -48,19 +40,21 @@ impl Host {
             .collect()
     }
 
-    /// A transform call: the plugin's body when it answered with one.
-    async fn transform<R: crate::gojson::GoStruct>(&self, record: &Record, method: &str, req: &R) -> Option<Bytes> {
+    /// A transform call: the plugin's body when it answered with one. Translator hooks
+    /// run inside synchronous translation, so the call blocks (see
+    /// [`crate::client::GuardedClient::call_blocking`]).
+    fn transform<R: crate::gojson::GoJson>(&self, record: &Record, method: &str, req: &R) -> Option<Bytes> {
         if !self.live(record) {
             return None;
         }
-        match self.call::<PayloadResponse, _>(record, method, req).await {
+        match self.call_blocking::<PayloadResponse, _>(record, method, req) {
             Ok(resp) if !resp.body.is_empty() => Some(resp.body),
             _ => None,
         }
     }
 
     /// Go `NormalizeRequest`: every request normalizer, chained.
-    pub async fn normalize_request(&self, from: &str, to: &str, model: &str, body: Bytes, stream: bool) -> Bytes {
+    pub fn normalize_request(&self, from: &str, to: &str, model: &str, body: Bytes, stream: bool) -> Bytes {
         let mut current = body;
         for record in self.hook_records(|r| r.plugin.caps.request_normalizer) {
             let req = RequestTransformRequest {
@@ -70,7 +64,7 @@ impl Host {
                 stream,
                 body: current.clone(),
             };
-            if let Some(out) = self.transform(&record, method::REQUEST_NORMALIZE, &req).await {
+            if let Some(out) = self.transform(&record, method::REQUEST_NORMALIZE, &req) {
                 current = out;
             }
         }
@@ -78,14 +72,7 @@ impl Host {
     }
 
     /// Go `TranslateRequest`: the first translator that answers wins.
-    pub async fn translate_request(
-        &self,
-        from: &str,
-        to: &str,
-        model: &str,
-        body: &Bytes,
-        stream: bool,
-    ) -> Option<Bytes> {
+    pub fn translate_request(&self, from: &str, to: &str, model: &str, body: &Bytes, stream: bool) -> Option<Bytes> {
         for record in self.hook_records(|r| r.plugin.caps.request_translator) {
             let req = RequestTransformRequest {
                 from_format: from.into(),
@@ -94,7 +81,7 @@ impl Host {
                 stream,
                 body: body.clone(),
             };
-            if let Some(out) = self.transform(&record, method::REQUEST_TRANSLATE, &req).await {
+            if let Some(out) = self.transform(&record, method::REQUEST_TRANSLATE, &req) {
                 return Some(out);
             }
         }
@@ -114,11 +101,11 @@ impl Host {
     }
 
     /// Go `NormalizeResponseBefore`: chained, before native translation.
-    pub async fn normalize_response_before(&self, t: &ResponseTransform<'_>, body: Bytes) -> Bytes {
+    pub fn normalize_response_before(&self, t: &ResponseTransform<'_>, body: Bytes) -> Bytes {
         let mut current = body;
         for record in self.hook_records(|r| r.plugin.caps.response_before_translator) {
             let req = Self::response_request(t, current.clone());
-            if let Some(out) = self.transform(&record, method::RESPONSE_NORMALIZE_BEFORE, &req).await {
+            if let Some(out) = self.transform(&record, method::RESPONSE_NORMALIZE_BEFORE, &req) {
                 current = out;
             }
         }
@@ -126,10 +113,10 @@ impl Host {
     }
 
     /// Go `TranslateResponse`: the first translator that answers wins.
-    pub async fn translate_response(&self, t: &ResponseTransform<'_>, body: &Bytes) -> Option<Bytes> {
+    pub fn translate_response(&self, t: &ResponseTransform<'_>, body: &Bytes) -> Option<Bytes> {
         for record in self.hook_records(|r| r.plugin.caps.response_translator) {
             let req = Self::response_request(t, body.clone());
-            if let Some(out) = self.transform(&record, method::RESPONSE_TRANSLATE, &req).await {
+            if let Some(out) = self.transform(&record, method::RESPONSE_TRANSLATE, &req) {
                 return Some(out);
             }
         }
@@ -137,11 +124,11 @@ impl Host {
     }
 
     /// Go `NormalizeResponseAfter`: chained, after translation.
-    pub async fn normalize_response_after(&self, t: &ResponseTransform<'_>, body: Bytes) -> Bytes {
+    pub fn normalize_response_after(&self, t: &ResponseTransform<'_>, body: Bytes) -> Bytes {
         let mut current = body;
         for record in self.hook_records(|r| r.plugin.caps.response_after_translator) {
             let req = Self::response_request(t, current.clone());
-            if let Some(out) = self.transform(&record, method::RESPONSE_NORMALIZE_AFTER, &req).await {
+            if let Some(out) = self.transform(&record, method::RESPONSE_NORMALIZE_AFTER, &req) {
                 current = out;
             }
         }
@@ -151,6 +138,38 @@ impl Host {
     /// Go `hasResponseTranslator`.
     pub fn has_response_translator(&self) -> bool {
         !self.hook_records(|r| r.plugin.caps.response_translator).is_empty()
+    }
+
+    /// Whether an active plugin offers a request or response translator or normalizer.
+    fn has_translator_hooks(&self) -> bool {
+        self.active_records().iter().any(|r| {
+            let c = &r.plugin.caps;
+            c.request_translator
+                || c.request_normalizer
+                || c.response_translator
+                || c.response_before_translator
+                || c.response_after_translator
+        })
+    }
+
+    /// Go `sdktranslator.SetPluginHooks(host)`: the translation registry calls this host's
+    /// translators and normalizers. Process-wide, like Go's default registry; the host
+    /// that installed them keeps [`cpa_translate::hooks::set_active`] current.
+    pub fn install_translator_hooks(&self) {
+        self.inner
+            .translator_hooks
+            .store(true, std::sync::atomic::Ordering::Release);
+        cpa_translate::hooks::install(Some(std::sync::Arc::new(TranslatorHooks(std::sync::Arc::downgrade(
+            &self.inner,
+        )))));
+        self.publish_translator_hooks();
+    }
+
+    /// After the active plugins change: whether the installed hooks have work.
+    pub(crate) fn publish_translator_hooks(&self) {
+        if self.inner.translator_hooks.load(std::sync::atomic::Ordering::Acquire) {
+            cpa_translate::hooks::set_active(self.has_translator_hooks());
+        }
     }
 
     /// Go `refreshThinkingProviders` + `thinking.RegisterPluginProvider`: provider name to
@@ -261,6 +280,52 @@ pub fn usage_session_ids(
         parent.clear();
     }
     (session, parent)
+}
+
+/// The installed translator hooks; a dropped host answers nothing.
+struct TranslatorHooks(std::sync::Weak<crate::host::Inner>);
+
+impl TranslatorHooks {
+    fn host(&self) -> Option<Host> {
+        self.0.upgrade().map(Host::from_inner)
+    }
+}
+
+impl cpa_translate::hooks::PluginHooks for TranslatorHooks {
+    fn normalize_request(&self, from: &str, to: &str, model: &str, body: Vec<u8>, stream: bool) -> Vec<u8> {
+        match self.host() {
+            Some(host) => host
+                .normalize_request(from, to, model, Bytes::from(body), stream)
+                .into(),
+            None => body,
+        }
+    }
+
+    fn translate_request(&self, from: &str, to: &str, model: &str, body: &[u8], stream: bool) -> Option<Vec<u8>> {
+        let body = Bytes::copy_from_slice(body);
+        self.host()?
+            .translate_request(from, to, model, &body, stream)
+            .map(Into::into)
+    }
+
+    fn normalize_response_before(&self, response: &ResponseTransform<'_>, body: Vec<u8>) -> Vec<u8> {
+        match self.host() {
+            Some(host) => host.normalize_response_before(response, Bytes::from(body)).into(),
+            None => body,
+        }
+    }
+
+    fn translate_response(&self, response: &ResponseTransform<'_>, body: &[u8]) -> Option<Vec<u8>> {
+        let body = Bytes::copy_from_slice(body);
+        self.host()?.translate_response(response, &body).map(Into::into)
+    }
+
+    fn normalize_response_after(&self, response: &ResponseTransform<'_>, body: Vec<u8>) -> Vec<u8> {
+        match self.host() {
+            Some(host) => host.normalize_response_after(response, Bytes::from(body)).into(),
+            None => body,
+        }
+    }
 }
 
 #[cfg(test)]

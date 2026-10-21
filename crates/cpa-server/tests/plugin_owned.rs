@@ -233,6 +233,130 @@ async fn plugin_catalog_models_bind_to_credentials_served_by_a_plugin_executor()
     env.finish().await;
 }
 
+/// Go `SetPluginHooks(host)`: plugin normalizers run around every registered
+/// translation, request side after the native transform and response side before and
+/// after it, once per stream line; a pair with no native transform (a plugin
+/// executor's own output format) goes to the plugin response translator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_translator_hooks_run_around_translation() {
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let upstream = {
+        let bodies = bodies.clone();
+        let handler = move |body: String| {
+            let bodies = bodies.clone();
+            async move {
+                let stream = body.contains(r#""stream":true"#);
+                bodies.lock().unwrap().push(body);
+                let chunk = |content: &str| {
+                    format!(
+                        r#"data: {{"id":"r","object":"chat.completion.chunk","created":1,"model":"up-model","choices":[{{"index":0,"delta":{{"content":"{content}"}},"finish_reason":null}}]}}"#
+                    )
+                };
+                if stream {
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("{}\n\n{}\n\ndata: [DONE]\n\n", chunk("ok"), chunk("ok")),
+                    )
+                } else {
+                    (
+                        [("content-type", "application/json")],
+                        r#"{"id":"r","object":"chat.completion","created":1,"model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_owned(),
+                    )
+                }
+            }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
+    let hooks = "request_normalizer,response_before_translator,response_after_translator,response_translator\n      \
+                 rewrite1: request.normalize hi normalized\n      \
+                 rewrite2: response.normalize_before ok before\n      \
+                 rewrite3: response.normalize_after before after\n      \
+                 rewrite4: response.normalize_after uno UNO\n      \
+                 rewrite5: response.translate one uno\n      \
+                 rewrite6: response.translate hi translated";
+    let Some(env) = env(
+        "plugin-translator-hooks",
+        &[
+            ("hooks", hooks),
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      outputs: acme-format"),
+        ],
+        &format!(
+            "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a}}]\n    models: [{{name: up-model}}]\n"
+        ),
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+
+    // A built-in executor: the request normalizer edits the translated body, and the
+    // response normalizers run in order (`after` sees `before`'s output).
+    let (status, body) = env.chat("up-model").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        bodies.lock().unwrap()[0].contains(r#""content":"normalized""#),
+        "{:?}",
+        bodies
+    );
+    assert!(body.contains(r#""content":"after""#), "{body}");
+    let request = &calls(&env.records, "hooks", "request.normalize")[0];
+    assert_eq!(
+        (request["FromFormat"].as_str(), request["ToFormat"].as_str()),
+        (Some("openai"), Some("openai"))
+    );
+    let before = &calls(&env.records, "hooks", "response.normalize_before")[0];
+    assert_eq!(before["Stream"], false);
+    assert_eq!(before["Model"], "up-model");
+
+    // Streaming: the response normalizers run once per upstream line.
+    let _ = std::fs::remove_file(env.records.join("hooks.jsonl"));
+    let (status, body) = env.chat_stream("up-model").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body.matches(r#""content":"after""#).count(), 2, "{body}");
+    let lines = calls(&env.records, "hooks", "response.normalize_before");
+    assert!(lines.len() >= 3, "every line, [DONE] included: {}", lines.len());
+    assert!(lines.iter().all(|l| l["Stream"] == true));
+
+    // A plugin executor answering in its own format: no native transform exists, so the
+    // plugin response translator converts each payload (Go `executorResponseTranslationAvailable`
+    // chose the format because a response translator is active).
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        r#"{"model":"acme-1","messages":[{"role":"user","content":"translated"}]}"#
+    );
+    let executed = calls(&env.records, "acme", "executor.execute");
+    assert_eq!(executed.last().unwrap()["Format"], "acme-format");
+    let translated = calls(&env.records, "hooks", "response.translate");
+    let last = translated.last().unwrap();
+    assert_eq!(
+        (last["FromFormat"].as_str(), last["ToFormat"].as_str()),
+        (Some("acme-format"), Some("openai"))
+    );
+    let (status, body) = env.chat_stream("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.starts_with("data: UNO\n\ndata: two\n\ndata: three\n\n"), "{body}");
+    env.finish().await;
+}
+
 /// Go `registerModelsForAuth` appends plugin catalogs to OpenAI-compatible credentials
 /// under their provider key, with no exclusions, whether or not models are configured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

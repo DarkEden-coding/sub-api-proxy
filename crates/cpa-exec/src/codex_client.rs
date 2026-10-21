@@ -60,9 +60,8 @@ fn compat_translator(from: Format, to: Format) -> Option<cpa_translate::RequestF
 ///    targets, the multi-agent v2 input rewrite (portable messages; compat also strips
 ///    `author`, `recipient` and passthrough metadata).
 /// 3. An is-compat model uses its pair's `...WithCompat` translator between summary
-///    extraction and application; anything else goes through `translate_request`.
-// ponytail: plugin NormalizeRequest hooks after a compat translator are not ported
-// (cpa_translate has none either).
+///    extraction and application, then the plugin request normalizers; anything else
+///    goes through `translate_request`.
 pub(crate) fn translate_request(
     from: Format,
     to: Format,
@@ -88,11 +87,13 @@ pub(crate) fn translate_request(
     use cpa_common::thinking::{apply_summary_config_for_model, extract_translated_summary_config};
     let summary = extract_translated_summary_config(&payload, from.as_str(), to.as_str());
     let translated = translate(ctx, &payload)?;
-    Ok(apply_summary_config_for_model(
-        &translated,
+    let translated = apply_summary_config_for_model(&translated, to.as_str(), ctx.model, summary);
+    Ok(cpa_translate::hooks::normalize_request(
+        from.as_str(),
         to.as_str(),
         ctx.model,
-        summary,
+        translated,
+        ctx.stream,
     ))
 }
 

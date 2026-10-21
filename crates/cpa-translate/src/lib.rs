@@ -38,14 +38,27 @@ macro_rules! registered {
                 },
                 non_stream: |ctx, body| {
                     let non_stream: $crate::NonStreamFn = $non_stream;
-                    let levels = $crate::levels(&[body, ctx.original_request, ctx.translated_request]);
-                    $crate::deep_stack(levels, || non_stream(ctx, body))
+                    $crate::hooks::non_stream(
+                        cpa_core::format::Format::$upstream.as_str(),
+                        cpa_core::format::Format::$client.as_str(),
+                        ctx,
+                        body,
+                        |body| {
+                            let levels = $crate::levels(&[body, ctx.original_request, ctx.translated_request]);
+                            $crate::deep_stack(levels, || non_stream(ctx, body))
+                        },
+                    )
                 },
                 stream: |ctx| {
                     $crate::stream::framed(
                         cpa_core::format::Format::$client,
                         cpa_core::format::Format::$upstream,
-                        ($go_stream)(ctx),
+                        $crate::hooks::wrap_stream(
+                            cpa_core::format::Format::$upstream.as_str(),
+                            cpa_core::format::Format::$client.as_str(),
+                            ctx,
+                            ($go_stream)(ctx),
+                        ),
                         $crate::levels(&[ctx.original_request, ctx.translated_request]),
                     )
                 },
@@ -89,6 +102,7 @@ mod gemini_interactions_response;
 mod gemini_responses;
 mod gemini_responses_response;
 mod gemini_web_search;
+pub mod hooks;
 mod interactions_claude;
 mod mime;
 mod openai;
@@ -321,7 +335,7 @@ pub fn stream_with(
         stream::framed_with(
             client,
             upstream,
-            (r.go_stream)(ctx),
+            hooks::wrap_stream(upstream.as_str(), client.as_str(), ctx, (r.go_stream)(ctx)),
             levels(&[ctx.original_request, ctx.translated_request]),
             options,
         )
@@ -334,33 +348,72 @@ pub fn go_stream(client: Format, upstream: Format) -> Option<GoStreamFn> {
     registered(client, upstream).map(|r| r.go_stream)
 }
 
+/// Go `TranslateNonStream` between format strings, as a plugin executor names them: a
+/// registered pair's transform, else the plugin hooks' translation (the body unchanged
+/// without one).
+pub fn translate_non_stream(
+    client: &str,
+    upstream: &str,
+    ctx: &ResponseCtx<'_>,
+    body: &[u8],
+) -> Result<Vec<u8>, Error> {
+    match Format::parse(client)
+        .zip(Format::parse(upstream))
+        .and_then(|(c, u)| pair(c, u))
+    {
+        Some(pair) => (pair.non_stream)(ctx, body),
+        None => Ok(hooks::unregistered_non_stream(upstream, client, ctx, body)),
+    }
+}
+
+/// The Go-shaped line translator Go's `TranslateStream` runs between format strings:
+/// a registered pair's, with the plugin hooks; for an unregistered pair, the plugin
+/// hooks alone while they are active; otherwise `None` (lines pass unchanged).
+#[doc(hidden)]
+pub fn go_stream_between(client: &str, upstream: &str, ctx: &ResponseCtx<'_>) -> Option<Box<dyn stream::GoStream>> {
+    match Format::parse(client)
+        .zip(Format::parse(upstream))
+        .and_then(|(c, u)| registered(c, u))
+    {
+        Some(r) => Some(hooks::wrap_stream(upstream, client, ctx, (r.go_stream)(ctx))),
+        None => hooks::unregistered_stream(upstream, client, ctx),
+    }
+}
+
 /// sdk/translator TranslateRequest. A registered pair runs between summary extraction
 /// (from the client body) and summary application (to the upstream body); without one,
 /// only a differing top-level `model` is rewritten.
-// ponytail: plugin NormalizeRequest/TranslateRequest hooks (M6) are not ported.
+/// With plugin hooks active, a registered pair's output goes through the request
+/// normalizers; an unregistered pair's body is normalized and offered to the plugin
+/// request translators, with the summary intent read from the normalized body.
 pub fn translate_request(
     client: Format,
     upstream: Format,
     ctx: &RequestCtx<'_>,
     body: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    let (from, to) = (client.as_str(), upstream.as_str());
     if let Some(pair) = pair(client, upstream) {
-        return deep_stack(levels(&[body]), || {
-            let summary = thinking::extract_translated_summary(body, client.as_str(), upstream.as_str());
+        let out = deep_stack(levels(&[body]), || {
+            let summary = thinking::extract_translated_summary(body, from, to);
             let out = (pair.request)(ctx, body)?;
-            Ok(thinking::apply_summary_for_model(
-                out,
-                upstream.as_str(),
-                ctx.model,
-                summary,
-            ))
-        });
+            Ok(thinking::apply_summary_for_model(out, to, ctx.model, summary))
+        })?;
+        return Ok(hooks::normalize_request(from, to, ctx.model, out, ctx.stream));
     }
     let mut out = body.to_vec();
     if !ctx.model.is_empty() && *gj::get(body, "model").bytes() != *ctx.model.as_bytes() {
         gj::set_str(&mut out, "model", ctx.model);
     }
-    Ok(out)
+    let Some(hooks) = hooks::current() else {
+        return Ok(out);
+    };
+    let out = hooks.normalize_request(from, to, ctx.model, out, ctx.stream);
+    let summary = thinking::extract_translated_summary(&out, from, to);
+    Ok(match hooks.translate_request(from, to, ctx.model, &out, ctx.stream) {
+        Some(translated) => thinking::apply_summary_for_model(translated, to, ctx.model, summary),
+        None => out,
+    })
 }
 
 /// sdk/translator TranslateRequestEnvelope: [`translate_request`] with the request-scoped
@@ -378,7 +431,7 @@ pub fn translate_request_envelope(
     if (client, upstream) != (Format::OpenAIResponse, Format::Antigravity) {
         return translate_request(client, upstream, ctx, body);
     }
-    deep_stack(levels(&[body]), || {
+    let out = deep_stack(levels(&[body]), || {
         let summary = thinking::extract_translated_summary(body, client.as_str(), upstream.as_str());
         let out = antigravity_responses::request_envelope(ctx, body, model_info);
         Ok(thinking::apply_summary_for_model(
@@ -387,7 +440,14 @@ pub fn translate_request_envelope(
             ctx.model,
             summary,
         ))
-    })
+    })?;
+    Ok(hooks::normalize_request(
+        client.as_str(),
+        upstream.as_str(),
+        ctx.model,
+        out,
+        ctx.stream,
+    ))
 }
 
 /// sdk/translator TranslateTokenCount: the pair's token-count shape, or the upstream body

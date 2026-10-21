@@ -555,13 +555,6 @@ fn translate_response(n: &Negotiated, req: &ExecutorRequest, payload: Bytes) -> 
     if n.requested.is_empty() || n.output == n.requested {
         return ensure_usage(responses, payload);
     }
-    let pair = Format::parse(&n.requested)
-        .zip(Format::parse(&n.output))
-        .and_then(|(to, from)| cpa_translate::pair(to, from));
-    let Some(pair) = pair else {
-        // Go's registry returns an unregistered pair's body unchanged.
-        return ensure_usage(responses, payload);
-    };
     let original = if req.original_request.is_empty() {
         &req.payload
     } else {
@@ -572,7 +565,11 @@ fn translate_response(n: &Negotiated, req: &ExecutorRequest, payload: Bytes) -> 
         original_request: original,
         translated_request: &req.payload,
     };
-    let out = (pair.non_stream)(&ctx, &payload).map(Bytes::from).unwrap_or(payload);
+    // An unregistered pair goes to the plugin response translators (the body unchanged
+    // without one), as Go's registry does with its hooks installed.
+    let out = cpa_translate::translate_non_stream(&n.requested, &n.output, &ctx, &payload)
+        .map(Bytes::from)
+        .unwrap_or(payload);
     ensure_usage(responses, out)
 }
 
@@ -586,22 +583,26 @@ fn translate_stream(
     chunk_error: fn(String) -> ExecError,
 ) -> ExecStream {
     let translating = !n.requested.is_empty() && n.output != n.requested;
-    let formats = Format::parse(&n.requested).zip(Format::parse(&n.output));
-    let translator = formats.filter(|_| translating).and_then(|(to, from)| {
-        let original = if req.original_request.is_empty() {
-            &req.payload
-        } else {
-            &req.original_request
-        };
-        let ctx = cpa_translate::ResponseCtx {
-            model: &req.model,
-            original_request: original,
-            translated_request: &req.payload,
-        };
-        cpa_translate::go_stream(to, from).map(|open| open(&ctx))
-    });
+    let native = Format::parse(&n.requested)
+        .zip(Format::parse(&n.output))
+        .is_some_and(|(to, from)| cpa_translate::pair(to, from).is_some());
+    let translator = translating
+        .then(|| {
+            let original = if req.original_request.is_empty() {
+                &req.payload
+            } else {
+                &req.original_request
+            };
+            let ctx = cpa_translate::ResponseCtx {
+                model: &req.model,
+                original_request: original,
+                translated_request: &req.payload,
+            };
+            cpa_translate::go_stream_between(&n.requested, &n.output, &ctx)
+        })
+        .flatten();
     let state = StreamState {
-        native: translator.is_some(),
+        native,
         translator,
         passthrough: n.requested.is_empty()
             || (n.output == n.requested && n.requested != Format::OpenAIResponse.as_str()),

@@ -116,9 +116,7 @@ async fn chained_hooks_skip_a_plugin_fused_by_an_earlier_call() {
         fuse_on: None,
     };
     let (host, log) = host_with("chain", [("a", a), ("b", b)].into()).await;
-    let out = host
-        .normalize_request("openai", "claude", "m", Bytes::from_static(b"{}"), false)
-        .await;
+    let out = host.normalize_request("openai", "claude", "m", Bytes::from_static(b"{}"), false);
     assert_eq!(&out[..], b"a", "b's body would win if it were still called");
     assert_eq!(calls(&log), ["a request.normalize"]);
     let scope = Default::default();

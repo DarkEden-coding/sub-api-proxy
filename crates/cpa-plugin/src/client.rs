@@ -95,6 +95,14 @@ impl std::fmt::Display for GuardError {
     }
 }
 
+fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
+}
+
 #[derive(Default)]
 struct GuardState {
     inner: Option<Arc<dyn PluginClient>>,
@@ -170,6 +178,32 @@ impl GuardedClient {
         match task.await {
             Ok(result) => result.map_err(GuardError::Transport),
             Err(e) => Err(GuardError::Panic(e.to_string())),
+        }
+    }
+
+    /// [`Self::call`] on the calling thread, for synchronous callers (the translator
+    /// hooks). On a multi-threaded runtime worker the call runs in `block_in_place`, so
+    /// the worker's other tasks move on; elsewhere (a current-thread runtime, a blocking
+    /// or plain thread) it blocks that thread.
+    pub fn call_blocking(&self, method: &str, request: &[u8]) -> Result<Bytes, GuardError> {
+        let inner = self.acquire()?;
+        struct Release<'a>(&'a GuardedClient);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+        let _release = Release(self);
+        let call = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.call(method, request)));
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(call)
+            }
+            _ => call(),
+        };
+        match result {
+            Ok(result) => result.map_err(GuardError::Transport),
+            Err(panic) => Err(GuardError::Panic(panic_message(&panic))),
         }
     }
 

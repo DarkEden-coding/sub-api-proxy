@@ -165,6 +165,8 @@ pub(crate) struct Inner {
     snapshot: RwLock<Arc<Snapshot>>,
     loader: Arc<dyn Loader>,
     pub callbacks: Callbacks,
+    /// This host installed the process-wide translator hooks.
+    pub(crate) translator_hooks: std::sync::atomic::AtomicBool,
 }
 
 /// The plugin host. Cheap to clone.
@@ -212,6 +214,7 @@ impl Host {
             snapshot: RwLock::new(Arc::default()),
             loader,
             callbacks: Callbacks::new(me.clone()),
+            translator_hooks: Default::default(),
         });
         Self { inner }
     }
@@ -399,7 +402,7 @@ impl Host {
         self.state().config = Some(cfg.clone());
         if !rc.enabled {
             self.deactivate_all();
-            self.refresh_thinking_providers().await;
+            self.records_changed().await;
             return;
         }
         let desired = config::desired_versions(&rc.items);
@@ -408,7 +411,7 @@ impl Host {
             Err(e) => {
                 tracing::warn!("pluginhost: failed to select plugin files: {e}");
                 self.deactivate_all();
-                self.refresh_thinking_providers().await;
+                self.records_changed().await;
                 return;
             }
         };
@@ -532,7 +535,7 @@ impl Host {
             );
             cleanup
         };
-        self.refresh_thinking_providers().await;
+        self.records_changed().await;
         for (id, version, path, old_version, old_path) in hot_reloads {
             tracing::info!(plugin_id = %id, active_version = %version, active_path = %path.display(), retired_version = %old_version, retired_path = %old_path.display(), "pluginhost: plugin hot reloaded");
         }
@@ -802,7 +805,7 @@ impl Host {
             targets
         };
         self.inner.callbacks.close_plugin(id);
-        self.refresh_thinking_providers().await;
+        self.records_changed().await;
         for target in targets {
             let (name, version, path) = (target.name.clone(), target.version.clone(), target.path.clone());
             self.inner.callbacks.close_instance(id, target.client.instance());
@@ -857,9 +860,26 @@ impl Host {
             .find(|r| r.id == id && !self.is_fused(&r.id))
     }
 
+    /// After the active plugins change: thinking providers and translator hooks.
+    async fn records_changed(&self) {
+        self.refresh_thinking_providers().await;
+        self.publish_translator_hooks();
+    }
+
     /// One typed RPC to an active plugin, fusing it on a host-side panic.
     pub async fn call<T: GoJson, R: GoJson>(&self, record: &Record, method: &str, request: &R) -> Result<T, CallError> {
         let result = rpc::call(&record.client, method, request).await;
+        self.fuse_on_panic(&record.id, method, result)
+    }
+
+    /// [`Self::call`] on the calling thread, for synchronous callers.
+    pub fn call_blocking<T: GoJson, R: GoJson>(
+        &self,
+        record: &Record,
+        method: &str,
+        request: &R,
+    ) -> Result<T, CallError> {
+        let result = rpc::call_blocking(&record.client, method, request);
         self.fuse_on_panic(&record.id, method, result)
     }
 

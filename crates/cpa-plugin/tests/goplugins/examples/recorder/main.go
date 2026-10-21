@@ -11,6 +11,9 @@
 //	inputs: a,b            executor_input_formats (default chat-completions)
 //	outputs: a,b           executor_output_formats (default chat-completions)
 //	scope: <scope>         executor_model_scope (default both)
+//	rewrite<n>: <method> <old> <new>
+//	                       answer that translator or normalizer method with its Body,
+//	                       every <old> replaced by <new> (any key starting "rewrite")
 //
 // Any other method is answered from <record>/respond/<label>/<method>.json when that
 // file exists: the file is the complete response envelope, written by the test before
@@ -105,6 +108,8 @@ var (
 	inputs  = []string{"chat-completions"}
 	outputs = []string{"chat-completions"}
 	scope   = "both"
+	// rewrites maps a transform method to its replacements.
+	rewrites = map[string][][2]string{}
 )
 
 type envelope struct {
@@ -179,6 +184,7 @@ func configure(raw []byte) {
 	inputs = []string{"chat-completions"}
 	outputs = []string{"chat-completions"}
 	scope = "both"
+	rewrites = map[string][][2]string{}
 	for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
 		if !ok {
@@ -208,6 +214,10 @@ func configure(raw []byte) {
 			outputs = splitList(value)
 		case "scope":
 			scope = value
+		default:
+			if fields := strings.Fields(value); strings.HasPrefix(key, "rewrite") && len(fields) == 3 {
+				rewrites[fields[0]] = append(rewrites[fields[0]], [2]string{fields[1], fields[2]})
+			}
 		}
 	}
 }
@@ -362,6 +372,21 @@ func handle(method string, request []byte) ([]byte, int) {
 		return ok(pluginapi.ExecutorResponse{Payload: req.Payload, Headers: map[string][]string{"X-Recorder": {name}}})
 	case pluginabi.MethodExecutorExecuteStream:
 		return executeStream(request)
+	case pluginabi.MethodRequestNormalize, pluginabi.MethodRequestTranslate, pluginabi.MethodResponseNormalizeBefore,
+		pluginabi.MethodResponseTranslate, pluginabi.MethodResponseNormalizeAfter:
+		mu.Lock()
+		replacements := rewrites[method]
+		mu.Unlock()
+		if len(replacements) == 0 {
+			return failure("unknown_method", "unknown method: "+method, 0)
+		}
+		var req struct{ Body []byte }
+		_ = json.Unmarshal(request, &req)
+		body := string(req.Body)
+		for _, r := range replacements {
+			body = strings.ReplaceAll(body, r[0], r[1])
+		}
+		return ok(pluginapi.PayloadResponse{Body: []byte(body)})
 	default:
 		return failure("unknown_method", "unknown method: "+method, 0)
 	}
