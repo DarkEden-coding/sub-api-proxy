@@ -1281,42 +1281,53 @@ pub fn oauth_excluded(cfg: &Config) -> HashMap<String, Vec<String>> {
 /// Like Go's `FileSynthesizer`, an unreadable or missing directory is an empty set:
 /// it must never block publishing the rest of a valid config.
 pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
-    scan_auth_dir(cfg).0
+    scan_auth_dir(cfg).credentials
 }
 
-/// [`from_auth_dir`], plus the files this same read found empty or not valid JSON (Go
-/// v8.0.35 `SynthesisContext.IncompleteFiles`); a caller keeps their last good
-/// credentials. A file that cannot be read is skipped, as in Go's full scan.
-pub fn scan_auth_dir(cfg: &Config) -> (Vec<Credential>, HashSet<PathBuf>) {
-    let mut incomplete = HashSet::new();
+/// What one read of the auth folder found.
+#[derive(Default)]
+pub struct AuthScan {
+    pub credentials: Vec<Credential>,
+    /// The files this read found empty or not valid JSON (Go v8.0.35
+    /// `SynthesisContext.IncompleteFiles`); a caller keeps their last good credentials.
+    pub incomplete: HashSet<PathBuf>,
+    /// The SHA-256 of every file read, so the watcher records what it applied rather than
+    /// what it observed before a later write.
+    pub read: BTreeMap<PathBuf, [u8; 32]>,
+}
+
+/// [`from_auth_dir`], with the files it found incomplete and the hashes of what it read.
+/// A file that cannot be read is skipped, as in Go's full scan.
+pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
+    let mut scan = AuthScan::default();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(dir = %cfg.auth_dir.display(), error = %e, "cannot read auth dir");
             }
-            return (Vec::new(), incomplete);
+            return scan;
         }
     };
-    let mut out = Vec::new();
     for entry in entries.flatten() {
         let path: PathBuf = entry.path();
         if !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json") {
             continue;
         }
         let Some(data) = read_regular(&path) else { continue };
+        scan.read.insert(path.clone(), Sha256::digest(&data).into());
         if serde_json::from_slice::<serde::de::IgnoredAny>(&data).is_err() {
-            incomplete.insert(path);
+            scan.incomplete.insert(path);
             continue;
         }
         match from_file(cfg, &cfg.auth_dir, &path, &data) {
-            Ok(Some(c)) => out.push(c),
+            Ok(Some(c)) => scan.credentials.push(c),
             Ok(None) => {}
             Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping auth file"),
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    (out, incomplete)
+    scan.credentials.sort_by(|a, b| a.id.cmp(&b.id));
+    scan
 }
 
 /// The bytes of `path` when it is, or links to, a regular file: the rule the auth-folder
