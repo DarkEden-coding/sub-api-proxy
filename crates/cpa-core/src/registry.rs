@@ -144,55 +144,34 @@ impl Catalog {
                 self.channel(channel).iter().chain(statics)
             })
             .find(|m| m.id == id)
-            .or_else(|| self.claude_family(self.channel("claude"), id))
+            .or_else(|| {
+                let claude = self.channel("claude");
+                claude_family_ids(id)
+                    .into_iter()
+                    .find_map(|family| claude.iter().find(|m| m.id == family))
+            })
     }
+}
 
-    /// Go `LookupStaticModelInfoByChannel`: this channel's definition with the exact
-    /// (trimmed) ID, or for `claude` its family entry. Channel names fold as in Go
-    /// `GetStaticModelDefinitionsByChannel`.
-    pub fn lookup_in_channel(&self, id: &str, channel: &str) -> Option<&ModelInfo> {
-        let id = id.trim();
-        if id.is_empty() {
-            return None;
-        }
-        let key = channel.trim().to_ascii_lowercase();
-        let section = match key.as_str() {
-            "gemini-interactions" => "gemini",
-            "codex" => "codex-pro",
-            "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi",
-            "x-ai" | "grok" => "xai",
-            "muse" => "meta",
-            other => other,
-        };
-        let models = self.channel(section);
-        models
-            .iter()
-            .find(|m| m.id == id)
-            .or_else(|| (section == "claude").then(|| self.claude_family(models, id)).flatten())
+/// Dated and bracketed Claude variants (`claude-sonnet-5-5-20261001`,
+/// `claude-opus-5-5[1m]`) share their catalog entry's capabilities (Go
+/// `claudeFamilyModelIDs`): the ID without a `[...]` suffix, then also without a
+/// `-YYYYMMDD` date.
+pub(crate) fn claude_family_ids(id: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    if !id.starts_with("claude-") {
+        return candidates;
     }
-
-    /// Dated and bracketed Claude variants (`claude-sonnet-5-5-20261001`,
-    /// `claude-opus-5-5[1m]`) share their catalog entry's capabilities (Go
-    /// `claudeFamilyModelIDs`): the ID without a `[...]` suffix, then also without a
-    /// `-YYYYMMDD` date.
-    fn claude_family<'a>(&self, models: &'a [ModelInfo], id: &str) -> Option<&'a ModelInfo> {
-        if !id.starts_with("claude-") {
-            return None;
-        }
-        let mut base = id;
-        let mut candidates = Vec::with_capacity(2);
-        if let Some(i) = base.find('[').filter(|&i| i > 0 && base.ends_with(']')) {
-            base = &base[..i];
-            candidates.push(base);
-        }
-        let n = base.len();
-        if n > 9 && base.as_bytes()[n - 9] == b'-' && base.as_bytes()[n - 8..].iter().all(u8::is_ascii_digit) {
-            candidates.push(&base[..n - 9]);
-        }
-        candidates
-            .into_iter()
-            .find_map(|family| models.iter().find(|m| m.id == family))
+    let mut base = id;
+    if let Some(i) = base.find('[').filter(|&i| i > 0 && base.ends_with(']')) {
+        base = &base[..i];
+        candidates.push(base);
     }
+    let n = base.len();
+    if n > 9 && base.as_bytes()[n - 9] == b'-' && base.as_bytes()[n - 8..].iter().all(u8::is_ascii_digit) {
+        candidates.push(&base[..n - 9]);
+    }
+    candidates
 }
 
 /// The static catalog in effect (Go `getModels()`): the embedded models.json until a
@@ -425,17 +404,6 @@ mod tests {
             ("claude-haiku-4-5-20251001[1m]", "claude-haiku-4-5-20251001"),
         ] {
             assert_eq!(c.lookup(id).map(|m| m.id.as_str()), Some(family), "{id}");
-            assert_eq!(
-                c.lookup_in_channel(id, "claude").map(|m| m.id.as_str()),
-                Some(family),
-                "{id}"
-            );
-            assert_eq!(
-                c.lookup_in_channel(&format!(" {id} "), " Claude ")
-                    .map(|m| m.id.as_str()),
-                Some(family),
-                "{id}"
-            );
         }
         assert_eq!(
             c.lookup("claude-haiku-4-5-20251001").map(|m| m.id.as_str()),

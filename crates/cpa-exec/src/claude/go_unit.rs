@@ -134,8 +134,10 @@ async fn replay_file(fixture: &Value, file: &str) {
     for (test, records) in tests {
         if std::ptr::eq(fixture, self::fixture()) && SUPERSEDED.contains(&test.as_str()) {
             assert!(
-                fixture_v8_0_35()["files"][file][test].is_array(),
-                "{test}: superseded but not recorded at v8.0.35"
+                fixture_v8_0_35()["files"][file][test]
+                    .as_array()
+                    .is_some_and(|calls| !calls.is_empty()),
+                "{test}: superseded but no v8.0.35 call recorded"
             );
             continue;
         }

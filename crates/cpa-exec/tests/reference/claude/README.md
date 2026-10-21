@@ -109,9 +109,12 @@ skipped (`SUPERSEDED` in `claude/go_unit.rs`). Today it has one test:
 `TestClaudeExecutor_DisabledThinkingStripsDisplayBeta`, whose `thinking` object Go
 ad9e456d (`disableThinking`) now replaces whole.
 
+The recording's `source` names the checkout's full commit (`git rev-parse HEAD` in the
+reference, `ae3ee3be303fb07fb8173279923413005bf32177`, with a clean worktree).
+
 ```sh
-reference=/absolute/path/to/CLIProxyAPI   # at v8.0.35 (ae3ee3be)
-RSFIX_REFERENCE="v8.0.35 (ae3ee3be)" RSFIX_FILES=claude_executor_test.go \
+reference=/absolute/path/to/CLIProxyAPI   # at v8.0.35
+RSFIX_REFERENCE="v8.0.35 ($(git -C "$reference" rev-parse HEAD))" RSFIX_FILES=claude_executor_test.go \
 RSFIX_ONLY='^TestClaudeExecutor_DisabledThinkingStripsDisplayBeta$' \
   python3 "$crate/tests/reference/claude/unit/record.py" "$reference" "$crate/src/claude/testdata/go_unit_v8.0.35.json"
 ```

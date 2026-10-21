@@ -514,6 +514,41 @@ fn apply_excluded(models: Vec<Spec>, excluded: &[String]) -> Vec<Spec> {
 }
 
 /// `native_capabilities.web_search` of a static catalog model.
+/// Go `GetStaticModelDefinitionsByChannel`: the static section a channel name selects,
+/// through Go's getters (built-ins included); unknown names select nothing.
+fn static_channel(name: &str) -> Vec<Spec> {
+    match name.trim().to_lowercase().as_str() {
+        "claude" => channel("claude"),
+        "gemini" | "gemini-interactions" => channel("gemini"),
+        "vertex" => channel("vertex"),
+        "aistudio" => channel("aistudio"),
+        "codex" => codex_channel("codex-pro"),
+        "kimi" | "kimi-ai" | "kimi.ai" | "kimi.com" => channel("kimi"),
+        "antigravity" => channel("antigravity"),
+        "xai" | "x-ai" | "grok" => with_xai_builtins(channel("xai")),
+        "devin" => super::devin::models().iter().map(Spec::from_static).collect(),
+        "meta" | "muse" => channel("meta"),
+        _ => Vec::new(),
+    }
+}
+
+/// Go `LookupStaticModelInfoByChannel` over `models`, the section of `channel`: the
+/// exact (trimmed) ID, or for `claude` its family entry.
+fn lookup_by_channel<'a>(models: &'a [Spec], channel: &str, id: &str) -> Option<&'a Spec> {
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    models.iter().find(|m| m.id == id).or_else(|| {
+        if !channel.trim().eq_ignore_ascii_case("claude") {
+            return None;
+        }
+        super::claude_family_ids(id)
+            .into_iter()
+            .find_map(|family| models.iter().find(|m| m.id == family))
+    })
+}
+
 fn native_web_search(info: &ModelInfo) -> Option<bool> {
     info.raw
         .get("native_capabilities")
@@ -652,6 +687,7 @@ fn build_config_models(
     now: i64,
 ) -> Vec<Spec> {
     let mut seen = std::collections::HashSet::new();
+    let statics = static_channel(metadata_channel);
     models
         .iter()
         .filter_map(|m| {
@@ -693,9 +729,8 @@ fn build_config_models(
                 support_configuration_update: m.support_configuration_update,
                 user_defined: true,
                 explicit_thinking: m.thinking.is_some(),
-                native_web_search: pinned()
-                    .lookup_in_channel(name, metadata_channel)
-                    .and_then(native_web_search),
+                native_web_search: lookup_by_channel(&statics, metadata_channel, name)
+                    .and_then(|s| s.native_web_search),
                 ..Spec::default()
             })
         })
@@ -1016,8 +1051,7 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
                 }
                 models
             } else {
-                // Go's metadata channel "codex" is the Pro catalog.
-                build_config_models(&configured, "openai", "openai", "codex-pro", now)
+                build_config_models(&configured, "openai", "openai", "codex", now)
             }
         }
         "codex" => {
@@ -1557,6 +1591,66 @@ mod tests {
             c.attributes.insert((*k).into(), (*v).into());
         }
         Arc::new(c)
+    }
+
+    /// Go `GetStaticModelDefinitionsByChannel` and `LookupStaticModelInfoByChannel`: Go's
+    /// channel names (folded with Unicode case rules), its getters' built-ins, trimmed
+    /// IDs and Claude family entries; raw catalog sections are not channels.
+    #[test]
+    fn static_channel_lookup_matches_go() {
+        let ids = |name: &str| static_channel(name).into_iter().map(|m| m.id).collect::<Vec<_>>();
+        for (name, same_as) in [
+            (" Claude ", "claude"),
+            ("gemini-interactions", "gemini"),
+            ("x-ai", "xai"),
+            ("GROK", "xai"),
+            ("muse", "meta"),
+            ("kimi.com", "kimi"),
+            // KELVIN SIGN folds to `k` in Go's strings.ToLower too.
+            ("\u{212A}imi", "kimi"),
+        ] {
+            assert!(!ids(same_as).is_empty(), "{same_as}");
+            assert_eq!(ids(name), ids(same_as), "{name}");
+        }
+        for raw in [
+            "codex-pro",
+            "codex-team",
+            "codex-free",
+            "codex-plus",
+            "gemini-cli",
+            "unknown",
+        ] {
+            assert!(static_channel(raw).is_empty(), "{raw} is not a Go channel");
+        }
+        assert!(
+            ids("codex").iter().any(|id| id == "gpt-image-2"),
+            "codex keeps its built-ins"
+        );
+        assert_eq!(
+            ids("devin"),
+            super::super::devin::models()
+                .into_iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>()
+        );
+        let claude = static_channel("Claude");
+        let found =
+            |channel: &str, models: &[Spec], id: &str| lookup_by_channel(models, channel, id).map(|m| m.id.clone());
+        assert_eq!(
+            found(" Claude ", &claude, " claude-opus-5-5[1m] ").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            found("claude", &claude, "claude-sonnet-5-5-20261001").as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        assert_eq!(found("claude", &claude, "  "), None);
+        // The family fallback is Claude's alone.
+        let gemini = static_channel("gemini");
+        let mut renamed = claude.clone();
+        renamed.retain(|m| m.id == "claude-opus-5-5");
+        assert_eq!(found("gemini", &renamed, "claude-opus-5-5[1m]"), None);
+        assert!(found("gemini", &gemini, "claude-opus-5-5").is_none());
     }
 
     /// Go `Auth.AccountInfo` (sdk/cliproxy/auth/types.go): kind first, then the
