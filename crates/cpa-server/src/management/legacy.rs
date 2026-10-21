@@ -20,9 +20,6 @@ mod keys;
 mod lists;
 pub(crate) mod view;
 
-/// Serializes v0 read-modify-write handlers, as Go's handler mutex does.
-static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// Go `strings.TrimSpace`.
 pub(crate) fn go_trim(s: &str) -> &str {
     std::str::from_utf8(cpa_core::config::go_trim_space(s.as_bytes())).unwrap_or(s)
@@ -265,47 +262,89 @@ pub(super) fn target(v8: impl Into<String>, legacy: impl Into<String>) -> Target
     }
 }
 
-/// Saves through the legacy or the shared config writer; Go's v0 success body.
-/// `v8` is the value to PUT at the v8 path, `None` deletes it (absent counts as done).
-async fn save(state: Arc<Management>, t: Target, v8: Option<Value>, legacy: super::LegacyEdit) -> Response {
-    let delete = v8.is_none();
-    let res = tokio::task::spawn_blocking(move || {
-        let parts: Vec<&str> = t.legacy.split('/').collect();
-        let path = format!("/v8/management/config/{}", t.v8);
-        super::v0_save(&state, &parts, legacy, super::V8Edit { path: &path, value: v8 })
+/// One v0 save.
+pub(super) enum Change {
+    /// `value` at the v8 path, or `legacy` at the legacy path of a legacy file.
+    Write(Target, Value, Value),
+    /// One path saved unchanged, as Go saves after a handler that changed nothing.
+    /// ponytail: a path absent from the document is not saved at all; Go would still
+    /// rewrite the file (and fail on a read-only disk).
+    Touch(Target),
+    /// One path deleted (absent counts as done).
+    Remove(Target),
+    /// No save: this answer as is.
+    Answer(Response),
+}
+
+/// Go resolves and changes a v0 setting under the lock its saves hold (1631875b): `f`
+/// reads the published config and decides the change, which is saved under the same
+/// `disk` lock, so no other save or reload lands between the read and the write. A
+/// save answers Go's v0 success body.
+pub(super) async fn locked(state: Arc<Management>, f: impl FnOnce(Value) -> Change + Send + 'static) -> Response {
+    let saved = tokio::task::spawn_blocking(move || {
+        let disk = state.disk.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cfg = current(&state);
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut slot = AFTER_READ.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                match slot.as_ref() {
+                    Some((path, _)) if *path == state.path => slot.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, hook)) = hook {
+                hook();
+            }
+        }
+        save(&state, &disk, f(cfg))
     })
-    .await
-    .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
-    match res.status() {
-        StatusCode::OK => ok(),
-        StatusCode::NOT_FOUND if delete => ok(),
-        _ => save_error(res).await,
+    .await;
+    match saved {
+        Ok((res, None)) => res,
+        Ok((res, Some(delete))) => match res.status() {
+            StatusCode::OK => ok(),
+            StatusCode::NOT_FOUND if delete => ok(),
+            _ => save_error(res).await,
+        },
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
+}
+
+/// Test hook run once, in [`locked`] for the config file it names, after the published
+/// config was read and before the change it decides is saved.
+#[cfg(test)]
+static AFTER_READ: std::sync::Mutex<Option<(std::path::PathBuf, super::LayoutHook)>> = std::sync::Mutex::new(None);
+
+/// Saves through the legacy or the shared config writer, with whether it was a delete
+/// (`None` for an answer that saved nothing).
+fn save(state: &Management, disk: &std::sync::MutexGuard<'_, ()>, change: Change) -> (Response, Option<bool>) {
+    let (t, v8, legacy) = match change {
+        Change::Write(t, value, legacy) => (t, Some(value), super::LegacyEdit::Set(legacy)),
+        Change::Touch(t) => {
+            let cfg = state.rt.config();
+            let current =
+                t.v8.split('/')
+                    .try_fold(&cfg.document, |v, k| v.get(k))
+                    .and_then(|v| serde_json::to_value(v).ok());
+            match current {
+                Some(value) => (t, Some(value), super::LegacyEdit::Keep),
+                None => return (ok(), None),
+            }
+        }
+        Change::Remove(t) => (t, None, super::LegacyEdit::Delete),
+        Change::Answer(res) => return (res, None),
+    };
+    let delete = v8.is_none();
+    let parts: Vec<&str> = t.legacy.split('/').collect();
+    let path = format!("/v8/management/config/{}", t.v8);
+    let res = super::v0_save(state, disk, &parts, legacy, super::V8Edit { path: &path, value: v8 });
+    (res, Some(delete))
 }
 
 /// Writes `value` at the v8 path, or `legacy` at the legacy path of a legacy file.
 async fn write(state: Arc<Management>, t: Target, value: Value, legacy: Value) -> Response {
-    save(state, t, Some(value), super::LegacyEdit::Set(legacy)).await
-}
-
-/// Saves one path unchanged, as Go saves after a handler that changed nothing.
-/// ponytail: a path absent from the document is not saved at all; Go would still
-/// rewrite the file (and fail on a read-only disk).
-async fn touch(state: Arc<Management>, t: Target) -> Response {
-    let cfg = state.rt.config();
-    let current =
-        t.v8.split('/')
-            .try_fold(&cfg.document, |v, k| v.get(k))
-            .and_then(|v| serde_json::to_value(v).ok());
-    match current {
-        Some(value) => save(state, t, Some(value), super::LegacyEdit::Keep).await,
-        None => ok(),
-    }
-}
-
-/// Deletes one path (absent counts as done).
-async fn remove(state: Arc<Management>, t: Target) -> Response {
-    save(state, t, None, super::LegacyEdit::Delete).await
+    locked(state, move |_| Change::Write(t, value, legacy)).await
 }
 
 /// Go's scalar v0 routes: GET reads the runtime value, PUT and PATCH take
@@ -419,74 +458,85 @@ pub(crate) async fn api_keys(
     RawQuery(raw): RawQuery,
     body: Bytes,
 ) -> Response {
-    let _serial = WRITES.lock().await;
-    let cfg = current(&state);
-    let mut keys: Vec<Value> = cfg["api-keys"].as_array().cloned().unwrap_or_default();
-    let t = || target("access/api-keys", "api-keys");
-    match method {
-        Method::GET => go_json(StatusCode::OK, &json!({"api-keys": cfg["api-keys"]})),
-        Method::PUT => {
-            // Go `putStringList`.
-            let Some(list) = decode::put_collection(view::field("api-keys"), &body, true) else {
-                return bad("invalid body");
-            };
-            // Go copies with append([]string(nil), v...): an empty list becomes nil.
-            let list = list.as_array().filter(|l| !l.is_empty()).cloned();
-            let list = list.map_or(Value::Null, Value::Array);
-            write(state, t(), list.clone(), list).await
-        }
-        Method::PATCH => {
-            // Go `patchStringList`: `{old, new, index, value}`, all pointers.
-            let shape = decode::record(vec![
-                decode::field("old", "string", true, None),
-                decode::field("new", "string", true, None),
-                decode::field("index", "int", true, None),
-                decode::field("value", "string", true, None),
-            ]);
-            let Some(b) = decode::bind(&shape, &body) else {
-                return bad("invalid body");
-            };
-            let text = |k: &str| b.get(k).and_then(Value::as_str).map(str::to_owned);
-            let (old, new, value) = (text("old"), text("new"), text("value"));
-            let index = b.get("index").and_then(Value::as_i64);
-            if let (Some(i), Some(v)) = (index, &value)
-                && i >= 0
-                && (i as usize) < keys.len()
-            {
-                keys[i as usize] = Value::from(v.clone());
-                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
-            }
-            if let (Some(old), Some(new)) = (old, new) {
-                match keys.iter_mut().find(|k| k.as_str() == Some(old.as_str())) {
-                    Some(slot) => *slot = Value::from(new),
-                    None => keys.push(Value::from(new)),
-                }
-                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
-            }
-            bad("missing fields")
-        }
-        Method::DELETE => {
-            let raw = raw.as_deref();
-            if let Some(i) = query_first(raw, "index")
-                .filter(|s| !s.is_empty())
-                .and_then(|s| sscanf_int(&s))
-                && i >= 0
-                && (i as usize) < keys.len()
-            {
-                keys.remove(i as usize);
-                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
-            }
-            if let Some(value) = query_first(raw, "value")
-                .map(|v| go_trim(&v).to_owned())
-                .filter(|v| !v.is_empty())
-            {
-                keys.retain(|k| go_trim(k.as_str().unwrap_or_default()) != value);
-                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
-            }
-            bad("missing index or value")
-        }
-        _ => super::access::not_found(),
+    if method == Method::GET {
+        return go_json(StatusCode::OK, &json!({"api-keys": current(&state)["api-keys"]}));
     }
+    if !matches!(method, Method::PUT | Method::PATCH | Method::DELETE) {
+        return super::access::not_found();
+    }
+    locked(state, move |cfg| {
+        let mut keys: Vec<Value> = cfg["api-keys"].as_array().cloned().unwrap_or_default();
+        let write = |keys: Vec<Value>| {
+            Change::Write(
+                target("access/api-keys", "api-keys"),
+                Value::Array(keys.clone()),
+                Value::Array(keys),
+            )
+        };
+        match method {
+            Method::PUT => {
+                // Go `putStringList`.
+                let Some(list) = decode::put_collection(view::field("api-keys"), &body, true) else {
+                    return Change::Answer(bad("invalid body"));
+                };
+                // Go copies with append([]string(nil), v...): an empty list becomes nil.
+                let list = list.as_array().filter(|l| !l.is_empty()).cloned();
+                let list = list.map_or(Value::Null, Value::Array);
+                Change::Write(target("access/api-keys", "api-keys"), list.clone(), list)
+            }
+            Method::PATCH => {
+                // Go `patchStringList`: `{old, new, index, value}`, all pointers.
+                let shape = decode::record(vec![
+                    decode::field("old", "string", true, None),
+                    decode::field("new", "string", true, None),
+                    decode::field("index", "int", true, None),
+                    decode::field("value", "string", true, None),
+                ]);
+                let Some(b) = decode::bind(&shape, &body) else {
+                    return Change::Answer(bad("invalid body"));
+                };
+                let text = |k: &str| b.get(k).and_then(Value::as_str).map(str::to_owned);
+                let (old, new, value) = (text("old"), text("new"), text("value"));
+                let index = b.get("index").and_then(Value::as_i64);
+                if let (Some(i), Some(v)) = (index, &value)
+                    && i >= 0
+                    && (i as usize) < keys.len()
+                {
+                    keys[i as usize] = Value::from(v.clone());
+                    return write(keys);
+                }
+                if let (Some(old), Some(new)) = (old, new) {
+                    match keys.iter_mut().find(|k| k.as_str() == Some(old.as_str())) {
+                        Some(slot) => *slot = Value::from(new),
+                        None => keys.push(Value::from(new)),
+                    }
+                    return write(keys);
+                }
+                Change::Answer(bad("missing fields"))
+            }
+            _ => {
+                let raw = raw.as_deref();
+                if let Some(i) = query_first(raw, "index")
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| sscanf_int(&s))
+                    && i >= 0
+                    && (i as usize) < keys.len()
+                {
+                    keys.remove(i as usize);
+                    return write(keys);
+                }
+                if let Some(value) = query_first(raw, "value")
+                    .map(|v| go_trim(&v).to_owned())
+                    .filter(|v| !v.is_empty())
+                {
+                    keys.retain(|k| go_trim(k.as_str().unwrap_or_default()) != value);
+                    return write(keys);
+                }
+                Change::Answer(bad("missing index or value"))
+            }
+        }
+    })
+    .await
 }
 
 /// Live credential indexes by credential ID (Go `liveAuthIndexByID`).
@@ -512,7 +562,7 @@ pub(crate) async fn list_route(
 ) -> Response {
     let route = route_of(&uri).to_owned();
     if method != Method::GET {
-        return lists::change(state, &route, method, raw.as_deref(), &body).await;
+        return lists::change(state, route, method, raw, body).await;
     }
     let cfg = current(&state);
     let value = if route.starts_with("oauth-") {
@@ -864,6 +914,72 @@ mod tests {
         let api = cfg.for_api_key();
         let ua = &api.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"];
         assert_eq!(ua.as_str(), Some("legacy-agent"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go 1631875b: a v0 list mutation reads and saves under the lock v8 saves hold. A
+    /// v8 save of the same list that starts after the v0 PATCH read [a, b] lands after
+    /// the PATCH, so it is kept; were the read outside the lock, the PATCH would
+    /// overwrite it with its stale [a2, b].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_v0_list_change_reads_and_saves_under_the_disk_lock() {
+        let dir = std::env::temp_dir().join(format!("cpa-v0-list-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let config = format!(
+            "config-version: 8\noauth: {{auth-dir: {}}}\naccess: {{api-keys: [a, b]}}\n",
+            dir.display()
+        );
+        std::fs::write(&path, config).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cpa_core::config::Config::load(&path).unwrap(),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::with_options(rt, path.clone(), Default::default());
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let v8 = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                go_rx.recv().unwrap();
+                let res = super::super::config_sync(
+                    &state,
+                    "/v8/management/config/access/api-keys",
+                    Method::PUT,
+                    &[],
+                    br#"["a","b","c"]"#,
+                );
+                let _ = done_tx.send(());
+                res.status()
+            })
+        };
+        let hook = move || {
+            go_tx.send(()).unwrap();
+            // Unlocked, the v8 save finishes well within this window.
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        };
+        *AFTER_READ.lock().unwrap() = Some((path.clone(), Box::new(hook)));
+        let patch = api_keys(
+            State(state.clone()),
+            Method::PATCH,
+            RawQuery(None),
+            Bytes::from(r#"{"old":"a","new":"a2"}"#),
+        )
+        .await;
+        assert_eq!(patch.status(), StatusCode::OK);
+        assert_eq!(
+            tokio::task::spawn_blocking(move || v8.join().unwrap()).await.unwrap(),
+            StatusCode::OK
+        );
+        assert_eq!(current(&state)["api-keys"], json!(["a", "b", "c"]));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("- c"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
