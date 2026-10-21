@@ -407,6 +407,8 @@ fn config_and_file_credentials_match_go_synthesizers() {
         // `oauth-excluded-models`. Until that lands, Rust still merges them as 6fecc6e
         // did; this pins the old values, so the port shows up here as a failure.
         if name == "oauth_files" {
+            assert_eq!(want[0]["attributes"]["excluded_models"], "haiku-z", "{name}");
+            assert!(want[2]["attributes"].get("excluded_models").is_none(), "{name}");
             want[0]["attributes"]["excluded_models"] = json!("haiku-z,opus-x,sonnet-y");
             want[2]["attributes"]["excluded_models"] = json!("opus-x,sonnet-y");
         }
@@ -639,38 +641,54 @@ mod config_writes {
     use cpa_server::management::{Management, Options};
     use std::sync::Arc;
 
-    /// bcrypt output differs per run; compare its presence, not its bytes.
+    /// The management key, the one bcrypt value in these configs, differs per run; its
+    /// presence is compared, not its bytes. Go v8.0.35 saves a plaintext key written
+    /// through the v8 API until its post-save reload hashes it, while cliproxy-rs stores
+    /// the hash at once (docs/DIFFERENCES-FROM-GO.md), so a plaintext `fake-*` key in
+    /// Go's recording stands for the hash Rust writes.
     fn normalize(v: &Value) -> Value {
-        match v {
-            Value::String(s) if s.starts_with("$2a$") || s.starts_with("$2b$") => json!("<bcrypt>"),
-            Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), normalize(v))).collect()),
-            Value::Array(a) => Value::Array(a.iter().map(normalize).collect()),
-            other => other.clone(),
+        let mut v = v.clone();
+        for at in ["/management/secret-key", "/remote-management/secret-key"] {
+            if let Some(key) = v.pointer_mut(at)
+                && key
+                    .as_str()
+                    .is_some_and(|k| ["$2a$", "$2b$", "fake-"].iter().any(|p| k.starts_with(p)))
+            {
+                *key = json!("<bcrypt>");
+            }
         }
+        v
+    }
+
+    /// A `/config/...` response as the document it is part of, so [`normalize`] sees
+    /// the key at its path.
+    fn rooted(path: &str, v: &Value) -> Value {
+        path.trim_start_matches("/config")
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .rev()
+            .fold(v.clone(), |doc, part| json!({ part: doc }))
     }
 
     /// cliproxy-rs writes only what the request changed (untouched text stays
     /// byte-stable); since v8.0.35 Go's v8 saver also adds no default-valued keys, so
     /// the values compare exactly.
     fn same(go: &Value, rust: &Value, at: &str) -> Result<(), String> {
-        if go == rust {
-            Ok(())
-        } else {
-            Err(format!("{at}: Go {go} != Rust {rust}"))
+        match (go, rust) {
+            (Value::Object(g), Value::Object(r)) => {
+                for k in g.keys().chain(r.keys()) {
+                    let missing = Value::String("<absent>".into());
+                    same(
+                        g.get(k).unwrap_or(&missing),
+                        r.get(k).unwrap_or(&missing),
+                        &format!("{at}.{k}"),
+                    )?;
+                }
+                Ok(())
+            }
+            _ if go == rust => Ok(()),
+            _ => Err(format!("{at}: Go {go} != Rust {rust}")),
         }
-    }
-
-    /// Go v8.0.35 saves (and reports, until its post-save reload rehashes the file) a
-    /// plaintext `management.secret-key` written through the v8 API; cliproxy-rs stores
-    /// the bcrypt hash at once (docs/DIFFERENCES-FROM-GO.md). Normalized `want` values
-    /// show a plaintext `fake-*` key as the hash Rust writes.
-    fn hashed_secret(mut v: Value) -> Value {
-        if let Some(key) = v.pointer_mut("/management/secret-key")
-            && key.as_str().is_some_and(|k| k.starts_with("fake-"))
-        {
-            *key = json!("<bcrypt>");
-        }
-        v
     }
 
     /// A YAML text as Go's decoder into `any` sees it: merge keys expanded.
@@ -678,37 +696,6 @@ mod config_writes {
         let mut v: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).unwrap();
         cpa_core::config::expand_merges(&mut v).unwrap();
         serde_json::to_value(v).unwrap()
-    }
-
-    /// Typed scalars as Go loads them (YAML 1.1 bools, truncated floats), and null
-    /// plugin entries as the `{}` Go's saver writes. Go re-encodes these on its first
-    /// write; cliproxy-rs keeps untouched text as written, so files compare by what
-    /// they load as.
-    fn typed_bools(v: &Value) -> Value {
-        let mut yaml = serde_yaml_ng::to_value(v).unwrap();
-        cpa_core::config::coerce_typed_scalars(&mut yaml);
-        let mut json = serde_json::to_value(yaml).unwrap();
-        if let Some(entries) = json.pointer_mut("/plugins/configs").and_then(Value::as_object_mut) {
-            for entry in entries.values_mut().filter(|e| e.is_null()) {
-                *entry = json!({});
-            }
-        }
-        json
-    }
-
-    /// [`typed_bools`] for the value at a `/config/...` sub-path.
-    fn typed_at(path: &str, v: &Value) -> Value {
-        let parts: Vec<&str> = path
-            .trim_start_matches("/config")
-            .split('/')
-            .filter(|p| !p.is_empty())
-            .collect();
-        let mut doc = v.clone();
-        for part in parts.iter().rev() {
-            doc = json!({ *part: doc });
-        }
-        let typed = typed_bools(&doc);
-        parts.iter().fold(&typed, |node, part| &node[*part]).clone()
     }
 
     #[tokio::test]
@@ -794,24 +781,20 @@ mod config_writes {
                             "{at}: {got}"
                         );
                     } else {
-                        // Config reads are compared like the file they reflect.
+                        // Values as written: `"on"` stays a string, as in Go's file.
                         let path = step["path"].as_str().unwrap();
                         let (want, got) = if path == "/config" || path.starts_with("/config/") {
-                            (typed_at(path, want), typed_at(path, &got))
+                            (rooted(path, want), rooted(path, &got))
                         } else {
                             (want.clone(), got)
                         };
-                        if let Err(e) = same(&hashed_secret(normalize(&want)), &normalize(&got), "response") {
+                        if let Err(e) = same(&normalize(&want), &normalize(&got), "response") {
                             failures.push(format!("{at}: {e}"));
                         }
                     }
                 }
                 let file = std::fs::read_to_string(&path).unwrap();
-                if let Err(e) = same(
-                    &hashed_secret(normalize(&typed_bools(&step["file"]))),
-                    &normalize(&typed_bools(&rust_yaml_value(&file))),
-                    "file",
-                ) {
+                if let Err(e) = same(&normalize(&step["file"]), &normalize(&rust_yaml_value(&file)), "file") {
                     failures.push(format!("{at}: {e}"));
                 }
                 if file.contains("# mystery-section") != step["file_has_archive"].as_bool().unwrap() {
@@ -1009,7 +992,7 @@ mod creds {
             let mut last_cursor = "no-cursor".to_owned();
             for (i, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
                 let at = format!("{name}[{i}] {} {}", step["method"], step["path"]);
-                let step = &pin_pending_steps(step.clone(), &at);
+                let step = &pin_pending_steps(step.clone(), name, i, &at);
                 if let Some(ms) = step["sleep_ms"].as_u64() {
                     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 }
@@ -1127,7 +1110,6 @@ mod creds {
                         );
                         want["error"] = got["error"].clone();
                     }
-                    pin_pending_bodies(&mut got, &mut want, &at);
                     assert_eq!(got, want, "{at}");
                 }
                 // Auth dir contents, as JSON values.
@@ -1176,79 +1158,127 @@ mod creds {
         }
         assert_eq!(compared, 199);
         eprintln!("credentials: {bytes_compared} of {compared} steps compared byte for byte");
-        assert!(bytes_compared >= 80, "only {bytes_compared} byte comparisons");
+        assert_eq!(bytes_compared, 149, "steps compared byte for byte");
     }
 
-    /// Pending v8.0.35 drift outside the config saver, pinned to what cliproxy-rs
-    /// answers today (the 6fecc6e recording), so each port shows up as a failure.
-    fn pin_pending_steps(mut step: Value, at: &str) -> Value {
-        // Go 7b0319fb (Sign in with ChatGPT): codex auth files get a `<name>.lock`
-        // side file. Credentials owner.
+    /// Pending v8.0.35 drift outside the config saver. Each pin names its scenario and
+    /// steps, asserts Go's recorded value there, then expects cliproxy-rs's current
+    /// (6fecc6e) value in just the differing fields, so porting the change, or losing
+    /// the old behaviour some other way, fails here until the pin is removed.
+    fn pin_pending_steps(mut step: Value, name: &str, i: usize, at: &str) -> Value {
+        let inventory = name == "credential_inventory_and_edits";
+        // Go 7b0319fb (Sign in with ChatGPT): codex auth files get an empty
+        // `<name>.lock` side file. Credentials owner.
         if let Some(files) = step["files"].as_object_mut() {
-            files.retain(|file, v| {
-                let lock = file.ends_with(".lock");
-                assert!(!lock || v == "raw:", "{at}: {file}");
-                !lock
-            });
+            let mut locks: Vec<&str> = Vec::new();
+            if inventory && (19..=88).contains(&i) {
+                locks.push("codex-b.json.lock");
+            }
+            if inventory && (73..=88).contains(&i) {
+                locks.push("retype.json.lock");
+            }
+            let mut recorded: Vec<String> = files.keys().filter(|f| f.ends_with(".lock")).cloned().collect();
+            recorded.sort();
+            assert_eq!(recorded, locks, "{at}: Go's lock files");
+            for lock in locks {
+                assert_eq!(files.remove(lock), Some(json!("raw:")), "{at}: {lock}");
+            }
         }
-        // Go 1a28c61e: an upload that isn't JSON answers 400 (cliproxy-rs: 500).
-        // Management auth files; follow-up.
-        if step["method"] == "POST"
-            && step["path"]
-                .as_str()
-                .is_some_and(|p| p.split('?').next() == Some("/credentials"))
-            && step["status"] == 400
-            && step["response"]["error"]
-                .as_str()
-                .is_some_and(|e| e.starts_with("invalid auth file: "))
-        {
-            step["status"] = json!(500);
+        let mut response = step["response"].take();
+        let response = &mut response;
+        let status = step["status"].clone();
+        let mut new_status = None;
+        match (name, i) {
+            // Go 0c708401: auth-file lists drop `quota_probe` and `supports_quota`.
+            // Plugin worker.
+            ("credential_inventory_and_edits", 0 | 1) => {
+                let file = response["files"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|f| f["name"] == "claude-a.json")
+                    .unwrap();
+                let file = file.as_object_mut().unwrap();
+                assert!(
+                    !file.contains_key("quota_probe") && !file.contains_key("supports_quota"),
+                    "{at}"
+                );
+                file.insert("quota_probe".into(), json!({"kind": "fake"}));
+                file.insert("supports_quota".into(), json!(true));
+                step.as_object_mut().unwrap().remove("raw_json");
+            }
+            // Go 1a28c61e: an upload that isn't JSON answers 400. Management auth
+            // files; follow-up.
+            ("credential_inventory_and_edits", 28 | 49) => {
+                assert_eq!(status, 400, "{at}");
+                assert!(
+                    response["error"].as_str().unwrap().starts_with("invalid auth file: "),
+                    "{at}"
+                );
+                new_status = Some(json!(500));
+            }
+            // Go d69962e4 (safe Modify): fields on a config credential, which has no auth
+            // file, answer 404. Management auth files; follow-up.
+            ("credential_inventory_and_edits", 70 | 71) => {
+                assert_eq!(status, 404, "{at}");
+                assert_eq!(*response, json!({"error": "auth file not found"}), "{at}");
+                new_status = Some(json!(200));
+                *response = json!({"status": "ok"});
+                step["raw_json"] = json!(r#"{"status":"ok"}"#);
+            }
+            // Go f62d4d28 and a19a8ecd: the Claude catalog adds claude-haiku-5-5 and
+            // changes six models' thinking metadata. Models catalog owner.
+            ("credential_inventory_and_edits", 82) => {
+                let models = response["models"].as_array_mut().unwrap();
+                let at_haiku = models
+                    .iter()
+                    .position(|m| m["id"] == "claude-haiku-5-5")
+                    .expect("Go adds it");
+                assert_eq!(models[at_haiku - 1]["id"], "claude-sonnet-5-5", "{at}");
+                models.remove(at_haiku);
+                let levels = json!(["low", "medium", "high", "xhigh", "max"]);
+                let budget = json!({"levels": levels, "max": 128000, "min": 1024, "zero_allowed": true});
+                let dynamic = json!({"dynamic_allowed": true, "levels": levels, "zero_allowed": true});
+                let fable = json!({"dynamic_allowed": true, "levels": levels});
+                for (id, go, old) in [
+                    ("claude-opus-4-7", &dynamic, &budget),
+                    ("claude-opus-4-8", &dynamic, &budget),
+                    ("claude-fable-5", &fable, &budget),
+                    ("claude-fable-5-1", &fable, &budget),
+                    ("claude-opus-5-5", &fable, &dynamic),
+                ] {
+                    let model = models.iter_mut().find(|m| m["id"] == id).unwrap();
+                    assert_eq!(&model["thinking"], go, "{at}: {id}");
+                    model["thinking"] = old.clone();
+                }
+                let sonnet = models.iter_mut().find(|m| m["id"] == "claude-sonnet-5-5").unwrap();
+                let thinking = sonnet["thinking"].as_object_mut().unwrap();
+                assert_eq!(thinking.remove("disable_type"), Some(json!("between_tools")), "{at}");
+                assert_eq!(Value::Object(thinking.clone()), dynamic, "{at}");
+                step.as_object_mut().unwrap().remove("raw_json");
+            }
+            // Go f62d4d28 and a19a8ecd: AI Studio drops gemini-3.7-flash, the 15th
+            // model. Models catalog owner.
+            ("runtime_credentials", 4 | 6) => {
+                let models = response["models"].as_array_mut().unwrap();
+                let id = |m: &Value| m.get("id").unwrap_or(m).clone();
+                assert!(models.iter().all(|m| id(m) != "gemini-3.7-flash"), "{at}");
+                assert_eq!(id(&models[13]), "gemini-3.6-flash", "{at}");
+                let old = if i == 4 {
+                    json!({"display_name": "Gemini 3.7 Flash", "id": "gemini-3.7-flash", "owned_by": "google", "type": "gemini"})
+                } else {
+                    json!("gemini-3.7-flash")
+                };
+                models.insert(14, old);
+                step.as_object_mut().unwrap().remove("raw_json");
+            }
+            _ => {}
         }
-        // Go d69962e4 (safe Modify): fields on a config credential answer 404, as it
-        // has no auth file (cliproxy-rs still edits it). Management auth files; follow-up.
-        if step["path"] == "/credentials/fields" && step["body"].as_str().is_some_and(|b| b.contains("\"$CFGID\"")) {
-            assert_eq!(step["status"], 404, "{at}");
-            step["status"] = json!(200);
-            step["response"] = json!({"status": "ok"});
-            step["raw_json"] = json!(r#"{"status":"ok"}"#);
+        step["response"] = response.take();
+        if let Some(status) = new_status {
+            step["status"] = status;
         }
         step
-    }
-
-    fn pin_pending_bodies(got: &mut Value, want: &mut Value, at: &str) {
-        // Go 0c708401: auth files no longer list `quota_probe` and `supports_quota`.
-        // Plugin worker.
-        for file in got.get_mut("files").and_then(Value::as_array_mut).into_iter().flatten() {
-            if let Some(file) = file.as_object_mut()
-                && let Some(probe) = file.remove("quota_probe")
-            {
-                assert_eq!(probe, json!({"kind": "fake"}), "{at}");
-                assert_eq!(file.remove("supports_quota"), Some(json!(true)), "{at}");
-            }
-        }
-        // Go f62d4d28 and a19a8ecd: the model catalog dropped gemini-3.7-flash and added
-        // claude-haiku-5-5 (with new thinking metadata). Models catalog owner.
-        if let Some(models) = got.get_mut("models").and_then(Value::as_array_mut) {
-            let id = |m: &Value| m.get("id").unwrap_or(m).clone();
-            let before = models.len();
-            models.retain(|m| id(m) != "gemini-3.7-flash");
-            assert!(
-                before == models.len()
-                    || want["models"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .all(|m| id(m) != "gemini-3.7-flash"),
-                "{at}"
-            );
-            if want["channel"] == "claude" {
-                let ids = |v: &Value| v.as_array().unwrap().iter().map(id).collect::<Vec<_>>();
-                let mut go = ids(&want["models"]);
-                go.retain(|m| m != "claude-haiku-5-5");
-                assert_eq!(models.iter().map(id).collect::<Vec<_>>(), go, "{at}: catalog ids");
-                *want = got.clone();
-            }
-        }
     }
 
     /// Writes or appends a fixture log file and sets Go's fixed mtime

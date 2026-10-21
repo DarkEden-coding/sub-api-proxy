@@ -763,6 +763,22 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
     json(status, &json!({"error": "invalid_config", "message": err.to_string()}))
 }
 
+/// Stores the bcrypt hash of a plaintext management key at `path`. `decoded` is the
+/// key as the config decodes it, so a number or bool written there (`123`) is hashed as
+/// its string, as Go's `ParseConfigBytes` does before publishing.
+fn hash_secret(doc: &mut ConfigDocument, path: &[&str], decoded: &str) -> Option<Response> {
+    if decoded.is_empty() || is_bcrypt(decoded) {
+        return None;
+    }
+    match bcrypt::hash(decoded, bcrypt::DEFAULT_COST) {
+        Err(e) => Some(invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e)),
+        Ok(hash) => doc
+            .update(path, hash.into(), false)
+            .err()
+            .map(|_| error(422, "invalid_config")),
+    }
+}
+
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
 /// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
@@ -898,8 +914,9 @@ fn config_sync_locked(
             _ => return error(400, "invalid_body"),
         };
         // A whole-config body is alias-normalized first, where a scalar merge fails
-        // (Go `NormalizeV8ConfigAliases`, 400); below the root it fails the config
-        // parse (422).
+        // (Go `NormalizeV8ConfigAliases`, 400). ponytail: below the root this answers
+        // 422, but in a JSON body Go reads `<<` as a plain key (opaque plugin data
+        // keeps it); telling JSON bodies apart here is the upgrade path.
         if let Err(e) = cpa_core::config::expand_merges(&mut value) {
             let status = if parts.is_empty() {
                 StatusCode::BAD_REQUEST
@@ -949,9 +966,10 @@ fn config_sync_locked(
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::BAD_REQUEST, e),
     };
-    if let Err(e) = Config::parse(&text) {
-        return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e);
-    }
+    let parsed = match Config::parse(&text) {
+        Ok(v) => v,
+        Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
+    };
     if let Err(e) = cpa_core::config::validate_config_fields(doc.value(), true) {
         return invalid_config(StatusCode::BAD_REQUEST, e);
     }
@@ -960,19 +978,8 @@ fn config_sync_locked(
     if typed && let Some(written) = &written {
         doc.typed_projection(&parts, written, method == Method::PATCH);
     }
-    if let Some(secret) = doc
-        .get(&["management", "secret-key"])
-        .and_then(serde_yaml_ng::Value::as_str)
-        && !secret.is_empty()
-        && !is_bcrypt(secret)
-    {
-        let hash = match bcrypt::hash(secret, bcrypt::DEFAULT_COST) {
-            Ok(v) => v,
-            Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
-        };
-        if doc.update(&["management", "secret-key"], hash.into(), false).is_err() {
-            return error(422, "invalid_config");
-        }
+    if let Some(response) = hash_secret(&mut doc, &["management", "secret-key"], &parsed.management.secret_key) {
+        return response;
     }
     let basis = if yaml {
         match std::str::from_utf8(body) {
@@ -1095,18 +1102,16 @@ pub(crate) fn v0_save(state: &Management, legacy: &[&str], edit: LegacyEdit, v8:
     }
     // Go saves its in-memory config, whose key is hashed on load; a plaintext key
     // edited into the file since must not be published.
-    let secret = ["remote-management", "secret-key"];
-    if let Some(key) = doc.get(&secret).and_then(serde_yaml_ng::Value::as_str)
-        && !key.is_empty()
-        && !is_bcrypt(key)
-    {
-        let hash = match bcrypt::hash(key, bcrypt::DEFAULT_COST) {
-            Ok(v) => v,
-            Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
-        };
-        if doc.update(&secret, hash.into(), false).is_err() {
-            return error(422, "invalid_config");
-        }
+    let parsed = match doc.yaml().and_then(|t| Config::parse(&t)) {
+        Ok(v) => v,
+        Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
+    };
+    if let Some(response) = hash_secret(
+        &mut doc,
+        &["remote-management", "secret-key"],
+        &parsed.management.secret_key,
+    ) {
+        return response;
     }
     let text = match doc.render_preserving(&original) {
         Ok(v) => v,

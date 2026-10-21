@@ -767,6 +767,39 @@ async fn config_api_keys_become_scheduled_credentials_on_write_and_reload() {
     server.abort();
 }
 
+/// A number or bool written as the key is hashed as the string it decodes to (Go
+/// `ParseConfigBytes`), so it authenticates at once, before any reload.
+#[tokio::test]
+async fn typed_secret_keys_are_hashed_as_the_string_they_decode_to() {
+    let f = Fixture::new("typed-secret");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let get = |key: &str| {
+        client
+            .get(format!("{base}/v8/management/config/server/port"))
+            .bearer_auth(key)
+            .send()
+    };
+    let mut old = "fake-management-only";
+    for (written, key) in [(json!(123), "123"), (json!(true), "true")] {
+        let r = client
+            .put(format!("{base}/v8/management/config/management/secret-key"))
+            .bearer_auth(old)
+            .json(&written)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{written}");
+        assert_eq!(get(key).await.unwrap().status(), 200, "{written}: new key");
+        assert_eq!(get(old).await.unwrap().status(), 401, "{written}: old key");
+        let file: serde_yaml_ng::Value = serde_yaml_ng::from_str(&f.file()).unwrap();
+        let hash = file["management"]["secret-key"].as_str().expect("stored as a string");
+        assert!(bcrypt::verify(key, hash).unwrap(), "{written}: {hash}");
+        old = key;
+    }
+    server.abort();
+}
+
 #[tokio::test]
 async fn unreadable_auth_dir_never_blocks_secret_rotation_or_removal() {
     let f = Fixture::new("authfile");
@@ -876,6 +909,25 @@ async fn writes_normalize_only_what_they_touch() {
     let r = send(wreq::Method::PATCH, "/config", "{}").await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(f.file(), after_patch, "an empty PATCH writes nothing");
+    // A YAML 1.1 bool spelling is saved and read back as the string written; only the
+    // runtime config decodes it.
+    let r = send(wreq::Method::PUT, "/config/upstream/xai/inject-x-search", r#""on""#)
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let file: serde_yaml_ng::Value = serde_yaml_ng::from_str(&f.file()).unwrap();
+    assert_eq!(
+        file["upstream"]["xai"]["inject-x-search"],
+        serde_yaml_ng::Value::from("on")
+    );
+    let got = send(wreq::Method::GET, "/config/upstream/xai/inject-x-search", "")
+        .await
+        .unwrap();
+    assert_eq!(got.text().await.unwrap(), r#""on""#);
+    assert_eq!(
+        f.rt.config().document["upstream"]["xai"]["inject-x-search"],
+        serde_yaml_ng::Value::Bool(true)
+    );
     server.abort();
 }
 
