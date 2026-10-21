@@ -483,10 +483,9 @@ fn reload_config(
         }
     };
     state.lock_auth_dir(&mut config);
-    let scan = credentials::scan_auth_dir(&config);
-    let mut files = scan.credentials;
-    keep_incomplete(state, &mut files, &scan.incomplete);
-    read.auth = scan.read;
+    let mut scan = credentials::scan_auth_dir(&config);
+    keep_incomplete(state, &mut scan.credentials, &scan.incomplete);
+    read.auth = scan.read.clone();
     // A file neither could read stays as observed; recording it as missing would
     // reload it on every tick.
     for (path, hash) in &observed.auth {
@@ -495,7 +494,7 @@ fn reload_config(
         }
     }
     let result = accepted.then(|| config.clone());
-    state.publish(config, Some(files));
+    state.publish(config, Some(scan));
     let result = match config_error {
         Some(error) => Err(error),
         None => Ok(result),
@@ -776,6 +775,27 @@ mod tests {
         std::fs::write(&file, good).unwrap();
         keep_incomplete(&state, &mut files, &scan.incomplete);
         assert_eq!(files.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["a.json"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go c4c1d43e through the publication the watcher makes: a token refresh committed
+    /// after the reload's scan read the file is kept, not replaced by the scanned token.
+    #[tokio::test]
+    async fn a_reload_scan_does_not_undo_a_refresh_committed_after_it() {
+        let (state, dir) = state();
+        std::fs::write(dir.join("a.json"), r#"{"type":"codex","access_token":"old"}"#).unwrap();
+        reload(&state).unwrap();
+        let config = (*state.rt.config()).clone();
+        let scan = credentials::scan_auth_dir(&config);
+        let store = state.rt.store();
+        let revision = store.get("a.json").unwrap().revision;
+        let mut patch = cpa_core::credential::MetadataPatch::default();
+        patch.set.insert("access_token".into(), "refreshed".into());
+        store.apply_patch("a.json", revision, &patch).unwrap();
+        state.publish(config, Some(scan));
+        assert_eq!(store.get("a.json").unwrap().metadata["access_token"], "refreshed");
+        reload(&state).unwrap();
+        assert_eq!(store.get("a.json").unwrap().metadata["access_token"], "refreshed");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

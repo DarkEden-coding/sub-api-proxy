@@ -1975,7 +1975,46 @@ impl CredentialStore {
     /// Replaces the credential set (watcher reload, management import/delete). Unchanged
     /// credentials keep their revision; new and changed ones get fresh revisions.
     pub fn reconcile(&self, credentials: Vec<Credential>) {
+        self.reconcile_scanned(credentials, &std::collections::BTreeMap::new());
+    }
+
+    /// [`Self::reconcile`] for an auth-folder scan; `read` has the SHA-256 of the bytes
+    /// each file credential was built from. Go c4c1d43e: a scanned credential that would
+    /// replace the current one is applied only while its file still holds those bytes.
+    /// Otherwise a write committed after the scan read the file (a token refresh, an
+    /// edit) has changed it, and the current credential is kept: the stale snapshot
+    /// would undo that write, and the watcher reloads the file it sees changed. A file
+    /// that is gone or unreadable keeps the current credential too. The check runs
+    /// under the exclusive reload gate, so no write lands between it and the swap, but
+    /// before `inner` is taken, so its file reads never stall readers.
+    pub fn reconcile_scanned(
+        &self,
+        credentials: Vec<Credential>,
+        read: &std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>,
+    ) {
+        use sha2::{Digest, Sha256};
         let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
+        let mut credentials = credentials;
+        if !read.is_empty() {
+            let current = self.snapshot();
+            for cred in &mut credentials {
+                let Source::File(path) = &cred.source else { continue };
+                let Some(seen) = read.get(path) else { continue };
+                let Some(existing) = current.iter().find(|c| c.id == cred.id) else {
+                    continue;
+                };
+                if unchanged(existing, cred) {
+                    continue;
+                }
+                let on_disk: Option<[u8; 32]> = std::fs::read(path)
+                    .ok()
+                    .filter(|data| !data.is_empty())
+                    .map(|data| Sha256::digest(&data).into());
+                if on_disk.as_ref() != Some(seen) {
+                    *cred = Credential::clone(existing);
+                }
+            }
+        }
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let mut next = Vec::with_capacity(credentials.len());
         for mut cred in credentials {
@@ -2975,6 +3014,59 @@ mod tests {
         let ids: Vec<String> = store.snapshot().iter().map(|c| c.id.clone()).collect();
         assert_eq!(ids, ["b.json"]);
         assert_eq!(store.get("b.json").unwrap().metadata["access_token"], "renamed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Go c4c1d43e `TestFileSnapshotCannotOverwriteLaterPersistedPrefix`: a scan that
+    /// read a file before a later write cannot undo that write; a real edit still
+    /// applies; a file gone or unreadable since the scan keeps the current credential.
+    #[test]
+    fn a_stale_scan_cannot_undo_a_later_write() {
+        let dir = std::env::temp_dir().join(format!("cpa-stale-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("synthetic.json");
+        let write = |prefix: &str| std::fs::write(&path, format!(r#"{{"type":"codex","prefix":"{prefix}"}}"#)).unwrap();
+        let mut cfg = cpa_core::config::Config::parse("").unwrap();
+        cfg.auth_dir = dir.clone();
+        let scan = || cpa_core::config::credentials::scan_auth_dir(&cfg);
+        write("pfx-8");
+        let store = CredentialStore::new(scan().credentials);
+        let stale = scan();
+        let revision = store.get("synthetic.json").unwrap().revision;
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("prefix".into(), "pfx-9".into());
+        store.apply_patch("synthetic.json", revision, &patch).unwrap();
+        let current = || store.get("synthetic.json").unwrap();
+        let before = current();
+        store.reconcile_scanned(stale.credentials, &stale.read);
+        assert_eq!(
+            current().metadata["prefix"],
+            "pfx-9",
+            "the stale scan overwrote the write"
+        );
+        assert_eq!(current().revision, before.revision);
+        write("manual-edit");
+        let manual = scan();
+        store.reconcile_scanned(manual.credentials, &manual.read);
+        assert_eq!(current().metadata["prefix"], "manual-edit", "a real edit was lost");
+        let before = current();
+        write("deleted-edit");
+        let deleted = scan();
+        std::fs::remove_file(&path).unwrap();
+        store.reconcile_scanned(deleted.credentials.clone(), &deleted.read);
+        assert_eq!(
+            current().revision,
+            before.revision,
+            "a deleted file's snapshot was applied"
+        );
+        std::fs::create_dir(&path).unwrap();
+        store.reconcile_scanned(deleted.credentials, &deleted.read);
+        assert_eq!(
+            current().revision,
+            before.revision,
+            "an unreadable file's snapshot was applied"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

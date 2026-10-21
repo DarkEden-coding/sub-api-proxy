@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
 use cpa_core::config::{Config, ConfigDocument, archive_comments, credentials, is_bcrypt};
-use cpa_core::credential::{Credential, Source};
+use cpa_core::credential::Source;
 use serde_json::{Value, json};
 
 use crate::Runtime;
@@ -233,12 +233,14 @@ impl Management {
     /// Publishes a config and everything Go derives from it on reload: scheduler
     /// policy, management availability, and the credential set (auth-dir files plus
     /// config API keys). `files` replaces the auth-dir scan when the caller already
-    /// has a reconciled list. Callers hold `disk`. Infallible on purpose: access
-    /// settings of a valid config (a rotated or removed secret) always take effect.
-    pub(crate) fn publish(&self, cfg: Config, files: Option<Vec<Credential>>) {
+    /// has one; its file hashes keep a stale scan from undoing a later write (Go
+    /// c4c1d43e). Callers hold `disk`. Infallible on purpose: access settings of a
+    /// valid config (a rotated or removed secret) always take effect.
+    pub(crate) fn publish(&self, cfg: Config, files: Option<credentials::AuthScan>) {
         let mut cfg = cfg;
         self.lock_auth_dir(&mut cfg);
-        let mut all = files.unwrap_or_else(|| credentials::from_auth_dir(&cfg));
+        let scan = files.unwrap_or_else(|| credentials::scan_auth_dir(&cfg));
+        let mut all = scan.credentials;
         // Fallbacks follow their file: gone with it, replaced once a synthesizer
         // claims it, otherwise rebuilt from its current content.
         let mut fallbacks = self.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -267,7 +269,7 @@ impl Management {
         self.rt.usage_queue().configure(self.access.available(), &cfg);
         let policy = policy(&cfg);
         self.rt.publish_config_and_policy(cfg, policy);
-        self.rt.store().reconcile(all);
+        self.rt.store().reconcile_scanned(all, &scan.read);
         // Go's watcher calls redisqueue.NotifyUsageRefresh after every client reload.
         self.rt.usage_queue().notify_usage_refresh();
     }
