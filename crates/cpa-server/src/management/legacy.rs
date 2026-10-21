@@ -1,10 +1,8 @@
 //! Go's v0 management routes (`internal/api/server_management.go`) that predate the v8
-//! tree. Reads render Go's runtime `Config` view ([`view`]); writes go through the v8
-//! config writer ([`super::config_sync`]) and the v8 OAuth and logs handlers, so v0 and
+//! tree. Reads render Go's runtime `Config` view ([`view`]); writes go through
+//! [`super::v0_save`], which keeps a legacy-layout file in its layout and sends a v8
+//! file to the v8 config writer, and through the v8 OAuth and logs handlers, so v0 and
 //! v8 share one implementation as they do in Go.
-//!
-//! Deliberate difference: Go's v0 saver keeps a legacy-layout file in the legacy
-//! layout; the shared v8 writer migrates it on the first write, as a v8 write does.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -254,7 +252,7 @@ async fn save_error(res: Response) -> Response {
 
 /// Where a v0 save lands: its v8 document path, and the legacy path (`/`-separated) a
 /// file without v8 sections keeps it at, since Go v8.0.35 saves such a file in its
-/// legacy layout ([`super::legacy_sync`]).
+/// legacy layout ([`super::v0_save`]).
 pub(super) struct Target {
     v8: String,
     legacy: String,
@@ -273,13 +271,8 @@ async fn save(state: Arc<Management>, t: Target, v8: Option<Value>, legacy: supe
     let delete = v8.is_none();
     let res = tokio::task::spawn_blocking(move || {
         let parts: Vec<&str> = t.legacy.split('/').collect();
-        super::legacy_sync(&state, &parts, legacy).unwrap_or_else(|| {
-            let path = format!("/v8/management/config/{}", t.v8);
-            match v8 {
-                Some(value) => super::config_sync(&state, &path, Method::PUT, &[], value.to_string().as_bytes()),
-                None => super::config_sync(&state, &path, Method::DELETE, &[], b""),
-            }
-        })
+        let path = format!("/v8/management/config/{}", t.v8);
+        super::v0_save(&state, &parts, legacy, super::V8Edit { path: &path, value: v8 })
     })
     .await
     .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
@@ -805,6 +798,63 @@ pub(crate) async fn vertex_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A v0 setter chooses its writer and writes under one `disk` lock: an upload that
+    /// arrives after the setter saw a v8 file waits, and then replaces the file, so the
+    /// uploaded legacy file is never migrated (its `codex-header-defaults` stays shared).
+    #[tokio::test]
+    async fn a_v0_save_holds_the_disk_lock_from_layout_to_write() {
+        let dir = std::env::temp_dir().join(format!("cpa-v0-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let auth = format!("{}", dir.display());
+        std::fs::write(&path, format!("config-version: 8\noauth: {{auth-dir: {auth}}}\n")).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::with_options(rt, path.clone(), Default::default());
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        *super::super::AFTER_LAYOUT.lock().unwrap() = Some((
+            path.clone(),
+            Box::new(move || {
+                seen_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }),
+        ));
+        let setter = tokio::spawn(field_route(
+            State(state.clone()),
+            OriginalUri("/v0/management/request-retry".parse().unwrap()),
+            Method::PUT,
+            Bytes::from(r#"{"value":2}"#),
+        ));
+        tokio::task::spawn_blocking(move || seen.recv().unwrap()).await.unwrap();
+        let upload =
+            format!("auth-dir: {auth}\nrequest-retry: 3\ncodex-header-defaults: {{user-agent: legacy-agent}}\n");
+        let uploading = tokio::spawn(put_config_yaml(State(state.clone()), Bytes::from(upload.clone())));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!uploading.is_finished(), "the upload waits for the setter's save");
+        release.send(()).unwrap();
+        assert_eq!(setter.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(uploading.await.unwrap().status(), StatusCode::OK);
+        *super::super::AFTER_LAYOUT.lock().unwrap() = None;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), upload);
+        let cfg = state.rt.config();
+        let api = cfg.for_api_key();
+        let ua = &api.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"];
+        assert_eq!(ua.as_str(), Some("legacy-agent"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn value_binding_follows_gin() {

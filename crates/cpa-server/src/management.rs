@@ -777,6 +777,11 @@ pub(crate) fn config_sync(
     body: &[u8],
 ) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+    config_sync_locked(state, path, method, if_match, body)
+}
+
+/// [`config_sync`] for a caller already holding `state.disk`.
+fn config_sync_locked(state: &Management, path: &str, method: Method, if_match: &[String], body: &[u8]) -> Response {
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
@@ -1012,55 +1017,102 @@ pub(crate) enum LegacyEdit {
     Keep,
 }
 
-/// Go v8.0.35 `SaveConfigPreserveComments` for a file without v8 sections: a v0 save
-/// keeps the legacy layout, so legacy settings keep their scope (a legacy
-/// `codex-header-defaults` still applies to API keys). `None` when the file is in the
-/// v8 layout, for the caller to save through [`config_sync`].
-/// ponytail: only the edited key changes; Go also merges its whole typed legacy render
-/// into the file and drops removed integration keys. Port `mergeMappingPreserve` here
-/// if a difference in the saved file matters.
-pub(crate) fn legacy_sync(state: &Management, path: &[&str], edit: LegacyEdit) -> Option<Response> {
+/// A v0 save at the v8 path: `Some(value)` replaces it, `None` deletes it.
+pub(crate) struct V8Edit<'a> {
+    pub path: &'a str,
+    pub value: Option<Value>,
+}
+
+/// Test pause point once [`v0_save`] has chosen a layout, for the config file it names.
+#[cfg(test)]
+pub(crate) static AFTER_LAYOUT: Mutex<Option<(PathBuf, LayoutHook)>> = Mutex::new(None);
+#[cfg(test)]
+pub(crate) type LayoutHook = Box<dyn Fn() + Send>;
+
+/// Go v8.0.35 `SaveConfigPreserveComments`: a v0 save keeps a file without v8 sections
+/// in its legacy layout, so legacy settings keep their scope (a legacy
+/// `codex-header-defaults` still applies to API keys); a v8 file saves through the v8
+/// writer. One `disk` lock covers the layout check and the chosen write, so an upload
+/// cannot change the layout in between.
+/// ponytail: the legacy branch changes only the edited key; Go also merges its whole
+/// typed legacy render into the file and drops removed integration keys. Port
+/// `mergeMappingPreserve` here if a difference in the saved file matters.
+pub(crate) fn v0_save(state: &Management, legacy: &[&str], edit: LegacyEdit, v8: V8Edit) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
-        Err(_) => return Some(error(500, "read_failed")),
+        Err(_) => return error(500, "read_failed"),
     };
-    let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(&original).ok()?;
-    if !raw.is_mapping() || cpa_core::config::is_v8_layout(&raw) {
-        return None;
+    // Go's saver works on the alias- and merge-expanded root mapping (`flattenV8`).
+    let mut root: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&original) {
+        Ok(v) => v,
+        Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    if let Err(e) = cpa_core::config::expand_merges(&mut root) {
+        return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
-    let mut doc = ConfigDocument::unmigrated(raw);
+    if !root.is_mapping() {
+        return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, "expected root mapping node");
+    }
+    #[cfg(test)]
+    if let Some((path, hook)) = AFTER_LAYOUT.lock().unwrap().as_ref()
+        && *path == state.path
+    {
+        hook();
+    }
+    if cpa_core::config::is_v8_layout(&root) {
+        return match v8.value {
+            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes()),
+            None => config_sync_locked(state, v8.path, Method::DELETE, &[], b""),
+        };
+    }
+    let mut doc = ConfigDocument::unmigrated(root);
     match edit {
         LegacyEdit::Set(value) => {
             let value = match serde_yaml_ng::to_value(value) {
                 Ok(v) => v,
-                Err(e) => return Some(invalid_config(StatusCode::BAD_REQUEST, e)),
+                Err(e) => return invalid_config(StatusCode::BAD_REQUEST, e),
             };
-            if doc.update(path, value, false).is_err() {
-                return Some(error(400, "invalid_path"));
+            if doc.update(legacy, value, false).is_err() {
+                return error(400, "invalid_path");
             }
         }
         LegacyEdit::Delete => {
-            doc.delete(path);
+            doc.delete(legacy);
         }
         LegacyEdit::Keep => {}
     }
+    // Go saves its in-memory config, whose key is hashed on load; a plaintext key
+    // edited into the file since must not be published.
+    let secret = ["remote-management", "secret-key"];
+    if let Some(key) = doc.get(&secret).and_then(serde_yaml_ng::Value::as_str)
+        && !key.is_empty()
+        && !is_bcrypt(key)
+    {
+        let hash = match bcrypt::hash(key, bcrypt::DEFAULT_COST) {
+            Ok(v) => v,
+            Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
+        };
+        if doc.update(&secret, hash.into(), false).is_err() {
+            return error(422, "invalid_config");
+        }
+    }
     let text = match doc.render_preserving(&original) {
         Ok(v) => v,
-        Err(e) => return Some(invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e)),
+        Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let cfg = match Config::parse(&text) {
         Ok(v) => v,
-        Err(e) => return Some(invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e)),
+        Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
     if let Err(e) = ConfigDocument::write(&state.path, &text) {
-        return Some(json(
+        return json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &json!({"error": "write_failed", "message": e.to_string()}),
-        ));
+        );
     }
     state.publish(cfg, None);
-    Some(json(StatusCode::OK, &json!({"status": "ok"})))
+    json(StatusCode::OK, &json!({"status": "ok"}))
 }
 
 /// Go `liveAuthIndexFromManager`: the index each config-backed credential carries.
