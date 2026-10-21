@@ -26,9 +26,9 @@ Columns:
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
-| Credentials, selection and cooldowns | 22 | 2 | 20 | 0 | 0 | 0 |
+| Credentials, selection and cooldowns | 22 | 3 | 19 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
+| Config and Management API | 15 | 3 | 12 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
 | Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **29** | **195** | **0** | **61** | **3** |
+| **All** | **288** | **31** | **193** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -231,10 +231,10 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`8a01bc02`](https://github.com/router-for-me/CLIProxyAPI/commit/8a01bc02) | feat(auth): introduce mutation locking and persistence delta merging | no | to port | M (+210 −30) | mutation locking and persistence delta merging |
 | [`50d5fe18`](https://github.com/router-for-me/CLIProxyAPI/commit/50d5fe18) | fix(cliproxy): avoid selecting rejected credentials during refresh and preserve active quota cooldowns | yes | to port | M (+68 −6) | rejected credentials not selected during refresh; quota cooldowns kept |
 | [`6920ed5d`](https://github.com/router-for-me/CLIProxyAPI/commit/6920ed5d) | fix(cliproxy): propagate credential version and registration epoch in execution results | no | to port | M (+80 −18) | credential version and registration epoch in results |
-| [`935aa6e3`](https://github.com/router-for-me/CLIProxyAPI/commit/935aa6e3) | fix(cliproxy): prevent in-flight token refresh from overwriting concurrently updated credentials | yes | to port | S (+6 −0) | in-flight refresh does not overwrite a newer credential |
+| [`935aa6e3`](https://github.com/router-for-me/CLIProxyAPI/commit/935aa6e3) | fix(cliproxy): prevent in-flight token refresh from overwriting concurrently updated credentials | yes | ported here | S (+6 −0) | a refresh that lands after the tokens were saved is dropped and answers with them; another edit is merged with it like Go `mergeAuthContent`, with the Codex outer tokens gated as one partition; Go's registration-epoch and credential-version guards are not ported |
 | [`7c2133e2`](https://github.com/router-for-me/CLIProxyAPI/commit/7c2133e2) | fix(cliproxy): reconcile concurrent auth updates during batch model registration | no | to port | S (+39 −8) | concurrent auth updates during batch model registration |
 | [`4a8ecf5c`](https://github.com/router-for-me/CLIProxyAPI/commit/4a8ecf5c) | fix(auth): skip local filtering for home dispatch | yes | to port | S (+7 −2) | Home dispatch skips local filtering |
-| [`5dbd92a0`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbd92a0) | fix(auth): preserve upstream error cooldown on canceled stream contexts | yes | to port | S (+39 −4) | upstream error cooldown kept on canceled streams |
+| [`5dbd92a0`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbd92a0) | fix(auth): preserve upstream error cooldown on canceled stream contexts | yes | to port | S (+39 −4) | partly covered: a Codex WebSocket error leaves the turn's stream in the same poll that reports the lost socket (test added). A cancellation while an executor has cooldown headers but is still awaiting the error body still discards the cooldown; Go keeps it through `recordCanceledUpstreamCooldown`. Claude awaits a 429 body before classifying it, so the fix waits for the post-replay set |
 | [`7a687f42`](https://github.com/router-for-me/CLIProxyAPI/commit/7a687f42) | feat(routing): support session-affinity-rebind-on option | yes | to port | L (+297 −19) | `session-affinity-rebind-on` |
 | [`56eee6a4`](https://github.com/router-for-me/CLIProxyAPI/commit/56eee6a4) | fix(cliproxy): treat HTTP/2 closed connection errors as transient lifecycle drops | yes | ported here | S (+11 −4) | the classifier came with #73; replays its statusless Go cases (no cooldown, a retry round) |
 | [`08e5762a`](https://github.com/router-for-me/CLIProxyAPI/commit/08e5762a) | fix(cliproxy): add model registration fencings and epoch-checked publications to prevent superseded updates | yes | to port | L (+298 −45) | add model registration fencings and epoch-checked publications to prevent superseded updates |
@@ -270,7 +270,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
 | [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | ported here | L (+205 −156) | shared `upstream` provider settings; API keys see them, only the `oauth.providers` leftovers stay OAuth-only; `/v8/management/config/upstream/...` |
-| [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | to port | M (+212 −46) | historical v8 config aliases: reads, writes, bodies, comments and the v8-layout check ported; explicit `null` handling waits for the direct v8 save |
+| [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | ported here | M (+212 −46) | historical v8 config aliases: reads, writes, bodies, comments, the v8-layout check and the direct v8 save (explicit `null` kept) ported; Go's `parse config payload: ` message prefix and the whole typed render of a legacy v0 save remain partial under M5-0308 |
 | [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | to port | L (+503 −8) | auth indexes in v8 `api-keys` |
 | [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |
 | [`0a23627d`](https://github.com/router-for-me/CLIProxyAPI/commit/0a23627d) | fix(config): normalize collection styles and unquote mapping keys in v8 api | yes | to port | S (+20 −7) | v8 API: collection styles and quoted mapping keys |

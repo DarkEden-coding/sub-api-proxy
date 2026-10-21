@@ -23,7 +23,7 @@ mod trusted;
 mod validate;
 pub use document::{ConfigDocument, archive_comments, is_v8_layout};
 pub use schema::validate as validate_config_fields;
-pub use schema::{coerce_typed_scalars, go_bool, go_int, written_bool_spelling};
+pub use schema::{coerce_typed_scalars, go_bool, go_int};
 
 /// Go `expandConfigAliases` plus yaml.v3's merge rules: `<<` keys expand bottom-up
 /// (nested merges first); explicit keys win, then earlier merged mappings. A merge
