@@ -503,7 +503,12 @@ impl PluginRuntime {
     /// Go `configaccess.Register` then `RegisterFrontendAuthProviders`: register or
     /// unregister the client-key provider, register each plugin provider, set the
     /// exclusive key, and drop plugin keys no longer offered.
-    fn register_access(&self, client_keys: bool, providers: Vec<(String, String)>, exclusive: Option<String>) {
+    pub(crate) fn register_access(
+        &self,
+        client_keys: bool,
+        providers: Vec<(String, String)>,
+        exclusive: Option<String>,
+    ) {
         let mut slot = self.access.write().unwrap_or_else(|e| e.into_inner());
         let mut next = AccessRegistry {
             order: slot.order.clone(),
@@ -592,6 +597,14 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                             outcome = Some(Err(Denied {
                                 status: 413,
                                 message: "request body too large",
+                            }));
+                            break;
+                        }
+                        // Go `NewRequestEntityTooLargeError` (dd7b4334).
+                        Err(error) if crate::body_limit::is_too_large(&error) => {
+                            outcome = Some(Err(Denied {
+                                status: 413,
+                                message: crate::body_limit::MESSAGE,
                             }));
                             break;
                         }

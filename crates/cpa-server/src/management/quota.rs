@@ -388,8 +388,12 @@ pub(crate) async fn get_plugin(
 pub(crate) async fn fetch_plugin(
     State(state): State<Arc<Management>>,
     UrlPath(id): UrlPath<String>,
-    body: Bytes,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
     let Some(body) = QuotaBody::decode(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
@@ -433,9 +437,14 @@ pub(crate) async fn reset_plugin(
     if index.is_empty() {
         // Go reads the body only here and ignores binding errors, keeping whatever
         // fields did bind.
-        let body = axum::body::to_bytes(req.into_body(), usize::MAX)
-            .await
-            .unwrap_or_default();
+        let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+            Ok(body) => body,
+            // dd7b4334: the configured body limit is the one read error Go reports.
+            Err(error) if crate::body_limit::is_too_large(&error) => {
+                return fail(StatusCode::PAYLOAD_TOO_LARGE, crate::body_limit::MESSAGE);
+            }
+            Err(_) => Bytes::new(),
+        };
         index = QuotaBody::bind(&body).0.auth_index();
     }
     if index.is_empty() {

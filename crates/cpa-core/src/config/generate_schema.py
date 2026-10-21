@@ -99,6 +99,8 @@ schema["fields"]["config-version"] = "version"
 # v8.0.35 345cc9d5 and b3dc6c3f (SDKConfig.TLSHandshakeTimeoutSeconds), with its legacy
 # root spelling in buildV8Paths.
 put("requests.tls-handshake-timeout-seconds", "int")
+# v8.0.35 dd7b4334 (SDKConfig.MaxRequestBodyBytes), legacy root spelling in buildV8Paths.
+put("server.max-request-body-bytes", "int")
 # cliproxy-rs additions (docs/DIFFERENCES-FROM-GO.md). Go starts with them and ignores
 # them; a config edit through its v8 Management API moves them into comments.
 put("oauth.providers.codex.chatgpt-keep-alive", "bool")

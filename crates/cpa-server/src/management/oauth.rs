@@ -1421,7 +1421,15 @@ pub(crate) async fn callback_get(
 /// Go `PostOAuthCallback`: gin's `ShouldBindJSON` into `oauthCallbackRequest`
 /// (first JSON value, exact-then-case-insensitive names, type mismatches rejected).
 /// Under v8, `PostOAuthCallbackV8`, whose request also has `client_id`.
-pub(crate) async fn callback_post(State(state): State<Arc<Management>>, uri: axum::http::Uri, body: Bytes) -> Response {
+pub(crate) async fn callback_post(
+    State(state): State<Arc<Management>>,
+    uri: axum::http::Uri,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return status_error(super::read_status(&rejection), "invalid body"),
+    };
     let v8 = uri.path().starts_with("/v8/");
     const FIELDS: [&str; 6] = ["provider", "redirect_url", "code", "state", "error", "client_id"];
     let fields = if v8 { &FIELDS[..] } else { &FIELDS[..5] };

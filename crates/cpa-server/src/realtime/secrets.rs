@@ -119,8 +119,8 @@ fn body_error(error: super::http::ReadError) -> Response {
             "invalid_request_error",
             "invalid_request",
         ),
-        super::http::ReadError::Read(e) => realtime_error(
-            400,
+        super::http::ReadError::Read(e, status) => realtime_error(
+            status,
             &format!("failed to read Realtime client secret request: {e}"),
             "invalid_request_error",
             "invalid_request",
