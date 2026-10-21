@@ -2,7 +2,7 @@
 //! (internal/client/codex/optimize-multi-agent-v2: optimize_multi_agent_v2.go and
 //! orphan_delegation.go, and normalizeCodexInstructions).
 //!
-//! - Orphan delegation: with `oauth.providers.codex.orphan-delegation-compatibility` and
+//! - Orphan delegation: with `upstream.codex.orphan-delegation-compatibility` and
 //!   `X-Openai-Subagent: collab_spawn`, `codex_app` delegation outputs without a matching
 //!   call become user messages.
 //! - Multi-agent v2 (`client.codex.optimize-multi-agent-v2`, official Codex clients only):
@@ -37,8 +37,8 @@ pub const CLIENT_MODELS_JSON: &str = include_str!("codex_client_models.json");
 pub struct Settings {
     /// `client.codex.optimize-multi-agent-v2`.
     pub optimize_multi_agent_v2: bool,
-    /// `oauth.providers.codex.orphan-delegation-compatibility` (Go `cfg.Codex`). API-key
-    /// credentials read it from `Config::for_api_key`.
+    /// `upstream.codex.orphan-delegation-compatibility` (Go `cfg.Codex`), shared by every
+    /// credential kind.
     pub orphan_delegation: bool,
 }
 
@@ -52,22 +52,10 @@ impl Settings {
         };
         Self {
             optimize_multi_agent_v2: flag(&["client", "codex", "optimize-multi-agent-v2"]),
-            orphan_delegation: flag(&["oauth", "providers", "codex", ORPHAN_PATH]),
+            orphan_delegation: flag(&["upstream", "codex", "orphan-delegation-compatibility"]),
         }
-    }
-
-    /// The Responses API boundary's view (Go's handler `Cfg`): orphan delegation written in
-    /// v8 form under `oauth.providers.codex` is OAuth-only and does not apply there.
-    pub fn for_responses_handler(cfg: &Config) -> Self {
-        let mut settings = Self::from_config(cfg);
-        if cfg.oauth_only.contains(&format!("oauth.providers.codex.{ORPHAN_PATH}")) {
-            settings.orphan_delegation = false;
-        }
-        settings
     }
 }
-
-const ORPHAN_PATH: &str = "orphan-delegation-compatibility";
 
 /// Go's Responses handlers (`prepareCodexMultiAgentV2Tools`, then
 /// `prepareCodexOrphanDelegation`) on a request body before dispatch.

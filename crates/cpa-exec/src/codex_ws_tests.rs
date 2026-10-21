@@ -621,9 +621,8 @@ async fn reader_failure_before_the_turn_activates_fails_the_turn() {
 }
 
 /// With model-level cooling, a usage-limit handshake rejection cools only the model
-/// (`newCodexStatusErrWithCooling`); without it, the whole credential. API keys see
-/// `ForAPIKey`: the v8 `oauth.providers.codex` spelling is OAuth-only, the legacy
-/// top-level `codex` spelling stays global.
+/// (`newCodexStatusErrWithCooling`); without it, the whole credential. The setting is
+/// shared (`upstream.codex`, Go 52d5507d), so every spelling applies to API keys.
 #[tokio::test]
 async fn handshake_usage_limit_honours_model_level_cooling() {
     const LIMIT: &str = r#"{"error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":3600}}"#;
@@ -632,7 +631,11 @@ async fn handshake_usage_limit_honours_model_level_cooling() {
         ("codex:\n  model-level-cooling: true\n", FailureScope::Model),
         (
             "oauth:\n  providers:\n    codex:\n      model-level-cooling: true\n",
-            FailureScope::Credential,
+            FailureScope::Model,
+        ),
+        (
+            "upstream:\n  codex:\n    model-level-cooling: true\n",
+            FailureScope::Model,
         ),
     ] {
         let (up, url) = upstream(vec![]).await;

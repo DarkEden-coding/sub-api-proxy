@@ -28,7 +28,7 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 0 | 22 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 1 | 14 | 0 | 0 | 0 |
+| Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
 | Usage and logging | 3 | 0 | 3 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **24** | **200** | **0** | **61** | **3** |
+| **All** | **288** | **25** | **199** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -269,7 +269,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | to port | L (+205 −156) | shared `upstream` provider settings |
+| [`52d5507d`](https://github.com/router-for-me/CLIProxyAPI/commit/52d5507d) | feat(config): add shared upstream provider settings | yes | ported here | L (+205 −156) | shared `upstream` provider settings; API keys see them, only the `oauth.providers` leftovers stay OAuth-only; `/v8/management/config/upstream/...` |
 | [`3be5fa44`](https://github.com/router-for-me/CLIProxyAPI/commit/3be5fa44) | fix(config): support historical v8 aliases | yes | to port | M (+212 −46) | historical v8 config aliases |
 | [`0fb50a18`](https://github.com/router-for-me/CLIProxyAPI/commit/0fb50a18) | feat(management): inject auth indexes into v8 api-keys config | yes | to port | L (+503 −8) | auth indexes in v8 `api-keys` |
 | [`7c41cd05`](https://github.com/router-for-me/CLIProxyAPI/commit/7c41cd05) | feat: add global server GitHub token configuration | yes | to port | M (+78 −22) | global server GitHub token |

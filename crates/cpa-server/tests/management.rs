@@ -3042,6 +3042,140 @@ async fn config_writes_render_json_values_as_block_yaml() {
     server.abort();
 }
 
+/// Go `TestConfigV8SharedUpstreamRoundTrip` (52d5507d): a historical
+/// `oauth.providers.codex` shared field reads at `upstream/...` without a rewrite,
+/// upstream writes keep the OAuth-only header scope, and a write to the historical
+/// path is refused without touching the file.
+#[tokio::test]
+async fn config_shared_upstream_round_trip() {
+    let f = Fixture::from_yaml("upstream", |auth, hash| {
+        format!(
+            "management: {{secret-key: '{hash}'}}\noauth: {{auth-dir: {}, providers: {{codex: {{stream-bootstrap-buffering: true, header-defaults: {{user-agent: oauth-agent}}}}}}}}\n",
+            auth.display()
+        )
+    });
+    let raw = f.file();
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let send = |method, at: &str, body: &str| {
+        client
+            .request(method, format!("{base}/v8/management/config/{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body.to_owned())
+            .send()
+    };
+    let request = |method: wreq::Method, at: &'static str, body: &'static str, want: u16| {
+        let r = send(method.clone(), at, body);
+        async move {
+            let r = r.await.unwrap();
+            let status = r.status().as_u16();
+            let text = r.text().await.unwrap();
+            assert_eq!(status, want, "{method} {at}: {text}");
+            text
+        }
+    };
+    let got = request(wreq::Method::GET, "upstream/codex/stream-bootstrap-buffering", "", 200).await;
+    assert_eq!(got.trim(), "true");
+    assert_eq!(f.file(), raw, "GET rewrote the historical document");
+    request(
+        wreq::Method::PUT,
+        "upstream/codex/stream-bootstrap-buffering",
+        "false",
+        200,
+    )
+    .await;
+    request(wreq::Method::PUT, "oauth/auth-auto-refresh-workers", "3", 200).await;
+    request(
+        wreq::Method::PATCH,
+        "upstream/claude",
+        r#"{"header-defaults":{"timezone":"Asia/Singapore","stabilize-device-profile":false}}"#,
+        200,
+    )
+    .await;
+    let loaded = Config::parse(&f.file()).unwrap();
+    let api = loaded.for_api_key();
+    for cfg in [&loaded, &*api] {
+        let d = &cfg.document;
+        assert_eq!(
+            d["upstream"]["codex"]["stream-bootstrap-buffering"],
+            serde_yaml_ng::Value::Bool(false)
+        );
+        assert_eq!(d["upstream"]["claude"]["header-defaults"]["timezone"], "Asia/Singapore");
+        assert_eq!(d["oauth"]["auth-auto-refresh-workers"], 3);
+    }
+    assert_eq!(
+        loaded.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"],
+        "oauth-agent"
+    );
+    assert_eq!(
+        api.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"],
+        ""
+    );
+    let before = f.file();
+    // ponytail: 52d5507d refuses the historical path with 400; 3be5fa44 (v8.0.35)
+    // accepts it as an alias and answers 422 only for an invalid value. Ported next.
+    request(
+        wreq::Method::PUT,
+        "oauth/providers/codex/stream-bootstrap-buffering",
+        "true",
+        400,
+    )
+    .await;
+    assert_eq!(
+        f.file(),
+        before,
+        "a rejected historical-path write changed the document"
+    );
+    request(wreq::Method::DELETE, "upstream/claude", "", 200).await;
+    assert!(!request(wreq::Method::GET, "upstream/claude", "", 404).await.is_empty());
+    let loaded = Config::parse(&f.file()).unwrap();
+    assert!(
+        loaded.document.get("upstream").and_then(|u| u.get("claude")).is_none(),
+        "{}",
+        f.file()
+    );
+    server.abort();
+}
+
+/// A legacy file whose `codex` block holds a shared `upstream.codex` field keeps the
+/// comments of its other sections when a v8 or v0 setting save migrates it.
+#[tokio::test]
+async fn legacy_migration_with_a_shared_codex_field_keeps_other_comments() {
+    let f = Fixture::from_yaml("shared-codex", |auth, hash| {
+        format!(
+            "remote-management:\n  # keep this comment\n  secret-key: '{hash}'\nauth-dir: {}\ncodex: {{response-steering: true}}\n",
+            auth.display()
+        )
+    });
+    let raw = f.file();
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    for (at, body) in [
+        ("/v8/management/config/routing/retry/request-retry", "3"),
+        ("/v0/management/debug", r#"{"value":true}"#),
+    ] {
+        std::fs::write(f.dir.join("config.yaml"), &raw).unwrap();
+        let r = client
+            .put(format!("{base}{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{at}");
+        let file = f.file();
+        assert!(file.contains("management:\n  # keep this comment\n"), "{at}: {file}");
+        let cfg = Config::parse(&file).unwrap();
+        assert_eq!(
+            cfg.document["upstream"]["codex"]["response-steering"],
+            serde_yaml_ng::Value::Bool(true),
+            "{at}: {file}"
+        );
+        assert!(cfg.document.get("codex").is_none(), "{at}: {file}");
+    }
+    server.abort();
+}
+
 /// Go v8.0.35 Sign in with ChatGPT binding (`d50a1995`, `ae3ee3be`) against a local
 /// token endpoint: start validation, the legacy-callback refusal, callback forms and
 /// conflicts, the bound file, the v8 summary, failures, cancellation, and the v8-only

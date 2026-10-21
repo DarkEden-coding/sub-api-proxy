@@ -54,8 +54,7 @@ pub(crate) struct Settings {
     pub image_generation: bool,
     /// `requests.payload` rules and image-generation mode for this config snapshot.
     pub payload: cpa_common::payload::Rules,
-    /// Multi-agent v2 and orphan-delegation settings (Go reads them from `ForAPIKey` for
-    /// API keys, as [`Settings::scoped`] does).
+    /// Multi-agent v2 and orphan-delegation settings, both shared by every credential kind.
     pub client: cpa_common::codex_client::Settings,
     /// The `models` of the `codex-api-key` entry the credential resolves to.
     pub key_models: Vec<serde_json::Value>,
@@ -68,9 +67,9 @@ pub(crate) struct Settings {
     pub image_base_model: String,
 }
 
-/// `codex.response-steering` in its v8 home; the legacy key is already moved there.
+/// `upstream.codex.response-steering`; the older spellings are already moved there.
 pub(crate) fn response_steering(cfg: &Config) -> bool {
-    setting(cfg, &["oauth", "providers", "codex", "response-steering"])
+    setting(cfg, &["upstream", "codex", "response-steering"])
         .and_then(serde_yaml_ng::Value::as_bool)
         .unwrap_or(false)
 }
@@ -89,7 +88,8 @@ fn setting<'a>(cfg: &'a Config, path: &[&str]) -> Option<&'a serde_yaml_ng::Valu
 
 impl Settings {
     /// The settings `view`'s credential sees: API keys get Go's `ForAPIKey` view, where
-    /// `oauth.providers.codex.*` written in v8 form does not apply.
+    /// the OAuth-only `oauth.providers.codex.*` settings (the header defaults) do not
+    /// apply.
     pub fn scoped(cfg: &Config, view: &View<'_>) -> Self {
         let mut settings = if view.api_key {
             Self::from(&cfg.for_api_key())
@@ -146,7 +146,8 @@ impl Settings {
     }
 
     pub fn from(cfg: &Config) -> Self {
-        let codex = |k: &str| setting(cfg, &["oauth", "providers", "codex", k]);
+        // Shared settings (`upstream.codex`); the header defaults stay OAuth-only.
+        let codex = |k: &str| setting(cfg, &["upstream", "codex", k]);
         let flag = |k: &str| codex(k).and_then(|v| v.as_bool()).unwrap_or(false);
         let text = |path: &[&str]| {
             setting(cfg, path)

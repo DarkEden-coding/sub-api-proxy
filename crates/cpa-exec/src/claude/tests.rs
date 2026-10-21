@@ -1807,6 +1807,38 @@ async fn refused_versions_log_only_when_the_identity_is_replaced() {
     );
 }
 
+/// `upstream.claude.model-level-cooling` (Go 52d5507d) in every spelling, seen through
+/// the API-key view: off, a shared-window 429 cools the credential; on, the model.
+#[test]
+fn shared_window_429_follows_model_level_cooling() {
+    for (yaml, scope) in [
+        ("{}\n", FailureScope::Credential),
+        (
+            "upstream: {claude: {model-level-cooling: false}}\n",
+            FailureScope::Credential,
+        ),
+        ("upstream: {claude: {model-level-cooling: true}}\n", FailureScope::Model),
+        (
+            "oauth: {providers: {claude: {model-level-cooling: true}}}\n",
+            FailureScope::Model,
+        ),
+        ("claude: {model-level-cooling: true}\n", FailureScope::Model),
+    ] {
+        let cfg = Config::parse(yaml).unwrap();
+        let settings = settings::Settings::from_config(&cfg.for_api_key());
+        let mut headers = http::HeaderMap::new();
+        headers.insert("anthropic-ratelimit-unified-5h-status", "rejected".parse().unwrap());
+        let error = upstream_error(
+            429,
+            headers,
+            Bytes::from_static(b"{}"),
+            false,
+            settings.model_level_cooling,
+        );
+        assert_eq!(error.scope, scope, "{yaml}");
+    }
+}
+
 /// `tests/fixtures/claude_ratelimit_go.json`, recorded from v8.0.35 by
 /// `tests/reference/claude_ratelimit`: the per-minute 429 cooldown (db1bab01), the
 /// header-only cooldown it replaces, and the scope and retry of a classified and a fast

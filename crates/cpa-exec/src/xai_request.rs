@@ -69,12 +69,10 @@ pub(crate) fn requested_model(req: &ExecRequest) -> &str {
     }
 }
 
-/// `oauth.providers.xai.inject-x-search` as this credential sees it (Go binds
-/// `cfg.ForAPIKey()` for API-key credentials).
+/// `upstream.xai.inject-x-search`, shared by OAuth and API-key credentials.
 pub(crate) fn inject_x_search(cfg: &Config) -> bool {
     cfg.document
-        .get("oauth")
-        .and_then(|o| o.get("providers"))
+        .get("upstream")
         .and_then(|p| p.get("xai"))
         .and_then(|x| x.get("inject-x-search"))
         .and_then(serde_yaml_ng::Value::as_bool)
