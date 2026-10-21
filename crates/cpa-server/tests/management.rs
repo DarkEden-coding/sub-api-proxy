@@ -4503,7 +4503,7 @@ async fn v0_legacy_saves_expand_merges_and_hash_the_key() {
     );
     let (status, text) = call(
         &base,
-        wreq::Method::PUT,
+        wreq::Method::PATCH,
         "/v0/management/quota-exceeded/switch-project",
         r#"{"value":false}"#,
     )
