@@ -543,21 +543,37 @@ mod tests {
     async fn a_removed_and_recreated_file_keeps_its_credential() {
         let (state, dir) = state();
         let file = dir.join("a.json");
-        let good = r#"{"type":"codex","email":"a@example.com"}"#;
-        let loaded = |state: &Management| state.rt.store().snapshot().iter().any(|c| c.id == "a.json");
-        std::fs::write(&file, good).unwrap();
+        let good = |email: &str| format!(r#"{{"type":"codex","email":"{email}"}}"#);
+        let loaded = |state: &Management| {
+            state
+                .rt
+                .store()
+                .snapshot()
+                .iter()
+                .find(|c| c.id == "a.json")
+                .and_then(|c| c.str("email").map(str::to_owned))
+        };
+        std::fs::write(&file, good("a@example.com")).unwrap();
         reload(&state).unwrap();
-        assert!(loaded(&state));
+        assert_eq!(loaded(&state).as_deref(), Some("a@example.com"));
         std::fs::remove_file(&file).unwrap();
-        std::fs::write(&file, good).unwrap();
+        std::fs::write(&file, good("b@example.com")).unwrap();
         reload(&state).unwrap();
-        assert!(loaded(&state), "re-created before the reload");
+        assert_eq!(
+            loaded(&state).as_deref(),
+            Some("b@example.com"),
+            "re-created before the reload"
+        );
         std::fs::remove_file(&file).unwrap();
         reload(&state).unwrap();
-        assert!(!loaded(&state), "removed");
-        std::fs::write(&file, good).unwrap();
+        assert_eq!(loaded(&state), None, "removed");
+        std::fs::write(&file, good("c@example.com")).unwrap();
         reload(&state).unwrap();
-        assert!(loaded(&state), "re-created after the reload");
+        assert_eq!(
+            loaded(&state).as_deref(),
+            Some("c@example.com"),
+            "re-created after the reload"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

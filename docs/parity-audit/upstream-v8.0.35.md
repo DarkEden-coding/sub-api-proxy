@@ -26,7 +26,7 @@ Columns:
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
-| Credentials, selection and cooldowns | 22 | 2 | 18 | 0 | 2 | 0 |
+| Credentials, selection and cooldowns | 22 | 2 | 20 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
 | Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **29** | **193** | **0** | **63** | **3** |
+| **All** | **288** | **29** | **195** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -238,7 +238,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`7a687f42`](https://github.com/router-for-me/CLIProxyAPI/commit/7a687f42) | feat(routing): support session-affinity-rebind-on option | yes | to port | L (+297 −19) | `session-affinity-rebind-on` |
 | [`56eee6a4`](https://github.com/router-for-me/CLIProxyAPI/commit/56eee6a4) | fix(cliproxy): treat HTTP/2 closed connection errors as transient lifecycle drops | yes | ported here | S (+11 −4) | the classifier came with #73; replays its statusless Go cases (no cooldown, a retry round) |
 | [`08e5762a`](https://github.com/router-for-me/CLIProxyAPI/commit/08e5762a) | fix(cliproxy): add model registration fencings and epoch-checked publications to prevent superseded updates | yes | to port | L (+298 −45) | add model registration fencings and epoch-checked publications to prevent superseded updates |
-| [`5fc580b1`](https://github.com/router-for-me/CLIProxyAPI/commit/5fc580b1) | feat(watcher): add file removal tracking and single-file auth snapshotting for robust deletion reconciliation | yes | nothing to port | M (+164 −6) | each reload rebuilds the credentials from a fresh scan of the auth folder, so a delete cannot outlive a re-created file; test added |
+| [`5fc580b1`](https://github.com/router-for-me/CLIProxyAPI/commit/5fc580b1) | feat(watcher): add file removal tracking and single-file auth snapshotting for robust deletion reconciliation | yes | to port | M (+164 −6) | partly covered: each reload rebuilds the credentials from a fresh scan of the auth folder, so a delete cannot outlive a re-created file (test added), and Go's queued per-ID deletes need no counterpart. Go's REMOVE path still keeps a credential that Rust drops: a stat error other than not-found, a failed single-file snapshot (including a plugin parse error under StrictFileParsing), or a snapshot with no valid IDs, such as `{}` or JSON that synthesis rejects |
 | [`1631875b`](https://github.com/router-for-me/CLIProxyAPI/commit/1631875b) | fix(watcher): guard management saves against stale config reloads and serialize file updates | yes | to port | M (+129 −47) | guard management saves against stale config reloads and serialize file updates |
 | [`35af74f9`](https://github.com/router-for-me/CLIProxyAPI/commit/35af74f9) | fix(auth): protect active model and credential cooldowns from being cleared by stale in-flight execution successes | yes | ported here | M (+137 −25) | per-dispatch stamp right before each execution (after the after-auth interceptor; also refresh retries, pooled models, the credits lease); a success at or before a live cooldown's watermark leaves it; replays four of the five issue 6643 tests (M4-0573 lists the auth-level 429 gap) |
 | [`c4c1d43e`](https://github.com/router-for-me/CLIProxyAPI/commit/c4c1d43e) | feat(auth): prevent stale file snapshots from overwriting later persisted state | yes | to port | M (+133 −2) | prevent stale file snapshots from overwriting later persisted state |
@@ -246,7 +246,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`b015f208`](https://github.com/router-for-me/CLIProxyAPI/commit/b015f208) | fix(oauth): restore credential exclusion priority | yes | to port | S (+28 −14) | restore credential exclusion priority |
 | [`94d1a9a0`](https://github.com/router-for-me/CLIProxyAPI/commit/94d1a9a0) | Refactor authentication exclusion handling and improve model registration | yes | to port | M (+157 −116) | Refactor authentication exclusion handling and improve model registration |
 | [`1a28c61e`](https://github.com/router-for-me/CLIProxyAPI/commit/1a28c61e) | fix(auth): tolerate invalid excluded models on load | yes | to port | M (+40 −23) | tolerate invalid excluded models on load |
-| [`7484a521`](https://github.com/router-for-me/CLIProxyAPI/commit/7484a521) | feat(watcher): protect credentials from unindexed deletion during incomplete or in-place file writes | yes | nothing to port | L (+288 −70) | the scan's own read keeps the credential of an empty or invalid-JSON file (came with #77); provider-reload buffering has no counterpart, since every reload rebuilds from disk |
+| [`7484a521`](https://github.com/router-for-me/CLIProxyAPI/commit/7484a521) | feat(watcher): protect credentials from unindexed deletion during incomplete or in-place file writes | yes | to port | L (+288 −70) | partly covered: the scan's own read keeps the credential of an empty or invalid-JSON file (came with #77), and provider-reload buffering has no counterpart, since every reload rebuilds from disk. Gap: Go invalidates cached hashes after an incomplete read; here a file truncated between the watcher's observation and the scan, then completed before the next observation, is recorded as applied, so the old credential stays until another change (fix belongs in the watcher's applied-snapshot bookkeeping, queued with 1631875b) |
 | [`feb63984`](https://github.com/router-for-me/CLIProxyAPI/commit/feb63984) | feat(auth): increase Codex proactive refresh lead to 96 hours and improve rejected token handling | yes | to port | M (+52 −18) | increase Codex proactive refresh lead to 96 hours and improve rejected token handling |
 
 ## Model registry and catalogs
