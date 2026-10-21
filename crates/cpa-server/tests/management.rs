@@ -1318,6 +1318,20 @@ async fn excluded_models_writes_are_validated() {
         );
         assert!(!auth.join("bad.json").exists(), "{content}: nothing is written");
     }
+    // The alias is canonicalized first, as Go's NormalizeCredentialMetadata does.
+    let r = client
+        .post(format!("{base}/v8/management/credentials?name=bad.json"))
+        .bearer_auth("fake-management-only")
+        .body(r#"{"type":"codex","excluded-models":["a",true]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.text().await.unwrap(),
+        r#"{"error":"invalid auth file: metadata excluded_models[1] must be a string, got bool"}"#
+    );
+    assert!(!auth.join("bad.json").exists());
     server.abort();
 }
 
