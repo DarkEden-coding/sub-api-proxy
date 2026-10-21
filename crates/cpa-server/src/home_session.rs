@@ -318,7 +318,9 @@ impl SessionHome {
         }
     }
 
-    /// Go `GetExecutionSessionAuthByID`: a Home credential a live kept pick holds.
+    /// Go `GetExecutionSessionAuthByID`: a Home credential a live kept pick holds. Every
+    /// pick ends before it drops (a session's `Kept` holds it, an attempt's `PickGuard`
+    /// closes it), so no entry outlives its owner.
     pub(crate) fn auth(&self, id: &str) -> Option<Arc<Credential>> {
         self.auths
             .lock()

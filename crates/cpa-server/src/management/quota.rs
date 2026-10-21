@@ -184,11 +184,25 @@ fn physical(c: &Credential) -> Option<AuthView> {
 
 /// Go `Auth.Attributes` of a credential. cpa-core keeps Go's `Auth.Prefix` and
 /// `Auth.ProxyURL` fields as the `prefix` and `proxy_url` attributes; Go's synthesizers
-/// never put those keys in the attribute map plugins see.
+/// never put those keys in the attribute map plugins see. A Home credential also
+/// carries what Go keeps outside `Auth.Attributes`: its runtime state (`Auth.Status`,
+/// `ModelStates`, ...), auth index (`Auth.Index`) and own provider (`Auth.Provider`), the selection's model info and
+/// sessions, and the resolved model options (request metadata in Go).
 pub(crate) fn go_attributes(c: &Credential) -> std::collections::BTreeMap<String, String> {
     let mut attributes = c.attributes.clone();
-    attributes.remove("prefix");
-    attributes.remove("proxy_url");
+    for key in [
+        "prefix",
+        "proxy_url",
+        crate::remote::AVAILABILITY,
+        crate::remote::MODEL_INFO,
+        crate::remote::SESSION,
+        crate::remote::PARENT_SESSION,
+        credentials::HOME_AUTH_INDEX,
+        credentials::HOME_MODEL_OPTIONS,
+        credentials::HOME_PROVIDER,
+    ] {
+        attributes.remove(key);
+    }
     attributes
 }
 
@@ -468,4 +482,33 @@ pub(crate) async fn reset_plugin(
         Err(e) => return fail(StatusCode::BAD_GATEWAY, &format!("failed to reset quota: {e}")),
     };
     finish_reset(&state, &auth, &index, resp, "quota reset rejected by plugin")
+}
+
+#[cfg(test)]
+mod tests {
+    /// What plugins receive as `auth_attributes` (executor and quota requests): a Home
+    /// credential's private state stays out, Go's own Home attributes stay in.
+    #[test]
+    fn plugin_attributes_leave_out_home_private_state() {
+        let mut c = cpa_core::credential::Credential::relay_session("home-a");
+        for (key, value) in [
+            ("base_url", "http://127.0.0.1:9"),
+            (crate::remote::UPSTREAM_MODEL, "gpt-up"),
+            (crate::remote::AVAILABILITY, r#"{"unavailable":true}"#),
+            (crate::remote::MODEL_INFO, r#"{"id":"gpt-up"}"#),
+            (crate::remote::SESSION, "s1"),
+            (crate::remote::PARENT_SESSION, "s0"),
+            (super::credentials::HOME_AUTH_INDEX, "idx"),
+            (super::credentials::HOME_MODEL_OPTIONS, "{}"),
+            (super::credentials::HOME_PROVIDER, "openai-compatible-probe"),
+            ("prefix", "team"),
+        ] {
+            c.attributes.insert(key.into(), value.into());
+        }
+        let attributes = super::go_attributes(&c);
+        assert_eq!(
+            attributes.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["base_url", crate::remote::UPSTREAM_MODEL, "runtime_only"]
+        );
+    }
 }

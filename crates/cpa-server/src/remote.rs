@@ -32,58 +32,192 @@ pub const MODEL_INFO: &str = "home_model_info";
 pub const SESSION: &str = "home_session_id";
 /// Its parent (Go `HomeDispatchSelection.ParentSessionID`).
 pub const PARENT_SESSION: &str = "home_parent_session_id";
-/// The dispatched auth's runtime availability as Home sent it: a JSON object with Go's
-/// `status`, `unavailable`, `next_retry_after` and `model_states` fields, those present.
+/// The dispatched auth's runtime availability ([`Availability`] as JSON), which only
+/// the Home credential decoder sets.
 pub const AVAILABILITY: &str = "home_availability";
+
+/// The runtime state Go keeps on a dispatched `coreauth.Auth` (`status`, `unavailable`,
+/// `next_retry_after`, `model_states`) and the Responses WebSocket pin check reads,
+/// decoded as Go's typed JSON decoding does.
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Availability {
+    #[serde(flatten)]
+    state: State,
+    /// A `null` entry is Go's nil state: present, but never consulted.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    model_states: std::collections::BTreeMap<String, Option<State>>,
+}
+
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct State {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    status: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    unavailable: bool,
+    /// Unix seconds and nanoseconds; `None` is Go's zero time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry: Option<(i64, u32)>,
+}
+
+impl State {
+    fn decode(object: &serde_json::Map<String, serde_json::Value>) -> Result<Self, ()> {
+        use serde_json::Value;
+        let field = |key: &str| object.get(key).filter(|v| !v.is_null());
+        Ok(Self {
+            status: match field("status") {
+                None => String::new(),
+                Some(Value::String(s)) => s.clone(),
+                Some(_) => return Err(()),
+            },
+            unavailable: match field("unavailable") {
+                None => false,
+                Some(v) => v.as_bool().ok_or(())?,
+            },
+            retry: match field("next_retry_after") {
+                None => None,
+                Some(v) => go_time(v.as_str().ok_or(())?).ok_or(())?,
+            },
+        })
+    }
+
+    fn disabled(&self) -> bool {
+        self.status == "disabled"
+    }
+
+    /// `Unavailable && !NextRetryAfter.IsZero() && NextRetryAfter.After(now)`.
+    fn cooling(&self, now: (i64, u32)) -> bool {
+        self.unavailable && self.retry.is_some_and(|at| at > now)
+    }
+}
+
+impl Availability {
+    /// Go's `json.Unmarshal` into `coreauth.Auth` for these fields: `null` or absent
+    /// keeps the default, any other mistyped value or unparsable time fails the whole
+    /// reply (Home's `invalid_auth`). `None` when everything is the default.
+    pub fn decode(auth: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Self>, ()> {
+        use serde_json::Value;
+        let state = State::decode(auth)?;
+        let model_states = match auth.get("model_states") {
+            None | Some(Value::Null) => Default::default(),
+            Some(Value::Object(states)) => states
+                .iter()
+                .map(|(model, state)| match state {
+                    Value::Null => Ok((model.clone(), None)),
+                    Value::Object(state) => Ok((model.clone(), Some(State::decode(state)?))),
+                    _ => Err(()),
+                })
+                .collect::<Result<_, ()>>()?,
+            Some(_) => return Err(()),
+        };
+        let decoded = Self { state, model_states };
+        Ok((decoded != Self::default()).then_some(decoded))
+    }
+}
+
+/// Go's `time.Time` JSON decoding (`parseStrictRFC3339`, whose strict checks are off,
+/// so `time.Parse(time.RFC3339, ...)`): a one- or two-digit hour, a fraction after `.`
+/// or `,` (nanoseconds, the rest ignored), `Z` or a `±hh:mm` offset up to 24:60.
+/// `Some(None)` is Go's zero time (`IsZero`), `None` a value Go rejects.
+fn go_time(raw: &str) -> Option<Option<(i64, u32)>> {
+    let b = raw.as_bytes();
+    let digits = |from: usize, to: usize| -> Option<u32> {
+        let part = b.get(from..to)?;
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+    };
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    // Go's `atoi` on the four year bytes takes a sign.
+    let year = match b.first()? {
+        b'-' => -(digits(1, 4)? as i32),
+        b'+' => digits(1, 4)? as i32,
+        _ => digits(0, 4)? as i32,
+    };
+    let (month, day) = (digits(5, 7)?, digits(8, 10)?);
+    if !(at(4, b'-') && at(7, b'-') && at(10, b'T')) {
+        return None;
+    }
+    let mut i = if b.get(12).is_some_and(u8::is_ascii_digit) {
+        13
+    } else {
+        12
+    };
+    let hour = digits(11, i)?;
+    if !(at(i, b':') && at(i + 3, b':')) {
+        return None;
+    }
+    let (minute, second) = (digits(i + 1, i + 3)?, digits(i + 4, i + 6)?);
+    i += 6;
+    let mut nanos = 0;
+    if matches!(b.get(i), Some(b'.' | b',')) && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        let start = i + 1;
+        i = start;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        for k in start..start + 9 {
+            nanos = nanos * 10 + if k < i { u32::from(b[k] - b'0') } else { 0 };
+        }
+    }
+    let offset = match b.get(i)? {
+        b'Z' => {
+            i += 1;
+            0
+        }
+        sign @ (b'+' | b'-') => {
+            let (hh, mm) = (digits(i + 1, i + 3)?, digits(i + 4, i + 6)?);
+            if !at(i + 3, b':') || hh > 24 || mm > 60 {
+                return None;
+            }
+            i += 6;
+            let offset = i64::from((hh * 60 + mm) * 60);
+            if *sign == b'-' { -offset } else { offset }
+        }
+        _ => return None,
+    };
+    if i != b.len() || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let local = chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, second)?;
+    let seconds = local.and_utc().timestamp() - offset;
+    // Go's zero time: January 1, year 1, 00:00:00 UTC.
+    const ZERO: i64 = -62_135_596_800;
+    Some((seconds != ZERO || nanos != 0).then_some((seconds, nanos)))
+}
 
 /// Go `responsesWebsocketAuthAvailableForModel` on a dispatched auth's snapshot:
 /// enabled (`disabled` and `status`), then the model's state when the snapshot has one
 /// (its status and cooldown decide), else the auth-wide cooldown. A cooldown counts only
 /// while its retry time is set and in the future.
 pub fn available_for_model(credential: &Credential, model: &str, now: std::time::SystemTime) -> bool {
-    use serde_json::Value;
     if credential.disabled {
         return false;
     }
-    let snapshot: serde_json::Map<String, Value> = credential
+    let snapshot: Availability = credential
         .attributes
         .get(AVAILABILITY)
         .and_then(|raw| serde_json::from_str(raw).ok())
         .unwrap_or_default();
-    let disabled =
-        |state: &serde_json::Map<String, Value>| state.get("status").and_then(Value::as_str) == Some("disabled");
-    let cooling = |state: &serde_json::Map<String, Value>| {
-        state.get("unavailable").and_then(Value::as_bool) == Some(true)
-            && state
-                .get("next_retry_after")
-                .and_then(Value::as_str)
-                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-                .map(std::time::SystemTime::from)
-                // Go's zero time is year 1, long before the epoch.
-                .is_some_and(|at| at > now)
+    let now = match now.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => (since.as_secs() as i64, since.subsec_nanos()),
+        Err(_) => (0, 0),
     };
-    if disabled(&snapshot) {
+    if snapshot.state.disabled() {
         return false;
     }
-    let states = snapshot.get("model_states").and_then(Value::as_object);
-    if !model.is_empty()
-        && let Some(states) = states.filter(|states| !states.is_empty())
-    {
+    if !model.is_empty() && !snapshot.model_states.is_empty() {
         let base = cpa_common::thinking::parse_suffix(model).model_name;
-        let state = states
-            .get(model)
-            .filter(|state| !state.is_null())
-            .or_else(|| {
-                Some(base.trim())
-                    .filter(|b| !b.is_empty() && *b != model)
-                    .and_then(|b| states.get(b))
-            })
-            .and_then(Value::as_object);
+        let base = base.trim();
+        let state = match snapshot.model_states.get(model) {
+            Some(Some(state)) => Some(state),
+            _ if !base.is_empty() && base != model => snapshot.model_states.get(base).and_then(Option::as_ref),
+            _ => None,
+        };
         if let Some(state) = state {
-            return !disabled(state) && !cooling(state);
+            return !state.disabled() && !state.cooling(now);
         }
     }
-    !cooling(&snapshot)
+    !snapshot.state.cooling(now)
 }
 
 /// Go `HomeDispatchSelection.Provider`: the dispatched auth's provider, lower-cased.
@@ -442,6 +576,124 @@ pub async fn gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Go `time.Time` JSON decoding, expected values from Go 1.27: a comma fraction and
+    /// a 24:60 offset are accepted, extra digits are cut at nanoseconds, a one-digit
+    /// hour is accepted, and Go's zero time (whatever the offset) is `IsZero`.
+    #[test]
+    fn home_times_decode_as_go_does() {
+        const Y2999: i64 = 32_472_144_000;
+        for (raw, want) in [
+            ("2999-01-01T00:00:00Z", Some(Some((Y2999, 0)))),
+            ("2999-01-01T00:00:00,1Z", Some(Some((Y2999, 100_000_000)))),
+            ("2999-01-01T00:00:00.1234567891234Z", Some(Some((Y2999, 123_456_789)))),
+            ("2999-01-01T00:00:00+24:60", Some(Some((Y2999 - 25 * 3600, 0)))),
+            ("2999-01-01T00:00:00-00:00", Some(Some((Y2999, 0)))),
+            ("2000-01-01T0:00:00Z", Some(Some((946_684_800, 0)))),
+            ("0001-01-01T00:00:00Z", Some(None)),
+            ("0001-01-01T01:00:00+01:00", Some(None)),
+            ("2999-01-01T00:00:00+25:00", None),
+            ("2999-01-01T00:00:00+00:61", None),
+            ("2999-01-01T00:00:00z", None),
+            ("2999-01-01t00:00:00Z", None),
+            ("2999-01-01T00:00:60Z", None),
+            ("2999-01-01T24:00:00Z", None),
+            ("2999-02-30T00:00:00Z", None),
+            ("2999-01-01T00:00:00,Z", None),
+            ("2999-01-01T00:00:00+0100", None),
+            ("2999-01-01T00:00:00Z ", None),
+            ("2999-01-01T00:00:00", None),
+            ("", None),
+        ] {
+            assert_eq!(go_time(raw), want, "{raw}");
+        }
+    }
+
+    /// Go decodes the auth's runtime state into typed fields: `null` keeps a default,
+    /// any other mistyped value fails the reply.
+    #[test]
+    fn home_availability_rejects_what_go_cannot_decode() {
+        let decode = |json: &str| Availability::decode(&serde_json::from_str(json).unwrap());
+        for valid in [
+            r#"{}"#,
+            r#"{"status":null,"unavailable":null,"next_retry_after":null,"model_states":null}"#,
+            r#"{"model_states":{"m":null,"n":{"status":"disabled"}}}"#,
+        ] {
+            assert!(decode(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            r#"{"status":1}"#,
+            r#"{"unavailable":"true"}"#,
+            r#"{"next_retry_after":""}"#,
+            r#"{"next_retry_after":0}"#,
+            r#"{"model_states":[]}"#,
+            r#"{"model_states":{"m":1}}"#,
+            r#"{"model_states":{"m":{"next_retry_after":""}}}"#,
+            r#"{"model_states":{"m":{"unavailable":1}}}"#,
+        ] {
+            assert!(decode(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    /// `responsesWebsocketAuthAvailableForModel` on decoded snapshots, at 2026-01-01.
+    #[test]
+    fn home_availability_follows_go() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_767_225_600);
+        let available = |json: &str, model: &str| {
+            let mut c = Credential::relay_session("home-a");
+            if let Some(a) = Availability::decode(&serde_json::from_str(json).unwrap()).unwrap() {
+                c.attributes
+                    .insert(AVAILABILITY.into(), serde_json::to_string(&a).unwrap());
+            }
+            available_for_model(&c, model, now)
+        };
+        let future = "2999-01-01T00:00:00,1Z";
+        for (json, model, want) in [
+            (r#"{}"#.to_owned(), "m", true),
+            (r#"{"status":"disabled"}"#.into(), "m", false),
+            (
+                format!(r#"{{"unavailable":true,"next_retry_after":"{future}"}}"#),
+                "m",
+                false,
+            ),
+            (
+                r#"{"unavailable":true,"next_retry_after":"2001-01-01T00:00:00Z"}"#.into(),
+                "m",
+                true,
+            ),
+            (
+                r#"{"unavailable":true,"next_retry_after":"0001-01-01T00:00:00Z"}"#.into(),
+                "m",
+                true,
+            ),
+            (r#"{"unavailable":true}"#.into(), "m", true),
+            (
+                format!(r#"{{"model_states":{{"m":{{"unavailable":true,"next_retry_after":"{future}"}}}}}}"#),
+                "m",
+                false,
+            ),
+            // The suffix-free base model's state, and the model's state over the auth's.
+            (
+                r#"{"model_states":{"m":{"status":"disabled"}}}"#.into(),
+                "m(high)",
+                false,
+            ),
+            (
+                format!(r#"{{"unavailable":true,"next_retry_after":"{future}","model_states":{{"m":{{}}}}}}"#),
+                "m",
+                true,
+            ),
+            // A nil state is never consulted: the auth-wide cooldown decides.
+            (
+                format!(r#"{{"unavailable":true,"next_retry_after":"{future}","model_states":{{"m":null}}}}"#),
+                "m",
+                false,
+            ),
+            (r#"{"model_states":{"other":{"status":"disabled"}}}"#.into(), "m", true),
+        ] {
+            assert_eq!(available(&json, model), want, "{json} {model}");
+        }
+    }
 
     /// Go `homeDispatchHeaders` and `homeQueryCredentialFromContext`: `?key=` (else
     /// `?auth_token=`) reaches Home as X-Goog-Api-Key unless a credential header was

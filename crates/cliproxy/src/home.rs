@@ -377,8 +377,14 @@ impl Dispatcher {
                 kind,
             });
         }
+        // Go decodes the auth's runtime state with the reply: a mistyped field or an
+        // unparsable time fails it.
         let response = match DispatchResponse::parse(&raw) {
-            Ok(response) => response,
+            Ok(response) if cpa_server::remote::Availability::decode(&response.auth).is_ok() => response,
+            Ok(_) => {
+                end_scope(&scope);
+                return Err(reject(502, "invalid_auth", "home returned invalid auth payload"));
+            }
             Err(message) => {
                 end_scope(&scope);
                 return Err(reject(502, "invalid_auth", message));
@@ -663,15 +669,12 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
         credential.attributes.remove(key);
     }
     // The snapshot's runtime state, which Go keeps on the auth and the Responses
-    // WebSocket pin check reads (`responsesWebsocketAuthAvailableForModel`).
-    let availability: serde_json::Map<String, Value> = ["status", "unavailable", "next_retry_after", "model_states"]
-        .into_iter()
-        .filter_map(|key| auth.get(key).map(|value| (key.to_owned(), value.clone())))
-        .collect();
-    if !availability.is_empty() {
+    // WebSocket pin check reads (`responsesWebsocketAuthAvailableForModel`). The pick
+    // already refused a reply where it does not decode.
+    if let Ok(Some(availability)) = cpa_server::remote::Availability::decode(auth) {
         credential.attributes.insert(
             cpa_server::remote::AVAILABILITY.into(),
-            Value::Object(availability).to_string(),
+            serde_json::to_string(&availability).unwrap_or_default(),
         );
     }
     let info = response.model_info.as_ref().filter(|info| {
@@ -3110,6 +3113,11 @@ mod tests {
                 r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00Z""#,
                 false,
             ),
+            // Go's time decoding takes a comma before the fraction.
+            (
+                r#","unavailable":true,"next_retry_after":"2999-01-01T00:00:00,1Z""#,
+                false,
+            ),
             (r#","unavailable":true,"next_retry_after":"2001-01-01T00:00:00Z""#, true),
             // The model's own state decides over the auth-wide one.
             (
@@ -5021,6 +5029,10 @@ mod tests {
                 false,
             ),
             (r#"{"error":"busy","auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
+            // Go decodes the auth's runtime state with the reply.
+            (r#"{"auth":{"id":"cred-1","provider":"codex","unavailable":"true"}}"#.into(), "invalid_auth", false),
+            (r#"{"auth":{"id":"cred-1","provider":"codex","next_retry_after":""}}"#.into(), "invalid_auth", false),
+            (tupled(r#""auth_index":"cred-1","auth":{"id":"cred-1","provider":"codex","model_states":{"gpt":1}}"#), "invalid_auth", false),
             (r#"{"error":{},"auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
             (r#"{"error":null,"auth":{"id":"cred-1","provider":"codex"}}"#.into(), "invalid_auth", false),
             (
