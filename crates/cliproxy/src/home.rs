@@ -900,7 +900,7 @@ async fn run_lifetimes(
                         rt.usage_queue().configure(true, &cfg);
                         let keys = config_api_keys(&cfg);
                         rt.publish_config(cfg);
-                        sync_config_api_keys(&rt, keys);
+                        rt.store().replace_config(keys);
                         // Go applies the plugin config with the rest of the config
                         // (`applyConfigRuntime`) before it finalizes: load marks, delete
                         // tasks and the first dispatch all wait for the plugin worker.
@@ -1055,18 +1055,6 @@ fn config_api_keys(cfg: &Config) -> Vec<Credential> {
         // `IsConfigAPIKeyAuth`: a keyless OpenAI-compatibility entry is not one.
         .filter(cpa_core::registry::dynamic::is_api_key)
         .collect()
-}
-
-fn sync_config_api_keys(rt: &Runtime, keys: Vec<Credential>) {
-    let mut next: Vec<Credential> = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| !matches!(c.source, Source::Config { .. }))
-        .map(|c| Credential::clone(c))
-        .collect();
-    next.extend(keys);
-    rt.store().reconcile(next);
 }
 
 #[cfg(test)]
