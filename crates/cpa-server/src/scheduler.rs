@@ -1334,10 +1334,12 @@ impl Scheduler {
         let model = canonical_model(model);
         self.apply(c, model, outcome, policy, picked, seq, now);
         // Go stamps the failing state with the dispatch watermark; a credential-wide 429
-        // also stamps the credential and every sibling state.
+        // also stamps the credential and every sibling state. A credential-level failure
+        // stamps the credential even when it skips the cooldown (Go's auth-level branch
+        // has no skip).
         if let Outcome::Failure(error) = outcome {
             let action = policy.error_action(c, error);
-            if action.cooldown {
+            if action.cooldown || model.is_empty() {
                 let disabled = policy.cooling_disabled(c) && !action.force_cooldown;
                 let all = crate::classify::credential_scoped(error) && !disabled;
                 for ((id, m), s) in &mut self.cooldowns {
@@ -3068,6 +3070,17 @@ mod tests {
             s.record_dispatched(&c, model, &Outcome::Success, &p, g, 0, now);
             assert!(!s.cooling(&c, model, now), "{model:?}: an unstamped success clears it");
         }
+        // A skipped credential-level failure (a connection drop) still moves the
+        // credential's watermark past a success dispatched before it.
+        let mut s = Scheduler::default();
+        let first = s.dispatch();
+        s.record_dispatched(&c, "", &unavailable(), &p, g, first, now);
+        let success = s.dispatch();
+        let dropped = Outcome::Failure(ExecError::local(0, FailureScope::Model, "http2: client conn is closed"));
+        let third = s.dispatch();
+        s.record_dispatched(&c, "", &dropped, &p, g, third, now);
+        s.record_dispatched(&c, "", &Outcome::Success, &p, g, success, now);
+        assert!(s.cooling(&c, "", now), "the skipped failure stamped the credential");
         // Go `mergeModelState` keeps the live watermark through a restore; a cooldown
         // restored after a restart has none, and any success clears it.
         let mut s = Scheduler::default();
