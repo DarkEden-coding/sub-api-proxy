@@ -56,8 +56,12 @@ const PATHS: &[(&str, &str)] = &[
     ("codex.response-steering", "upstream.codex.response-steering"),
     ("codex", "oauth.providers.codex"),
     ("codex-header-defaults", "oauth.providers.codex.header-defaults"),
-    ("claude", "upstream.claude"),
-    ("claude-code", "upstream.claude"),
+    // Go walks the declared fields: ClaudeConfig and ClaudeCode have one each.
+    ("claude.model-level-cooling", "upstream.claude.model-level-cooling"),
+    (
+        "claude-code.disable-cloaking-model-list",
+        "upstream.claude.disable-cloaking-model-list",
+    ),
     ("disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"),
     ("claude-header-defaults", "upstream.claude.header-defaults"),
     ("antigravity", "oauth.providers.antigravity"),
@@ -249,6 +253,18 @@ impl ConfigDocument {
             root.remove("api-keys");
             insert_missing(&mut root, "access.api-keys", keys)?;
         }
+        // The legacy Claude structs move by their leaves (PATHS); an empty or null one is
+        // an empty `upstream.claude`, and other children stay as unknown fields.
+        for old in ["claude", "claude-code"] {
+            match root.get(old) {
+                Some(Value::Null) => {}
+                Some(Value::Mapping(m)) if m.is_empty() => {}
+                Some(Value::Mapping(_)) | None => continue,
+                Some(_) => bail!("{old} must be a mapping"),
+            }
+            root.remove(old);
+            insert_missing(&mut root, "upstream.claude", Value::Mapping(Mapping::new()))?;
+        }
         for (old, current) in PATHS {
             if let Some(mut value) = lookup(&root, old).cloned() {
                 if value.is_null() && super::schema::is_struct(current) {
@@ -288,8 +304,11 @@ impl ConfigDocument {
     }
 
     /// Comment-preserving v8 text of `original`: legacy root entries move under their
-    /// v8 parents with their own lines. `None` when the text form is unsupported or
-    /// would not parse to the migrated value; callers then render from `original`.
+    /// v8 parents with their own lines. Moves the text form cannot make (a dotted
+    /// legacy leaf such as `codex.response-steering`) are left for
+    /// [`ConfigDocument::render_preserving`], so the result only has to normalize to
+    /// this document. `None` when the text form is unsupported or normalizes to
+    /// something else; callers then render from `original`.
     pub fn migrated_text(&self, original: &str) -> Option<String> {
         let mut moves = vec![super::text::Move {
             old: "api-keys",
@@ -310,8 +329,7 @@ impl ConfigDocument {
         );
         let families: Vec<&str> = FAMILIES.iter().map(|(old, _)| *old).collect();
         let text = super::text::migrate(original, &moves, &families, &self.0)?;
-        let parsed: Value = serde_yaml_ng::from_str(&text).ok()?;
-        (parsed == self.0).then_some(text)
+        (Self::parse(&text).ok()?.0 == self.0).then_some(text)
     }
 
     /// Go's read-time migration archives unrecognised sections as comments. Returns

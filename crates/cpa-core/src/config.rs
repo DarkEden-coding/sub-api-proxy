@@ -689,6 +689,28 @@ mod tests {
                 assert!(lookup(doc.value().as_mapping().unwrap(), current).is_some(), "{raw}");
             }
         }
+        // The legacy Claude structs move by their declared fields only: Go has no
+        // `claude.disable-cloaking-model-list` or `claude-code.model-level-cooling`.
+        let cfg = Config::parse(
+            "claude: {disable-cloaking-model-list: true, model-level-cooling: true}\nclaude-code: {disable-cloaking-model-list: false, model-level-cooling: true}\n",
+        )
+        .unwrap();
+        let claude = &cfg.document["upstream"]["claude"];
+        assert_eq!(claude["disable-cloaking-model-list"], Value::Bool(false));
+        assert_eq!(claude["model-level-cooling"], Value::Bool(true));
+        assert_eq!(cfg.document["claude"]["disable-cloaking-model-list"], Value::Bool(true));
+        assert_eq!(cfg.document["claude-code"]["model-level-cooling"], Value::Bool(true));
+        let cfg = Config::parse("claude-code: {model-level-cooling: true}\n").unwrap();
+        assert!(cfg.document.get("upstream").is_none(), "{:?}", cfg.document);
+        for legacy in ["claude: null\n", "claude-code: {}\n"] {
+            let doc = ConfigDocument::parse(legacy).unwrap();
+            assert_eq!(
+                doc.value()["upstream"]["claude"],
+                Value::Mapping(Mapping::new()),
+                "{legacy}"
+            );
+            assert!(doc.value().get("claude").is_none() && doc.value().get("claude-code").is_none());
+        }
         let err = Config::parse("oauth: {providers: {xai: true}}\n").unwrap_err();
         assert_eq!(err.to_string(), "oauth.providers.xai must be a mapping");
     }

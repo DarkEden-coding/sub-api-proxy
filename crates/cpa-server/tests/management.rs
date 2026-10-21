@@ -3137,6 +3137,45 @@ async fn config_shared_upstream_round_trip() {
     server.abort();
 }
 
+/// A legacy file whose `codex` block holds a shared `upstream.codex` field keeps the
+/// comments of its other sections when a v8 or v0 setting save migrates it.
+#[tokio::test]
+async fn legacy_migration_with_a_shared_codex_field_keeps_other_comments() {
+    let f = Fixture::from_yaml("shared-codex", |auth, hash| {
+        format!(
+            "remote-management:\n  # keep this comment\n  secret-key: '{hash}'\nauth-dir: {}\ncodex: {{response-steering: true}}\n",
+            auth.display()
+        )
+    });
+    let raw = f.file();
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    for (at, body) in [
+        ("/v8/management/config/routing/retry/request-retry", "3"),
+        ("/v0/management/debug", r#"{"value":true}"#),
+    ] {
+        std::fs::write(f.dir.join("config.yaml"), &raw).unwrap();
+        let r = client
+            .put(format!("{base}{at}"))
+            .bearer_auth("fake-management-only")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{at}");
+        let file = f.file();
+        assert!(file.contains("management:\n  # keep this comment\n"), "{at}: {file}");
+        let cfg = Config::parse(&file).unwrap();
+        assert_eq!(
+            cfg.document["upstream"]["codex"]["response-steering"],
+            serde_yaml_ng::Value::Bool(true),
+            "{at}: {file}"
+        );
+        assert!(cfg.document.get("codex").is_none(), "{at}: {file}");
+    }
+    server.abort();
+}
+
 /// Go v8.0.35 Sign in with ChatGPT binding (`d50a1995`, `ae3ee3be`) against a local
 /// token endpoint: start validation, the legacy-callback refusal, callback forms and
 /// conflicts, the bound file, the v8 summary, failures, cancellation, and the v8-only
