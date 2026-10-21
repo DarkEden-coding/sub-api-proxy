@@ -106,6 +106,9 @@ async fn host_with(name: &str, scripts: BTreeMap<&'static str, Script>) -> (Host
     (host, log)
 }
 
+/// Tests that install the process-wide translator hooks take turns.
+static GLOBAL_HOOKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn calls(log: &Log) -> Vec<String> {
     std::mem::take(&mut *log.lock().unwrap())
 }
@@ -176,6 +179,7 @@ async fn fusing_a_plugin_drops_its_thinking_provider() {
 /// for a stream that is already open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fusing_the_last_translator_plugin_turns_the_hooks_off() {
+    let _hooks = GLOBAL_HOOKS.lock().await;
     let a = Script {
         caps: r#""response_before_translator":true"#,
         // "X": a body for every normalize_before call.
@@ -217,6 +221,7 @@ async fn transform_calls_are_refused_on_a_current_thread_runtime() {
 /// while a later plugin is still registering, before the final snapshot commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replacing_a_fused_translator_plugin_turns_the_hooks_back_on() {
+    let _hooks = GLOBAL_HOOKS.lock().await;
     static SEEN: Mutex<Option<bool>> = Mutex::new(None);
     let a = Script {
         caps: r#""response_before_translator":true"#,
