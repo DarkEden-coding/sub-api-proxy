@@ -841,9 +841,12 @@ impl ChunkInterceptor {
 
 /// Go `WriteModelListResponse`: a model list goes through the response interceptors
 /// (and a lifecycle of its own) before it is written. `response` is the built 200 list;
-/// with `detail`, the answer is that model's entry from the final list.
+/// with `detail`, the answer is that model's entry from the final list. `caller` is the
+/// authenticated client: Go keeps the request context, so nested `host.model.*` calls
+/// from these interceptors record its identity.
 pub(crate) async fn model_list(
     rt: &Runtime,
+    caller: &Caller,
     source_format: &str,
     request_headers: &HeaderMap,
     response: axum::response::Response,
@@ -874,7 +877,7 @@ pub(crate) async fn model_list(
             &trace,
             super::go_request_header(request_headers),
             &Metadata::new(),
-            None,
+            Some(caller),
         ),
         source_format,
         "",

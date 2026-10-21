@@ -749,7 +749,9 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
 
 /// Go restores the parent callback context for `host.model.execute`, so the nested
 /// call's usage record carries the client key and access provider of the request whose
-/// interceptor made it (37fe2608), like the request's own record.
+/// interceptor made it (37fe2608), like the request's own record. That includes the
+/// response interceptors of the unified and Gemini model lists, which keep the request
+/// context (Go `WriteModelListResponse`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nested_callbacks_record_the_parent_usage_identity() {
     let _serial = SERIAL.lock().await;
@@ -768,12 +770,13 @@ async fn nested_callbacks_record_the_parent_usage_identity() {
     let url = serve(seen.clone()).await;
     std::fs::copy(built.join("recorder.so"), plugins.join("nested.so")).unwrap();
     let yaml = format!(
-        "auth-dir: {}\naccess:\n  api-keys: [k1]\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}]\nobservability: {{usage: {{usage-statistics-enabled: true}}}}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    nested:\n      enabled: true\n      label: nested\n      record: {}\n      caps: request_interceptor\n",
+        "auth-dir: {}\naccess:\n  api-keys: [k1]\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}]\nobservability: {{usage: {{usage-statistics-enabled: true}}}}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    nested:\n      enabled: true\n      label: nested\n      record: {}\n      caps: request_interceptor,response_interceptor\n",
         auths.display(),
         plugins.display(),
         records.display()
     );
     canned(&records, "nested", "request.intercept_after", json!({}));
+    canned(&records, "nested", "response.intercept_after", json!({}));
     std::fs::write(
         records.join("respond/nested/request.intercept_before.json"),
         json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute",
@@ -824,6 +827,39 @@ async fn nested_callbacks_record_the_parent_usage_identity() {
         })
         .collect();
     let want = (json!("k1"), json!(true), json!("config-inline"));
+    assert_eq!(identities, [want.clone(), want.clone()]);
+
+    canned(&records, "nested", "request.intercept_before", json!({}));
+    std::fs::write(
+        records.join("respond/nested/response.intercept_after.json"),
+        json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute",
+            "request":{"entry_protocol":"openai","model":"fast","body":b64(BODY)}}]})
+        .to_string(),
+    )
+    .unwrap();
+    for path in ["/v1/models", "/v1beta/models"] {
+        let response = wreq::Client::new()
+            .get(format!("http://{addr}{path}"))
+            .header("authorization", "Bearer k1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{path}");
+    }
+    assert_eq!(seen.0.lock().unwrap().len(), 4, "one nested call per model list");
+    let identities: Vec<(Value, Value, Value)> = rt
+        .usage_queue()
+        .pop_oldest(10)
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(r).unwrap())
+        .map(|r| {
+            (
+                r["api_key"].clone(),
+                r["is_native_key"].clone(),
+                r["access_provider"].clone(),
+            )
+        })
+        .collect();
     assert_eq!(identities, [want.clone(), want]);
     rt.plugins().shutdown_all(None).await;
     std::fs::remove_dir_all(dir).unwrap();

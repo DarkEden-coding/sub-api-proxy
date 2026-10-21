@@ -1424,8 +1424,9 @@ fn sessions(client: &Client) -> (String, String) {
 }
 
 /// Go `usageQueuePlugin.HandleUsage`: the queued `queuedUsageDetail` JSON.
-/// Go `usage.APIKeyFromContext` for a Home 401 record: the key the access middleware
-/// set wins; otherwise the key this request's Home pick authenticated
+/// Go `usage.APIKeyFromContext` for a Home 401 record from a handler whose context
+/// derives from the request's (Alpha Search, the live handlers): the key the access
+/// middleware set wins; otherwise the key this request's Home pick authenticated
 /// (`setHomeUserAPIKeyOnGinContext`).
 pub(crate) fn home_unauthorized_key(principal: &str, home_key: &str) -> String {
     let principal = principal.trim();

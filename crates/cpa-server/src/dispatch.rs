@@ -1752,11 +1752,12 @@ async fn remote_round(
                     facts.client.api_key = user_key.clone();
                     Arc::new(facts)
                 });
-                // A Home 401 record (count_tokens) keeps a key the access middleware set
-                // (Go `usage.APIKeyFromContext`).
+                // A count_tokens Home 401 record too: Go's handler context drops the
+                // middleware's usage key (`GetContextWithCancel` over a background
+                // context), so `usage.APIKeyFromContext` reads the gin key Home set.
                 let unauthorized = cx.unauthorized.map(|facts| {
                     let mut facts = (**facts).clone();
-                    facts.client.api_key = crate::usage_record::home_unauthorized_key(&facts.client.api_key, &user_key);
+                    facts.client.api_key = user_key.clone();
                     Arc::new(facts)
                 });
                 (request, usage, unauthorized)
