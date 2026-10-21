@@ -198,11 +198,25 @@ impl Wire {
     }
 
     /// `AppendCodexAPIWebsocketResponse`.
+    /// `AppendCodexAPIWebsocketResponse` and `EmitWebSocketResponseEvent`, the
+    /// observation awaited.
     pub(crate) async fn ws_response(&self, payload: &[u8]) {
         self.sink.record(CaptureEvent::WebsocketResponse(payload));
         if let Some(websocket) = &self.websocket {
             websocket.emit(payload).await;
         }
+    }
+
+    /// [`Self::ws_response`] for a caller that keeps serving other work while the
+    /// message is observed: records it now and returns the observation, if any.
+    pub(crate) fn ws_response_observation(
+        &self,
+        payload: &str,
+    ) -> Option<futures_util::future::BoxFuture<'static, ()>> {
+        self.sink.record(CaptureEvent::WebsocketResponse(payload.as_bytes()));
+        let websocket = self.websocket.clone()?;
+        let payload = payload.to_owned();
+        Some(Box::pin(async move { websocket.emit(payload.as_bytes()).await }))
     }
 
     /// `RecordAPIWebsocketError`.

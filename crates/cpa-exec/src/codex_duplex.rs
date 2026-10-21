@@ -122,8 +122,20 @@ impl Prepared {
 }
 
 /// The duplex stream's state: Go's writer and reader goroutines' shared metadata.
+/// An upstream message whose observation is running (Go's reader inside
+/// `EmitWebSocketResponseEvent`): the rest of its handling waits for it.
+struct Observing {
+    observation: futures_util::future::BoxFuture<'static, ()>,
+    payload: String,
+    kind: String,
+    establishing: bool,
+}
+
 pub(super) struct Duplex {
     turn: Turn,
+    /// While set, no further upstream message is read; client input and the writer
+    /// keep going, as Go's writer goroutine does while the reader waits.
+    observing: Option<Observing>,
     frames: OwnedMutexGuard<mpsc::Receiver<Bytes>>,
     input: Arc<SteeringInput>,
     /// The bootstrap request: the template for later creates (Go `req`, `opts`).
@@ -224,6 +236,7 @@ fn local(message: &str) -> ExecError {
 
 enum Step {
     Upstream(Option<Read>),
+    Observed,
     Client(Option<Bytes>),
     Writer(Result<Result<(), ExecError>, tokio::task::JoinError>),
 }
@@ -256,6 +269,7 @@ impl Duplex {
         let (out, chunks) = mpsc::channel(1);
         let duplex = Self {
             turn,
+            observing: None,
             frames,
             input,
             req,
@@ -297,6 +311,15 @@ impl Duplex {
     }
 
     async fn run(mut self) {
+        self.serve().await;
+        // An observation that already started finishes before the turn (and its
+        // session) is released.
+        if let Some(observing) = self.observing.take() {
+            observing.observation.await;
+        }
+    }
+
+    async fn serve(&mut self) {
         loop {
             if self.input_ready && !self.done {
                 self.progress().await;
@@ -310,6 +333,8 @@ impl Duplex {
             let read_client =
                 live && self.input_ready && self.deferred_steer.is_none() && writable && self.outbox.len() < OUTBOX;
             let await_room = live && self.input_ready && !writable && !self.writes.is_closed();
+            let observing = self.observing.is_some();
+            let pending_observation = &mut self.observing;
             let step = tokio::select! {
                 permit = self.out.reserve(), if deliver => match permit {
                     Ok(permit) => {
@@ -319,14 +344,28 @@ impl Duplex {
                     Err(_) => return,
                 },
                 () = self.out.closed(), if !deliver => return,
-                read = self.turn.rx.recv(), if live && !deliver => Step::Upstream(read),
+                read = self.turn.rx.recv(), if live && !deliver && !observing => Step::Upstream(read),
+                () = async {
+                    if let Some(observing) = pending_observation.as_mut() {
+                        (&mut observing.observation).await;
+                    }
+                }, if observing => Step::Observed,
                 frame = self.frames.recv(), if read_client => Step::Client(frame),
                 ended = &mut self.writer, if live => Step::Writer(ended),
                 // The writer freed room: re-check progress and client reads.
                 _ = self.writes.reserve(), if await_room => continue,
             };
             match step {
-                Step::Upstream(read) => self.upstream(read).await,
+                Step::Upstream(read) => self.upstream(read),
+                Step::Observed => {
+                    let Observing {
+                        payload,
+                        kind,
+                        establishing,
+                        ..
+                    } = self.observing.take().expect("an observation finished");
+                    self.observed(&payload, &kind, establishing);
+                }
                 Step::Client(frame) => self.client(frame).await,
                 Step::Writer(ended) => self.fail(match ended {
                     Ok(Err(error)) => error,
@@ -548,7 +587,7 @@ impl Duplex {
     }
 
     /// One upstream frame (the reader goroutine).
-    async fn upstream(&mut self, read: Option<Read>) {
+    fn upstream(&mut self, read: Option<Read>) {
         let text = match read {
             Some(Read::Text(text)) => text,
             // Go's duplex wraps the raw read error, not `mapCodexWebsocketReadError`'s 413.
@@ -574,11 +613,25 @@ impl Duplex {
             return;
         }
         self.turn.observe(payload);
-        self.turn.wire.ws_response(payload.as_bytes()).await;
+        match self.turn.wire.ws_response_observation(payload) {
+            Some(observation) => {
+                self.observing = Some(Observing {
+                    observation,
+                    payload: payload.to_owned(),
+                    kind,
+                    establishing,
+                });
+            }
+            None => self.observed(payload, &kind, establishing),
+        }
+    }
+
+    /// The rest of an upstream message's handling, once observers saw it.
+    fn observed(&mut self, payload: &str, kind: &str, establishing: bool) {
         // Steering acknowledgements, pending notices and failures are opaque: IDs, input,
         // sequence numbers and event types reach the client byte for byte.
         if kind.starts_with("response.steer.") {
-            self.steer_event(&kind, payload);
+            self.steer_event(kind, payload);
             self.outbox.push_back(Ok(Bytes::from(payload.to_owned())));
             return;
         }
@@ -649,10 +702,7 @@ impl Duplex {
         if kind == "response.output_item.done" {
             self.turn.items.collect(&out);
         }
-        if matches!(
-            kind.as_str(),
-            "response.completed" | "response.done" | "response.incomplete"
-        ) {
+        if matches!(kind, "response.completed" | "response.done" | "response.incomplete") {
             self.response_active = false;
             self.automatic_active = false;
             out = response::normalize_completion(out);

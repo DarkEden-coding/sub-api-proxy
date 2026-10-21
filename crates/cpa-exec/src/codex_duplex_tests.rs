@@ -1118,3 +1118,105 @@ async fn queued_create_keeps_the_namespace_state_until_written() {
     );
     drop(stream);
 }
+
+/// Go's reader waits inside `EmitWebSocketResponseEvent` while its writer goroutine keeps
+/// taking client frames: a steer sent while an observer holds a delta reaches upstream,
+/// and the held delta reaches the client only once its observation returns.
+#[tokio::test]
+async fn a_slow_observer_does_not_hold_client_input() {
+    const STEER: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"steer while observed"}"#;
+    const DELTA: &str = r#"{"type":"response.output_text.delta","delta":"held"}"#;
+    /// Holds every delta until `release`, telling `held` when it starts.
+    struct Holding {
+        held: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+    impl cpa_core::exec::WebSocketObserver for Holding {
+        fn response<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a cpa_core::credential::Credential,
+            _: &'a str,
+            payload: &'a [u8],
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                if gjson::get(&String::from_utf8_lossy(payload), "type").str() == "response.output_text.delta" {
+                    self.held.notify_one();
+                    let _ = self.release.acquire().await.unwrap();
+                }
+            })
+        }
+    }
+    let (steered, delta) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let up = {
+        let (steered, delta) = (steered.clone(), delta.clone());
+        Scripted::start(move |mut c: Peer| {
+            let (steered, delta) = (steered.clone(), delta.clone());
+            async move {
+                c.read().await;
+                c.write(r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#)
+                    .await;
+                delta.notified().await;
+                c.write(DELTA).await;
+                let got = c.read().await;
+                if got != STEER {
+                    c.error(format!("steer: {got}"));
+                }
+                steered.notify_one();
+                c.write(r#"{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}"#)
+                    .await;
+                c.write(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#)
+                    .await;
+                c.idle().await;
+            }
+        })
+        .await
+    };
+    let client = Client::new("observer-duplex");
+    let observer = Arc::new(Holding {
+        held: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let usage = cpa_core::exec::UsageSink::default().with_websocket(Some(observer.clone()));
+    let mut stream = client
+        .start_with(&up.url, r#"{"model":"gpt-6-astra","input":[]}"#, Format::Codex, usage)
+        .await;
+    let created = next(&mut stream).await.unwrap().unwrap();
+    assert_eq!(get(&created, "type"), "response.created");
+    delta.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), observer.held.notified())
+        .await
+        .expect("the delta was not observed");
+    // Go's unbuffered send: the duplex takes the steer while the delta is observed.
+    client.send(STEER).await;
+    tokio::time::timeout(Duration::from_secs(5), steered.notified())
+        .await
+        .expect("the steer did not reach upstream while the delta was observed");
+    let early = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
+    assert!(
+        early.is_err(),
+        "the held delta was delivered before its observation returned: {early:?}"
+    );
+    observer.release.add_permits(10);
+    let mut types = Vec::new();
+    while let Some(chunk) = next(&mut stream).await {
+        let kind = get(&chunk.unwrap(), "type");
+        types.push(kind.clone());
+        if kind == "response.completed" {
+            break;
+        }
+    }
+    assert_eq!(
+        types,
+        [
+            "response.output_text.delta",
+            "response.steer.accepted",
+            "response.completed"
+        ]
+    );
+    drop(stream);
+    up.finish().await;
+}
