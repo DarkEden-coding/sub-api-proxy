@@ -1,6 +1,7 @@
 mod discovery;
 mod dotenv;
 mod home;
+mod home_plugins;
 mod plugin_cli;
 mod tui;
 
@@ -810,15 +811,15 @@ async fn run(args: Args, plugins: cpa_plugin::Host, builtin: Vec<(String, String
     let cloud = std::env::var("DEPLOY").is_ok_and(|v| v == "cloud");
     // Go main: with a Home JWT the config comes from Home; the config path stays for
     // downstream components but need not exist.
-    let (mut config, home_config) = match &home_jwt {
-        Some(jwt) => match home::bootstrap(jwt, args.home_disable_cluster_discovery).await {
-            Ok((home_config, config)) => (config, Some(home_config)),
+    let (mut config, home_config, home_plugins) = match &home_jwt {
+        Some(jwt) => match home::bootstrap(jwt, args.home_disable_cluster_discovery, &plugins).await {
+            Ok((home_config, config, home_plugins)) => (config, Some(home_config), Some(home_plugins)),
             Err(line) => {
                 tracing::error!("{line}");
                 return Ok(());
             }
         },
-        None => (load_config(&config_path, cloud)?, None),
+        None => (load_config(&config_path, cloud)?, None, None),
     };
     if let Some(store) = &store {
         config.auth_dir = store.auth_dir.clone();
@@ -851,9 +852,16 @@ async fn run(args: Args, plugins: cpa_plugin::Host, builtin: Vec<(String, String
     cpa_server::logging::configure(&config);
     tracing::info!("{}", banner());
     let before = store.as_ref().map(|store| auth_files(&store.auth_dir));
-    // Go: the loaded config reaches the plugins, and a plugin flag hands the run to the
-    // plugins that own it.
-    if let Some(code) = plugin_cli::execute(&plugins, &config, &config_path, &builtin).await {
+    // Go: the loaded config reaches the plugins (and Home learns which of its plugins
+    // loaded), and a plugin flag hands the run to the plugins that own it.
+    plugins.apply_config(Arc::new(config.clone())).await;
+    if let Some(home_plugins) = home_plugins
+        && let Err(line) = home_plugins.finish(&plugins).await
+    {
+        tracing::error!("{line}");
+        return Ok(());
+    }
+    if let Some(code) = plugin_cli::execute(&plugins, &config_path, &builtin).await {
         if let (Some(store), Some(before)) = (&store, &before) {
             persist_login(store, before).await;
         }
