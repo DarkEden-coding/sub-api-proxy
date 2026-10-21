@@ -378,19 +378,19 @@ fn create_request_from_form(
         }
         Some(form)
     } else {
+        // Go `parsePostForm`: [`create`] answers an unusable media type before reading
+        // the body; a bad parameter still reads it, so the size error wins over it.
+        let error = match parse_media_type(&raw_type) {
+            MediaType::Invalid(reason) => return Err(reason.into()),
+            MediaType::BadParams(_) => Some("mime: invalid media parameter".to_owned()),
+            MediaType::Ok(..) => None,
+        };
         const MAX_FORM: usize = 10 << 20;
         // ponytail: Go also caps a limited body at 10 MB when request logging has
         // replaced it before the handler; matching that needs the capture state here.
         if limit.is_none() && body.len() > MAX_FORM {
             return Err("http: POST too large".into());
         }
-        // gin's type is the urlencoded one here, so the only invalid full type has
-        // content after the subtype.
-        let error = match parse_media_type(&raw_type) {
-            MediaType::Ok(..) => None,
-            MediaType::BadParams(_) => Some("mime: invalid media parameter".to_owned()),
-            MediaType::Invalid => Some("mime: unexpected content after media subtype".to_owned()),
-        };
         if let Some(e) = error.or_else(|| crate::access::query_error(body)).or(query_error) {
             return Err(e);
         }
@@ -842,8 +842,19 @@ pub async fn create(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     limit: crate::body_limit::Limit,
-    body: Result<Bytes, BytesRejection>,
+    client_request: axum::extract::Request,
 ) -> Response {
+    use axum::extract::FromRequest as _;
+    use cpa_exec::openai_compat_multipart::{MediaType, parse_media_type};
+    // Go `parsePostForm` answers an unusable urlencoded media type without reading the
+    // body.
+    if content_type(&headers) == "application/x-www-form-urlencoded" {
+        let raw_type = String::from_utf8_lossy(headers[header::CONTENT_TYPE].as_bytes());
+        if let MediaType::Invalid(reason) = parse_media_type(&raw_type) {
+            return failed(400, XAI_MODEL, &format!("Invalid request: {reason}"));
+        }
+    }
+    let body = Bytes::from_request(client_request, &()).await;
     let raw = match (content_type(&headers).as_str(), body) {
         (_, Err(rejection)) => Err(crate::claude::read_error(&rejection)),
         ("multipart/form-data" | "application/x-www-form-urlencoded", Ok(body)) => {

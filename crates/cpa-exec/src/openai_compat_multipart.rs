@@ -146,8 +146,8 @@ fn decode_2231(v: &str) -> Option<Vec<u8>> {
 /// Outcome of `mime.ParseMediaType`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MediaType {
-    /// No usable media type.
-    Invalid,
+    /// No usable media type, with Go's error text.
+    Invalid(&'static str),
     /// The media type parsed but its parameters did not (Go returns the type and an error).
     BadParams(String),
     Ok(String, BTreeMap<String, String>),
@@ -156,15 +156,22 @@ pub enum MediaType {
 pub fn parse_media_type(v: &str) -> MediaType {
     let base = v.split(';').next().unwrap_or_default();
     let media = base.to_ascii_lowercase().trim().to_owned();
+    // Go `checkMediaTypeDisposition`.
     let (main, rest) = consume_token(&media);
-    let valid_type = !main.is_empty()
-        && (rest.is_empty()
-            || rest.strip_prefix('/').is_some_and(|r| {
-                let (sub, tail) = consume_token(r);
-                !sub.is_empty() && tail.is_empty()
-            }));
-    if !valid_type {
-        return MediaType::Invalid;
+    if main.is_empty() {
+        return MediaType::Invalid("mime: no media type");
+    }
+    if !rest.is_empty() {
+        let Some(rest) = rest.strip_prefix('/') else {
+            return MediaType::Invalid("mime: expected slash after first token");
+        };
+        let (sub, tail) = consume_token(rest);
+        if sub.is_empty() {
+            return MediaType::Invalid("mime: expected token after slash");
+        }
+        if !tail.is_empty() {
+            return MediaType::Invalid("mime: unexpected content after media subtype");
+        }
     }
     let mut params = BTreeMap::new();
     let mut continuation: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -185,7 +192,7 @@ pub fn parse_media_type(v: &str) -> MediaType {
             None => &mut params,
         };
         if map.get(&key).is_some_and(|existing| *existing != value) {
-            return MediaType::Invalid;
+            return MediaType::Invalid("mime: duplicate parameter name");
         }
         map.insert(key, value);
         v = rest;
@@ -421,7 +428,7 @@ impl Reader<'_> {
         let (kind, params) = match parse_media_type(disposition) {
             MediaType::Ok(kind, params) => (kind, params),
             MediaType::BadParams(kind) => (kind, BTreeMap::new()),
-            MediaType::Invalid => (String::new(), BTreeMap::new()),
+            MediaType::Invalid(_) => (String::new(), BTreeMap::new()),
         };
         let name = if kind == "form-data" {
             params.get("name").cloned().unwrap_or_default()
