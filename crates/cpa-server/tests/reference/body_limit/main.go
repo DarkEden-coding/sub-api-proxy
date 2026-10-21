@@ -254,6 +254,26 @@ func scenarios() []scenario {
 	add(scenario{Name: "management_content_length_over_limit", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config", Headers: mgmt, Body: oversized})
 	add(scenario{Name: "management_unauthenticated_chunked", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config",
 		Headers: map[string]string{"Content-Type": "application/json"}, Body: oversized, Chunked: true})
+
+	// Video form parse errors, which do not depend on the limit.
+	noLimit := "config-version: 8\naccess:\n  api-keys:\n    - test-key\n"
+	urlencoded := "application/x-www-form-urlencoded"
+	videoForm, videoType := form([][2]string{{"prompt", "p"}}, "")
+	for _, c := range []struct{ name, path, contentType, body string }{
+		{"no_boundary", "/openai/v1/videos", "multipart/form-data", ""},
+		{"bad_escape", "/openai/v1/videos", urlencoded, "prompt=p&ignored=%ZZ"},
+		{"short_escape", "/openai/v1/videos", urlencoded, "prompt=p&ignored=%Z"},
+		{"semicolon", "/openai/v1/videos", urlencoded, "prompt=p&a=%ZZ&b=1;c=2"},
+		{"bad_query_urlencoded", "/openai/v1/videos?x=%ZZ", urlencoded, "prompt=p"},
+		{"bad_query_multipart", "/openai/v1/videos?x=%ZZ", videoType, videoForm},
+		{"bad_media_param", "/openai/v1/videos", urlencoded + "; x", "prompt=p"},
+		{"content_after_subtype", "/openai/v1/videos", urlencoded + " x", "prompt=p"},
+	} {
+		for _, limit := range []struct{ name, yaml string }{{"limit_off", noLimit}, {"limit_1024", strings.Replace(noLimit, "\n", "\nserver:\n  max-request-body-bytes: 1024\n", 1)}} {
+			add(scenario{Name: "video_form_" + c.name + " " + limit.name, YAML: limit.yaml, Method: "POST", Path: c.path,
+				Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": c.contentType}, Body: c.body})
+		}
+	}
 	return out
 }
 

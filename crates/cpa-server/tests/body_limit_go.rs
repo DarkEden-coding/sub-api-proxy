@@ -106,7 +106,7 @@ const STATUS_ONLY: &[&str] = &[
 ];
 
 /// Where Go and cliproxy-rs differ on purpose (docs/DIFFERENCES-FROM-GO.md), with
-/// cliproxy-rs's status and body. Go's first-value JSON decoders decode the first value
+/// cliproxy-rs's status and body, compared after [`normalize`], not as wire bytes. Go's first-value JSON decoders decode the first value
 /// from the permitted prefix; Go's multipart reader reports the limit or a parse error
 /// depending on where the limit falls in the form. cliproxy-rs reads these bodies whole
 /// first.
@@ -321,28 +321,75 @@ async fn a_stale_config_write_fails_before_its_body_is_read() {
             }
         }
     }
+    // Go's ConfigV8 order: lock, read the file, If-Match, parse the stored config, then
+    // read the body. Each case answers before the pending body is polled.
+    let non_utf8: &[u8] = b"config-version: 8\nserver: \xff\n";
+    // Name, the stored file written after the runtime loads, the condition header, status.
+    type Case = (
+        &'static str,
+        Option<&'static [u8]>,
+        Option<(&'static str, &'static str)>,
+        u16,
+    );
+    let cases: [Case; 4] = [
+        ("stale", None, Some(("if-match", "\"definitely-stale\"")), 412),
+        ("malformed", Some(b"server: ["), None, 500),
+        (
+            "malformed, If-None-Match",
+            Some(b"server: ["),
+            Some(("if-none-match", "*")),
+            500,
+        ),
+        (
+            "non-UTF-8, stale",
+            Some(non_utf8),
+            Some(("if-match", "\"definitely-stale\"")),
+            412,
+        ),
+    ];
     for limit in ["32", "0"] {
-        let dir = std::env::temp_dir().join(format!("cpa-body-limit-stale-{limit}-{}", std::process::id()));
-        let yaml = format!(
-            "config-version: 8\nserver:\n  max-request-body-bytes: {limit}\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n"
-        );
-        let (app, _) = app(&dir, &yaml, false);
-        let polls = Arc::new(AtomicU64::new(0));
-        let mut request = axum::http::Request::put("/v8/management/config")
-            .header("authorization", "Bearer mgmt-secret")
-            .header("content-type", "application/json")
-            .header("if-match", "\"definitely-stale\"")
-            .body(Body::new(Open(polls.clone())))
-            .unwrap();
-        let peer: SocketAddr = "192.0.2.1:1234".parse().unwrap();
-        request.extensions_mut().insert(axum::extract::ConnectInfo(peer));
-        let response = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(request))
-            .await
-            .expect("answered without waiting for the body")
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 412, "limit {limit}");
-        assert!(response.headers().contains_key("etag"));
-        assert_eq!(polls.load(Ordering::Relaxed), 0, "limit {limit}: the body was polled");
-        let _ = std::fs::remove_dir_all(&dir);
+        for (name, stored, condition, status) in cases {
+            let dir = std::env::temp_dir().join(format!("cpa-body-limit-stale-{limit}-{}", uuid::Uuid::new_v4()));
+            let yaml = format!(
+                "config-version: 8\nserver:\n  max-request-body-bytes: {limit}\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n"
+            );
+            let (app, _) = app(&dir, &yaml, false);
+            // Corrupted after the runtime loaded it.
+            if let Some(bytes) = stored {
+                std::fs::write(dir.join("config.yaml"), bytes).unwrap();
+            }
+            let file = std::fs::read(dir.join("config.yaml")).unwrap();
+            let polls = Arc::new(AtomicU64::new(0));
+            let mut request = axum::http::Request::put("/v8/management/config")
+                .header("authorization", "Bearer mgmt-secret")
+                .header("content-type", "application/json");
+            if let Some((key, value)) = condition {
+                request = request.header(key, value);
+            }
+            let mut request = request.body(Body::new(Open(polls.clone()))).unwrap();
+            let peer: SocketAddr = "192.0.2.1:1234".parse().unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(peer));
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(request))
+                .await
+                .unwrap_or_else(|_| panic!("limit {limit}, {name}: waited for the body"))
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "limit {limit}, {name}");
+            assert_eq!(
+                polls.load(Ordering::Relaxed),
+                0,
+                "limit {limit}, {name}: the body was polled"
+            );
+            if status == 412 {
+                // The ETag hashes the raw file bytes, UTF-8 or not.
+                use sha2::Digest as _;
+                let hex: String = sha2::Sha256::digest(&file).iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(response.headers()["etag"], format!("\"{hex}\"").as_str(), "{name}");
+            } else {
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"], "invalid_config", "limit {limit}, {name}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

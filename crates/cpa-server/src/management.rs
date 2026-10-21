@@ -770,14 +770,19 @@ pub(crate) async fn config(
         .iter()
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
         .collect();
-    // Go reads the body only for writes other than DELETE, after the file read and the
-    // If-Match check. They run again under the disk lock before the write.
+    // Go reads the body only for writes other than DELETE, under its lock, after the file
+    // read, the If-Match check and the stored config's parse. Those run here under the
+    // disk lock, which is released while the body arrives, and again under it before
+    // the write.
     let body = if matches!(method, Method::GET | Method::DELETE) {
         Ok(Bytes::new())
     } else {
         let check = {
             let (state, method, if_match) = (state.clone(), method.clone(), if_match.clone());
-            tokio::task::spawn_blocking(move || precondition(&state, &method, &if_match).err())
+            tokio::task::spawn_blocking(move || {
+                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+                stored(&state, &method, &if_match).err()
+            })
         };
         match check.await {
             Ok(Some(response)) => return *response,
@@ -870,21 +875,25 @@ pub(crate) fn config_sync(
     config_sync_locked(state, path, method, if_match, body, false)
 }
 
-/// The config file and its `ETag`, or Go's answer when the file cannot be read or a
-/// write's `If-Match` names another version.
-fn precondition(
+/// The stored config as Go's `ConfigV8` prepares it before reading a body: the file
+/// bytes and their `ETag`, the `If-Match` check for writes, then the parsed document.
+/// Errors are Go's answers. Call it holding `state.disk`.
+fn stored(
     state: &Management,
     method: &Method,
     if_match: &[String],
-) -> Result<(String, HeaderValue), Box<Response>> {
-    let original = std::fs::read_to_string(&state.path).map_err(|_| Box::new(error(500, "read_failed")))?;
-    let etag = config_etag(original.as_bytes());
+) -> Result<(String, HeaderValue, ConfigDocument), Box<Response>> {
+    let raw = std::fs::read(&state.path).map_err(|_| Box::new(error(500, "read_failed")))?;
+    let etag = config_etag(&raw);
     if method != Method::GET && !if_match_satisfied(if_match, &etag) {
         let mut response = error(412, "precondition_failed");
         response.headers_mut().insert(header::ETAG, etag);
         return Err(Box::new(response));
     }
-    Ok((original, etag))
+    let invalid = |e: &dyn std::fmt::Display| Box::new(invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e));
+    let original = String::from_utf8(raw).map_err(|_| invalid(&"yaml: invalid leading UTF-8 octet"))?;
+    let doc = ConfigDocument::parse(&original).map_err(|e| invalid(&e))?;
+    Ok((original, etag, doc))
 }
 
 /// [`config_sync`] for a caller already holding `state.disk`. `typed` saves the written
@@ -898,13 +907,9 @@ fn config_sync_locked(
     body: Result<&[u8], StatusCode>,
     typed: bool,
 ) -> Response {
-    let (original, etag) = match precondition(state, &method, if_match) {
+    let (original, etag, mut doc) = match stored(state, &method, if_match) {
         Ok(v) => v,
         Err(response) => return *response,
-    };
-    let mut doc = match ConfigDocument::parse(&original) {
-        Ok(v) => v,
-        Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let basis = doc.migrated_text(&original).unwrap_or_else(|| original.clone());
     let archived = doc.archive_unknown();

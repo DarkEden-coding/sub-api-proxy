@@ -344,7 +344,7 @@
     "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_18847045af0246e08be41f3de12f347b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_370f765f185743d48d12cacb078f6a4b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -376,7 +376,7 @@
     "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_2032ea9236234dc381fde8bd0b966449\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_4e32c81a610644a29e3bdf3442842156\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -392,7 +392,7 @@
     "body_b64": "cHJvbXB0PXBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw",
     "chunked": true,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_cdc9fe6844e54a70bc65265b26089b07\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_1881620f26db4e17a0a1748fa2a51b33\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 65
   },
@@ -579,7 +579,7 @@
     "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
     "chunked": false,
     "status": 413,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_404d997d629f444d9f159ac98ed2726b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_a2875dd0289949d5bc49cfb0b5729449\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
     "content_type": "application/json",
     "read": 53
   },
@@ -1300,7 +1300,7 @@
     "body_b64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
     "chunked": true,
     "status": 200,
-    "response": "{\"config-version\":8,\"management\":{\"allow-remote\":true,\"secret-key\":\"$2a$10$.tVo1nMz0N/YKbIYK.MyfuK7x/GdIi0b.r3kZ8X042sTmlRb2ACmC\"},\"oauth\":{\"auth-dir\":\"/tmp/cpa-body-limit-764382021/auth\"},\"server\":{\"max-request-body-bytes\":32}}",
+    "response": "{\"config-version\":8,\"management\":{\"allow-remote\":true,\"secret-key\":\"$2a$10$5q6GzRCHB1BlQv3bGhIaZeMFcYJN1JJNv4EXjW6Ip9lSWHHL9J0CS\"},\"oauth\":{\"auth-dir\":\"/tmp/cpa-body-limit-3108199717/auth\"},\"server\":{\"max-request-body-bytes\":32}}",
     "content_type": "application/json; charset=utf-8",
     "read": 0
   },
@@ -1428,7 +1428,7 @@
     "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnANCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
     "chunked": true,
     "status": 400,
-    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_15ebe724cbd44701a0202f4fcc7ee3b3\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\"}}",
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_19c31ae25cd44624981ee1ad32307745\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\"}}",
     "content_type": "application/json",
     "read": 31
   },
@@ -1462,5 +1462,261 @@
     "response": "{\"error\":\"missing management key\"}",
     "content_type": "application/json; charset=utf-8",
     "read": 0
+  },
+  {
+    "name": "video_form_no_boundary limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data"
+    },
+    "body_b64": "",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_de11ae40f40f4d7bb67644b5bee2b768\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: no multipart boundary param in Content-Type\"}}",
+    "content_type": "application/json",
+    "read": 0
+  },
+  {
+    "name": "video_form_no_boundary limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data"
+    },
+    "body_b64": "",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c347904c54174e1fa602cf1acd236985\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: no multipart boundary param in Content-Type\"}}",
+    "content_type": "application/json",
+    "read": 0
+  },
+  {
+    "name": "video_form_bad_escape limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWlo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_ae5d8c2314fe4814aaa417384a02184b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 20
+  },
+  {
+    "name": "video_form_bad_escape limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWlo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_98b81b27ba154679a18c82f736106701\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 20
+  },
+  {
+    "name": "video_form_short_escape limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_285b5c219dc149e2a0a9551c23480a52\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%Z\\\"\"}}",
+    "content_type": "application/json",
+    "read": 19
+  },
+  {
+    "name": "video_form_short_escape limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_8d73a5471ad4465cb225746d6d125f35\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%Z\\\"\"}}",
+    "content_type": "application/json",
+    "read": 19
+  },
+  {
+    "name": "video_form_semicolon limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmYT0lWlomYj0xO2M9Mg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c727bd10d62641f1af533021b7f8ad71\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid semicolon separator in query\"}}",
+    "content_type": "application/json",
+    "read": 22
+  },
+  {
+    "name": "video_form_semicolon limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmYT0lWlomYj0xO2M9Mg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_ce5ac2bb3ddc419d9b9bc28406a83e2b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid semicolon separator in query\"}}",
+    "content_type": "application/json",
+    "read": 22
+  },
+  {
+    "name": "video_form_bad_query_urlencoded limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_683e9ccb7a0d4553980f49373fadfe61\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_query_urlencoded limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c15c142758574d4bbf76ac0afe7a92bf\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_query_multipart limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icHJvbXB0Ig0KDQpwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_4b74fdaab2054fa89d3535e5611e8b41\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 98
+  },
+  {
+    "name": "video_form_bad_query_multipart limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icHJvbXB0Ig0KDQpwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c21bd6f23b1f48a2bb900b13ab0875c8\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 98
+  },
+  {
+    "name": "video_form_bad_media_param limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded; x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_deae716f7a4246809b004e1fa92f68d4\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: invalid media parameter\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_media_param limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded; x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_a09e69fe096746b3a2317b9d97a9639e\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: invalid media parameter\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_content_after_subtype limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_7646e4e2cc5148d1a06d8ce45758354e\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: unexpected content after media subtype\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_content_after_subtype limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_179b5c3d7fd642cc9899cce3205925cd\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: unexpected content after media subtype\"}}",
+    "content_type": "application/json",
+    "read": 8
   }
 ]
