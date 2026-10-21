@@ -473,11 +473,30 @@ impl Runtime {
         }
         let patch = self.executors.prepare(&self.for_executor(&current), cfg).await?;
         let store = self.store.clone();
-        let revision = current.revision;
         let id = id.to_owned();
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            store.apply_patch(&id, revision, &patch)
+            let mut revision = current.revision;
+            loop {
+                match store.apply_patch(&id, revision, &patch) {
+                    // Edited since the snapshot (the prepare lock does not hold off other
+                    // writers). Go 935aa6e3: an edit that changed the credentials wins and
+                    // this refresh is dropped; any other edit takes the refresh on top (Go
+                    // `MergeRefreshedAuth`).
+                    // ponytail: Go also drops it when the credential was registered again
+                    // (its CredentialVersion moved) with the same tokens; here a re-created
+                    // file with equal tokens takes the refresh. A version counter on
+                    // `Credential` would close that.
+                    Err(PatchError::Stale { .. }) => {
+                        let latest = store.get(&id).ok_or(PatchError::NotFound)?;
+                        if credentials_changed(&current, &latest) {
+                            return Ok(latest);
+                        }
+                        revision = latest.revision;
+                    }
+                    other => return other,
+                }
+            }
         })
         .await
         .map_err(|e| PatchError::Io(e.to_string()))
@@ -1902,6 +1921,61 @@ impl Runtime {
     }
 }
 
+/// Go `CredentialsChanged`: the tokens or API key differ.
+fn credentials_changed(a: &Credential, b: &Credential) -> bool {
+    let text = |c: &Credential, keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| {
+                c.metadata
+                    .get(*k)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let siwc = |c: &Credential, key: &str| {
+        c.metadata
+            .get("siwc")
+            .and_then(|s| s.get(key))
+            .and_then(Value::as_str)
+            .map_or("", str::trim)
+            .to_owned()
+    };
+    let api_key = |c: &Credential| {
+        c.attributes
+            .get("api_key")
+            .filter(|k| !k.is_empty())
+            .cloned()
+            .unwrap_or_else(|| text(c, &["api_key"]))
+    };
+    // Go `parseBoolAny`.
+    let use_siwc = |c: &Credential| {
+        let value = c.metadata.get("use_siwc")?;
+        value
+            .as_bool()
+            .or_else(|| match value.as_str()?.trim() {
+                "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+                "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+                _ => None,
+            })
+            .or_else(|| value.as_f64().map(|n| n != 0.0))
+    };
+    [
+        &["access_token", "accessToken"][..],
+        &["refresh_token", "refreshToken"],
+        &["id_token", "idToken"],
+    ]
+    .iter()
+    .any(|keys| text(a, keys) != text(b, keys))
+        || api_key(a) != api_key(b)
+        || ["access_token", "refresh_token", "id_token", "client_id"]
+            .iter()
+            .any(|k| siwc(a, k) != siwc(b, k))
+        || use_siwc(a) != use_siwc(b)
+}
+
 /// Writes `metadata` the way Go's `json.NewEncoder(f).Encode` does (compact JSON and a
 /// newline) via an exclusively created, uniquely named 0600 sibling and a rename. The
 /// temp name does not end in `.json`, so a crash never leaves a loadable credential.
@@ -2972,6 +3046,101 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go 935aa6e3 (TestManager_RefreshAuth_DropsStaleConcurrentCredential): tokens saved
+    /// while a refresh is in flight win over its result, in memory and on disk, and the
+    /// refresh answers with them. An edit that leaves the credentials alone takes the
+    /// refresh on top (Go `MergeRefreshedAuth`), so a rotated refresh token is not lost.
+    #[tokio::test]
+    async fn an_in_flight_refresh_does_not_overwrite_newer_credentials() {
+        for (edit, want) in [
+            (
+                serde_json::json!({"access_token": "saved", "refresh_token": "saved-rt"}),
+                ("saved", "saved-rt", None),
+            ),
+            (
+                serde_json::json!({"note": "kept"}),
+                ("rotated", "rotated-rt", Some("kept")),
+            ),
+        ] {
+            let (hit_tx, mut hit) = tokio::sync::mpsc::unbounded_channel();
+            let answer = Arc::new(tokio::sync::Semaphore::new(0));
+            let app = axum::Router::new().route(
+                "/oauth/token",
+                axum::routing::post({
+                    let answer = answer.clone();
+                    move || async move {
+                        hit_tx.send(()).unwrap();
+                        answer.acquire().await.unwrap().forget();
+                        r#"{"access_token":"rotated","refresh_token":"rotated-rt","expires_in":3600}"#
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let token_url = format!("http://{}/oauth/token", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = std::env::temp_dir().join(format!("cpa-refresh-stale-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("codex.json");
+            std::fs::write(
+                &path,
+                r#"{"type":"codex","access_token":"outer","refresh_token":"outer-rt"}"#,
+            )
+            .unwrap();
+            let mut cfg = Config::parse("").unwrap();
+            cfg.auth_dir = dir.clone();
+            let client = wreq::Client::new();
+            let oauth =
+                cpa_exec::codex_oauth::CodexOAuth::with_endpoints(client.clone(), &token_url, &token_url, &token_url);
+            let rt = Arc::new(crate::testing::runtime(
+                cfg.clone(),
+                cpa_core::config::credentials::from_auth_dir(&cfg)
+                    .into_iter()
+                    .map(crate::testing::local)
+                    .collect(),
+                Executors {
+                    claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                    codex: cpa_exec::codex::CodexExecutor::with_client(client, oauth),
+                    devices: Default::default(),
+                    openai: Default::default(),
+                    google: Default::default(),
+                },
+            ));
+            let refresh = tokio::spawn({
+                let rt = rt.clone();
+                async move { rt.refresh_credential("codex.json").await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), hit.recv())
+                .await
+                .expect("a refresh request");
+            let mut patch = MetadataPatch::default();
+            for (k, v) in edit.as_object().unwrap() {
+                patch.set.insert(k.clone(), v.clone());
+            }
+            let before = rt.store.get("codex.json").unwrap().revision;
+            rt.store.apply_patch("codex.json", before, &patch).unwrap();
+            answer.add_permits(1);
+            let answered = refresh.await.unwrap().expect("the refresh answers");
+            let current = rt.store.get("codex.json").unwrap();
+            let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for meta in [
+                &disk,
+                &Value::Object(current.metadata.clone()),
+                &Value::Object(answered.metadata.clone()),
+            ] {
+                assert_eq!(
+                    (
+                        meta["access_token"].as_str().unwrap(),
+                        meta["refresh_token"].as_str().unwrap(),
+                        meta["note"].as_str()
+                    ),
+                    want,
+                    "{edit}: {meta}"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// The loop sets no timer while nothing can come due, and a credential added later
