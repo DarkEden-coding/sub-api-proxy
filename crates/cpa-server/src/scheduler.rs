@@ -606,6 +606,10 @@ pub(crate) struct Cooldown {
     pub credential: bool,
     /// Bounded trust of a stated quota reset (cliproxy-rs only); `level` stays Go's.
     pub trust: Trust,
+    /// A live quota block (its end and status) that this non-quota failure answered:
+    /// Go keeps `ModelState.Quota` when it records a 401, and a recovery that clears the
+    /// 401 keeps the block. Not saved: a restored record has none.
+    pub quota_under: Option<(Instant, u16)>,
 }
 
 /// Bounded trust of one cooldown (`max-trusted-cooldown`, docs/DIFFERENCES-FROM-GO.md).
@@ -1347,6 +1351,16 @@ impl Scheduler {
         let prev_deadline = prev.map(|s| s.deadline);
         let prev_live = prev.filter(|s| s.deadline > now).map(|s| s.deadline);
         let prev_trust = prev.map(|s| s.trust).unwrap_or_default();
+        // A live quota block this failure answers, if it is not a quota failure itself.
+        let quota_under = prev
+            .and_then(|p| {
+                if p.quota {
+                    Some((p.deadline, p.status))
+                } else {
+                    p.quota_under
+                }
+            })
+            .filter(|(end, _)| *end > now);
         let mut level = prev.filter(|s| s.quota).map(|s| s.level).unwrap_or(0);
         // Causes other than a cut reset keep the trust count: nothing recovered.
         let mut trust = Trust {
@@ -1498,6 +1512,7 @@ impl Scheduler {
             since: SystemTime::now(),
             credential: false,
             trust: provenance(deadline),
+            quota_under: quota_under.filter(|_| !quota),
         };
         self.cooldowns.insert(key, state(deadline));
         if credential_quota {
@@ -1762,6 +1777,7 @@ impl Scheduler {
                 since: record.updated_at.unwrap_or(wall),
                 credential,
                 trust,
+                quota_under: None,
             },
         );
         true
@@ -1848,31 +1864,42 @@ impl Scheduler {
         models
     }
 
-    /// Go `clearUnauthorizedModelStates`: the 401 cooldowns of one credential are
-    /// dropped. A quota block whose error a later 401 replaced stays while it is live,
-    /// with the quota reason as its error again (Go clears `LastError` and restores the
-    /// quota reason), and is dropped once it has ended. Returns whether anything changed.
+    /// The unauthorized part of Go `BindCodexSIWC`: the 401 cooldowns of one
+    /// credential are dropped, except that a quota block still live under one stays, as
+    /// a quota cooldown again with its quota reason (Go clears only `LastError` and keeps
+    /// the retry time). Returns whether anything changed.
+    ///
+    /// Model keys match like `clearUnauthorizedModelStates` (a 401, or "unauthorized" in
+    /// the status message, which is the error here); the credential-wide key like
+    /// `isUnauthorizedError`. Go also matches the error code `unauthorized`, which
+    /// cooldowns do not keep.
     pub(crate) fn clear_unauthorized(&mut self, id: &str, now: Instant) -> bool {
         let mut changed = false;
-        self.cooldowns.retain(|(cid, _), c| {
-            // Go matches a 401 status, the `unauthorized` code or status message (the
-            // error message here).
+        self.cooldowns.retain(|(cid, model), c| {
             let error = c.error.to_ascii_lowercase();
-            if cid != id || !(c.status == 401 || error.contains("unauthorized") || error.contains("status 401")) {
+            let unauthorized = c.status == 401
+                || error.contains("status 401")
+                || error.contains("401 unauthorized")
+                || (!model.is_empty() && error.contains("unauthorized"));
+            if cid != id || !unauthorized {
                 return true;
             }
             changed = true;
-            let live = c.deadline > now || c.trust.stated.is_some_and(|r| r > now);
-            if c.quota && live {
-                c.error = if c.status == 429 {
-                    "quota"
-                } else {
-                    "cloudflare challenge"
-                }
-                .into();
-                return true;
-            }
-            false
+            let under = if c.quota {
+                Some((c.deadline, c.status))
+            } else {
+                c.quota_under
+            };
+            let Some((end, status)) = under.filter(|(end, _)| *end > now || c.trust.stated.is_some_and(|r| r > now))
+            else {
+                return false;
+            };
+            c.quota = true;
+            c.quota_under = None;
+            c.deadline = c.deadline.max(end);
+            c.error = if status == 429 { "quota" } else { "cloudflare challenge" }.into();
+            c.status = status;
+            true
         });
         changed
     }
@@ -1883,59 +1910,87 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Go `clearUnauthorizedModelStates`: 401 states go; a live quota block that a later
-    /// 401 answered keeps its block with the quota reason, an ended one goes; other
-    /// causes and other credentials stay.
+    /// Which cooldowns the SIWC recovery clears: model keys match a 401 or
+    /// "unauthorized" in the error (Go's status-message check), the credential-wide key
+    /// only Go's `isUnauthorizedError`; other causes and other credentials stay.
     #[test]
-    fn clear_unauthorized_keeps_live_quota_blocks() {
+    fn clear_unauthorized_matches_go_per_key_kind() {
         let now = Instant::now();
-        let cooldown = |status: u16, quota: bool, error: &str, live: bool| Cooldown {
-            deadline: if live {
-                now + Duration::from_secs(600)
-            } else {
-                now - Duration::from_secs(1)
-            },
-            level: 3,
+        let cooldown = |status: u16, error: &str| Cooldown {
+            deadline: now + Duration::from_secs(600),
+            level: 0,
             status,
-            quota,
+            quota: false,
             error: error.into(),
             since: SystemTime::now(),
             credential: false,
             trust: Trust::default(),
+            quota_under: None,
         };
         let mut s = Scheduler::default();
         for (id, model, c) in [
-            ("a", "401", cooldown(401, false, "upstream said no", true)),
-            ("a", "403-text", cooldown(403, false, "Unauthorized client", true)),
-            ("a", "403", cooldown(403, false, "forbidden", true)),
-            ("a", "quota", cooldown(429, true, "rate limited", true)),
-            ("a", "quota-401", cooldown(429, true, "status 401: token revoked", true)),
-            (
-                "a",
-                "ended-quota-401",
-                cooldown(429, true, "status 401: token revoked", false),
-            ),
-            ("b", "401", cooldown(401, false, "upstream said no", true)),
+            ("a", "401", cooldown(401, "upstream said no")),
+            ("a", "403-text", cooldown(403, "unauthorized operation")),
+            ("a", "403", cooldown(403, "forbidden")),
+            ("a", "", cooldown(403, "unauthorized operation")),
+            ("b", "401", cooldown(401, "upstream said no")),
         ] {
             s.cooldowns.insert((id.into(), model.into()), c);
         }
         assert!(s.clear_unauthorized("a", now));
-        let mut left: Vec<_> = s
-            .cooldowns
-            .iter()
-            .map(|((id, m), c)| (id.as_str(), m.as_str(), c.error.as_str(), c.level))
-            .collect();
+        let mut left: Vec<_> = s.cooldowns.keys().map(|(id, m)| (id.as_str(), m.as_str())).collect();
         left.sort();
-        assert_eq!(
-            left,
-            [
-                ("a", "403", "forbidden", 3),
-                ("a", "quota", "rate limited", 3),
-                ("a", "quota-401", "quota", 3),
-                ("b", "401", "upstream said no", 3),
-            ]
-        );
+        assert_eq!(left, [("a", ""), ("a", "403"), ("b", "401")]);
+        for (status, error) in [(401, "x"), (403, "Status 401: revoked"), (403, "HTTP 401 Unauthorized")] {
+            s.cooldowns.insert(("a".into(), String::new()), cooldown(status, error));
+            assert!(s.clear_unauthorized("a", now), "{status} {error}");
+            assert!(
+                !s.cooldowns.contains_key(&("a".into(), String::new())),
+                "{status} {error}"
+            );
+        }
         assert!(!s.clear_unauthorized("a", now), "nothing left to clear");
+    }
+
+    /// Go keeps `ModelState.Quota` when a 401 lands on a model under a live quota, and
+    /// the SIWC recovery keeps that block (with its quota reason) while it lasts: the
+    /// model is not freed early. A quota that ended before the recovery goes with the 401.
+    #[test]
+    fn a_401_over_a_live_quota_keeps_the_quota_through_recovery() {
+        let c = cred("a", serde_json::json!({}));
+        let start = Instant::now();
+        let unauthorized = Outcome::Failure(ExecError::local(401, FailureScope::Credential, "unauthorized"));
+        // Go's own cooldowns (the 401 replaces the entry) and a bounded window (the
+        // window stands and takes the 401's error).
+        for (cap, replaced) in [(Duration::ZERO, 401), (Policy::default().max_trusted_cooldown, 429)] {
+            let p = Policy {
+                max_trusted_cooldown: cap,
+                ..Policy::default()
+            };
+            let mut s = Scheduler::default();
+            s.record(&c, "long", &hinted(FailureScope::Model, secs(2 * H)), &p, start);
+            s.record(&c, "short", &hinted(FailureScope::Model, secs(MIN)), &p, start);
+            let answered = start + secs(MIN / 2);
+            s.record(&c, "long", &unauthorized, &p, answered);
+            s.record(&c, "short", &unauthorized, &p, answered);
+            assert_eq!(entry(&s, &c, "long").status, replaced, "{cap:?}");
+            let blocked = s.wait(&c, "long", answered);
+            let bind = start + secs(5 * MIN);
+            assert!(s.clear_unauthorized("a", bind), "{cap:?}");
+            let long = entry(&s, &c, "long");
+            assert_eq!(
+                (long.quota, long.status, long.error.as_str()),
+                (true, 429, "quota"),
+                "{cap:?}"
+            );
+            assert_eq!(
+                s.wait(&c, "long", bind),
+                blocked.map(|b| b - (bind - answered)),
+                "{cap:?}: still blocked until the same time"
+            );
+            assert!(s.wait(&c, "long", bind).is_some_and(|w| w > secs(30 * MIN)), "{cap:?}");
+            assert_eq!(s.wait(&c, "short", bind), None, "{cap:?}: its quota had ended");
+        }
     }
 
     fn tag<'a>(creds: &[&'a Credential]) -> Vec<(&'a Credential, &'static str)> {
