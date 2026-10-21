@@ -897,7 +897,9 @@ async fn run_lifetimes(
                         };
                         // Go `redisqueue.SetEnabled(... || cfg.Home.Enabled)`.
                         rt.usage_queue().configure(true, &cfg);
+                        let keys = config_api_keys(&cfg);
                         rt.publish_config(cfg);
+                        sync_config_api_keys(&rt, keys);
                         // Go applies the plugin config with the rest of the config
                         // (`applyConfigRuntime`) before it finalizes: load marks, delete
                         // tasks and the first dispatch all wait for the plugin worker.
@@ -1038,6 +1040,32 @@ async fn run_lifetimes(
         }
         return;
     }
+}
+
+/// Go `registerConfigAPIKeyAuths` on every applied Home config: the config's API keys
+/// become local credentials so the registry lists their models and aliases (and a
+/// Responses WebSocket session can keep a Home pin on them). Dispatch stays Home's: the
+/// remote dispatcher is installed before the first config arrives. Unlike Go, a key
+/// removed from Home's config is dropped with its models (docs/DIFFERENCES-FROM-GO.md).
+/// The rest of the store (relay sessions, plugin-registered credentials) is kept.
+fn config_api_keys(cfg: &Config) -> Vec<Credential> {
+    cpa_core::config::credentials::from_config(cfg)
+        .into_iter()
+        // `IsConfigAPIKeyAuth`: a keyless OpenAI-compatibility entry is not one.
+        .filter(cpa_core::registry::dynamic::is_api_key)
+        .collect()
+}
+
+fn sync_config_api_keys(rt: &Runtime, keys: Vec<Credential>) {
+    let mut next: Vec<Credential> = rt
+        .store()
+        .snapshot()
+        .iter()
+        .filter(|c| !matches!(c.source, Source::Config { .. }))
+        .map(|c| Credential::clone(c))
+        .collect();
+    next.extend(keys);
+    rt.store().reconcile(next);
 }
 
 #[cfg(test)]
@@ -3081,17 +3109,15 @@ mod tests {
         )
     }
 
-    /// A Home node whose registry knows `gpt-5-codex` for Codex through a local key (Go
-    /// synthesizes one from a key in Home's config), so a Responses WebSocket session
-    /// can keep its pin on a Home credential (Go `responsesWebsocketPinnedAuthMatchesModel`
-    /// with a Home runtime auth). Without the model in the registry Go and cliproxy-rs
-    /// both drop the pin.
+    /// Home config with a Codex API key for `gpt-5-codex`. Go synthesizes a local auth
+    /// from it, so the registry knows the model for Codex and a Responses WebSocket
+    /// session can keep its pin on a Home credential (Go
+    /// `responsesWebsocketPinnedAuthMatchesModel` with a Home runtime auth). The key's
+    /// unreachable base URL also shows dispatch never uses it.
+    const CODEX_HOME: &str = "port: 0\ncodex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n";
+
+    /// A Home node with Codex upstream support and no local credentials.
     async fn codex_ws_node(home: &FakeHome) -> (String, Arc<Runtime>, CancellationToken, tokio::task::JoinHandle<()>) {
-        let keys = overlay(
-            b"codex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n",
-            None,
-        )
-        .unwrap();
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
             codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
@@ -3099,8 +3125,7 @@ mod tests {
             openai: Default::default(),
             google: Default::default(),
         };
-        let local = cpa_core::config::credentials::from_config(&keys);
-        let (base, rt, shutdown, task) = node_full(home, executors, local).await;
+        let (base, rt, shutdown, task) = node_full(home, executors, Vec::new()).await;
         eventually("dispatch published", || {
             rt.remote_dispatch().is_some_and(|d| d.available())
         })
@@ -3166,7 +3191,7 @@ mod tests {
             ),
         ];
         for (state, native) in cases {
-            let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, state)]).await;
+            let home = scripted(CODEX_HOME, vec![codex_ws_pick("cred-ws", &upstream, state)]).await;
             let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
             let mut socket = ws_connect(&base).await;
             ws_turn(&mut socket, CODEX_TURN)
@@ -3195,13 +3220,51 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_model_with_a_spaced_suffix_keeps_no_home_pin() {
         let (upstream, _) = responses_ws_upstream().await;
-        let home = scripted("port: 0\n", vec![codex_ws_pick("cred-ws", &upstream, "")]).await;
+        let home = scripted(CODEX_HOME, vec![codex_ws_pick("cred-ws", &upstream, "")]).await;
         let (base, _rt, shutdown, task) = codex_ws_node(&home).await;
         let mut socket = ws_connect(&base).await;
         let spaced = |frame: &str| frame.replace(r#""gpt-5-codex""#, r#""gpt-5-codex(high) ""#);
         ws_turn(&mut socket, &spaced(CODEX_TURN)).await.unwrap();
         let close = ws_turn(&mut socket, &spaced(CODEX_CONTINUATION)).await.unwrap_err();
         assert!(close.contains("upstream requires HTTP replay"), "{close}");
+        drop(socket);
+        shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    /// Go `registerConfigAPIKeyAuths` on each applied Home config: its API keys register
+    /// their models (a keyless OpenAI-compatibility entry is not an API key), so a kept
+    /// Home pin survives the continuation. A later config without the key drops the
+    /// model (unlike Go, which keeps it), and with no provider for the model the pin is
+    /// no longer kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn home_config_api_keys_register_their_models_until_removed() {
+        let (upstream, _) = responses_ws_upstream().await;
+        let pick = || codex_ws_pick("cred-ws", &upstream, "");
+        let home = scripted(
+            "port: 0\ncodex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\nopenai-compatibility:\n  - name: keyless\n    base-url: http://127.0.0.1:9\n    models:\n      - name: compat-model\n",
+            vec![pick(), pick()],
+        )
+        .await;
+        let (base, rt, shutdown, task) = codex_ws_node(&home).await;
+        assert_eq!(rt.registry().providers("gpt-5-codex"), ["codex"]);
+        assert!(rt.registry().providers("compat-model").is_empty());
+        let mut socket = ws_connect(&base).await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        ws_turn(&mut socket, CODEX_CONTINUATION).await.unwrap();
+        drop(socket);
+
+        home.push(fake::message("config", b"port: 0\n"));
+        eventually("the key's model to go", || {
+            rt.registry().providers("gpt-5-codex").is_empty()
+        })
+        .await;
+        assert!(rt.store().snapshot().is_empty());
+        let mut socket = ws_connect(&base).await;
+        ws_turn(&mut socket, CODEX_TURN).await.unwrap();
+        let close = ws_turn(&mut socket, CODEX_CONTINUATION).await.unwrap_err();
+        assert!(close.contains("upstream requires HTTP replay"), "{close}");
+        assert_eq!(rpops(&home).len(), 2, "every turn's credential came from Home");
         drop(socket);
         shutdown.cancel();
         task.await.unwrap();
@@ -3215,7 +3278,7 @@ mod tests {
         let (upstream, counts) = responses_ws_upstream().await;
         let contract = ContractUpstream::start(vec![]).await;
         let home = scripted(
-            "port: 0\n",
+            CODEX_HOME,
             vec![
                 codex_ws_pick("cred-a", &upstream, ""),
                 contract_pick("cred-b", &contract.base, None, &Value::Null),
@@ -3254,7 +3317,7 @@ mod tests {
         let (upstream, counts) = responses_ws_upstream().await;
         let pick = |id: &str| codex_ws_pick(id, &upstream, "");
         let home = scripted(
-            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\n",
+            "port: 0\ncredentials:\n  concurrency:\n    lifecycle-config-revision: 1\n    cpa-cancel-bound: 20s\ncodex-api-key:\n  - api-key: sk-local\n    base-url: http://127.0.0.1:9\n    models:\n      - name: gpt-5-codex\n",
             vec![pick("cred-ws"), pick("cred-spare")],
         )
         .await;
