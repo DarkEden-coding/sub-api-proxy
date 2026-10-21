@@ -1,10 +1,8 @@
 //! Go's v0 management routes (`internal/api/server_management.go`) that predate the v8
-//! tree. Reads render Go's runtime `Config` view ([`view`]); writes go through the v8
-//! config writer ([`super::config_sync`]) and the v8 OAuth and logs handlers, so v0 and
+//! tree. Reads render Go's runtime `Config` view ([`view`]); writes go through
+//! [`super::v0_save`], which keeps a legacy-layout file in its layout and sends a v8
+//! file to the v8 config writer, and through the v8 OAuth and logs handlers, so v0 and
 //! v8 share one implementation as they do in Go.
-//!
-//! Deliberate difference: Go's v0 saver keeps a legacy-layout file in the legacy
-//! layout; the shared v8 writer migrates it on the first write, as a v8 write does.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -252,45 +250,62 @@ async fn save_error(res: Response) -> Response {
     )
 }
 
-/// Writes one v8 path through the shared config writer; Go's v0 success body.
-async fn write(state: Arc<Management>, v8: String, value: Value) -> Response {
-    let path = format!("/v8/management/config/{v8}");
-    let body = value.to_string().into_bytes();
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::PUT, &[], &body))
-        .await
-        .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
-    if res.status() == StatusCode::OK {
-        ok()
-    } else {
-        save_error(res).await
+/// Where a v0 save lands: its v8 document path, and the legacy path (`/`-separated) a
+/// file without v8 sections keeps it at, since Go v8.0.35 saves such a file in its
+/// legacy layout ([`super::v0_save`]).
+pub(super) struct Target {
+    v8: String,
+    legacy: String,
+}
+
+pub(super) fn target(v8: impl Into<String>, legacy: impl Into<String>) -> Target {
+    Target {
+        v8: v8.into(),
+        legacy: legacy.into(),
     }
 }
 
-/// Saves one v8 path unchanged, as Go saves after a handler that changed nothing.
+/// Saves through the legacy or the shared config writer; Go's v0 success body.
+/// `v8` is the value to PUT at the v8 path, `None` deletes it (absent counts as done).
+async fn save(state: Arc<Management>, t: Target, v8: Option<Value>, legacy: super::LegacyEdit) -> Response {
+    let delete = v8.is_none();
+    let res = tokio::task::spawn_blocking(move || {
+        let parts: Vec<&str> = t.legacy.split('/').collect();
+        let path = format!("/v8/management/config/{}", t.v8);
+        super::v0_save(&state, &parts, legacy, super::V8Edit { path: &path, value: v8 })
+    })
+    .await
+    .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
+    match res.status() {
+        StatusCode::OK => ok(),
+        StatusCode::NOT_FOUND if delete => ok(),
+        _ => save_error(res).await,
+    }
+}
+
+/// Writes `value` at the v8 path, or `legacy` at the legacy path of a legacy file.
+async fn write(state: Arc<Management>, t: Target, value: Value, legacy: Value) -> Response {
+    save(state, t, Some(value), super::LegacyEdit::Set(legacy)).await
+}
+
+/// Saves one path unchanged, as Go saves after a handler that changed nothing.
 /// ponytail: a path absent from the document is not saved at all; Go would still
 /// rewrite the file (and fail on a read-only disk).
-async fn touch(state: Arc<Management>, v8: String) -> Response {
+async fn touch(state: Arc<Management>, t: Target) -> Response {
     let cfg = state.rt.config();
-    let current = v8
-        .split('/')
-        .try_fold(&cfg.document, |v, k| v.get(k))
-        .and_then(|v| serde_json::to_value(v).ok());
+    let current =
+        t.v8.split('/')
+            .try_fold(&cfg.document, |v, k| v.get(k))
+            .and_then(|v| serde_json::to_value(v).ok());
     match current {
-        Some(value) => write(state, v8, value).await,
+        Some(value) => save(state, t, Some(value), super::LegacyEdit::Keep).await,
         None => ok(),
     }
 }
 
-/// Deletes one v8 path through the shared config writer (absent counts as done).
-async fn remove(state: Arc<Management>, v8: String) -> Response {
-    let path = format!("/v8/management/config/{v8}");
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::DELETE, &[], b""))
-        .await
-        .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
-    match res.status() {
-        StatusCode::OK | StatusCode::NOT_FOUND => ok(),
-        _ => save_error(res).await,
-    }
+/// Deletes one path (absent counts as done).
+async fn remove(state: Arc<Management>, t: Target) -> Response {
+    save(state, t, None, super::LegacyEdit::Delete).await
 }
 
 /// Go's scalar v0 routes: GET reads the runtime value, PUT and PATCH take
@@ -317,7 +332,7 @@ pub(crate) async fn field_route(
         return go_json(StatusCode::OK, &json!({ f.key: value }));
     }
     if method == Method::DELETE {
-        return write(state, f.v8.into(), Value::from("")).await;
+        return write(state, target(f.v8, f.route), Value::from(""), Value::from("")).await;
     }
     let Some(mut value) = bind_value(&body, f.kind) else {
         return bad("invalid body");
@@ -331,7 +346,7 @@ pub(crate) async fn field_route(
         },
         _ => {}
     }
-    write(state, f.v8.into(), value).await
+    write(state, target(f.v8, f.route), value.clone(), value).await
 }
 
 /// Go `fmt.Sscanf(s, "%d", &n)`: an optionally signed decimal prefix after Go's
@@ -407,7 +422,7 @@ pub(crate) async fn api_keys(
     let _serial = WRITES.lock().await;
     let cfg = current(&state);
     let mut keys: Vec<Value> = cfg["api-keys"].as_array().cloned().unwrap_or_default();
-    let v8 = "access/api-keys".to_owned();
+    let t = || target("access/api-keys", "api-keys");
     match method {
         Method::GET => go_json(StatusCode::OK, &json!({"api-keys": cfg["api-keys"]})),
         Method::PUT => {
@@ -417,7 +432,8 @@ pub(crate) async fn api_keys(
             };
             // Go copies with append([]string(nil), v...): an empty list becomes nil.
             let list = list.as_array().filter(|l| !l.is_empty()).cloned();
-            write(state, v8, list.map_or(Value::Null, Value::Array)).await
+            let list = list.map_or(Value::Null, Value::Array);
+            write(state, t(), list.clone(), list).await
         }
         Method::PATCH => {
             // Go `patchStringList`: `{old, new, index, value}`, all pointers.
@@ -438,14 +454,14 @@ pub(crate) async fn api_keys(
                 && (i as usize) < keys.len()
             {
                 keys[i as usize] = Value::from(v.clone());
-                return write(state, v8, Value::Array(keys)).await;
+                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
             }
             if let (Some(old), Some(new)) = (old, new) {
                 match keys.iter_mut().find(|k| k.as_str() == Some(old.as_str())) {
                     Some(slot) => *slot = Value::from(new),
                     None => keys.push(Value::from(new)),
                 }
-                return write(state, v8, Value::Array(keys)).await;
+                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
             }
             bad("missing fields")
         }
@@ -458,14 +474,14 @@ pub(crate) async fn api_keys(
                 && (i as usize) < keys.len()
             {
                 keys.remove(i as usize);
-                return write(state, v8, Value::Array(keys)).await;
+                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
             }
             if let Some(value) = query_first(raw, "value")
                 .map(|v| go_trim(&v).to_owned())
                 .filter(|v| !v.is_empty())
             {
                 keys.retain(|k| go_trim(k.as_str().unwrap_or_default()) != value);
-                return write(state, v8, Value::Array(keys)).await;
+                return write(state, t(), Value::Array(keys.clone()), Value::Array(keys)).await;
             }
             bad("missing index or value")
         }
@@ -782,6 +798,74 @@ pub(crate) async fn vertex_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A v0 setter chooses its writer and writes under one `disk` lock. At the point
+    /// where it has chosen the v8 writer, a legacy `config.yaml` upload starts; it must
+    /// not get in before the setter writes. If it could (the lock released between the
+    /// layout check and the write), the setter would then migrate the uploaded legacy
+    /// file and its `codex-header-defaults` would become OAuth-only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_v0_save_holds_the_disk_lock_from_layout_to_write() {
+        let dir = std::env::temp_dir().join(format!("cpa-v0-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let auth = format!("{}", dir.display());
+        std::fs::write(&path, format!("config-version: 8\noauth: {{auth-dir: {auth}}}\n")).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg.clone(),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::with_options(rt, path.clone(), Default::default());
+        let upload =
+            format!("auth-dir: {auth}\nrequest-retry: 3\ncodex-header-defaults: {{user-agent: legacy-agent}}\n");
+        let (upload_tx, upload_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let handle = tokio::runtime::Handle::current();
+        let hook = {
+            let (state, upload) = (state.clone(), upload.clone());
+            move || {
+                let task = handle.spawn(put_config_yaml(State(state), Bytes::from(upload)));
+                upload_tx.send(task).unwrap();
+                // Unlocked here, the upload finishes well within this window; locked, it
+                // cannot write until the setter has.
+                let raced = finished_rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+                assert!(!raced, "the upload wrote between the layout check and the write");
+            }
+        };
+        *super::super::AFTER_LAYOUT.lock().unwrap() = Some((path.clone(), Box::new(hook)));
+        let setter = field_route(
+            State(state.clone()),
+            OriginalUri("/v0/management/request-retry".parse().unwrap()),
+            Method::PUT,
+            Bytes::from(r#"{"value":2}"#),
+        );
+        let setter = tokio::time::timeout(std::time::Duration::from_secs(10), setter);
+        let watcher = tokio::task::spawn_blocking(move || {
+            let task = upload_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the hook ran");
+            let status = tokio::runtime::Handle::current().block_on(task).unwrap().status();
+            let _ = finished_tx.send(());
+            status
+        });
+        let saved = setter.await.expect("the setter finished");
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(watcher.await.unwrap(), StatusCode::OK);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), upload);
+        let cfg = state.rt.config();
+        let api = cfg.for_api_key();
+        let ua = &api.document["oauth"]["providers"]["codex"]["header-defaults"]["user-agent"];
+        assert_eq!(ua.as_str(), Some("legacy-agent"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn value_binding_follows_gin() {

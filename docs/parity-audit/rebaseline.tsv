@@ -841,7 +841,7 @@ M5-0123	covered	partial	automatic	probe: PATCH /v0/management/quota-exceeded/swi
 M5-0125	covered	partial	automatic	probe: PUT /v0/management/quota-exceeded/switch-preview-model -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
 M5-0152	covered	partial	automatic	probe: PATCH /v0/management/request-log -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
 M5-0155	covered	partial	automatic	probe: PATCH /v0/management/ws-auth -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
-M5-0158	covered	partial	automatic	probe: PATCH /v0/management/request-retry -> 400	Closed later: tests/management.rs v0_setters_save_v8_files_in_the_latest_layout sends this PATCH and checks the saved value.
+M5-0158	covered	partial	automatic	probe: PATCH /v0/management/request-retry -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
 M5-0161	covered	partial	automatic	probe: PATCH /v0/management/max-retry-credentials -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
 M5-0163	covered	partial	automatic	probe: PUT /v0/management/max-retry-interval -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.
 M5-0167	covered	partial	automatic	probe: PATCH /v0/management/force-model-prefix -> 400; no test requests this path	Fixture must request this HTTP method, not only the same path.

@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::decode;
 use super::view::{self, Shape};
-use super::{Management, go_json, go_trim, keys, query_first, remove, sscanf_int, touch, write};
+use super::{Management, go_json, go_trim, keys, query_first, remove, sscanf_int, target, touch, write};
 
 const META_BASE_URL: &str = "https://api.meta.ai/v1";
 
@@ -147,13 +147,14 @@ fn groups(family: &str, list: &[Value]) -> Value {
 async fn persist_list(state: Arc<Management>, family: &str, old: &Value, new: Value) -> Response {
     let new = keys::sanitize(family, &new);
     let shape = view::field(family);
-    let path = format!("api-keys/{}", v8_family(family));
-    if yaml(shape, &new) == yaml(shape, old) {
-        return touch(state, path).await;
+    let t = target(format!("api-keys/{}", v8_family(family)), family);
+    let legacy = yaml(shape, &new);
+    if legacy == yaml(shape, old) {
+        return touch(state, t).await;
     }
     match &new {
-        Value::Array(list) => write(state, path, groups(family, list)).await,
-        _ => remove(state, path).await,
+        Value::Array(list) => write(state, t, groups(family, list), legacy).await,
+        _ => remove(state, t).await,
     }
 }
 
@@ -908,12 +909,16 @@ pub(super) async fn change(
             Err(fail) => return fail.response(),
         };
         let shape = view::field(route);
+        let t = target(map_path(route), route);
         if yaml(shape, &new) == yaml(shape, &old) {
-            return touch(state, map_path(route).into()).await;
+            return touch(state, t).await;
         }
         return match new {
-            Value::Object(_) => write(state, map_path(route).into(), yaml(shape, &new)).await,
-            _ => remove(state, map_path(route).into()).await,
+            Value::Object(_) => {
+                let value = yaml(shape, &new);
+                write(state, t, value.clone(), value).await
+            }
+            _ => remove(state, t).await,
         };
     }
     let new = match method {

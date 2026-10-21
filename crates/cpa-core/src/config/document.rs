@@ -275,6 +275,12 @@ impl ConfigDocument {
         Ok(Self(Value::Mapping(root)))
     }
 
+    /// A document kept in the layout it was written in, for a save that must not
+    /// migrate it (Go's v0 save of a file without v8 sections).
+    pub fn unmigrated(value: Value) -> Self {
+        Self(value)
+    }
+
     pub fn value(&self) -> &Value {
         &self.0
     }
