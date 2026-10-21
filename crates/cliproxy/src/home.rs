@@ -5461,7 +5461,9 @@ mod tests {
     /// `TestApplyHomeOverlayReturnsRuntimePluginSyncFailureWithoutApplyingConfig` and
     /// `TestHomeConfigWorkerPreemptsFailingConfigWithNewerPayload_Issue6225`: a payload
     /// whose plugin sync fails is not applied and is retried until a newer payload
-    /// replaces it.
+    /// replaces it. The worker reads payloads from a watch channel, which keeps only the
+    /// newest (Go `TestHomeConfigWorkQueue_TryDequeueLatest_Issue6225` tests its queue's
+    /// equivalent).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn home_config_worker_preempts_failing_config_with_newer_payload_issue6225() {
         // Plugins are enabled, and Home sends no plugin sync plan.

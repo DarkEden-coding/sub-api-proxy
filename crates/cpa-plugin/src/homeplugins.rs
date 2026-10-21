@@ -1279,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_sync_report_cases() {
+    fn completed_sync_report_both_outcomes() {
         // Go TestCompletedSyncReport.
         let ok = completed_sync_report(&linux(), None);
         assert!(ok.ok && ok.task == TASK_SYNC && ok.finished_at.0.is_some());
