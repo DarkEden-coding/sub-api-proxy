@@ -21,7 +21,7 @@ mod schema;
 mod text;
 mod trusted;
 mod validate;
-pub use document::{ConfigDocument, archive_comments};
+pub use document::{ConfigDocument, archive_comments, is_v8_layout};
 pub use schema::validate as validate_config_fields;
 pub use schema::{coerce_typed_scalars, go_bool, go_int, written_bool_spelling};
 
@@ -713,6 +713,31 @@ mod tests {
         }
         let err = Config::parse("oauth: {providers: {xai: true}}\n").unwrap_err();
         assert_eq!(err.to_string(), "oauth.providers.xai must be a mapping");
+    }
+
+    /// Go `TestIsV8ConfigLayout` (3be5fa44).
+    #[test]
+    fn v8_layout_is_recognised_by_version_sections_and_paths() {
+        for (raw, v8) in [
+            ("request-retry: 3\ncodex: {response-steering: true}\n", false),
+            (
+                "routing: {strategy: fill-first}\nplugins: {configs: {example: {enabled: true}}}\nquota-exceeded: {switch-project: true}\nclient: {codex: {enable-apply-patch: true}}\napi-keys: [client-key]\n",
+                false,
+            ),
+            ("codex: {optimize-multi-agent-v2: true}\n", false),
+            ("config-version: 8\nrequest-retry: 3\n", true),
+            ("oauth: {providers: {codex: {response-steering: true}}}\n", true),
+            ("server: {}\n", true),
+            ("upstream: {xai: {inject-x-search: false}}\n", true),
+            ("api-keys: {}\n", true),
+            ("request-retry: 3\nrouting: {retry: {max-retry-credentials: 2}}\n", true),
+            ("routing: {retry: {}}\n", true),
+            ("providers: {codex: {optimize-multi-agent-v2: true}}\n", true),
+            ("client: {codex: {optimize-multi-agent-v2: false}}\n", true),
+        ] {
+            let value: Value = serde_yaml_ng::from_str(raw).unwrap();
+            assert_eq!(is_v8_layout(&value), v8, "{raw}");
+        }
     }
 
     #[test]

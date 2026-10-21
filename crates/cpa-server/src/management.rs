@@ -805,6 +805,9 @@ pub(crate) fn config_sync(
         suffix.split('/').collect()
     };
     if method == Method::GET {
+        // Go v8.0.35 (3be5fa44): a historical path reads the canonical values.
+        let mut view = doc.clone();
+        view.project_aliases(&parts);
         if yaml {
             return match doc.render_preserving(&basis) {
                 Ok(text) => (
@@ -822,7 +825,7 @@ pub(crate) fn config_sync(
                 Err(_) => error(500, "decode_failed"),
             };
         }
-        let mut result = match serde_json::to_value(doc.value()) {
+        let mut result = match serde_json::to_value(view.value()) {
             Ok(v) => v,
             Err(_) => return error(500, "decode_failed"),
         };
@@ -856,6 +859,8 @@ pub(crate) fn config_sync(
         return response;
     }
     let before = doc.clone();
+    // A write to a historical path replaces or deletes the canonical values there.
+    doc.project_aliases(&parts);
     let mut written = None;
     if method == Method::DELETE {
         if parts.is_empty() {
@@ -886,6 +891,9 @@ pub(crate) fn config_sync(
             return error(400, "config_must_be_object");
         }
         auth_index::strip_update(&parts, &mut value);
+        if parts.is_empty() {
+            ConfigDocument::normalize_aliases(&mut value);
+        }
         if doc.update(&parts, value.clone(), method == Method::PATCH).is_err() {
             return error(400, "invalid_path");
         }
@@ -893,6 +901,14 @@ pub(crate) fn config_sync(
             doc.preserve_turn_secrets(&before);
         }
         written = Some(value);
+    }
+    ConfigDocument::normalize_aliases(doc.value_mut());
+    // Go saves every v8 write as `NormalizeConfigLayout` output, which declares the
+    // version even when a whole-config PUT omitted it.
+    if let Some(root) = doc.value_mut().as_mapping_mut()
+        && !root.contains_key("config-version")
+    {
+        root.insert("config-version".into(), 8.into());
     }
     auth_index::strip_root(doc.value_mut());
     for field in [
