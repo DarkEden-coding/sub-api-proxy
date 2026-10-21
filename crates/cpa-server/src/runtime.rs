@@ -1885,7 +1885,7 @@ impl CredentialStore {
             .scheduler
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clear_unauthorized(id);
+            .clear_unauthorized(id, Instant::now());
         if cleared {
             self.persist_cooldowns();
         }

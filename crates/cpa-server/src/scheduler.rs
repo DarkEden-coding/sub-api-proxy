@@ -1848,16 +1848,33 @@ impl Scheduler {
         models
     }
 
-    /// Go `clearUnauthorizedModelStates`: drops the 401 cooldowns of one credential and
-    /// keeps its quota blocks. Returns whether any was dropped.
-    pub(crate) fn clear_unauthorized(&mut self, id: &str) -> bool {
-        let before = self.cooldowns.len();
+    /// Go `clearUnauthorizedModelStates`: the 401 cooldowns of one credential are
+    /// dropped. A quota block whose error a later 401 replaced stays while it is live,
+    /// with the quota reason as its error again (Go clears `LastError` and restores the
+    /// quota reason), and is dropped once it has ended. Returns whether anything changed.
+    pub(crate) fn clear_unauthorized(&mut self, id: &str, now: Instant) -> bool {
+        let mut changed = false;
         self.cooldowns.retain(|(cid, _), c| {
+            // Go matches a 401 status, the `unauthorized` code or status message (the
+            // error message here).
             let error = c.error.to_ascii_lowercase();
-            let unauthorized = c.status == 401 || error.contains("unauthorized") || error.contains("status 401");
-            cid != id || c.quota || !unauthorized
+            if cid != id || !(c.status == 401 || error.contains("unauthorized") || error.contains("status 401")) {
+                return true;
+            }
+            changed = true;
+            let live = c.deadline > now || c.trust.stated.is_some_and(|r| r > now);
+            if c.quota && live {
+                c.error = if c.status == 429 {
+                    "quota"
+                } else {
+                    "cloudflare challenge"
+                }
+                .into();
+                return true;
+            }
+            false
         });
-        self.cooldowns.len() != before
+        changed
     }
 }
 
@@ -1865,6 +1882,61 @@ impl Scheduler {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Go `clearUnauthorizedModelStates`: 401 states go; a live quota block that a later
+    /// 401 answered keeps its block with the quota reason, an ended one goes; other
+    /// causes and other credentials stay.
+    #[test]
+    fn clear_unauthorized_keeps_live_quota_blocks() {
+        let now = Instant::now();
+        let cooldown = |status: u16, quota: bool, error: &str, live: bool| Cooldown {
+            deadline: if live {
+                now + Duration::from_secs(600)
+            } else {
+                now - Duration::from_secs(1)
+            },
+            level: 3,
+            status,
+            quota,
+            error: error.into(),
+            since: SystemTime::now(),
+            credential: false,
+            trust: Trust::default(),
+        };
+        let mut s = Scheduler::default();
+        for (id, model, c) in [
+            ("a", "401", cooldown(401, false, "upstream said no", true)),
+            ("a", "403-text", cooldown(403, false, "Unauthorized client", true)),
+            ("a", "403", cooldown(403, false, "forbidden", true)),
+            ("a", "quota", cooldown(429, true, "rate limited", true)),
+            ("a", "quota-401", cooldown(429, true, "status 401: token revoked", true)),
+            (
+                "a",
+                "ended-quota-401",
+                cooldown(429, true, "status 401: token revoked", false),
+            ),
+            ("b", "401", cooldown(401, false, "upstream said no", true)),
+        ] {
+            s.cooldowns.insert((id.into(), model.into()), c);
+        }
+        assert!(s.clear_unauthorized("a", now));
+        let mut left: Vec<_> = s
+            .cooldowns
+            .iter()
+            .map(|((id, m), c)| (id.as_str(), m.as_str(), c.error.as_str(), c.level))
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                ("a", "403", "forbidden", 3),
+                ("a", "quota", "rate limited", 3),
+                ("a", "quota-401", "quota", 3),
+                ("b", "401", "upstream said no", 3),
+            ]
+        );
+        assert!(!s.clear_unauthorized("a", now), "nothing left to clear");
+    }
 
     fn tag<'a>(creds: &[&'a Credential]) -> Vec<(&'a Credential, &'static str)> {
         creds.iter().map(|c| (*c, "claude")).collect()
