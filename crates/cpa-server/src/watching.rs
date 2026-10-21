@@ -799,6 +799,84 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Go c4c1d43e for upload fallbacks, which are rebuilt from a second read: a scan
+    /// taken before an external edit (B) and a persist of the current credential (A)
+    /// does not publish B over A, whether the auth-dir is absolute or relative (where
+    /// the scan's paths are relative and the fallback's absolute).
+    #[tokio::test]
+    async fn a_reload_does_not_undo_a_write_to_an_upload_fallback() {
+        for relative in [false, true] {
+            let (state, dir) = state();
+            if relative {
+                let up = "../".repeat(std::env::current_dir().unwrap().components().count() - 1);
+                let auth = Path::new(&up).join(dir.strip_prefix("/").unwrap());
+                std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", auth.display())).unwrap();
+            }
+            reload(&state).unwrap();
+            let config = (*state.rt.config()).clone();
+            assert_eq!(config.auth_dir.is_relative(), relative);
+            // The path an upload records.
+            let file = std::path::absolute(config.auth_dir.join("a.json")).unwrap();
+            let a = r#"{"type":"gemini","v":"A"}"#;
+            std::fs::write(&file, a).unwrap();
+            state.fallbacks.lock().unwrap().insert(file.clone());
+            reload(&state).unwrap();
+            let store = state.rt.store();
+            let before = store.get("a.json").unwrap();
+            assert_eq!(before.metadata["v"], "A");
+            let scan = credentials::scan_auth_dir(&config);
+            std::fs::write(&file, r#"{"type":"gemini","v":"B"}"#).unwrap();
+            let persisted = file.clone();
+            crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+                config.auth_dir.clone(),
+                Box::new(move || std::fs::write(persisted, a).unwrap()),
+            ));
+            state.publish(config, Some(scan));
+            let after = store.get("a.json").unwrap();
+            assert_eq!(
+                (&after.metadata["v"], after.revision),
+                (&"A".into(), before.revision),
+                "relative: {relative}"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    /// A fallback stays tracked while its file still holds it: when the scan read a
+    /// synthesizable rewrite that the freshness check rejects, the next reload keeps the
+    /// fallback; an accepted rewrite still retires it.
+    #[tokio::test]
+    async fn a_fallback_whose_replacement_was_rejected_stays_tracked() {
+        let (state, dir) = state();
+        let file = dir.join("a.json");
+        let a = r#"{"type":"gemini","v":"A"}"#;
+        std::fs::write(&file, a).unwrap();
+        state.fallbacks.lock().unwrap().insert(file.clone());
+        reload(&state).unwrap();
+        let store = state.rt.store();
+        let before = store.get("a.json").unwrap();
+        let codex = r#"{"type":"codex","access_token":"B"}"#;
+        std::fs::write(&file, codex).unwrap();
+        let config = (*state.rt.config()).clone();
+        let scan = credentials::scan_auth_dir(&config);
+        let persisted = file.clone();
+        crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+            config.auth_dir.clone(),
+            Box::new(move || std::fs::write(persisted, a).unwrap()),
+        ));
+        state.publish(config, Some(scan));
+        let kept = store.get("a.json").unwrap();
+        assert_eq!((kept.provider.as_str(), kept.revision), ("gemini", before.revision));
+        reload(&state).unwrap();
+        assert_eq!(store.get("a.json").unwrap().provider, "gemini");
+        assert!(state.fallbacks.lock().unwrap().contains(&file));
+        std::fs::write(&file, codex).unwrap();
+        reload(&state).unwrap();
+        assert_eq!(store.get("a.json").unwrap().provider, "codex");
+        assert!(state.fallbacks.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A file that cannot be read (here a symlink loop, for every user) drops its
     /// credential, as Go's full scan does; only a read that succeeded can mark a file
     /// incomplete. The watcher does not observe such an entry, so keeping it would

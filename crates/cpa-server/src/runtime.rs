@@ -1986,21 +1986,24 @@ impl CredentialStore {
     /// would undo that write, and the watcher reloads the file it sees changed. A file
     /// that is gone or unreadable keeps the current credential too. The check runs
     /// under the exclusive reload gate, so no write lands between it and the swap, but
-    /// before `inner` is taken, so its file reads never stall readers.
+    /// before `inner` is taken, so its file reads never stall readers. Returns the files
+    /// whose scanned credential was rejected.
     pub fn reconcile_scanned(
         &self,
         credentials: Vec<Credential>,
         read: &std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>,
-    ) {
+    ) -> Vec<std::path::PathBuf> {
         use sha2::{Digest, Sha256};
         let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
         let mut credentials = credentials;
+        let mut rejected = Vec::new();
         if !read.is_empty() {
             let current = self.snapshot();
+            let by_id: HashMap<&str, &Arc<Credential>> = current.iter().map(|c| (c.id.as_str(), c)).collect();
             for cred in &mut credentials {
                 let Source::File(path) = &cred.source else { continue };
                 let Some(seen) = read.get(path) else { continue };
-                let Some(existing) = current.iter().find(|c| c.id == cred.id) else {
+                let Some(&existing) = by_id.get(cred.id.as_str()) else {
                     continue;
                 };
                 if unchanged(existing, cred) {
@@ -2012,15 +2015,21 @@ impl CredentialStore {
                     .filter(|data| !data.is_empty())
                     .map(|data| Sha256::digest(&data).into());
                 if on_disk.as_ref() != Some(seen) {
+                    rejected.push(path.clone());
                     *cred = Credential::clone(existing);
                 }
             }
         }
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let inner = &mut *guard;
         let mut next = Vec::with_capacity(credentials.len());
+        let mut by_id = HashMap::with_capacity(inner.creds.len());
+        for c in &inner.creds {
+            by_id.entry(c.id.as_str()).or_insert(c);
+        }
         for mut cred in credentials {
-            match inner.creds.iter().find(|c| unchanged(c, &cred)) {
-                Some(existing) => next.push(existing.clone()),
+            match by_id.get(cred.id.as_str()).filter(|c| unchanged(c, &cred)) {
+                Some(&existing) => next.push(existing.clone()),
                 None => {
                     inner.generation += 1;
                     cred.revision = inner.generation;
@@ -2044,10 +2053,11 @@ impl CredentialStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .reconcile(&inner.creds);
-        drop(inner);
+        drop(guard);
         drop(reload);
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
+        rejected
     }
 
     /// Inserts or replaces one credential (a plugin's `host.auth.save`) under a single
