@@ -156,9 +156,12 @@ async fn body_limit_answers_match_go() {
         let name = case["name"].as_str().unwrap();
         let dir = std::env::temp_dir().join(format!("cpa-body-limit-{}-{i}", std::process::id()));
         let (app, _) = app(&dir, case["yaml"].as_str().unwrap(), case["plugin_auth"] == true);
-        let raw = base64::engine::general_purpose::STANDARD
+        let mut raw = base64::engine::general_purpose::STANDARD
             .decode(case["body_b64"].as_str().unwrap())
             .unwrap();
+        if let Some(pad) = case["pad_to"].as_u64() {
+            raw.resize(pad as usize, b'p');
+        }
         let read = Arc::new(AtomicU64::new(0));
         let chunked = case["chunked"].as_bool().unwrap();
         let mut request = axum::http::Request::builder()

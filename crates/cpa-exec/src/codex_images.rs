@@ -597,7 +597,7 @@ fn prepare(req: &ExecRequest, path: &str) -> Result<Prepared, ExecError> {
     let content_type = request::header(&req.headers, "content-type").trim();
     let media = match multipart::parse_media_type(content_type) {
         MediaType::Ok(media, _) | MediaType::BadParams(media) => media,
-        MediaType::Invalid => String::new(),
+        MediaType::Invalid(_) => String::new(),
     };
     if media.starts_with("multipart/") {
         return edit_multipart(&req.body, &req.model, content_type);
