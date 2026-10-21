@@ -136,16 +136,21 @@ async fn model_detail_comes_from_the_clients_catalog() {
         .find(|m| m["slug"] == "sonnet-long");
     assert_eq!(Some(&body), listed);
     let (_, _, openai) = get("/v1/models", CONFIG).await;
-    let (status, _, body) = get("/v1/models/sonnet-long", CONFIG).await;
+    let (status, _, mut body) = get("/v1/models/sonnet-long", CONFIG).await;
     assert_eq!(status, 200);
-    assert_eq!(
-        Some(&body),
-        openai["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["id"] == "sonnet-long")
-    );
+    let mut listed = openai["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "sonnet-long")
+        .unwrap()
+        .clone();
+    // A config model is `created` at the request's second; the two requests can
+    // straddle a second boundary.
+    let (got, want) = (body["created"].take(), listed["created"].take());
+    assert!(got.as_i64().unwrap() - want.as_i64().unwrap() <= 1, "{got} {want}");
+    assert!(got.as_i64() >= want.as_i64(), "{got} {want}");
+    assert_eq!(body, listed);
     assert!(body.get("slug").is_none(), "the OpenAI entry, not the Codex one");
     let missing = serde_json::json!({"error": {"code": "model_not_found", "message": "Model not found", "type": "invalid_request_error"}});
     for path in ["/v1/models/nope", "/v1/models/", "/v1/models/sonnet-long/extra"] {
