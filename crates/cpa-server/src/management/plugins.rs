@@ -826,12 +826,16 @@ async fn serve_management(State(state): State<Arc<Management>>, req: Request) ->
         return access::not_found();
     }
     // Go reads the whole body (no cap) once a route matches, and answers 400 when that
-    // fails.
+    // fails, 413 at `server.max-request-body-bytes`.
     let body = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(body) => body,
-        Err(_) => {
+        Err(error) => {
             return reply(Some(cpa_plugin::management::Reply::error(
-                400,
+                if crate::body_limit::is_too_large(&error) {
+                    413
+                } else {
+                    400
+                },
                 "failed to read plugin management request body",
             )));
         }

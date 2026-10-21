@@ -1,0 +1,1722 @@
+[
+  {
+    "name": "content_length_over_limit_reads_nothing",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\nobservability:\n  logs:\n    request-log: true\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "content_length_over_limit_authenticated",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/messages",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "chunked_unauthenticated_request_log",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\nobservability:\n  logs:\n    request-log: true\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_b64": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYg==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_unauthenticated_no_request_log",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_b64": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYg==",
+    "chunked": true,
+    "status": 401,
+    "response": "{\"error\":\"Missing API key\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "chunked_authenticated_request_log",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\nobservability:\n  logs:\n    request-log: true\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/chat/completions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/completions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/completions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/responses",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/responses/compact",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses/compact",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /backend-api/codex/responses",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/backend-api/codex/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/messages",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/messages",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/messages/count_tokens",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/messages/count_tokens",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1beta/models/gemini-2.5-pro:generateContent",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1beta/models/gemini-2.5-pro:streamGenerateContent",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1beta/interactions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1beta/interactions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/images/generations",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/generations",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/images/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/audio/speech",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/audio/speech",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/tts",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/tts",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /v1/videos/generations",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/generations",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "chunked_authenticated /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_370f765f185743d48d12cacb078f6a4b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "content_type": "application/json",
+    "read": 65
+  },
+  {
+    "name": "multipart_chunked /v1/images/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "multipart_chunked /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_4e32c81a610644a29e3bdf3442842156\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "content_type": "application/json",
+    "read": 65
+  },
+  {
+    "name": "urlencoded_chunked /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_1881620f26db4e17a0a1748fa2a51b33\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "content_type": "application/json",
+    "read": 65
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/responses",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/chat/completions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/audio/speech",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/audio/speech",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit_request_log",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\nobservability:\n  logs:\n    request-log: true\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/images/generations",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/generations",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/images/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/generations",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/generations",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /v1/videos/extensions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/videos/extensions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_over_limit /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/UQAHAE1AQDUAXsibW9kZWwiOiJncHQtNSIsImlucHV0IjoieiJ9AVQUAizzE0X1dxM=",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_a2875dd0289949d5bc49cfb0b5729449\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: http: request body too large\"}}",
+    "content_type": "application/json",
+    "read": 53
+  },
+  {
+    "name": "zstd_decoded_at_limit",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 128\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Encoding": "zstd",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "KLUv/QQANQEA1AF7Im1vZGVsIjoiZ3B0LTUiLCJpbnB1dCI6InoifQFUFAIqAwIzn8zN",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"unknown provider for model gpt-5\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"param\":\"model\"}}",
+    "content_type": "application/json",
+    "read": 51
+  },
+  {
+    "name": "exact_boundary_accepted",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJvayJ9",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"unknown provider for model gpt-5\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"param\":\"model\"}}",
+    "content_type": "application/json",
+    "read": 30
+  },
+  {
+    "name": "exact_boundary_chunked_accepted",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJvayJ9",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"unknown provider for model gpt-5\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"param\":\"model\"}}",
+    "content_type": "application/json",
+    "read": 30
+  },
+  {
+    "name": "one_over_boundary_chunked",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJvayEifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"message\":\"Invalid request: http: request body too large\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 31
+  },
+  {
+    "name": "negative_limit_disables",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: -1\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIn0=",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"unknown provider for model gpt-5\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"param\":\"model\"}}",
+    "content_type": "application/json",
+    "read": 284
+  },
+  {
+    "name": "legacy_root_key",
+    "yaml": "max-request-body-bytes: 16\napi-keys:\n  - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJvayJ9",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "v8_key_wins_over_legacy",
+    "yaml": "max-request-body-bytes: 16\nserver:\n  max-request-body-bytes: 0\napi-keys:\n  - test-key\n",
+    "method": "POST",
+    "path": "/v1/responses",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwiaW5wdXQiOiJvayJ9",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"unknown provider for model gpt-5\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\",\"param\":\"model\"}}",
+    "content_type": "application/json",
+    "read": 30
+  },
+  {
+    "name": "get_with_body_over_limit",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "GET",
+    "path": "/v1/models",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 200,
+    "response": "{\"data\":[],\"object\":\"list\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "healthz_content_length_over_limit",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "GET",
+    "path": "/healthz",
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "management_chunked PUT /v8/management/config",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v8/management/config",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PATCH /v8/management/config",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PATCH",
+    "path": "/v8/management/config",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PUT /v8/management/config.yaml",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v8/management/config.yaml",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PUT /v8/management/config/server/port",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v8/management/config/server/port",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v8/management/plugins/store/demo/install",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/plugins/store/demo/install",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_request\",\"message\":\"read install request: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/plugin-store/demo/install",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/plugin-store/demo/install",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid_request\",\"message\":\"read install request: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/api-call",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/api-call",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v8/management/requests/api-call",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/requests/api-call",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/auth-files?name=x.json",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/auth-files?name=x.json",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"failed to read body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v8/management/credentials?name=x.json",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/credentials?name=x.json",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"failed to read body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked DELETE /v0/management/auth-files",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "DELETE",
+    "path": "/v0/management/auth-files",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PATCH /v0/management/auth-files/status",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PATCH",
+    "path": "/v0/management/auth-files/status",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PATCH /v8/management/credentials/fields",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PATCH",
+    "path": "/v8/management/credentials/fields",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/auth-files/refresh",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/auth-files/refresh",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/oauth-callback",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/oauth-callback",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid body\",\"status\":\"error\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v8/management/oauth/callback",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/oauth/callback",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid body\",\"status\":\"error\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/reset-quota",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/reset-quota",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v8/management/routing/cooldown/reset",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/routing/cooldown/reset",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/plugins/demo/quota",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/plugins/demo/quota",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked POST /v0/management/plugins/demo/quota/reset",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/plugins/demo/quota/reset",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PUT /v0/management/debug",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v0/management/debug",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"invalid body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PUT /v0/management/config.yaml",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v0/management/config.yaml",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"invalid_yaml\",\"message\":\"cannot read request body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_chunked PUT /v0/management/api-keys",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v0/management/api-keys",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"failed to read body\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_multipart_chunked /v0/management/auth-files",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/auth-files",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"invalid multipart form: malformed MIME header: missing colon: \\\"Content-Di\\\"\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_multipart_chunked /v0/management/vertex/import",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/vertex/import",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"file required\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "management_multipart_chunked /v8/management/oauth/import?provider=vertex",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/oauth/import?provider=vertex",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"file required\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "plugin_auth_chunked /v1/chat/completions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "headers": {
+      "Authorization": "Bearer wrong-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcA==",
+    "chunked": true,
+    "plugin_auth": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "plugin_auth_chunked /v1/realtime/calls",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/calls",
+    "headers": {
+      "Authorization": "Bearer wrong-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcA==",
+    "chunked": true,
+    "plugin_auth": true,
+    "status": 413,
+    "response": "{\"error\":{\"code\":\"request_body_too_large\",\"message\":\"http: request body too large\",\"param\":null,\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "plugin_auth_chunked /v1/live",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/live",
+    "headers": {
+      "Authorization": "Bearer wrong-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcA==",
+    "chunked": true,
+    "plugin_auth": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "plugin_auth_content_length_over_limit",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/calls",
+    "headers": {
+      "Authorization": "Bearer wrong-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcA==",
+    "chunked": false,
+    "plugin_auth": true,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "realtime_chunked /v1/realtime/client_secrets",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/client_secrets",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"failed to read Realtime client secret request: http: request body too large\",\"param\":null,\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "realtime_chunked /v1/realtime/sessions",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/sessions",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"failed to read Realtime client secret request: http: request body too large\",\"param\":null,\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "realtime_chunked /v1/realtime/calls",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/calls",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":{\"code\":\"realtime_request_failed\",\"message\":\"failed to read Codex live request: http: request body too large\",\"param\":null,\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "realtime_chunked /v1/live",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/live",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"failed to read Codex live request: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 65
+  },
+  {
+    "name": "realtime_chunked /v1/realtime/calls/rtc_1/hangup",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 64\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/realtime/calls/rtc_1/hangup",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJtb2RlbCI6ImdwdC01IiwibWVzc2FnZXMiOlt7InJvbGUiOiJ1c2VyIiwiY29udGVudCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In1dfQ==",
+    "chunked": true,
+    "status": 404,
+    "response": "{\"error\":{\"code\":\"realtime_call_not_found\",\"message\":\"Realtime call not found\",\"param\":null,\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "management_chunked GET /v8/management/config",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "GET",
+    "path": "/v8/management/config",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+    "chunked": true,
+    "status": 200,
+    "response": "{\"config-version\":8,\"management\":{\"allow-remote\":true,\"secret-key\":\"$2a$10$5q6GzRCHB1BlQv3bGhIaZeMFcYJN1JJNv4EXjW6Ip9lSWHHL9J0CS\"},\"oauth\":{\"auth-dir\":\"/tmp/cpa-body-limit-3108199717/auth\"},\"server\":{\"max-request-body-bytes\":32}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "management_chunked DELETE /v8/management/config/server/max-request-body-bytes",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "DELETE",
+    "path": "/v8/management/config/server/max-request-body-bytes",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+    "chunked": true,
+    "status": 200,
+    "response": "{\"config-version\":8,\"status\":\"ok\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "json_first_value_within_limit /v0/management/plugins/demo/quota",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/plugins/demo/quota",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "e30gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":\"auth_index is required\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 33
+  },
+  {
+    "name": "multipart_file_data_over_limit /v0/management/auth-files",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/auth-files",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid multipart form: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 1025
+  },
+  {
+    "name": "multipart_file_data_over_limit /v8/management/credentials",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/credentials",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"invalid multipart form: http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 1025
+  },
+  {
+    "name": "multipart_file_data_over_limit /v0/management/vertex/import",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v0/management/vertex/import",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"file required\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 1025
+  },
+  {
+    "name": "multipart_file_data_over_limit /v8/management/oauth/import?provider=vertex",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "POST",
+    "path": "/v8/management/oauth/import?provider=vertex",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iZmlsZSI7IGZpbGVuYW1lPSJ1cGxvYWQuanNvbiINCkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtDQoNCnsidHlwZSI6ImNsYXVkZSIsImFjY2Vzc190b2tlbiI6InR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0In0NCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 413,
+    "response": "{\"error\":\"file required\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 1025
+  },
+  {
+    "name": "multipart_headers_over_limit /v1/images/edits",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/v1/images/edits",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnANCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"error\":{\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 31
+  },
+  {
+    "name": "multipart_headers_over_limit /openai/v1/videos",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 30\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibW9kZWwiDQoNCmdwdC1pbWFnZS0xDQotLUJPVU5EQVJZMDEyMzQ1Njc4OQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJwcm9tcHQiDQoNCnANCi0tQk9VTkRBUlkwMTIzNDU2Nzg5LS0NCg==",
+    "chunked": true,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_19c31ae25cd44624981ee1ad32307745\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: malformed MIME header: missing colon: \\\"Content-\\\"\"}}",
+    "content_type": "application/json",
+    "read": 31
+  },
+  {
+    "name": "management_content_length_over_limit",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v8/management/config",
+    "headers": {
+      "Authorization": "Bearer mgmt-secret",
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": false,
+    "status": 413,
+    "response": "{\"error\":\"http: request body too large\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "management_unauthenticated_chunked",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 32\nmanagement:\n  allow-remote: true\n  secret-key: mgmt-secret\n",
+    "method": "PUT",
+    "path": "/v8/management/config",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_b64": "eyJ2ZXJzaW9uIjoidnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnYifQ==",
+    "chunked": true,
+    "status": 401,
+    "response": "{\"error\":\"missing management key\"}",
+    "content_type": "application/json; charset=utf-8",
+    "read": 0
+  },
+  {
+    "name": "video_form_no_boundary limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data"
+    },
+    "body_b64": "",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_de11ae40f40f4d7bb67644b5bee2b768\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: no multipart boundary param in Content-Type\"}}",
+    "content_type": "application/json",
+    "read": 0
+  },
+  {
+    "name": "video_form_no_boundary limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data"
+    },
+    "body_b64": "",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c347904c54174e1fa602cf1acd236985\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: no multipart boundary param in Content-Type\"}}",
+    "content_type": "application/json",
+    "read": 0
+  },
+  {
+    "name": "video_form_bad_escape limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWlo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_ae5d8c2314fe4814aaa417384a02184b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 20
+  },
+  {
+    "name": "video_form_bad_escape limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWlo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_98b81b27ba154679a18c82f736106701\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 20
+  },
+  {
+    "name": "video_form_short_escape limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_285b5c219dc149e2a0a9551c23480a52\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%Z\\\"\"}}",
+    "content_type": "application/json",
+    "read": 19
+  },
+  {
+    "name": "video_form_short_escape limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmaWdub3JlZD0lWg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_8d73a5471ad4465cb225746d6d125f35\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%Z\\\"\"}}",
+    "content_type": "application/json",
+    "read": 19
+  },
+  {
+    "name": "video_form_semicolon limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmYT0lWlomYj0xO2M9Mg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c727bd10d62641f1af533021b7f8ad71\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid semicolon separator in query\"}}",
+    "content_type": "application/json",
+    "read": 22
+  },
+  {
+    "name": "video_form_semicolon limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXAmYT0lWlomYj0xO2M9Mg==",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_ce5ac2bb3ddc419d9b9bc28406a83e2b\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid semicolon separator in query\"}}",
+    "content_type": "application/json",
+    "read": 22
+  },
+  {
+    "name": "video_form_bad_query_urlencoded limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_683e9ccb7a0d4553980f49373fadfe61\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_query_urlencoded limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c15c142758574d4bbf76ac0afe7a92bf\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_query_multipart limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icHJvbXB0Ig0KDQpwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_4b74fdaab2054fa89d3535e5611e8b41\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 98
+  },
+  {
+    "name": "video_form_bad_query_multipart limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos?x=%ZZ",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "multipart/form-data; boundary=BOUNDARY0123456789"
+    },
+    "body_b64": "LS1CT1VOREFSWTAxMjM0NTY3ODkNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icHJvbXB0Ig0KDQpwDQotLUJPVU5EQVJZMDEyMzQ1Njc4OS0tDQo=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_c21bd6f23b1f48a2bb900b13ab0875c8\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: invalid URL escape \\\"%ZZ\\\"\"}}",
+    "content_type": "application/json",
+    "read": 98
+  },
+  {
+    "name": "video_form_bad_media_param limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded; x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_deae716f7a4246809b004e1fa92f68d4\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: invalid media parameter\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_bad_media_param limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded; x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_a09e69fe096746b3a2317b9d97a9639e\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: invalid media parameter\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_content_after_subtype limit_off",
+    "yaml": "config-version: 8\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_7646e4e2cc5148d1a06d8ce45758354e\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: unexpected content after media subtype\"}}",
+    "content_type": "application/json",
+    "read": 8
+  },
+  {
+    "name": "video_form_content_after_subtype limit_1024",
+    "yaml": "config-version: 8\nserver:\n  max-request-body-bytes: 1024\naccess:\n  api-keys:\n    - test-key\n",
+    "method": "POST",
+    "path": "/openai/v1/videos",
+    "headers": {
+      "Authorization": "Bearer test-key",
+      "Content-Type": "application/x-www-form-urlencoded x"
+    },
+    "body_b64": "cHJvbXB0PXA=",
+    "chunked": false,
+    "status": 400,
+    "response": "{\"object\":\"video\",\"status\":\"failed\",\"progress\":0,\"id\":\"video_179b5c3d7fd642cc9899cce3205925cd\",\"model\":\"grok-imagine-video\",\"error\":{\"code\":\"invalid_request_error\",\"message\":\"Invalid request: mime: unexpected content after media subtype\"}}",
+    "content_type": "application/json",
+    "read": 8
+  }
+]

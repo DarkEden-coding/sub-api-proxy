@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -432,6 +433,22 @@ pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     json(status, &json!({"error": message}))
 }
 
+/// Go `HTTPStatusFromErrorOr(err, 400)` for a failed body read in the handlers
+/// dd7b4334 changed: 413 at `server.max-request-body-bytes` (and at a route's own
+/// `DefaultBodyLimit`), else 400.
+pub(crate) fn read_status(rejection: &BytesRejection) -> StatusCode {
+    if crate::body_limit::is_too_large(rejection) || rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+/// The text of a failed body read: Go's `err.Error()` at the limit.
+pub(crate) fn read_reason(rejection: &BytesRejection) -> String {
+    crate::claude::read_error(rejection).1
+}
+
 fn error(code: u16, message: &str) -> Response {
     json_error(StatusCode::from_u16(code).unwrap(), message)
 }
@@ -744,7 +761,7 @@ pub(crate) async fn config(
     OriginalUri(uri): OriginalUri,
     method: Method,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Response {
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
@@ -753,7 +770,34 @@ pub(crate) async fn config(
         .iter()
         .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
         .collect();
-    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
+    // Go reads the body only for writes other than DELETE, under its lock, after the file
+    // read, the If-Match check and the stored config's parse. Those run here under the
+    // disk lock, which is released while the body arrives, and again under it before
+    // the write.
+    let body = if matches!(method, Method::GET | Method::DELETE) {
+        Ok(Bytes::new())
+    } else {
+        let check = {
+            let (state, method, if_match) = (state.clone(), method.clone(), if_match.clone());
+            tokio::task::spawn_blocking(move || {
+                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+                stored(&state, &method, &if_match).err()
+            })
+        };
+        match check.await {
+            Ok(Some(response)) => return *response,
+            Ok(None) => {}
+            Err(_) => return error(500, "internal_error"),
+        }
+        axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+            if crate::body_limit::is_too_large(&e) {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        })
+    };
+    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, body.as_deref().map_err(|s| *s)))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
 }
@@ -825,10 +869,31 @@ pub(crate) fn config_sync(
     path: &str,
     method: Method,
     if_match: &[String],
-    body: &[u8],
+    body: Result<&[u8], StatusCode>,
 ) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     config_sync_locked(state, path, method, if_match, body, false)
+}
+
+/// The stored config as Go's `ConfigV8` prepares it before reading a body: the file
+/// bytes and their `ETag`, the `If-Match` check for writes, then the parsed document.
+/// Errors are Go's answers. Call it holding `state.disk`.
+fn stored(
+    state: &Management,
+    method: &Method,
+    if_match: &[String],
+) -> Result<(String, HeaderValue, ConfigDocument), Box<Response>> {
+    let raw = std::fs::read(&state.path).map_err(|_| Box::new(error(500, "read_failed")))?;
+    let etag = config_etag(&raw);
+    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
+        let mut response = error(412, "precondition_failed");
+        response.headers_mut().insert(header::ETAG, etag);
+        return Err(Box::new(response));
+    }
+    let invalid = |e: &dyn std::fmt::Display| Box::new(invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e));
+    let original = String::from_utf8(raw).map_err(|_| invalid(&"yaml: invalid leading UTF-8 octet"))?;
+    let doc = ConfigDocument::parse(&original).map_err(|e| invalid(&e))?;
+    Ok((original, etag, doc))
 }
 
 /// [`config_sync`] for a caller already holding `state.disk`. `typed` saves the written
@@ -839,22 +904,12 @@ fn config_sync_locked(
     path: &str,
     method: Method,
     if_match: &[String],
-    body: &[u8],
+    body: Result<&[u8], StatusCode>,
     typed: bool,
 ) -> Response {
-    let original = match std::fs::read_to_string(&state.path) {
+    let (original, etag, mut doc) = match stored(state, &method, if_match) {
         Ok(v) => v,
-        Err(_) => return error(500, "read_failed"),
-    };
-    let etag = config_etag(original.as_bytes());
-    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
-        let mut response = error(412, "precondition_failed");
-        response.headers_mut().insert(header::ETAG, etag);
-        return response;
-    }
-    let mut doc = match ConfigDocument::parse(&original) {
-        Ok(v) => v,
-        Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(response) => return *response,
     };
     let basis = doc.migrated_text(&original).unwrap_or_else(|| original.clone());
     let archived = doc.archive_unknown();
@@ -935,6 +990,10 @@ fn config_sync_locked(
             return error(404, "not_found");
         }
     } else {
+        let body = match body {
+            Ok(body) => body,
+            Err(status) => return error(status.as_u16(), "invalid_body"),
+        };
         if !yaml && serde_json::from_slice::<serde::de::IgnoredAny>(body).is_err() {
             return error(400, "invalid_json");
         }
@@ -1017,7 +1076,7 @@ fn config_sync_locked(
         return response;
     }
     let basis = if yaml {
-        match std::str::from_utf8(body) {
+        match std::str::from_utf8(body.unwrap_or_default()) {
             Ok(v) => v.to_owned(),
             Err(_) => return error(400, "invalid_body"),
         }
@@ -1126,8 +1185,8 @@ pub(crate) fn v0_save(
             }
         }
         return match v8.value {
-            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], value.to_string().as_bytes(), true),
-            None => config_sync_locked(state, v8.path, Method::DELETE, &[], b"", true),
+            Some(value) => config_sync_locked(state, v8.path, Method::PUT, &[], Ok(value.to_string().as_bytes()), true),
+            None => config_sync_locked(state, v8.path, Method::DELETE, &[], Ok(b""), true),
         };
     }
     let mut doc = ConfigDocument::unmigrated(root);

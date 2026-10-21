@@ -955,7 +955,7 @@ mod tests {
                     "/v8/management/config/access/api-keys",
                     Method::PUT,
                     &[],
-                    br#"["a","b","c"]"#,
+                    Ok(br#"["a","b","c"]"#),
                 );
                 let _ = done_tx.send(());
                 res.status()
@@ -1060,5 +1060,59 @@ mod tests {
         assert_eq!(sscanf_int("\u{a0}\u{3000}\u{b}3"), Some(3));
         assert_eq!(sscanf_int("\r\n3"), None);
         assert_eq!(sscanf_int("\r3"), Some(3));
+    }
+
+    /// Go's ConfigV8 reads the file under its lock before the body. A save
+    /// holding `state.disk` truncates then rewrites the file in place; a stale write's
+    /// precondition must wait for it and answer with the finished file's ETag, not that
+    /// of the empty file it would read unlocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_config_precondition_waits_for_an_in_place_save() {
+        let dir = std::env::temp_dir().join(format!("cpa-v8-precheck-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let config = format!("config-version: 8\noauth: {{auth-dir: {}}}\n", dir.display());
+        std::fs::write(&path, &config).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cpa_core::config::Config::load(&path).unwrap(),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::with_options(rt, path.clone(), Default::default());
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let writer = {
+            let (state, path, config) = (state.clone(), path.clone(), config.clone());
+            std::thread::spawn(move || {
+                let _disk = state.disk.lock().unwrap();
+                std::fs::write(&path, "").unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::fs::write(&path, config).unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::IF_MATCH, axum::http::HeaderValue::from_static("\"stale\""));
+        let response = super::super::config(
+            State(state.clone()),
+            OriginalUri("/v8/management/config/observability/logs/debug".parse().unwrap()),
+            Method::PUT,
+            headers,
+            axum::body::Body::from("true"),
+        )
+        .await;
+        writer.join().unwrap();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            response.headers()[header::ETAG],
+            super::super::config_etag(config.as_bytes())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

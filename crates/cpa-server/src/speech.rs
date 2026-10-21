@@ -53,6 +53,7 @@ pub async fn speech(
     matched: Option<MatchedPath>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
+    limit: crate::body_limit::Limit,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
@@ -64,7 +65,7 @@ pub async fn speech(
         }
         Err(rejection) => return read_failed(&rejection),
     };
-    let body = match crate::openai::read_body(&headers, body) {
+    let body = match crate::openai::read_body(&headers, body, limit.0) {
         Ok(body) => body,
         Err(response) => return *response,
     };

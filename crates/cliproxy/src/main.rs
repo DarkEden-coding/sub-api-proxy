@@ -1367,6 +1367,7 @@ async fn serve(
     };
     let app = app.layer(axum::middleware::from_fn(cpa_server::management::cors));
     let app = cpa_server::request_logging::router(&management, app);
+    let app = cpa_server::body_limit::layer(&rt, app);
     let app = cpa_server::observability::router(&rt, app);
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     let app = heap_trim::layer(app);

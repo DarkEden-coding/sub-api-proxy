@@ -10,6 +10,7 @@ use super::{lookup, validate_shape};
 const PATHS: &[(&str, &str)] = &[
     ("host", "server.host"),
     ("port", "server.port"),
+    ("max-request-body-bytes", "server.max-request-body-bytes"),
     ("trusted-proxies", "server.trusted-proxies"),
     ("tls", "server.tls"),
     ("commercial-mode", "server.commercial-mode"),

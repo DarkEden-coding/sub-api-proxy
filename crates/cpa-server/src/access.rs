@@ -95,6 +95,37 @@ pub(crate) fn query_get(query: &str, name: &str) -> Option<Vec<u8>> {
         })
 }
 
+/// The error `url.ParseQuery(query)` returns, if any: a `;` in any pair outranks the
+/// first malformed escape, and more than 10,000 pairs fail before parsing.
+pub(crate) fn query_error(query: &[u8]) -> Option<String> {
+    if query.iter().filter(|&&b| b == b'&').count() >= 10_000 {
+        return Some("number of URL query parameters exceeded limit".into());
+    }
+    let mut err = None;
+    for pair in query.split(|&b| b == b'&') {
+        if pair.contains(&b';') {
+            return Some("invalid semicolon separator in query".into());
+        }
+        if err.is_none() {
+            let (key, value) = match pair.iter().position(|&b| b == b'=') {
+                Some(i) => (&pair[..i], &pair[i + 1..]),
+                None => (pair, &[][..]),
+            };
+            err = escape_error(key).or_else(|| escape_error(value));
+        }
+    }
+    err
+}
+
+/// Go's `url.EscapeError` for the first `%` without two hex digits: up to three bytes
+/// from it, quoted.
+fn escape_error(s: &[u8]) -> Option<String> {
+    let hex = |i: usize| s.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit));
+    let i = (0..s.len()).find(|&i| s[i] == b'%' && !hex(i))?;
+    let end = s.len().min(i + 3);
+    Some(format!("invalid URL escape {}", cpa_common::gostr::quote(&s[i..end])))
+}
+
 /// Go's QueryUnescape: `+` is a space, `%XX` must be two hex digits, any bytes allowed.
 pub(crate) fn unescape(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
