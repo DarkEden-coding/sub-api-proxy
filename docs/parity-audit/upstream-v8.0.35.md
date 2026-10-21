@@ -30,7 +30,7 @@ Columns:
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
 | Config and Management API | 15 | 10 | 5 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
-| Server, handlers and streaming | 12 | 0 | 12 | 0 | 0 | 0 |
+| Server, handlers and streaming | 12 | 2 | 10 | 0 | 0 | 0 |
 | Usage and logging | 3 | 1 | 2 | 0 | 0 | 0 |
 | Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
 | Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
@@ -316,8 +316,8 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`81573f04`](https://github.com/router-for-me/CLIProxyAPI/commit/81573f04) | fix(server): prevent data races during concurrent config access and reloads | no | to port | M (+146 −62) | Go handler config race fix; verify request-pinned configuration in Rust |
 | [`4f2e5270`](https://github.com/router-for-me/CLIProxyAPI/commit/4f2e5270) | feat(runtime): detect upstream stream truncation across executors and proxy handlers | yes | to port | L (+341 −45) | Rust already detects transport truncation; verify the new cross-provider terminal and handler cases before claiming this whole commit |
 | [`294ed097`](https://github.com/router-for-me/CLIProxyAPI/commit/294ed097) | feat(discovery): add robust mDNS host conflict resolution and IP binding fallback | yes | to port | L (+2531 −44) | add robust mDNS host conflict resolution and IP binding fallback |
-| [`07feedf7`](https://github.com/router-for-me/CLIProxyAPI/commit/07feedf7) | fix(api): allow empty home model catalog | yes | to port | S (+10 −3) | allow empty home model catalog |
-| [`4d34502f`](https://github.com/router-for-me/CLIProxyAPI/commit/4d34502f) | fix(api): reject home models error envelopes | yes | to port | S (+4 −0) | reject home models error envelopes |
+| [`07feedf7`](https://github.com/router-for-me/CLIProxyAPI/commit/07feedf7) | fix(api): allow empty home model catalog | yes | ported here | S (+10 −3) | a Home catalog with no model records lists no models (200) instead of a 502; a null payload or section, or records without a usable ID, still answer 502 |
+| [`4d34502f`](https://github.com/router-for-me/CLIProxyAPI/commit/4d34502f) | fix(api): reject home models error envelopes | yes | ported here | S (+4 −0) | a Home catalog with an `error` key of any shape is an error, never a model list: 401 for the `no_credentials` and `invalid_credential` envelopes, 502 for every other |
 
 ## Usage and logging
 
