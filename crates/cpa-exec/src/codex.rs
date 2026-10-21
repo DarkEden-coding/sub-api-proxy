@@ -152,7 +152,7 @@ impl CodexExecutor {
         self.ws.close(id);
     }
 
-    /// Refresh due under Go's 24h Codex lead. Cheap and side-effect free.
+    /// Refresh due under Go's 96h Codex lead. Cheap and side-effect free.
     pub fn needs_prepare(&self, credential: &Credential, cfg: &Config) -> bool {
         self.needs_prepare_at(credential, cfg, Utc::now())
     }
@@ -169,11 +169,7 @@ impl CodexExecutor {
         if !codex_oauth::refresh_due(credential, now) {
             return Ok(MetadataPatch::default());
         }
-        // `NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)`: the credential's proxy, then the
-        // global one, on Go's standard transport.
-        let proxy = crate::proxy::Proxy::effective(credential, cfg);
-        let oauth = self.oauth.with_client(self.transport.standard(&proxy));
-        match oauth.refresh_patch(codex_oauth::refresh_token(credential)).await {
+        match self.refresh_now(credential, cfg).await {
             Ok(patch) => Ok(patch),
             Err(error) if codex_oauth::access_usable(credential, now) => {
                 tracing::warn!(
@@ -185,6 +181,21 @@ impl CodexExecutor {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Refreshes the outer tokens whether due or not: the runtime asks after an upstream
+    /// rejected the access token, or for a management refresh (Go `CodexOuterNeedsRefresh`
+    /// with a rejected token, and `IsForceRefreshContext`). Nothing without a refresh token.
+    pub async fn refresh_now(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
+        let refresh_token = codex_oauth::refresh_token(credential);
+        if refresh_token.is_empty() {
+            return Ok(MetadataPatch::default());
+        }
+        // `NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)`: the credential's proxy, then the
+        // global one, on Go's standard transport.
+        let proxy = crate::proxy::Proxy::effective(credential, cfg);
+        let oauth = self.oauth.with_client(self.transport.standard(&proxy));
+        oauth.refresh_patch(refresh_token).await
     }
 
     pub async fn execute(

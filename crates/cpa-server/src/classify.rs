@@ -65,9 +65,13 @@ pub fn upstream_attempted(e: &ExecError) -> bool {
 
 /// Go `isUnauthorizedError` for an attempt that was not an explicit request fault.
 pub fn is_unauthorized(e: &ExecError) -> bool {
-    if explicit_request_scoped(e) {
-        return false;
-    }
+    !explicit_request_scoped(e) && names_unauthorized(e)
+}
+
+/// Go `isUnauthorizedError` itself: a 401 status or text, whatever the scope. Result
+/// recording uses it with the cooldown policy, which a `*-and-cooldown` rule can force
+/// on a request-scoped 401.
+pub fn names_unauthorized(e: &ExecError) -> bool {
     let raw = error_text(e).to_lowercase();
     go_status(e) == 401 || raw.contains("status 401") || raw.contains("401 unauthorized")
 }
