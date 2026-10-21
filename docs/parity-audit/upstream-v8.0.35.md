@@ -26,7 +26,7 @@ Columns:
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
-| Credentials, selection and cooldowns | 22 | 0 | 22 | 0 | 0 | 0 |
+| Credentials, selection and cooldowns | 22 | 2 | 20 | 0 | 0 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
 | Config and Management API | 15 | 2 | 13 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **27** | **197** | **0** | **61** | **3** |
+| **All** | **288** | **29** | **195** | **0** | **61** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -236,11 +236,11 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`4a8ecf5c`](https://github.com/router-for-me/CLIProxyAPI/commit/4a8ecf5c) | fix(auth): skip local filtering for home dispatch | yes | to port | S (+7 −2) | Home dispatch skips local filtering |
 | [`5dbd92a0`](https://github.com/router-for-me/CLIProxyAPI/commit/5dbd92a0) | fix(auth): preserve upstream error cooldown on canceled stream contexts | yes | to port | S (+39 −4) | upstream error cooldown kept on canceled streams |
 | [`7a687f42`](https://github.com/router-for-me/CLIProxyAPI/commit/7a687f42) | feat(routing): support session-affinity-rebind-on option | yes | to port | L (+297 −19) | `session-affinity-rebind-on` |
-| [`56eee6a4`](https://github.com/router-for-me/CLIProxyAPI/commit/56eee6a4) | fix(cliproxy): treat HTTP/2 closed connection errors as transient lifecycle drops | yes | to port | S (+11 −4) | treat HTTP/2 closed connection errors as transient lifecycle drops |
+| [`56eee6a4`](https://github.com/router-for-me/CLIProxyAPI/commit/56eee6a4) | fix(cliproxy): treat HTTP/2 closed connection errors as transient lifecycle drops | yes | ported here | S (+11 −4) | the classifier came with #73; replays its statusless Go cases (no cooldown, a retry round) |
 | [`08e5762a`](https://github.com/router-for-me/CLIProxyAPI/commit/08e5762a) | fix(cliproxy): add model registration fencings and epoch-checked publications to prevent superseded updates | yes | to port | L (+298 −45) | add model registration fencings and epoch-checked publications to prevent superseded updates |
 | [`5fc580b1`](https://github.com/router-for-me/CLIProxyAPI/commit/5fc580b1) | feat(watcher): add file removal tracking and single-file auth snapshotting for robust deletion reconciliation | yes | to port | M (+164 −6) | add file removal tracking and single-file auth snapshotting for robust deletion reconciliation |
 | [`1631875b`](https://github.com/router-for-me/CLIProxyAPI/commit/1631875b) | fix(watcher): guard management saves against stale config reloads and serialize file updates | yes | to port | M (+129 −47) | guard management saves against stale config reloads and serialize file updates |
-| [`35af74f9`](https://github.com/router-for-me/CLIProxyAPI/commit/35af74f9) | fix(auth): protect active model and credential cooldowns from being cleared by stale in-flight execution successes | yes | to port | M (+137 −25) | protect active model and credential cooldowns from being cleared by stale in-flight execution successes |
+| [`35af74f9`](https://github.com/router-for-me/CLIProxyAPI/commit/35af74f9) | fix(auth): protect active model and credential cooldowns from being cleared by stale in-flight execution successes | yes | ported here | M (+137 −25) | per-dispatch stamp right before each execution (after the after-auth interceptor; also refresh retries, pooled models, the credits lease); a success at or before a live cooldown's watermark leaves it; replays four of the five issue 6643 tests (M4-0573 lists the auth-level 429 gap) |
 | [`c4c1d43e`](https://github.com/router-for-me/CLIProxyAPI/commit/c4c1d43e) | feat(auth): prevent stale file snapshots from overwriting later persisted state | yes | to port | M (+133 −2) | prevent stale file snapshots from overwriting later persisted state |
 | [`f75ea073`](https://github.com/router-for-me/CLIProxyAPI/commit/f75ea073) | feat(cliproxy): reconcile latest auth state when model registration is superseded mid-flight | yes | to port | M (+121 −60) | reconcile latest auth state when model registration is superseded mid-flight |
 | [`b015f208`](https://github.com/router-for-me/CLIProxyAPI/commit/b015f208) | fix(oauth): restore credential exclusion priority | yes | to port | S (+28 −14) | restore credential exclusion priority |
