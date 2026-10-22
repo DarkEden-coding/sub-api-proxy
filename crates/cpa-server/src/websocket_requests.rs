@@ -815,7 +815,7 @@ fn http_status_text(status: u16) -> &'static str {
 fn error_body(status: u16, text: &str) -> String {
     let trimmed = text.trim();
     if !trimmed.is_empty() && gjson::valid(trimmed) {
-        return trimmed.to_owned();
+        return crate::errors::compact_json(trimmed);
     }
     let (kind, code) = match status {
         401 => ("authentication_error", "invalid_api_key"),
