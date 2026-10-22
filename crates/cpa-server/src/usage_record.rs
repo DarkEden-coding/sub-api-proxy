@@ -804,6 +804,50 @@ pub fn parse_body(format: Format, body: &[u8]) -> Detail {
     }
 }
 
+/// Go `ParsePluginExecutorResponseUsage`: a plugin executor's buffered response in its
+/// output protocol; an unknown protocol reads as OpenAI.
+pub fn parse_plugin_body(protocol: &str, payload: &[u8]) -> Detail {
+    if payload.is_empty() {
+        return Detail::default();
+    }
+    match protocol.trim().go_lower().as_str() {
+        // Go `parseClaudePayloadUsage`: `usage`, else `message.usage`, of a valid body.
+        "claude" => {
+            if !gj::valid(payload) {
+                return Detail::default();
+            }
+            let node = first(&gj::parse(payload), &["usage", "message.usage"]);
+            if node.exists() {
+                parse_claude_node(&node)
+            } else {
+                Detail::default()
+            }
+        }
+        "gemini" => parse_gemini(payload),
+        "interactions" | "interactions-response" => parse_interactions(payload),
+        "antigravity" => parse_body(Format::Antigravity, payload),
+        // Go `parseResponsesPluginExecutorUsage`: an event's `response.usage`, else a
+        // completed object's top-level usage; a tier alone hides neither.
+        "codex" | "openai-response" => {
+            let codex = parse_codex(payload);
+            if let Some(d) = codex.as_ref().filter(|d| has_tokens(d)) {
+                return d.clone();
+            }
+            let mut openai = parse_openai(payload);
+            if has_tokens(&openai) {
+                if openai.response_service_tier.is_empty()
+                    && let Some(d) = &codex
+                {
+                    openai.response_service_tier = d.response_service_tier.clone();
+                }
+                return openai;
+            }
+            codex.unwrap_or(openai)
+        }
+        _ => parse_openai(payload),
+    }
+}
+
 /// Go `StreamUsageBuffer`, fed line by line in one format the way that format's Go
 /// executor feeds it.
 #[derive(Debug, Default)]
@@ -940,6 +984,43 @@ impl StreamUsage {
                     self.observe(d);
                 }
             }
+        }
+    }
+
+    /// Go `ObservePluginExecutorStreamUsage` for one trimmed line of a plugin
+    /// executor's stream in its output protocol; an unknown protocol reads as OpenAI.
+    pub fn plugin_line(&mut self, protocol: &str, line: &[u8]) {
+        match protocol.trim().go_lower().as_str() {
+            "claude" => {
+                if let Some(d) = parse_claude_stream(line) {
+                    self.observe_merged(d);
+                }
+            }
+            "gemini" => {
+                if let Some(d) = parse_gemini_stream(line) {
+                    self.observe(d);
+                }
+            }
+            "interactions" | "interactions-response" => {
+                if let Some(d) = parse_interactions_stream(line) {
+                    self.observe_merged(d);
+                }
+            }
+            "antigravity" => {
+                if let Some(d) = parse_antigravity_stream(line) {
+                    self.observe(d);
+                }
+            }
+            // A tier without `response.usage` is not token usage: a completed object's
+            // top-level usage still counts.
+            "codex" | "openai-response" => {
+                if let Some(d) = json_payload(line).and_then(parse_codex).filter(has_tokens) {
+                    self.observe(d);
+                    return;
+                }
+                self.observe_openai(line);
+            }
+            _ => self.observe_openai(line),
         }
     }
 
@@ -1843,6 +1924,8 @@ struct Reported {
     discarded: bool,
     exchange: Exchange,
     claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
+    /// The plugin executor's provider when a plugin runs the attempt.
+    plugin_provider: Option<String>,
 }
 
 impl Reported {
@@ -1865,12 +1948,13 @@ impl Observer {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn settle(&self, failed: bool, status: i64, body: &str) {
+    /// `keep_usage`: a failure that keeps the usage reported so far.
+    fn settle(&self, failed: bool, keep_usage: bool, status: i64, body: &str) {
         let mut r = self.lock();
         if r.outcome.is_some() {
             return;
         }
-        let detail = if failed {
+        let detail = if failed && !keep_usage {
             Detail::default()
         } else {
             r.usage().unwrap_or_default()
@@ -1910,6 +1994,28 @@ impl cpa_core::exec::UsageObserver for Observer {
         r.model.observe(line, &self.provider);
     }
 
+    fn plugin_executor(&self, provider: &str) {
+        self.lock().plugin_provider = Some(provider.to_owned());
+    }
+
+    fn plugin_response_body(&self, protocol: &str, body: &[u8]) {
+        let mut r = self.lock();
+        r.seen = true;
+        r.body = Some(parse_plugin_body(protocol, body));
+    }
+
+    fn plugin_response_line(&self, protocol: &str, line: &[u8]) {
+        let mut r = self.lock();
+        r.seen = true;
+        r.stream.plugin_line(protocol, line);
+        // Go `ObserveResponseModel` on each chunk (the TTFT observers) and the stream
+        // buffer's own model, for the executor's provider.
+        let Reported {
+            model, plugin_provider, ..
+        } = &mut *r;
+        model.observe(line, plugin_provider.as_deref().unwrap_or(&self.provider));
+    }
+
     fn request(&self, format: Format, payload: &[u8]) {
         self.request_for(format.as_str(), payload);
     }
@@ -1945,11 +2051,15 @@ impl cpa_core::exec::UsageObserver for Observer {
     }
 
     fn publish(&self) {
-        self.settle(false, 0, "");
+        self.settle(false, false, 0, "");
     }
 
     fn publish_failure(&self, status: u16, body: &str) {
-        self.settle(true, i64::from(status), body);
+        self.settle(true, false, i64::from(status), body);
+    }
+
+    fn publish_failure_with_usage(&self, status: u16, body: &str) {
+        self.settle(true, true, i64::from(status), body);
     }
 
     fn usage_required(&self) {
@@ -2155,6 +2265,11 @@ impl Tracker {
         // Keep the returned TTL buckets as observations, not inferred accounting.
         let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
         let mut record = std::mem::take(&mut self.record);
+        if let Some(provider) = &reported.plugin_provider {
+            // Go `ExecutorTypeName` of the host's `*executorAdapter`.
+            record.provider.clone_from(provider);
+            record.executor_type = "executorAdapter".into();
+        }
         let mut telemetry_only = false;
         let (latency, ttft);
         if let Some(outcome) = reported.outcome {

@@ -20,6 +20,8 @@
 // test can change host state between the call's record and its answer.
 // executor.execute_stream.script.once.json, {"chunks":["..."],"error":"..."}, makes the
 // next asynchronous stream emit those chunks and close with that error, then is removed.
+// While executor.execute_stream.close.hold exists, that stream stays open (up to 10s)
+// after its chunks, so a test can drop it mid-stream.
 //
 // A management.handle request whose body is {"calls":[{"method":...,"request":{...}}]}
 // makes those host callbacks (with host_callback_id filled in when absent) and returns
@@ -230,12 +232,7 @@ func canned(label, method string) ([]byte, int, bool) {
 	if base == "" {
 		return nil, 0, false
 	}
-	hold := filepath.Join(base, "respond", label, method+".hold")
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(hold); err != nil {
-			break
-		}
-	}
+	waitWhile(label, method+".hold")
 	// <method>.once.json answers one call, then is removed.
 	once := filepath.Join(base, "respond", label, method+".once.json")
 	raw, err := os.ReadFile(once)
@@ -422,11 +419,15 @@ func executeStream(request []byte) ([]byte, int) {
 		})
 	}
 	if script, found := streamScript(); found {
+		mu.Lock()
+		name := label
+		mu.Unlock()
 		go func() {
 			for _, chunk := range script.Chunks {
 				raw, _ := json.Marshal(map[string]any{"stream_id": req.StreamID, "payload": []byte(chunk)})
 				callHost(pluginabi.MethodHostStreamEmit, raw)
 			}
+			waitWhile(name, pluginabi.MethodExecutorExecuteStream+".close.hold")
 			raw, _ := json.Marshal(map[string]any{"stream_id": req.StreamID, "error": script.Error})
 			callHost(pluginabi.MethodHostStreamClose, raw)
 		}()
@@ -450,6 +451,18 @@ func executeStream(request []byte) ([]byte, int) {
 type streamScriptFile struct {
 	Chunks []string `json:"chunks"`
 	Error  string   `json:"error"`
+}
+
+// waitWhile waits (up to 10s) while respond/<name>/<file> exists.
+func waitWhile(name, file string) {
+	mu.Lock()
+	hold := filepath.Join(dir, "respond", name, file)
+	mu.Unlock()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(hold); err != nil {
+			return
+		}
+	}
 }
 
 // streamScript reads and removes executor.execute_stream.script.once.json.

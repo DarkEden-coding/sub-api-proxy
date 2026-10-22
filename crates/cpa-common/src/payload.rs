@@ -910,13 +910,25 @@ pub fn is_codex_user_agent(headers: &HeaderMap) -> bool {
         .is_some_and(|ua| ua.go_lower().contains("codex"))
 }
 
-/// Codex client tools whose `number` parameters Codex deserializes as integers.
+/// `codexClientToolIntegerFields` and `matchCodexTargetTool`: the Codex client tools
+/// whose `number` parameters Codex deserializes as integers. Fields are paths under
+/// `parameters.properties`, not recursive names. A namespaced tool arrives as
+/// `namespace__name`.
 fn codex_integer_fields(tool: &str) -> &'static [&'static str] {
     let base = tool.trim();
     let base = base
         .strip_prefix("functions__")
         .or_else(|| base.strip_prefix("collab__"))
         .unwrap_or(base);
+    let base = match base {
+        "multi_agent_v1__wait_agent" | "collaboration__wait_agent" => "wait_agent",
+        "collaboration__get_channels"
+        | "collaboration__list_threads"
+        | "collaboration__search_posts"
+        | "collaboration__read_thread"
+        | "collaboration__read_post" => &base["collaboration__".len()..],
+        other => other,
+    };
     match base {
         "exec_command" => &["yield_time_ms", "max_output_tokens", "timeout_ms"],
         "write_stdin" => &["session_id", "yield_time_ms", "max_output_tokens"],
@@ -924,7 +936,35 @@ fn codex_integer_fields(tool: &str) -> &'static [&'static str] {
         "wait_agent" => &["timeout_ms"],
         "wait" => &["yield_time_ms", "max_tokens"],
         "tool_search" => &["limit"],
-        "test_sync_tool" => &["sleep_before_ms", "sleep_after_ms", "participants", "timeout_ms"],
+        "test_sync_tool" => &[
+            "sleep_before_ms",
+            "sleep_after_ms",
+            "participants",
+            "timeout_ms",
+            "barrier.properties.participants",
+            "barrier.properties.timeout_ms",
+        ],
+        "create_goal" => &["token_budget"],
+        "get_channels" | "history__list_windows" | "history__search_contents" => &["limit"],
+        "list_threads" | "search_posts" | "read_thread" => &["limit", "max_chars_per_post"],
+        "read_post" | "history__read_item" => &["offset_chars", "limit_chars"],
+        "memories__list" | "notes__list_files_by_prefix" => &["max_results"],
+        "memories__read" => &["line_offset", "max_lines"],
+        "memories__search" => &["context_lines", "max_results"],
+        "history__list_items" => &["limit", "max_chars_per_item"],
+        // Codex declares signed line numbers in the first nullable union branch.
+        "notes__read_file" => &["start_line", "stop_line", "start_line.anyOf.0", "stop_line.anyOf.0"],
+        "notes__search_contents" => &["max_matches_per_file", "max_files"],
+        "image_gen__imagegen" => &["num_last_images_to_include"],
+        "web__run" => &[
+            "search_query.items.properties.recency",
+            "image_query.items.properties.recency",
+            "open.items.properties.lineno",
+            "click.items.properties.id",
+            "screenshot.items.properties.pageno",
+            "weather.items.properties.duration",
+            "sports.items.properties.num_games",
+        ],
         _ => &[],
     }
 }
@@ -939,7 +979,7 @@ pub fn normalize_codex_tool_integer_types(body: &[u8], headers: &HeaderMap) -> V
         return body;
     }
     let tools = json::get(&body, "tools");
-    if let Some(updated) = normalize_tool_array(&tools)
+    if let Some(updated) = normalize_tool_array(&tools, "")
         && let Ok(next) = json::try_set_raw(&body, "tools", updated)
     {
         body = next;
@@ -950,7 +990,7 @@ pub fn normalize_codex_tool_integer_types(body: &[u8], headers: &HeaderMap) -> V
             if *item.get("type").str() != *"additional_tools" {
                 continue;
             }
-            if let Some(updated) = normalize_tool_array(&item.get("tools"))
+            if let Some(updated) = normalize_tool_array(&item.get("tools"), "")
                 && let Ok(next) = json::try_set_raw(&body, &format!("input.{index}.tools"), updated)
             {
                 body = next;
@@ -961,7 +1001,7 @@ pub fn normalize_codex_tool_integer_types(body: &[u8], headers: &HeaderMap) -> V
 }
 
 /// Rewrites changed elements of a tool array, copying the bytes between them verbatim.
-fn normalize_tool_array(tools: &Res<'_>) -> Option<Vec<u8>> {
+fn normalize_tool_array(tools: &Res<'_>, namespace: &str) -> Option<Vec<u8>> {
     if !tools.is_array() {
         return None;
     }
@@ -969,7 +1009,7 @@ fn normalize_tool_array(tools: &Res<'_>) -> Option<Vec<u8>> {
     let mut out: Option<Vec<u8>> = None;
     let mut offset = 0;
     for tool in tools.array() {
-        let Some(updated) = normalize_tool(&tool) else {
+        let Some(updated) = normalize_tool(&tool, namespace) else {
             continue;
         };
         let start = tool.index.saturating_sub(tools.index);
@@ -983,16 +1023,21 @@ fn normalize_tool_array(tools: &Res<'_>) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn normalize_tool(tool: &Res<'_>) -> Option<Vec<u8>> {
+fn normalize_tool(tool: &Res<'_>, namespace: &str) -> Option<Vec<u8>> {
     let mut raw = tool.raw().to_vec();
     if *tool.get("type").str() == *"namespace" {
-        let updated = normalize_tool_array(&tool.get("tools"))?;
+        // One namespace level; its name qualifies the nested tools.
+        let name = tool.get("name").str().into_owned();
+        if !namespace.is_empty() || name.is_empty() {
+            return None;
+        }
+        let updated = normalize_tool_array(&tool.get("tools"), &name)?;
         return json::try_set_raw(&raw, "tools", updated).ok();
     }
     for key in ["function_declarations", "functionDeclarations"] {
         let decls = tool.get(key);
         if decls.is_array() {
-            let updated = normalize_tool_array(&decls)?;
+            let updated = normalize_tool_array(&decls, namespace)?;
             return json::try_set_raw(&raw, key, updated).ok();
         }
     }
@@ -1019,6 +1064,9 @@ fn normalize_tool(tool: &Res<'_>) -> Option<Vec<u8>> {
             return None;
         }
     }
+    if !namespace.is_empty() {
+        name = format!("{namespace}__{name}");
+    }
     let fields = codex_integer_fields(&name);
     if fields.is_empty() {
         return None;
@@ -1030,8 +1078,8 @@ fn normalize_tool(tool: &Res<'_>) -> Option<Vec<u8>> {
         return None;
     }
     for field in fields {
-        let kind = properties.get(&escape_key(field)).get("type");
-        let path = format!("properties.{}.type", escape_key(field));
+        let kind = properties.get(field).get("type");
+        let path = format!("properties.{field}.type");
         if kind.kind == Kind::String && *kind.str() == *"number" {
             changed |= json::set_str(&mut updated, &path, "integer");
         } else if kind.is_array() {
@@ -1057,9 +1105,4 @@ fn normalize_tool(tool: &Res<'_>) -> Option<Vec<u8>> {
     }
     raw = json::try_set_raw(&raw, path, updated).ok()?;
     Some(raw)
-}
-
-/// Go `escapeCodexSjsonKey`.
-fn escape_key(key: &str) -> String {
-    key.replace('\\', "\\\\").replace('.', "\\.").replace(':', "\\:")
 }
