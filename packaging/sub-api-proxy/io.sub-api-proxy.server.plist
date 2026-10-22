@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key><string>io.sub-api-proxy.server</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>@HOME@/.local/bin/cliproxy</string>
+      <string>--config</string>
+      <string>@HOME@/.config/sub-api-proxy/config.yaml</string>
+      <string>--sap-config</string>
+      <string>@HOME@/.config/sub-api-proxy/sap.yaml</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>3</integer>
+    <key>Umask</key><integer>63</integer>
+    <key>StandardOutPath</key><string>@HOME@/.local/state/sub-api-proxy/server.log</string>
+    <key>StandardErrorPath</key><string>@HOME@/.local/state/sub-api-proxy/server.log</string>
+  </dict>
+</plist>
