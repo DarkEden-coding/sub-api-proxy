@@ -150,7 +150,7 @@ pub(crate) fn translate(
     let ctx = RequestCtx { model, stream };
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", compat);
     deep_stack(body, || {
-        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
+        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client).map(|t| t.body)
     })
     .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
@@ -207,12 +207,13 @@ fn translate_pair(
     model: &str,
     compat: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), ExecError> {
-    let working = translate(req, cfg, target, model, &req.body, req.stream, compat)?;
+    // Go translates the original first; equal payloads once.
     let source = original_request(req);
-    if *source == req.body {
-        return Ok((working.clone(), working));
-    }
     let original = translate(req, cfg, target, model, source, req.stream, compat)?;
+    if *source == req.body {
+        return Ok((original.clone(), original));
+    }
+    let working = translate(req, cfg, target, model, &req.body, req.stream, compat)?;
     Ok((original, working))
 }
 

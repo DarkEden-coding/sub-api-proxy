@@ -425,11 +425,13 @@ async fn execute_chat(
             body,
             &codex_client,
         )
+        .map(|t| t.body)
         .map_err(|e| request_error(e.to_string()))
     };
-    let translated = translate(&req.body, req.stream)?;
-    // Go translates the original request too (stream false) for payload-rule defaults.
+    // Go translates the original request first (stream false) for payload-rule
+    // defaults, then the working one.
     let original_translated = translate(original(&req), false)?;
+    let translated = translate(&req.body, req.stream)?;
     let upstream_model = normalize_upstream_model(&base_model);
     let mut body = gj::try_set_str(&translated, "model", &upstream_model)
         .map_err(|e| internal_error(format!("kimi executor: failed to set model in payload: {e}")))?;

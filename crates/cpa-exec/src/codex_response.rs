@@ -1118,9 +1118,10 @@ impl Gate {
     /// One delivered line read from `raw` (lines, bytes) and `translated` bytes out, with
     /// `held` (lines, bytes) still collected: a handshake within the budgets, which it may
     /// fill exactly, stays held; anything else releases the stream.
-    // ponytail: `translated` is the Codex-format line, which is what Go's translator
-    // emits for a Responses or Codex client; other clients' translated sizes differ, so
-    // their byte budget is approximate. Exact needs client translation inside bootstrap.
+    // ponytail: `translated` is the Codex-format line: Go's translator output for a Codex
+    // client and for Responses events it leaves alone (it inserts a missing
+    // `response.model`); Claude and Chat sizes differ. That matters only when a total
+    // straddles 1 MiB. Exact needs client translation inside bootstrap.
     fn line(&mut self, handshake: bool, held: (usize, usize), raw: (usize, usize), translated: usize) {
         if self.released {
             return;
