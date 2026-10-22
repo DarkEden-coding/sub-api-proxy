@@ -63,3 +63,48 @@ Skipped by decision on October 22. The [implementation plan](implementation-plan
 2. `./run.sh claude` and `./run.sh codex`.
 
 The test alternates refreshes of session A and session B, runs one concurrent refresh, and after each step checks both sessions against profile and usage endpoints. It makes no inference calls. Tokens are written back after each refresh, so both logins remain usable.
+
+## SAP real-client harness, October 22, 2026
+
+[harness/sap-e2e](../../harness/sap-e2e/README.md) now runs the real clients with
+isolated temporary homes, fake keys, closed stdin, wall-clock alarms, and a
+macOS loopback-only sandbox. All inference is answered by the local mock.
+The requested debug build and two mock protocol tests passed. The full SAP
+chain is failing; its [evidence](../../harness/sap-e2e/evidence/chain/results.json)
+is separate from the [client/router/mock diagnostic](../../harness/sap-e2e/evidence/clients/results.json).
+
+Claude Code 2.1.308 with `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` preserves
+session and child-agent IDs, tool calls, and resume. It does **not** preserve the
+message-thread beta, `thread`, request-class, or compaction headers in these
+captures. `/compact` completes as a local command, but its mock request has no
+compaction label. Consequently this configuration cannot reproduce the earlier
+native-mode forced-400/full-history resend result. No forced resend was observed
+through SAP. A new `--resume` process sending history is not that recovery case.
+
+Codex CLI 0.163.0's custom `model_providers` entry with `wire_api = "responses"`
+and `supports_websockets = true` preserves WebSocket prewarm, thread/session IDs,
+window IDs, turn metadata, and `remote_compaction_v2` advertisement. Disabling
+WebSockets also succeeds using HTTP SSE. Actual remote compaction remains
+unverified. The synthetic-token `chatgpt_base_url` diagnostic stops at
+`selected workspace missing from routing discovery`; native ChatGPT-mode
+compatibility is inconclusive without a richer local bootstrap mock. The custom
+provider is the working configuration from this test.
+
+Codex socket recovery through the router is now observed. After a tool turn established
+`resp_local_9`, the mock closed a one-item continuation normally. Codex opened a
+new socket 299 ms later and resent six full-history items without
+`previous_response_id`, then completed the turn. Injecting `limit_reached`
+instead produces `turn.failed` and a usage-limit message. These are client/router/mock
+observations, not proof of SAP account movement or its socket-close hook.
+
+The integration blocker is credential discovery. Config API keys accept local
+base URLs but retain no subscription IDs; auth JSON files retain IDs but do not
+promote Claude/Codex base URLs into executor attributes. Four configured fake
+API keys therefore yield `accounts: []` and threads with `account: null`.
+Claude retries SAP 429s until its deadline; Codex stops on a routing-hook 400.
+Assignment, child affinity, exhaustion movement, and real-client failover cannot
+pass with this setup. No production code was changed to bypass the failure.
+After killing the primary, an untracked synthetic HTTP transport probe returned
+200 through backup in 25 ms with default probe settings. The real Claude request
+still failed account selection on backup, so the five-second real-client target
+remains unproven.

@@ -1,0 +1,23 @@
+{
+  "status": 200,
+  "body": [
+    {
+      "key": "claude:5a058031-2518-441e-9270-c522cab3dcf2",
+      "client": "claude_code",
+      "machine": "sap-e2e",
+      "title": null,
+      "lineage": "root",
+      "parent": null,
+      "agent_label": null,
+      "account": null,
+      "reason": null,
+      "serving_node": "primary",
+      "streaming": false,
+      "cache_hit_percent": null,
+      "compactions": 0,
+      "requests": 0,
+      "first_seen": "2026-10-22T22:21:32.733900Z",
+      "last_seen": "2026-10-22T22:21:56.718920Z"
+    }
+  ]
+}

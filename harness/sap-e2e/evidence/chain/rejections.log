@@ -1,0 +1,4 @@
+[2026-10-22 18:21:32] [1e9f72e4] [warn ] [observability.rs:237] 429 |          11ms |       127.0.0.1 | POST    "/v1/messages?beta=true"
+[2026-10-22 18:21:33] [022e830f] [warn ] [observability.rs:237] 429 |           5ms |       127.0.0.1 | POST    "/v1/messages?beta=true"
+{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"request rejected by routing hook\",\"type\":\"invalid_request_error\"}}"}
+{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"request rejected by routing hook\",\"type\":\"invalid_request_error\"}}"}}

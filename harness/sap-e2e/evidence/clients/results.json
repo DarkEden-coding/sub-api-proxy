@@ -1,0 +1,228 @@
+[
+  {
+    "name": "claude-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.185,
+      "log": "claude-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "claude-new-tool-child",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.453,
+      "log": "claude-new-tool-child.log",
+      "requests": 4
+    }
+  },
+  {
+    "name": "claude-resume",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.188,
+      "log": "claude-resume.log",
+      "requests": 1
+    }
+  },
+  {
+    "name": "codex-custom-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.019,
+      "log": "codex-custom-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.181,
+      "log": "codex-custom.log",
+      "requests": 2
+    }
+  },
+  {
+    "name": "codex-custom-socket-close",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.512,
+      "log": "codex-custom-socket-close.log",
+      "requests": 4
+    }
+  },
+  {
+    "name": "codex-custom-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.237,
+      "log": "codex-custom-exhausted.log",
+      "requests": 2
+    }
+  },
+  {
+    "name": "codex-custom-http-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "codex-custom-http-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom-http",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.077,
+      "log": "codex-custom-http.log",
+      "requests": 1
+    }
+  },
+  {
+    "name": "codex-custom-http-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.077,
+      "log": "codex-custom-http-exhausted.log",
+      "requests": 1
+    }
+  },
+  {
+    "name": "codex-chatgpt-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "codex-chatgpt-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-chatgpt",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.074,
+      "log": "codex-chatgpt.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-chatgpt-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.043,
+      "log": "codex-chatgpt-exhausted.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "claude-compact",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.568,
+      "log": "claude-compact.log",
+      "requests": 1
+    }
+  },
+  {
+    "name": "claude-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.041,
+      "log": "claude-exhausted.log",
+      "requests": 5
+    }
+  },
+  {
+    "name": "claude-session-and-agent-headers",
+    "passed": true,
+    "evidence": {
+      "requests": 4,
+      "message_counts": [
+        1,
+        1,
+        3,
+        5
+      ]
+    }
+  },
+  {
+    "name": "claude-native-thread-and-request-class",
+    "passed": false,
+    "evidence": {
+      "thread_fields": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "request_class": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "compaction_headers": [
+        null
+      ]
+    }
+  },
+  {
+    "name": "codex-full-input-after-normal-close",
+    "passed": true,
+    "evidence": [
+      {
+        "action": "reply",
+        "connection": 7,
+        "input_count": 1,
+        "previous_response_id": null,
+        "time": 1792707900.54896
+      },
+      {
+        "action": "reply",
+        "connection": 7,
+        "input_count": 4,
+        "previous_response_id": null,
+        "time": 1792707900.555396
+      },
+      {
+        "action": "close",
+        "connection": 7,
+        "input_count": 1,
+        "previous_response_id": "resp_local_9",
+        "time": 1792707900.590869
+      },
+      {
+        "action": "reply",
+        "connection": 10,
+        "input_count": 6,
+        "previous_response_id": null,
+        "time": 1792707900.8899179
+      }
+    ]
+  },
+  {
+    "name": "codex-custom-native-metadata",
+    "passed": true,
+    "evidence": {
+      "prewarm": true,
+      "remote_compaction_advertised": true
+    }
+  }
+]
