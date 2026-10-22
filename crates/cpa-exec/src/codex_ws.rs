@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use cpa_core::config::Config;
+use cpa_core::credential::Credential;
 use cpa_core::exec::{
     ExecError, ExecRequest, ExecResponse, ExecSession, ExecStream, FailureScope, ResponseBody, SessionLease,
 };
@@ -39,6 +41,7 @@ use crate::codex_json::{set_raw, set_str};
 use crate::codex_quota::{self, QuotaSignals};
 use crate::codex_request::{self as request, Call, Settings, View};
 use crate::codex_response::{self as response, OutputItems};
+use crate::proxy::Proxy;
 
 /// `codexResponsesWebsocketIdleTimeout`: read deadline renewed before every read.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -75,11 +78,44 @@ const MAX_HANDSHAKE_BODY: usize = 64 * 1024;
 // bounded while fitting image-bearing output items.
 const MAX_UPSTREAM_MESSAGE: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Target {
     pub(crate) credential: String,
     pub(crate) url: String,
-    pub(crate) proxy: crate::proxy::Proxy,
+    /// The effective proxy: the credential's own, else `requests.proxy-url`.
+    pub(crate) proxy: Proxy,
+    /// `requests.proxy-url` when the target was resolved.
+    global: Proxy,
+    /// Whether `proxy` came from `requests.proxy-url` (the credential sets none).
+    inherited: bool,
+}
+
+impl Target {
+    pub(crate) fn new(credential: &Credential, url: String, cfg: &Config) -> Self {
+        let own = Proxy::own_url(credential);
+        let global = Proxy::parse(&Proxy::global_url(cfg));
+        Self {
+            credential: credential.id.clone(),
+            url,
+            proxy: own.map_or_else(|| global.clone(), Proxy::parse),
+            global,
+            inherited: own.is_none(),
+        }
+    }
+
+    /// `websocketSessionTargetMatches` under the current config.
+    pub(crate) fn same(&self, want: &Target) -> bool {
+        self.credential == want.credential && self.url == want.url && self.proxy == want.proxy
+    }
+
+    /// Whether the live socket dialed for `self` still serves `want`. Go 1e37b52b
+    /// (`effectiveConfig`): for the same credential, the global proxy is the one the
+    /// socket dialed with, so a reload that changes only `requests.proxy-url` keeps the
+    /// socket. New sockets dial with the new setting.
+    pub(crate) fn serves(&self, want: &Target) -> bool {
+        let proxy = if want.inherited { &self.global } else { &want.proxy };
+        self.credential == want.credential && self.url == want.url && self.proxy == *proxy
+    }
 }
 
 pub(crate) enum Read {
@@ -320,9 +356,21 @@ pub(crate) struct Session {
     closed: watch::Sender<Option<ExecError>>,
     /// The downstream connection's client frames when response steering is configured.
     steering: Mutex<Option<Arc<SteeringInput>>>,
+    /// The credential of the last socket dialed (Go keeps `sess.authID` after the socket
+    /// is gone, and removing that credential still ends the session).
+    credential: Mutex<String>,
 }
 
 impl Session {
+    /// Makes `conn` the session's socket.
+    pub(crate) fn publish(&self, conn: Arc<Upstream>) {
+        let mut slot = self.conn.lock().expect("session conn");
+        conn.target
+            .credential
+            .clone_into(&mut self.credential.lock().expect("session credential"));
+        *slot = Some(conn);
+    }
+
     pub(crate) fn current(&self) -> Option<Arc<Upstream>> {
         self.conn.lock().expect("session conn").clone()
     }
@@ -400,6 +448,7 @@ impl Pool {
                     conn: Mutex::default(),
                     closed: watch::channel(None).0,
                     steering: Mutex::default(),
+                    credential: Mutex::default(),
                 })
             })
             .clone()
@@ -421,6 +470,35 @@ impl Pool {
         if let Some(conn) = session.and_then(|s| s.conn.lock().expect("session conn").take()) {
             conn.shutdown();
         }
+    }
+
+    /// `closeCodexWebsocketSessionsInStoreForAuthID`: ends the sessions whose last socket
+    /// was dialed for `credential` (a removed credential), like [`Self::close`] for each,
+    /// and leaves every other session open. Returns the closed session ids.
+    pub(crate) fn close_credential(&self, credential: &str) -> Vec<String> {
+        let sessions: Vec<_> = {
+            let sessions = self.sessions.lock().expect("sessions");
+            sessions.iter().map(|(id, s)| (id.clone(), s.clone())).collect()
+        };
+        let mut closed = Vec::new();
+        for (id, session) in sessions {
+            if *session.credential.lock().expect("session credential") != credential {
+                continue;
+            }
+            {
+                let mut sessions = self.sessions.lock().expect("sessions");
+                // A session closed or replaced since the snapshot is not this one.
+                if !sessions.get(&id).is_some_and(|s| Arc::ptr_eq(s, &session)) {
+                    continue;
+                }
+                sessions.remove(&id);
+            }
+            if let Some(conn) = session.conn.lock().expect("session conn").take() {
+                conn.shutdown();
+            }
+            closed.push(id);
+        }
+        closed
     }
 
     /// The error that lost the session's upstream socket, if it was lost.
@@ -1021,7 +1099,7 @@ impl CodexExecutor {
         wire: Option<&crate::codex_capture::Wire>,
     ) -> Result<(Arc<Upstream>, Option<HeaderMap>), ExecError> {
         if let Some(current) = session.current() {
-            if current.target == *target {
+            if current.target.serves(target) {
                 return Ok((current, None));
             }
             // target_changed: another credential, URL or proxy now serves this session.
@@ -1039,7 +1117,7 @@ impl CodexExecutor {
         // socket current and invalidates it; holding the handle slot keeps a concurrent
         // shutdown from missing the abort handle.
         let mut reader = conn.reader.lock().expect("reader handle");
-        *session.conn.lock().expect("session conn") = Some(conn.clone());
+        session.publish(conn.clone());
         let task = tokio::spawn(read_loop(stream, Arc::downgrade(session), conn.clone(), self.ws.idle));
         *reader = Some(task.abort_handle());
         drop(reader);
@@ -1128,6 +1206,7 @@ impl CodexExecutor {
         settings: &Settings,
         req: ExecRequest,
         exec_session: &ExecSession,
+        cfg: &Config,
     ) -> Result<ExecResponse, ExecError> {
         let model = request::base_model(&req.model).to_owned();
         let request::Shaped {
@@ -1140,11 +1219,7 @@ impl CodexExecutor {
         let (body, cache) = request::prompt_cache(&req, body, Some(&exec_session.id), true);
         let native = request::is_native(&req);
         let headers = request::ws_headers(view, settings, &req.headers, &body, &model, cache.as_deref(), native);
-        let target = Target {
-            credential: view.credential.id.clone(),
-            url: ws_url(&format!("{}/responses", view.base_url))?,
-            proxy: view.proxy.clone(),
-        };
+        let target = Target::new(view.credential, ws_url(&format!("{}/responses", view.base_url))?, cfg);
         let session = self.ws.session(&exec_session.id);
         // `WebsocketInputFromContext(ctx) != nil && cfg.Codex.ResponseSteering`.
         let steering = settings
@@ -1162,7 +1237,7 @@ impl CodexExecutor {
             .with_websocket(req.websocket_emitter("codex", view.credential));
         wire.ws_request(&target.url, &headers, frame.as_bytes());
         let (mut conn, mut handshake) = if exec_session.continuation {
-            match session.current().filter(|c| c.target == target) {
+            match session.current().filter(|c| c.target.serves(&target)) {
                 Some(conn) => (conn, None),
                 None => return Err(ExecError::replay_required()),
             }

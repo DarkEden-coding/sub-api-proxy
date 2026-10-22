@@ -1159,3 +1159,74 @@ async fn ping_is_answered_while_the_writer_is_held() {
     executor.close_session("test-xai-keepalive");
     server.abort();
 }
+
+/// Go 1e37b52b for xAI: after a reload that changes only `requests.proxy-url`, the open
+/// socket keeps serving its credential and the session's upstream response IDs, while a
+/// new session dials through the new proxy.
+#[tokio::test]
+async fn a_global_proxy_reload_keeps_the_open_socket() {
+    let completed = r#"{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let shared: Shared = Arc::default();
+    shared.lock().unwrap().turn =
+        Some(serde_json::json!({"acts": [{"send": [completed]}, {"send": [completed]}, {"send": [completed]}]}));
+    let app = axum::Router::new().fallback(handler).with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executor = XaiExecutor::with_client(wreq::Client::new());
+    let attrs = serde_json::json!({"api_key": "xai-key", "websockets": "true", "base_url": "http://UPSTREAM/v1"});
+    let credential = credential("xai-reload", &attrs, &addr);
+    // Nothing listens on port 1: a dial through this proxy fails.
+    let reloaded = Config::parse("requests:\n  proxy-url: http://127.0.0.1:1\n").unwrap();
+    let first = r#"{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"turn 1"}]}"#;
+    let next = r#"{"model":"grok-4.3","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"turn 2"}]}"#;
+    let turn = |session: &str, payload: &str, cfg: &Config, continuation: bool| {
+        let req = request(&serde_json::json!({"payload": payload}), session, Default::default());
+        let exec_session = ExecSession {
+            id: session.to_owned(),
+            continuation,
+            lease: None,
+        };
+        let (executor, credential, cfg) = (&executor, &credential, cfg.clone());
+        async move {
+            let response = executor
+                .execute_in_session(credential, req, &cfg, &exec_session)
+                .await?;
+            let ResponseBody::Stream(stream) = response.body else {
+                panic!("buffered response");
+            };
+            stream
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+        }
+    };
+    for (payload, cfg, continuation) in [
+        (first, &Config::default(), false),
+        (next, &reloaded, true),
+        (next, &reloaded, false),
+    ] {
+        turn("xai-reload-session", payload, cfg, continuation)
+            .await
+            .unwrap_or_else(|e| panic!("continuation={continuation}: {e:?}"));
+    }
+    {
+        let script = shared.lock().unwrap();
+        assert_eq!(script.recorded.upgrades.len(), 1, "every turn kept the first socket");
+        let previous: Vec<_> = script
+            .recorded
+            .frames
+            .iter()
+            .map(|f| gjson::get(f, "previous_response_id").str().to_owned())
+            .collect();
+        assert_eq!(previous, ["", "resp-1", "resp-1"], "the upstream ID mapping survived");
+    }
+    let error = turn("xai-reload-new", first, &reloaded, false)
+        .await
+        .expect_err("a new socket dials through the reloaded proxy");
+    assert_eq!(error.scope, FailureScope::Transport, "{error}");
+    assert_eq!(shared.lock().unwrap().recorded.upgrades.len(), 1);
+    executor.close_session("xai-reload-session");
+    server.abort();
+}

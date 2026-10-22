@@ -1198,3 +1198,133 @@ async fn an_upstream_error_that_loses_the_socket_still_cools_the_credential() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Go 1e37b52b: removing a Codex or xAI credential from the store closes the upstream
+/// WebSocket its session holds and no other; a sibling credential's connection keeps its
+/// socket for the next turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_credential_closes_only_its_upstream_sockets() {
+    for section in ["codex-api-key", "xai-api-key"] {
+        removal_closes_only_its_sockets(section).await;
+    }
+}
+
+async fn removal_closes_only_its_sockets(section: &str) {
+    use futures_util::StreamExt;
+    use wreq::ws::message::Message as WsMessage;
+    type Log = Arc<std::sync::Mutex<Vec<String>>>;
+    let (dials, ended): (Log, Log) = Default::default();
+    let upstream = {
+        let (dials, ended) = (dials.clone(), ended.clone());
+        serve(
+            axum::Router::new().fallback(move |headers: axum::http::HeaderMap, ws: WebSocketUpgrade| {
+                let (dials, ended) = (dials.clone(), ended.clone());
+                async move {
+                    let key = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .trim_start_matches("Bearer ")
+                        .to_owned();
+                    dials.lock().unwrap().push(key.clone());
+                    ws.on_upgrade(move |mut socket| async move {
+                        while let Some(Ok(message)) = socket.recv().await {
+                            if !matches!(message, AxMessage::Text(_)) {
+                                continue;
+                            }
+                            let completed = format!(
+                                r#"{{"type":"response.completed","response":{{"id":"resp-{key}","output":[],"usage":{{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}}}}"#
+                            );
+                            if socket.send(AxMessage::Text(completed.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        ended.lock().unwrap().push(key);
+                    })
+                }
+            }),
+        )
+        .await
+    };
+    let dir = std::env::temp_dir().join(format!("cpa-ws-remove-{}", uuid::Uuid::new_v4()));
+    let entry = |key: &str| {
+        format!(
+            "  - api-key: {key}\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-{key}\n"
+        )
+    };
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\n{section}:\n{}{}",
+        dir.join("auths").display(),
+        entry("keep"),
+        entry("drop")
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let keep = credentials
+        .iter()
+        .find(|c| c.attributes.get("api_key").map(String::as_str) == Some("keep"))
+        .cloned()
+        .expect("the kept key");
+    assert_eq!(credentials.len(), 2, "{section}");
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let proxy = serve(router(rt.clone())).await;
+    let connect = || async {
+        wreq::Client::new()
+            .websocket(format!("ws://{proxy}/v1/responses"))
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap()
+    };
+    async fn turn(socket: &mut wreq::ws::WebSocket, key: &str, previous: &str) {
+        let create = format!(
+            r#"{{"type":"response.create","model":"gpt-{key}","previous_response_id":"{previous}","input":[{{"type":"message","role":"user","content":"hi"}}]}}"#
+        );
+        socket.send(WsMessage::text(create)).await.unwrap();
+        loop {
+            let frame = match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+                Ok(Some(Ok(WsMessage::Text(text)))) => text.as_str().to_owned(),
+                other => panic!("{key}: no text frame: {other:?}"),
+            };
+            match gjson::get(&frame, "type").str() {
+                "response.completed" => return,
+                "error" => panic!("{key}: {frame}"),
+                _ => {}
+            }
+        }
+    }
+    let (mut kept, mut dropped) = (connect().await, connect().await);
+    turn(&mut kept, "keep", "").await;
+    turn(&mut dropped, "drop", "").await;
+    assert_eq!(*dials.lock().unwrap(), ["keep", "drop"], "{section}");
+
+    rt.store().replace_config(vec![keep]);
+    let started = Instant::now();
+    while ended.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        *ended.lock().unwrap(),
+        ["drop"],
+        "{section}: only the removed key's socket closed"
+    );
+
+    turn(&mut kept, "keep", "resp-keep").await;
+    assert_eq!(
+        *dials.lock().unwrap(),
+        ["keep", "drop"],
+        "the kept connection reused its socket"
+    );
+    assert_eq!(*ended.lock().unwrap(), ["drop"]);
+    drop((kept, dropped));
+    let _ = std::fs::remove_dir_all(&dir);
+}
