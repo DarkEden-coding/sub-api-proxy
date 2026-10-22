@@ -2194,6 +2194,190 @@ async fn a_reload_and_a_serial_plugins_save_both_complete() {
     env.finish().await;
 }
 
+/// `host.auth.save` registers what the plugin auth provider for the file's type parses,
+/// as Go's `buildAuthsFromFileData` does: the file's earlier credentials go, one parsed
+/// auth inherits the file's other fields and, without an ID of its own, keeps the ID of
+/// the file's credential (as a built-in save does), and a failed parse fails the save
+/// before anything is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_save_registers_what_the_auth_provider_parses() {
+    let Some(env) = env(
+        "plugin-owned-auth-save-parse",
+        &[("acme", "auth_provider,management_api")],
+        "",
+        &[("pair.json", r#"{"type":"acme","v":0}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[
+                    {"Provider":"acme","ID":"acme-1","Metadata":{"type":"acme"}},
+                    {"Provider":"acme","ID":"acme-2","Metadata":{"type":"acme"}}]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    let store = env.rt.store().clone();
+    assert!(store.get("acme-1").is_some() && store.get("acme-2").is_some());
+    let save = |name: &str, json: Value| {
+        let host = env.rt.plugins().clone();
+        let body = json!({"calls":[{"method":"host.auth.save","request":{"name":name,"json":json}}]});
+        async move {
+            let response = host
+                .serve_management(cpa_plugin::management::Inbound {
+                    method: "POST".into(),
+                    path: "/v0/management/rec/acme/calls".into(),
+                    body: serde_json::to_vec(&body).unwrap().into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            let result = response["results"][0].as_str().unwrap().to_owned();
+            serde_json::from_str::<Value>(result.split_once(' ').unwrap().1).unwrap()
+        }
+    };
+    let answer = |auth: Value| {
+        canned(
+            &env.records,
+            "acme",
+            "auth.parse",
+            json!({"Handled":true,"Auths":[auth]}),
+        )
+    };
+
+    // One auth without an ID: the file's two virtual credentials go, and the auth takes
+    // the file's ID and its other fields.
+    answer(json!({"Provider":"acme","Metadata":{"type":"acme","access_token":"t1"}}));
+    let saved = save("pair.json", json!({"type":"acme","note":"kept","v":1})).await;
+    assert_eq!(saved["ok"], true, "{saved}");
+    let asked = calls(&env.records, "acme", "auth.parse");
+    let asked = asked.last().unwrap();
+    assert_eq!(asked["Provider"], "acme");
+    assert_eq!(asked["FileName"], "pair.json");
+    assert_eq!(
+        asked["Path"],
+        env.rt.config().auth_dir.join("pair.json").display().to_string()
+    );
+    assert!(
+        store.get("acme-1").is_none() && store.get("acme-2").is_none(),
+        "stale credentials stayed"
+    );
+    let one = store.get("pair.json").expect("the parsed auth was not registered");
+    assert_eq!(one.metadata["access_token"], "t1");
+    assert_eq!(one.metadata["note"], "kept");
+    file_matches_store(&env, "pair.json");
+
+    // An auth with its own ID replaces the file's credential.
+    answer(json!({"Provider":"acme","ID":"acct-7","Metadata":{"type":"acme","access_token":"t2"}}));
+    assert_eq!(save("pair.json", json!({"type":"acme","v":2})).await["ok"], true);
+    assert!(store.get("pair.json").is_none());
+    assert_eq!(store.get("acct-7").unwrap().metadata["access_token"], "t2");
+
+    // Without an ID again, the auth keeps the file's credential's ID.
+    answer(json!({"Provider":"acme","Metadata":{"type":"acme","access_token":"t3"}}));
+    assert_eq!(save("pair.json", json!({"type":"acme","v":3})).await["ok"], true);
+    assert!(store.get("pair.json").is_none());
+    assert_eq!(store.get("acct-7").unwrap().metadata["access_token"], "t3");
+
+    // A built-in save of the file keeps that ID too.
+    assert_eq!(
+        save("pair.json", json!({"type":"claude","access_token":"t4"})).await["ok"],
+        true
+    );
+    assert!(store.get("pair.json").is_none());
+    let built_in = store.get("acct-7").unwrap();
+    assert_eq!(
+        (built_in.provider.as_str(), &built_in.metadata["access_token"]),
+        ("claude", &json!("t4"))
+    );
+
+    // A failed parse fails the save, and nothing is written.
+    std::fs::write(
+        env.records.join("respond/acme/auth.parse.json"),
+        json!({"ok":false,"error":{"code":"bad","message":"unreadable material"}}).to_string(),
+    )
+    .unwrap();
+    let failed = save("bad.json", json!({"type":"acme"})).await;
+    assert_eq!(failed["ok"], false, "{failed}");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("invalid auth file") && message.contains("unreadable material"),
+        "{message}"
+    );
+    assert!(!env.rt.config().auth_dir.join("bad.json").exists());
+    assert!(store.get("bad.json").is_none());
+    drop(management);
+    env.finish().await;
+}
+
+/// A save the auth provider's parse of the saved file answers by saving that file again,
+/// from inside the parse: Go parses the data before writing it, which recurses through
+/// the plugin without bound. The inner save writes without parsing again, so the save
+/// completes after one parse, the file holds what the outer save wrote, and the
+/// parse's credential is registered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_whose_parse_saves_the_same_file_completes_after_one_parse() {
+    let Some(env) = env(
+        "plugin-owned-auth-save-reentrant",
+        &[("acme", "auth_provider,management_api")],
+        "",
+        &[],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let inner = json!({"type": "acme", "n": 2});
+            std::fs::write(dir.join("auth.parse.json"), parse_saving("acme-a", inner)).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let body = json!({"calls":[{"method":"host.auth.save","request":{
+        "name":"acme.json","json":{"type":"acme","n":1}}}]});
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        env.rt.plugins().serve_management(cpa_plugin::management::Inbound {
+            method: "POST".into(),
+            path: "/v0/management/rec/acme/calls".into(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("the save never completed")
+    .unwrap();
+    let response: Value = serde_json::from_slice(&response.body).unwrap();
+    let result = response["results"][0].as_str().unwrap();
+    let saved: Value = serde_json::from_str(result.split_once(' ').unwrap().1).unwrap();
+    assert_eq!(saved["ok"], true, "{saved}");
+    assert_eq!(saved["result"]["name"], "acme.json");
+    // The inner save also succeeded, with Go's response.
+    let inner = calls(&env.records, "acme", "host_callback");
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[0]["ok"], true, "{}", inner[0]);
+    assert_eq!(inner[0]["result"]["name"], "acme.json");
+    assert_eq!(calls(&env.records, "acme", "auth.parse").len(), 1);
+    let on_disk: Value =
+        serde_json::from_slice(&std::fs::read(env.rt.config().auth_dir.join("acme.json")).unwrap()).unwrap();
+    assert_eq!((&on_disk["type"], &on_disk["n"]), (&json!("acme"), &json!(1)));
+    assert!(env.rt.store().get("acme-a").is_some());
+    drop(management);
+    env.finish().await;
+}
+
 /// A file that changes after plugins parsed it, before the reload's scan reads it, is
 /// not parsed again by the scan (which may run under the disk lock): it keeps its
 /// credentials until the next reload parses the new bytes. A file that appears then is

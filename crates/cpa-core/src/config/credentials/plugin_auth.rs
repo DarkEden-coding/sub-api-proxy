@@ -166,7 +166,7 @@ fn parsing() -> std::sync::MutexGuard<'static, Vec<Parsing>> {
 
 /// `path` absolute and lexically cleaned (Go `filepath.Abs`), so the scan's spelling
 /// and the save's match.
-fn clean(path: &Path) -> PathBuf {
+pub fn clean(path: &Path) -> PathBuf {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     let mut out = PathBuf::new();
     for part in absolute.components() {
@@ -376,6 +376,17 @@ pub(super) fn credentials(
         true => super::FileCredentials::Unapplied(all),
         false => super::FileCredentials::Plugin(all),
     }))
+}
+
+/// The credentials for `auths`, what a plugin parsed from auth file `path` holding
+/// `data` (Go `buildAuthsFromFileData`'s handled branch, for `host.auth.save`): the
+/// file's settings applied as the auth-folder scan applies them, so the next scan
+/// publishes the same credentials.
+pub fn plugin_file_credentials(path: &Path, data: &[u8], auths: Vec<ParsedAuth>) -> Result<Vec<Credential>, String> {
+    let mut meta = serde_json::from_slice::<Map<String, Json>>(data).map_err(|e| format!("invalid auth file: {e}"))?;
+    super::normalize_metadata(&mut meta);
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    build(auths, &meta, path, &file_name)
 }
 
 fn build(
