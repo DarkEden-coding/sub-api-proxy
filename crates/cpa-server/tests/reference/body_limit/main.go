@@ -345,6 +345,19 @@ func scenarios() []scenario {
 		Headers: bType, Body: "--b\r\nX:\r\n\r\nhello\r\n--b--\r\n", Chunked: true})
 	add(scenario{Name: "multipart_preamble_over_buffer /v0/management/auth-files", YAML: limited(mgmtYAML, 4097), Method: "POST", Path: "/v0/management/auth-files",
 		Headers: bType, Body: strings.Repeat("p", 4098), Chunked: true})
+	// A header line longer than the buffer comes back in fragments: the limit inside
+	// the line cuts it short, the limit right after a full-buffer fragment drops it and
+	// reports the limit, and a fragment ending in "\r" puts the "\r" back.
+	longHeader := "--b\r\n" + strings.Repeat("X", 4096) + "\n"
+	for _, n := range []int{4100, 4101, 4102} {
+		add(scenario{Name: fmt.Sprintf("multipart_header_fragments limit_%d /v0/management/auth-files", n), YAML: limited(mgmtYAML, n), Method: "POST",
+			Path: "/v0/management/auth-files", Headers: bType, Body: longHeader + "--b--\r\n", Chunked: true})
+	}
+	crHeader := "--b\r\n" + strings.Repeat("X", 4095) + "\r\nY: v\r\n\r\n"
+	for _, n := range []int{4101, 4102} {
+		add(scenario{Name: fmt.Sprintf("multipart_header_fragment_cr limit_%d /v0/management/auth-files", n), YAML: limited(mgmtYAML, n), Method: "POST",
+			Path: "/v0/management/auth-files", Headers: bType, Body: crHeader + "--b--\r\n", Chunked: true})
+	}
 	add(scenario{Name: "multipart_preamble_within_buffer /v0/management/auth-files", YAML: limited(mgmtYAML, 4095), Method: "POST", Path: "/v0/management/auth-files",
 		Headers: bType, Body: strings.Repeat("p", 4096), Chunked: true})
 	for _, path := range []string{"/v1/images/edits", "/openai/v1/videos"} {
