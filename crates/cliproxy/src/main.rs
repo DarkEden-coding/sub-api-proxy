@@ -1801,6 +1801,8 @@ mod tests {
                 } else {
                     String::new()
                 }),
+                // Keeps the log-folder probe out of the working directory.
+                log_dir: Some(dir.join("logs")),
                 ..Default::default()
             };
             let management = cpa_server::management::Management::with_options(rt.clone(), path.clone(), options);
