@@ -107,6 +107,12 @@ The installer never runs sudo or changes that policy itself.
    Click its branching-arrow icon to open the admin panel. Right-click and choose
    Copy admin key, then paste it into the panel's Settings page and save. The app
    starts at login. Quitting it leaves the router and server running.
+   For continuous cache telemetry collection on the Mac, enable both usage
+   statistics and `observability.usage.claude-cache-telemetry` in `config.yaml`,
+   then run `sh packaging/sub-api-proxy/install-collector.sh`. The collector
+   drains the local usage queue to `~/.local/state/sub-api-proxy/usage.jsonl`,
+   mode 0600, keeping only the allowlisted telemetry fields. Use one queue
+   collector per server. This file grows until archived or rotated manually.
 4. Put the management key in the mode-0600 file described above. Set
    `SAP_CLIENT_KEY` in the environment from which you launch your coding client.
    This is a client key accepted by both servers, not the management key.
