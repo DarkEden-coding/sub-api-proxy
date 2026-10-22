@@ -84,6 +84,21 @@ fn outcome(outcome: Outcome) -> RoutingInput {
 }
 
 #[test]
+fn window_past_its_reset_counts_as_fresh_allowance() {
+    let mut input = input(RoutingEvent::NewThread);
+    // `a` was observed full, but that window has since reset; `b` is half used.
+    for w in &mut input.accounts[0].windows {
+        w.used_percent = 100.0;
+        w.reset_at = Some(at(-60));
+    }
+    let scores = policy().scores(&input);
+    let a = scores.iter().find(|s| s.account == id("a")).unwrap();
+    assert!(a.stale, "an elapsed window must be marked stale");
+    assert!(a.score > 0.0, "an elapsed window must not look exhausted");
+    assert!(matches!(policy().decide(&input), Decision::Use { .. }));
+}
+
+#[test]
 fn new_thread_uses_best_score_and_deterministic_ties() {
     let mut request = input(RoutingEvent::NewThread);
     request.accounts.reverse();

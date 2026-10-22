@@ -109,6 +109,8 @@ pub struct ThreadRecord {
     pub client: ClientKind,
     pub lineage: LineageKind,
     pub root_session: String,
+    /// The thread this one descends from: the parent of a subagent, or the source of a
+    /// fork (see `lineage`). The dashboard nests a thread under this key.
     pub parent: Option<ThreadKey>,
     pub client_host: Option<String>,
     pub agent_label: Option<String>,

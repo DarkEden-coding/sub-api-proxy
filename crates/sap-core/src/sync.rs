@@ -36,7 +36,10 @@ pub enum Table {
 pub enum ChangeOp {
     /// Set one field of a record (field-level LWW tables) or the whole record when
     /// `field` is `None`.
-    Set { field: Option<String>, value: serde_json::Value },
+    Set {
+        field: Option<String>,
+        value: serde_json::Value,
+    },
     /// Delete a record (a tombstone that wins over older sets).
     Delete,
     /// Append an immutable entry (append-only tables).

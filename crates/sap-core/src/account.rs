@@ -31,7 +31,10 @@ pub struct Capacity {
 
 impl Default for Capacity {
     fn default() -> Self {
-        Self { multiplier: 1.0, source: CapacitySource::Default }
+        Self {
+            multiplier: 1.0,
+            source: CapacitySource::Default,
+        }
     }
 }
 

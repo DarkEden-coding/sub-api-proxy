@@ -65,7 +65,10 @@ pub struct ThreadKey {
 
 impl ThreadKey {
     pub fn new(provider: Provider, id: impl Into<String>) -> Self {
-        Self { provider, id: id.into() }
+        Self {
+            provider,
+            id: id.into(),
+        }
     }
 
     /// Parses `"<provider>:<id>"`.

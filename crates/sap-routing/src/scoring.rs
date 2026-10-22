@@ -69,10 +69,16 @@ pub(crate) fn score(
                 if !valid {
                     continue;
                 }
-                let remaining = capacity * (1.0 - window.used_percent / 100.0);
+                // A window whose reset has passed has fresh allowance, but the
+                // observation no longer describes it, so it is also stale.
+                let elapsed = window.reset_at.is_some_and(|reset| reset <= input.now);
+                stale |= elapsed;
+                let used = if elapsed { 0.0 } else { window.used_percent };
+                let remaining = capacity * (1.0 - used / 100.0);
                 headroom = Some(headroom.map_or(remaining, |h| h.min(remaining)));
-                // Unknown reset times contribute no urgency, rather than fabricating a reset.
-                if let Some(reset) = window.reset_at {
+                // Unknown or elapsed reset times contribute no urgency, rather than
+                // fabricating a reset.
+                if let Some(reset) = window.reset_at.filter(|_| !elapsed) {
                     let seconds = reset.signed_duration_since(input.now).num_milliseconds() as f64 / 1000.0;
                     urgency += remaining / seconds.max(cfg.reset_floor_secs.max(1) as f64);
                 }

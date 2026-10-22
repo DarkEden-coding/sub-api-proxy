@@ -81,11 +81,18 @@ impl Reason {
 pub enum Outcome {
     Success,
     /// Temporary rate limit (429 without exhaustion).
-    RateLimited { retry_after: Option<DateTime<Utc>> },
+    RateLimited {
+        retry_after: Option<DateTime<Utc>>,
+    },
     /// Upstream overloaded (Claude 529, 503).
-    Overloaded { retry_after: Option<DateTime<Utc>> },
+    Overloaded {
+        retry_after: Option<DateTime<Utc>>,
+    },
     /// A five-hour or weekly window is confirmed used up.
-    Exhausted { window: WindowKind, reset_at: Option<DateTime<Utc>> },
+    Exhausted {
+        window: WindowKind,
+        reset_at: Option<DateTime<Utc>>,
+    },
     /// Login revoked or account disabled upstream.
     Revoked,
     /// The account's plan cannot serve the requested model.
@@ -103,7 +110,11 @@ pub enum RoutingEvent {
     /// A later request of a known thread.
     Continue { current: Assignment },
     /// The previous attempt on the thread's account failed with this outcome.
-    AfterOutcome { current: Assignment, outcome: Outcome, first_failure_at: DateTime<Utc> },
+    AfterOutcome {
+        current: Assignment,
+        outcome: Outcome,
+        first_failure_at: DateTime<Utc>,
+    },
     /// The thread just completed a compaction; reconsider its account.
     CompactionCompleted { current: Assignment },
 }
@@ -129,7 +140,11 @@ pub enum Decision {
     RetrySame { account: AccountId, at: DateTime<Utc> },
     /// Nothing can serve the request now. `retryable` errors carry the earliest known
     /// usable time; it is `None` when unknown and is never invented.
-    Reject { retryable: bool, earliest_usable_at: Option<DateTime<Utc>>, message: String },
+    Reject {
+        retryable: bool,
+        earliest_usable_at: Option<DateTime<Utc>>,
+        message: String,
+    },
 }
 
 /// One account's score, for explanations and the visualizer's weights.

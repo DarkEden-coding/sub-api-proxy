@@ -3525,7 +3525,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "sap-core",
- "sap-store",
  "serde",
  "serde_json",
  "sha2 0.10.9",

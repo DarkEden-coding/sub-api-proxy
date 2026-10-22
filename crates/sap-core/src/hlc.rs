@@ -30,15 +30,27 @@ impl PartialOrd for Hlc {
 
 impl Hlc {
     pub fn zero(node: NodeId) -> Self {
-        Self { wall_ms: 0, counter: 0, node }
+        Self {
+            wall_ms: 0,
+            counter: 0,
+            node,
+        }
     }
 
     /// The next local timestamp after `self`, given the current wall time.
     pub fn tick(&self, now_ms: i64) -> Self {
         if now_ms > self.wall_ms {
-            Self { wall_ms: now_ms, counter: 0, node: self.node.clone() }
+            Self {
+                wall_ms: now_ms,
+                counter: 0,
+                node: self.node.clone(),
+            }
         } else {
-            Self { wall_ms: self.wall_ms, counter: self.counter + 1, node: self.node.clone() }
+            Self {
+                wall_ms: self.wall_ms,
+                counter: self.counter + 1,
+                node: self.node.clone(),
+            }
         }
     }
 
@@ -54,7 +66,11 @@ impl Hlc {
         } else {
             0
         };
-        Self { wall_ms: wall, counter, node: self.node.clone() }
+        Self {
+            wall_ms: wall,
+            counter,
+            node: self.node.clone(),
+        }
     }
 }
 
@@ -71,7 +87,11 @@ mod tests {
         let a = Hlc::zero(n("a")).tick(100);
         let a2 = a.tick(90);
         assert!(a2 > a);
-        let remote = Hlc { wall_ms: 500, counter: 3, node: n("b") };
+        let remote = Hlc {
+            wall_ms: 500,
+            counter: 3,
+            node: n("b"),
+        };
         let a3 = a2.observe(&remote, 120);
         assert!(a3 > remote && a3 > a2);
     }
