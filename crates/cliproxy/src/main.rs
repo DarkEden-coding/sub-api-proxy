@@ -105,6 +105,9 @@ struct Args {
     /// Prefix for Vertex model namespacing (use with -vertex-import)
     #[arg(long, default_value = "")]
     vertex_import_prefix: String,
+    /// Bind Sign in with ChatGPT (SIWC) credentials to a Codex credential file
+    #[arg(long, default_value = "")]
+    siwc_bind: String,
     /// Management password accepted from loopback clients only.
     #[arg(long, hide = true, default_value = "")]
     password: String,
@@ -941,6 +944,7 @@ fn free_console() {
 /// Go's `commandMode`: a login or import flag is set.
 fn command_mode(args: &Args) -> bool {
     !args.vertex_import.is_empty()
+        || !args.siwc_bind.is_empty()
         || args.antigravity_login
         || args.codex_login
         || args.codex_device_login
@@ -1143,6 +1147,29 @@ async fn command(args: &Args, config: &Config) -> anyhow::Result<bool> {
         match cpa_exec::vertex_auth::import(&config.auth_dir, &args.vertex_import, &args.vertex_import_prefix) {
             Ok(path) => println!("Vertex credentials imported: {}", path.display()),
             Err(error) => tracing::error!("{error}"),
+        }
+        return Ok(true);
+    }
+    if !args.siwc_bind.is_empty() {
+        // Go DoSIWCBind: failures are reported and the command still exits normally,
+        // except a busy callback port (ErrPortInUse's code 13).
+        let options = cpa_exec::codex_oauth::LoginOptions {
+            no_browser: args.no_browser,
+            callback_port: args.oauth_callback_port,
+        };
+        match cpa_exec::codex_siwc_bind::bind(config, &args.siwc_bind, &options).await {
+            Ok(path) => {
+                println!("SIWC credentials bound and saved to {}", path.display());
+                println!("Sign in with ChatGPT authentication successful!");
+            }
+            Err(cpa_exec::codex_siwc_bind::BindError::Log(line)) => tracing::error!("{line}"),
+            Err(cpa_exec::codex_siwc_bind::BindError::Print(line)) => println!("{line}"),
+            Err(cpa_exec::codex_siwc_bind::BindError::PortInUse) => {
+                tracing::error!(
+                    "The required port is already in use. Please close any applications using port 3000 and try again."
+                );
+                std::process::exit(13);
+            }
         }
         return Ok(true);
     }
@@ -1581,6 +1608,8 @@ mod tests {
             "k.json",
             "-vertex-import-prefix",
             "p",
+            "-siwc-bind",
+            "codex-a.json",
             "-home-jwt",
             "j",
             "-home-disable-cluster-discovery",
@@ -1602,6 +1631,7 @@ mod tests {
         assert_eq!(args.discover_timeout, -2);
         assert_eq!(csv_flags(&args.discover_include), ["eth0", "en0", "wl*"]);
         assert_eq!(args.management_base_url, "https://x");
+        assert_eq!(args.siwc_bind, "codex-a.json");
         let sub = |a: &[&str]| {
             DiscoverArgs::try_parse_from(
                 go_flags(

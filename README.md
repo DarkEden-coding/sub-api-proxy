@@ -164,7 +164,6 @@ Not in cliproxy-rs yet:
 
 - An AUR package.
 - Per-credential plugin model discovery (`model.for_auth`) and plugin response hooks on a Claude client's buffered Claude answer. Existing plugins can load, serve routes and quotas, install from the store, parse the credential files of their provider (`auth.parse`) and participate in frontend auth, model routing, credential scheduling, interceptors, request and response translation, thinking and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
-- The `--siwc-bind` command, which binds Sign in with ChatGPT tokens from the command line. The Management API binding and requests through the bound tokens (`use_siwc`) already work.
 - Sending `server.github-token` on plugin store requests to the GitHub API that no `plugins.store-auth` rule covers. The setting is already accepted and kept.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 
