@@ -1412,28 +1412,36 @@ async fn a_codex_save_refuses_a_disk_subtree_its_loader_cannot_read() {
     });
     let file = f.dir.join("auth").join("codex.json");
     let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    let before = f.rt.store().get("codex.json").unwrap();
+    let (base, server) = f.server().await;
+    // As edited, and already in the bytes the save would write (an equal save, which
+    // writes nothing but would still publish what the bytes synthesize).
     let edited = format!(
         r#"{{"type":"codex","access_token":"fake-a","siwc":{{"x":{}}}}}"#,
         nested(200)
     );
-    std::fs::write(&file, &edited).unwrap();
-    let before = f.rt.store().get("codex.json").unwrap();
-    let (base, server) = f.server().await;
-    let r = wreq::Client::new()
-        .patch(format!("{base}/v8/management/credentials/status"))
-        .bearer_auth("fake-management-only")
-        .body(r#"{"name":"codex.json","disabled":true}"#)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 500);
-    assert_eq!(
-        r.json::<Value>().await.unwrap(),
-        json!({"error": "failed to update auth: Io(\"the saved auth file could not be read back\")"})
+    let canonical = format!(
+        r#"{{"access_token":"fake-a","disabled":false,"siwc":{{"x":{}}},"type":"codex"}}"#,
+        nested(200)
     );
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
-    let after = f.rt.store().get("codex.json").unwrap();
-    assert_eq!((after.revision, after.disabled), (before.revision, false));
+    for (disk, disabled) in [(&edited, true), (&canonical, false)] {
+        std::fs::write(&file, disk).unwrap();
+        let r = wreq::Client::new()
+            .patch(format!("{base}/v8/management/credentials/status"))
+            .bearer_auth("fake-management-only")
+            .body(format!(r#"{{"name":"codex.json","disabled":{disabled}}}"#))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 500, "disabled {disabled}");
+        assert_eq!(
+            r.json::<Value>().await.unwrap(),
+            json!({"error": "failed to update auth: Io(\"the saved auth file could not be read back\")"})
+        );
+        assert_eq!(&std::fs::read_to_string(&file).unwrap(), disk);
+        let after = f.rt.store().get("codex.json").unwrap();
+        assert_eq!((after.revision, after.disabled), (before.revision, false));
+    }
     server.abort();
 }
 

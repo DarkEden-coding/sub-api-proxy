@@ -1935,8 +1935,8 @@ fn apply_fields(state: &Management, name: &str, fields: &[Field], retry: Option<
 /// of the metadata as Go holds it and the patched `literals` as decoded, aliases under
 /// their canonical names. Go's numbers come from the credential's [`Provenance`]: the
 /// document the last save committed, or the float64 reading of the bytes it was loaded
-/// from while the file still holds them. A non-integer number with neither refuses the
-/// save (docs/DIFFERENCES-FROM-GO.md). An equal document leaves the file as it is, and
+/// from while the file still holds them, with any token refresh's values in place. A
+/// non-integer number with neither refuses the save (docs/DIFFERENCES-FROM-GO.md). An equal document leaves the file as it is, and
 /// the record is published all the same. Codex records go through
 /// `PersistCodexAuthFile`, which keeps the disk's credentials first.
 ///
@@ -1959,6 +1959,13 @@ fn save_file_backed(
         .provenance(&target.id)
         .filter(|p| p.revision == target.revision);
     let (prior, loaded) = match provenance {
+        Some(p) if p.loaded => {
+            let mut loaded = p.doc.and_then(|d| GoValue::clone(&d).into_object().ok());
+            if let Some(loaded) = loaded.as_mut() {
+                normalize_go(loaded);
+            }
+            (None, loaded.map(GoValue::Object))
+        }
         Some(p) if p.doc.is_some() => (p.doc, None),
         Some(p) if Some(p.sha256) == held => {
             let mut loaded = object(existing.as_deref().and_then(GoValue::parse));
@@ -2006,8 +2013,9 @@ fn save_file_backed(
         Some(old) => GoValue::parse(old).is_some_and(|old| go_json_equal(&old, &doc)),
         None => false,
     };
-    // A document the auth loader cannot read would drop the credential.
-    if !unchanged && serde_json::from_slice::<Map<String, Value>>(&bytes).is_err() {
+    // A document the auth loader cannot read would drop the credential, written or not:
+    // an equal save still publishes what these bytes synthesize.
+    if serde_json::from_slice::<Map<String, Value>>(&bytes).is_err() {
         return Err(PatchError::Io("the saved auth file could not be read back".into()));
     }
     let commit = Commit {
@@ -2688,7 +2696,7 @@ mod tests {
     }
 
     /// Go's store leaves a file whose document is unchanged alone (`jsonEqual`, numbers
-    /// as float64): no new inode or mtime, and the credential keeps its revision.
+    /// as float64): no new inode or mtime, and the record is published all the same.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_unchanged_save_writes_nothing() {
@@ -2716,6 +2724,7 @@ mod tests {
     /// Go `FileTokenStore.Save` skips writing an equal document, and the manager still
     /// publishes the saved record: a file edited to the same state behind its back, and
     /// an integer float64 cannot tell from the file's, both reach memory.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_equal_save_still_publishes_the_record() {
         use std::os::unix::fs::MetadataExt;
@@ -2768,6 +2777,71 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("b.json")).unwrap(),
             r#"{"disabled":true,"request_retry":9007199254740993,"type":"claude"}"#
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go's in-memory numbers survive what does not reload the record: a watcher read of
+    /// the file half-written (the record is kept, not rebuilt), and a token refresh,
+    /// which changes only the keys it patches.
+    #[tokio::test]
+    async fn numbers_survive_incomplete_reads_and_refreshes() {
+        let (state, dir) = management(
+            "provenance-kept",
+            &[
+                ("a.json", r#"{"type":"claude","request_retry":1}"#),
+                ("b.json", r#"{"type":"claude","request_retry":1}"#),
+                ("big.json", r#"{"type":"claude","x":18446744073709553665}"#),
+            ],
+        );
+        let save = |id: &str, meta: Map<String, Value>, literals: &[(Vec<String>, GoValue)]| {
+            let current = state.rt.store().get(id).unwrap();
+            let mut next = current.metadata.clone();
+            next.extend(meta);
+            save_file_backed(&state, &current, &next, literals).unwrap();
+        };
+        let exact = |id: &str| {
+            let literals = [(
+                vec!["request_retry".to_owned()],
+                GoValue::Number("9007199254740993".into()),
+            )];
+            save(
+                id,
+                Map::from_iter([("request_retry".into(), 9_007_199_254_740_993_u64.into())]),
+                &literals,
+            );
+        };
+        let disable = |id: &str| save(id, Map::from_iter([("disabled".into(), true.into())]), &[]);
+        let want = r#"{"disabled":true,"request_retry":9007199254740993,"type":"claude"}"#;
+
+        // Truncated, read by the watcher (the record is kept), then restored.
+        exact("a.json");
+        let saved = std::fs::read(dir.join("a.json")).unwrap();
+        std::fs::write(dir.join("a.json"), b"").unwrap();
+        crate::watching::reload(&state).unwrap();
+        std::fs::write(dir.join("a.json"), &saved).unwrap();
+        disable("a.json");
+        assert_eq!(std::fs::read_to_string(dir.join("a.json")).unwrap(), want);
+
+        // A refresh after the save.
+        exact("b.json");
+        refresh(&state, "b.json", "fake-refreshed");
+        disable("b.json");
+        let got = on_disk(&dir, "b.json");
+        assert_eq!(got["access_token"], "fake-refreshed");
+        assert!(
+            std::fs::read_to_string(dir.join("b.json"))
+                .unwrap()
+                .contains(r#""request_retry":9007199254740993"#)
+        );
+
+        // A refresh after the load: Go's float64 of the loaded text, not of serde's.
+        refresh(&state, "big.json", "fake-refreshed");
+        disable("big.json");
+        assert!(
+            std::fs::read_to_string(dir.join("big.json"))
+                .unwrap()
+                .contains(r#""x":18446744073709556000"#)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

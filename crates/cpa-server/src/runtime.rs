@@ -1217,6 +1217,9 @@ pub struct Provenance {
     /// The document a management save committed (Go's metadata after that save); `None`
     /// for a load, where Go's metadata is the float64 reading of those bytes.
     pub doc: Option<Arc<cpa_common::json::GoValue>>,
+    /// `doc` is the text of the bytes the record was loaded from (numbers as written,
+    /// read as float64 by a save) with a refresh's values in place, not Go's metadata.
+    pub loaded: bool,
 }
 
 /// How [`CredentialStore::commit_file_backed`] commits a management save.
@@ -1232,6 +1235,26 @@ pub struct Commit {
     pub disk: Option<Option<[u8; 32]>>,
     /// Go's metadata after the save, recorded as the new revision's [`Provenance`].
     pub doc: Option<Arc<cpa_common::json::GoValue>>,
+}
+
+/// A value a refresh set, as Go holds it (integers exact, other numbers float64), or
+/// with `literal` its number text as written.
+fn go_typed(v: &Value, literal: bool) -> cpa_common::json::GoValue {
+    use cpa_common::json::GoValue;
+    match v {
+        Value::Null => GoValue::Null,
+        Value::Bool(b) => GoValue::Bool(*b),
+        Value::Number(n) if literal || n.is_i64() || n.is_u64() => GoValue::Number(n.to_string()),
+        Value::Number(n) => {
+            let text = n.to_string();
+            GoValue::Number(
+                cpa_common::json::json_float(cpa_common::json::parse_float(text.as_bytes())).unwrap_or(text),
+            )
+        }
+        Value::String(s) => GoValue::String(s.clone()),
+        Value::Array(items) => GoValue::Array(items.iter().map(|v| go_typed(v, literal)).collect()),
+        Value::Object(map) => GoValue::Object(map.iter().map(|(k, v)| (k.clone(), go_typed(v, literal))).collect()),
+    }
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -1903,14 +1926,34 @@ impl CredentialStore {
                 // Go's `json.NewEncoder(f).Encode`: compact JSON and a newline.
                 let mut bytes = serde_json::to_vec(&next.metadata).map_err(|e| PatchError::Io(e.to_string()))?;
                 bytes.push(b'\n');
-                Ok(Some((Some(path.clone()), bytes, next)))
+                let basis = self.patched_doc(current, path, patch, next.disabled);
+                Ok(Some((Some(path.clone()), bytes, (next, basis))))
             },
-            |inner, index, bytes, mut next| {
+            |inner, index, bytes, (mut next, basis)| {
                 inner.generation += 1;
                 next.revision = inner.generation;
-                // ponytail: Go's refresh keeps the refreshed values as it typed them; the
-                // next save here reads them back from the written file as float64.
-                self.note_provenance(&next.id, next.revision, sha256(bytes), None);
+                // The written bytes are serde's, not Go's: a later management save takes
+                // its numbers from `doc`, Go's metadata after the refresh, or refuses.
+                match basis {
+                    Some((doc, loaded)) => {
+                        let provenance = Provenance {
+                            revision: next.revision,
+                            sha256: sha256(bytes),
+                            doc: Some(Arc::new(doc)),
+                            loaded,
+                        };
+                        self.provenance
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(next.id.clone(), provenance);
+                    }
+                    None => {
+                        self.provenance
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .remove(&next.id);
+                    }
+                }
                 inner.creds[index] = Arc::new(next);
                 inner.epoch += 1;
                 self.changed.send_replace(());
@@ -2108,6 +2151,40 @@ impl CredentialStore {
         Ok(())
     }
 
+    /// Go's metadata after `patch` (a token refresh) lands on `current`: Go's refresh
+    /// changes only the patched keys of the auth it holds. From a save, that is the saved
+    /// document with the patched values as Go holds them; from a load, the loaded text
+    /// (while `path` still holds it) with the patched values as written, `true`. `None`
+    /// when neither is known.
+    fn patched_doc(
+        &self,
+        current: &Credential,
+        path: &std::path::Path,
+        patch: &MetadataPatch,
+        disabled: bool,
+    ) -> Option<(cpa_common::json::GoValue, bool)> {
+        use cpa_common::json::GoValue;
+        let prior = self
+            .provenance(&current.id)
+            .filter(|p| p.revision == current.revision)?;
+        let (base, loaded) = match prior.doc {
+            Some(doc) => (GoValue::clone(&doc), prior.loaded),
+            None => {
+                let bytes = std::fs::read(path).ok().filter(|b| sha256(b) == prior.sha256)?;
+                (GoValue::parse(&bytes)?, true)
+            }
+        };
+        let mut doc = base.into_object().ok()?;
+        for key in &patch.remove {
+            doc.remove(key);
+        }
+        for (key, value) in &patch.set {
+            doc.insert(key.clone(), go_typed(value, loaded));
+        }
+        doc.insert("disabled".into(), GoValue::Bool(disabled));
+        Some((GoValue::Object(doc), loaded))
+    }
+
     /// The [`Provenance`] of credential `id`, if one is known.
     pub fn provenance(&self, id: &str) -> Option<Provenance> {
         self.provenance
@@ -2118,10 +2195,15 @@ impl CredentialStore {
     }
 
     fn note_provenance(&self, id: &str, revision: u64, sha256: [u8; 32], doc: Option<Arc<cpa_common::json::GoValue>>) {
-        self.provenance
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.to_owned(), Provenance { revision, sha256, doc });
+        self.provenance.lock().unwrap_or_else(PoisonError::into_inner).insert(
+            id.to_owned(),
+            Provenance {
+                revision,
+                sha256,
+                doc,
+                loaded: false,
+            },
+        );
     }
 
     /// Records that the current file credentials were loaded from the bytes `read`
@@ -2146,6 +2228,7 @@ impl CredentialStore {
                         revision: c.revision,
                         sha256: hash,
                         doc: None,
+                        loaded: false,
                     },
                 );
             }
@@ -2198,6 +2281,16 @@ impl CredentialStore {
         let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
         let mut credentials = credentials;
         keep(&self.snapshot(), &mut credentials);
+        // A credential this scan synthesized has no revision yet; one kept for an
+        // incomplete or deferred file is the store's own record, not built from `read`.
+        let built: std::collections::HashSet<std::path::PathBuf> = credentials
+            .iter()
+            .filter(|c| c.revision == 0)
+            .filter_map(|c| match &c.source {
+                Source::File(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
         let mut rejected = Vec::new();
         if !read.is_empty() {
             let current = self.snapshot();
@@ -2259,7 +2352,7 @@ impl CredentialStore {
         drop(guard);
         // Under the gate still: no save lands between the scan's publication and this.
         let mut loaded = read.clone();
-        loaded.retain(|path, _| !rejected.contains(path));
+        loaded.retain(|path, _| built.contains(path) && !rejected.contains(path));
         self.note_loaded(&loaded);
         drop(reload);
         self.close_sessions(removed);
