@@ -2994,8 +2994,8 @@ async fn a_plugin_refresh_that_cannot_be_saved_backs_off() {
 /// A parsed `NextRefreshAfter` seeds the registration it came with only. A credential
 /// registered afresh is due by its interval at once, as Go registers it: after its
 /// file is deleted and created again as an ordinary credential the parser no longer
-/// handles (whether or not the refresh loop saw the parsed one), and after it is
-/// disabled and enabled again.
+/// handles (whether or not the refresh loop saw the parsed one). A credential disabled
+/// and enabled again is not registered afresh: it keeps the parsed deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_credential_registered_afresh_does_not_inherit_a_parsed_refresh_deadline() {
     let parsed = |id: &str| {
@@ -3083,7 +3083,7 @@ async fn a_credential_registered_afresh_does_not_inherit_a_parsed_refresh_deadli
             .unwrap();
         settle().await;
     }
-    eventually("c.json's refresh", || refreshes("c.json") >= 1).await;
+    assert_eq!(refreshes("c.json"), 0, "still waiting for the parsed NextRefreshAfter");
     env.rt.stop_auto_refresh();
     env.finish().await;
 }
@@ -3106,6 +3106,10 @@ async fn a_plugin_refresh_saves_its_tokens_disabled_state_and_proxy_url() {
                 r#"{"type":"acme","access_token":"x","proxy_url":"socks5://old:1"}"#,
             ),
             ("o.json", r#"{"type":"acme","access_token":"o"}"#),
+            (
+                "y.json",
+                r#"{"type":"acme","access_token":"y","proxy_url":"socks5://a:1"}"#,
+            ),
         ],
         |_| {},
     )
@@ -3148,6 +3152,42 @@ async fn a_plugin_refresh_saves_its_tokens_disabled_state_and_proxy_url() {
         auth_file(&env, "x.json"),
         json!({"type":"acme","access_token":"x3","proxy_url":"socks5://new:2","disabled":false})
     );
+
+    // A management edit of the proxy URL lands while the plugin refreshes and answers
+    // another one: the edit wins in the document and the running credential alike.
+    respond(json!({"ProxyURL":"socks5://b:2",
+        "Metadata":{"type":"acme","access_token":"y2","proxy_url":"socks5://a:1"}}));
+    let release = Release(env.records.join("respond/acme/auth.refresh.hold"));
+    std::fs::write(&release.0, "").unwrap();
+    let pending = tokio::spawn({
+        let rt = env.rt.clone();
+        async move { rt.refresh_credential("y.json").await }
+    });
+    eventually("the refresh of y.json", || {
+        calls(&env.records, "acme", "auth.refresh")
+            .iter()
+            .any(|r| r["AuthID"] == "y.json")
+    })
+    .await;
+    let mut edit = cpa_core::credential::MetadataPatch::default();
+    edit.set.insert("proxy_url".into(), "socks5://c:3".into());
+    store
+        .apply_patch("y.json", store.get("y.json").unwrap().revision, &edit)
+        .unwrap();
+    drop(release);
+    pending.await.unwrap().unwrap();
+    let proxies = || {
+        (
+            auth_file(&env, "y.json")["proxy_url"].clone(),
+            store.get("y.json").unwrap().attributes.get("proxy_url").cloned(),
+        )
+    };
+    assert_eq!(proxies(), (json!("socks5://c:3"), Some("socks5://c:3".into())));
+    // The next refresh, with no reload between, echoes its input.
+    respond(json!({"Metadata":{"type":"acme","access_token":"y3","proxy_url":"socks5://c:3"}}));
+    env.rt.refresh_credential("y.json").await.unwrap();
+    assert_eq!(proxies(), (json!("socks5://c:3"), Some("socks5://c:3".into())));
+    assert_eq!(auth_file(&env, "y.json")["access_token"], "y3");
 
     for (change, auth) in [
         (

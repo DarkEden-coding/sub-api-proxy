@@ -93,8 +93,8 @@ pub(crate) fn due_at(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<DateT
     // Go registers a parsed auth with the plugin's `NextRefreshAfter`, and keeps both
     // fields when the auth is registered again (`prepareCoreAuthForModelRegistration`).
     // The parsed value is taken either way: it seeds this registration only, so a
-    // credential registered afresh later (removed or disabled meanwhile) waits for a
-    // new parse of its file to get one.
+    // credential registered afresh after its removal waits for a new parse of its file
+    // to get one.
     let parsed = rt.plugins().take_parsed_next_refresh_after(&c.id);
     let schedule = *lock(&rt.plugin_runtime().schedules)
         .entry(c.id.clone())
@@ -137,11 +137,11 @@ pub(crate) fn schedules(rt: &Runtime) -> Schedules {
     rt.plugin_runtime().schedules.clone()
 }
 
-/// Forgets the schedules of credentials that are gone or disabled: Go registers them
-/// afresh, without the previous `LastRefreshedAt` and `NextRefreshAfter`.
+/// Forgets the schedules of credentials that are gone: Go registers them afresh, without
+/// the previous `LastRefreshedAt` and `NextRefreshAfter`. A disabled credential keeps
+/// its schedule (Go's disable edits the registered auth and keeps both fields).
 pub(crate) fn reconcile(rt: &Runtime, snapshot: &[Arc<Credential>]) {
-    let live: std::collections::HashSet<&str> =
-        snapshot.iter().filter(|c| !c.disabled).map(|c| c.id.as_str()).collect();
+    let live: std::collections::HashSet<&str> = snapshot.iter().map(|c| c.id.as_str()).collect();
     lock(&rt.plugin_runtime().schedules).retain(|id, _| live.contains(id.as_str()));
 }
 
@@ -178,11 +178,14 @@ pub(crate) fn failed(rt: &Runtime, c: &Credential, now: DateTime<Utc>) {
         .next_after = Some(at);
 }
 
-/// What a plugin refresh commits: the metadata change, and the proxy URL the credential
-/// has afterwards (Go `Auth.ProxyURL`, empty for none), published with it.
+/// What a plugin refresh commits: the metadata change, and whether a plugin answered.
+/// An answer writes Go's merged `proxy_url` into the metadata, and the commit publishes
+/// the committed metadata's value as the credential's proxy URL (Go keeps `ProxyURL`
+/// and `Metadata["proxy_url"]` equal), so a concurrent edit that wins the metadata wins
+/// both.
 pub(crate) struct Refreshed {
     pub patch: MetadataPatch,
-    pub proxy_url: String,
+    pub answered: bool,
 }
 
 /// Refreshes `c` through its plugin and returns what to commit. `stored` is the
@@ -251,7 +254,7 @@ async fn refresh_once(
         // No plugin answers for the credential's provider.
         let unchanged = Refreshed {
             patch: MetadataPatch::default(),
-            proxy_url: own_proxy,
+            answered: false,
         };
         return match route {
             Route::Executor => Ok(unchanged),
@@ -316,7 +319,7 @@ async fn refresh_once(
     if proxy.is_empty() {
         refreshed.metadata.remove("proxy_url");
     } else {
-        refreshed.metadata.insert("proxy_url".into(), proxy.clone().into());
+        refreshed.metadata.insert("proxy_url".into(), proxy.into());
     }
     refreshed.metadata.insert("disabled".into(), refreshed.disabled.into());
     let mut ignored = Vec::new();
@@ -352,7 +355,7 @@ async fn refresh_once(
         .map_err(|e| ExecError::local(500, FailureScope::Credential, format!("persist refreshed auth: {e}")))?;
     Ok(Refreshed {
         patch: diff(&c.metadata, &next),
-        proxy_url: proxy,
+        answered: true,
     })
 }
 

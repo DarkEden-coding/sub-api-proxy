@@ -495,23 +495,26 @@ impl Runtime {
         }
         let view = self.for_executor(&current);
         let plugin = crate::plugins::refresh::route(self, &current, cfg);
-        // A plugin refresh also publishes the credential's proxy URL with its document.
-        let (patch, plugin_proxy) = match (&plugin, failed) {
+        // A plugin answer also publishes the committed document's proxy URL (the merged
+        // one, or a concurrent edit's when that wins the merge) as the credential's.
+        let (patch, publish_proxy) = match (&plugin, failed) {
             (Some(route), _) => {
                 let refreshed = crate::plugins::refresh::refresh(self, route, &view, &current).await?;
-                (refreshed.patch, Some(refreshed.proxy_url))
+                (refreshed.patch, refreshed.answered)
             }
-            (None, Some(_)) if management => (self.executors.prepare_management(&view, cfg).await?, None),
-            (None, Some(_)) => (self.executors.prepare_forced(&view, cfg).await?, None),
-            (None, None) => (self.executors.prepare(&view, cfg).await?, None),
+            (None, Some(_)) if management => (self.executors.prepare_management(&view, cfg).await?, false),
+            (None, Some(_)) => (self.executors.prepare_forced(&view, cfg).await?, false),
+            (None, None) => (self.executors.prepare(&view, cfg).await?, false),
         };
         let publish_proxy = move |c: &mut Credential| {
-            if let Some(proxy) = &plugin_proxy {
-                if proxy.is_empty() {
-                    c.attributes.remove("proxy_url");
-                } else {
-                    c.attributes.insert("proxy_url".into(), proxy.clone());
-                }
+            if publish_proxy {
+                match c.str("proxy_url").map(str::trim).filter(|p| !p.is_empty()) {
+                    Some(proxy) => {
+                        let proxy = proxy.to_owned();
+                        c.attributes.insert("proxy_url".into(), proxy)
+                    }
+                    None => c.attributes.remove("proxy_url"),
+                };
             }
         };
         let store = self.store.clone();
