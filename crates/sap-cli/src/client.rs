@@ -50,7 +50,8 @@ impl Client {
             let status = response.status();
             let bytes = Limited::new(response.into_body(), 8 * 1024 * 1024)
                 .collect()
-                .await?
+                .await
+                .map_err(|e| anyhow::anyhow!(e).context("read response body"))?
                 .to_bytes();
             // Never echo arbitrary server error bodies, which may contain secrets.
             if !status.is_success() {
