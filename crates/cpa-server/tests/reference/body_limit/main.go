@@ -338,6 +338,41 @@ func scenarios() []scenario {
 	// type error wins over a later duplicate, and data after the value is not read.
 	add(scenario{Name: "json_duplicate_key_no_limit /v0/management/plugins/demo/enabled", YAML: limited(mgmtYAML, 0), Method: "PATCH",
 		Path: "/v0/management/plugins/demo/enabled", Headers: mgmt, Body: `{"enabled":1,"enabled":true}x`})
+	// Without a limit too, gin binds only the first value, matches field names under
+	// Unicode case folding (ſ folds to s) and fails on any member's type error.
+	for _, c := range []struct{ name, method, path, body string }{
+		{"value_then_data", "PATCH", "/v0/management/plugins/demo/enabled", `{"enabled":true}xx`},
+		{"folded_name", "PATCH", "/v0/management/plugins/demo/enabled", `{"ENABLED":true}`},
+		{"null_enabled", "PATCH", "/v0/management/plugins/demo/enabled", `{"enabled":true,"enabled":null}`},
+		{"value_then_data", "PATCH", "/v0/management/auth-files/status", `{"name":"x.json","disabled":true}x`},
+		{"long_s_fold", "PATCH", "/v0/management/auth-files/status", `{"name":"x.json","diſabled":true}`},
+		{"duplicate_type_error", "PATCH", "/v0/management/auth-files/status", `{"name":"x.json","disabled":1,"disabled":true}`},
+		{"null_body", "PATCH", "/v0/management/auth-files/status", `null`},
+		{"array_body", "PATCH", "/v0/management/auth-files/status", `[1]`},
+		{"value_then_data", "PATCH", "/v8/management/credentials/fields", `{"name":"x.json","note":"n"}x`},
+		{"duplicate_last_wins", "PATCH", "/v8/management/credentials/fields", `{"name":1,"name":"x.json"}`},
+		{"null_body", "PATCH", "/v8/management/credentials/fields", `null`},
+	} {
+		add(scenario{Name: "json_bind_no_limit " + c.name + " " + c.method + " " + c.path, YAML: limited(mgmtYAML, 0), Method: c.method,
+			Path: c.path, Headers: mgmt, Body: c.body})
+	}
+	// Unknown members are skipped unconverted: an out-of-range number, nesting deeper
+	// than serde's 128 levels, invalid UTF-8 and a lone surrogate all bind.
+	for _, u := range []struct{ name, value string }{
+		{"huge_number", `1e400`},
+		{"deep_nesting", strings.Repeat("[", 200) + strings.Repeat("]", 200)},
+		{"invalid_utf8", "\"\xff\xfe\""},
+		{"lone_surrogate", `"\ud800"`},
+	} {
+		for _, c := range []struct{ method, path, body string }{
+			{"PATCH", "/v0/management/auth-files/status", `{"unused":` + u.value + `,"name":"x.json","disabled":true}`},
+			{"PATCH", "/v0/management/plugins/demo/enabled", `{"unused":` + u.value + `,"enabled":true}`},
+			{"POST", "/v0/management/api-call", `{"unused":` + u.value + `,"method":"GET"}`},
+		} {
+			add(scenario{Name: "json_bind_no_limit unknown_" + u.name + " " + c.method + " " + c.path, YAML: limited(mgmtYAML, 0), Method: c.method,
+				Path: c.path, Headers: mgmt, Body: c.body})
+		}
+	}
 	// textproto trims only spaces and tabs, so a cut header line keeps its "\r"; and a
 	// line longer than the reader's 4096-byte buffer fails before the limit.
 	bType := map[string]string{"Authorization": "Bearer mgmt-secret", "Content-Type": "multipart/form-data; boundary=b"}

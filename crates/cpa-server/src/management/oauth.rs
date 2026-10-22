@@ -1436,7 +1436,7 @@ pub(crate) async fn callback_get(
 }
 
 /// Go `PostOAuthCallback`: gin's `ShouldBindJSON` into `oauthCallbackRequest`
-/// (first JSON value, exact-then-case-insensitive names, type mismatches rejected).
+/// (first JSON value, exact-then-folded names, type mismatches rejected).
 /// Under v8, `PostOAuthCallbackV8`, whose request also has `client_id`.
 pub(crate) async fn callback_post(
     State(state): State<Arc<Management>>,
@@ -1451,21 +1451,11 @@ pub(crate) async fn callback_post(
     const FIELDS: [&str; 6] = ["provider", "redirect_url", "code", "state", "error", "client_id"];
     let fields = if v8 { &FIELDS[..] } else { &FIELDS[..5] };
     let invalid = || status_error(StatusCode::BAD_REQUEST, "invalid body");
-    let members = serde_json::Deserializer::from_slice(&body)
-        .into_iter::<super::api_call::Members>()
-        .next();
-    let Some(Ok(super::api_call::Members(members))) = members else {
+    let Some(members) = super::api_call::bind_struct(&body, fields) else {
         return invalid();
     };
     let mut req = CallbackRequest::default();
-    for (key, v) in members.unwrap_or_default() {
-        let Some(i) = fields
-            .iter()
-            .position(|f| *f == key)
-            .or_else(|| fields.iter().position(|f| f.eq_ignore_ascii_case(&key)))
-        else {
-            continue;
-        };
+    for (i, v) in members {
         let slot = match i {
             0 => &mut req.provider,
             1 => &mut req.redirect_url,
