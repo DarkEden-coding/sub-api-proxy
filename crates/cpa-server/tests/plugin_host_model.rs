@@ -20,6 +20,10 @@ const BODY: &str = r#"{ "model":"fast", "messages":[{"role":"user","content":"he
 const REPLY: &str = r#"{ "id":"reply", "choices":[{"message":{"content":"ok"}}] }"#;
 const CHUNK: &str = r#"{"id":"reply","choices":[{"delta":{"content":"ok"}}]}"#;
 
+/// The tests share process-wide plugin and callback state, so they take turns when they
+/// run as threads of one process (plain `cargo test`; nextest runs one per process).
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Default)]
 struct Seen(Mutex<Vec<(String, String, Bytes)>>);
 
@@ -135,6 +139,7 @@ fn canned(records: &Path, label: &str, method: &str, result: Value) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn callbacks_execute_pin_and_stream_without_recursing_into_the_caller() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model") else {
         return;
@@ -401,6 +406,7 @@ async fn callbacks_execute_pin_and_stream_without_recursing_into_the_caller() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn callback_streams_preserve_executor_bytes_across_interceptor_unload() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_bytes") else {
         return;
@@ -560,6 +566,7 @@ fn callback(host: &cpa_plugin::Host, instance: &Arc<CallbackInstance>, method: &
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
+    let _serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_context") else {
         return;
@@ -740,12 +747,131 @@ async fn nested_callbacks_inherit_pin_session_and_path_but_not_proxy() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Go restores the parent callback context for `host.model.execute`, so the nested
+/// call's usage record carries the client key and access provider of the request whose
+/// interceptor made it (37fe2608), like the request's own record. That includes the
+/// response interceptors of the unified and Gemini model lists, which keep the request
+/// context (Go `WriteModelListResponse`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nested_callbacks_record_the_parent_usage_identity() {
+    let _serial = SERIAL.lock().await;
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let Some(built) = cpa_plugin::testing::built_plugins(tmp, "plugin_host_model_usage") else {
+        return;
+    };
+    let dir = cpa_plugin::testing::scratch(tmp, "host-model-usage");
+    let auths = dir.join("auths");
+    let records = dir.join("records");
+    let plugins = dir.join("plugins");
+    for d in [&auths, &records, &plugins] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let seen = Arc::new(Seen::default());
+    let url = serve(seen.clone()).await;
+    std::fs::copy(built.join("recorder.so"), plugins.join("nested.so")).unwrap();
+    let yaml = format!(
+        "auth-dir: {}\naccess:\n  api-keys: [k1]\napi-keys:\n  openai-compatibility:\n    - name: Acme\n      base-url: {url}/v1\n      models: [{{name: up-model, alias: fast}}]\n      keys: [{{api-key: first}}]\nobservability: {{usage: {{usage-statistics-enabled: true}}}}\nplugins:\n  enabled: true\n  dir: {}\n  configs:\n    nested:\n      enabled: true\n      label: nested\n      record: {}\n      caps: request_interceptor,response_interceptor\n",
+        auths.display(),
+        plugins.display(),
+        records.display()
+    );
+    canned(&records, "nested", "request.intercept_after", json!({}));
+    canned(&records, "nested", "response.intercept_after", json!({}));
+    std::fs::write(
+        records.join("respond/nested/request.intercept_before.json"),
+        json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute",
+            "request":{"entry_protocol":"openai","model":"fast","body":b64(BODY)}}]})
+        .to_string(),
+    )
+    .unwrap();
+    let cfg = Config::parse(&yaml).unwrap();
+    let credentials = cpa_core::config::credentials::load(&cfg);
+    let rt = Arc::new(cpa_server::testing::runtime(
+        cfg.clone(),
+        credentials,
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    rt.usage_queue().configure(true, &cfg);
+    cpa_server::plugins::start(&rt).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = cpa_server::router(rt.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let response = wreq::Client::new()
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .header("authorization", "Bearer k1")
+        .header("content-type", "application/json")
+        .body(BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(seen.0.lock().unwrap().len(), 2, "the nested call and the request");
+    let identities: Vec<(Value, Value, Value)> = rt
+        .usage_queue()
+        .pop_oldest(10)
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(r).unwrap())
+        .map(|r| {
+            (
+                r["api_key"].clone(),
+                r["is_native_key"].clone(),
+                r["access_provider"].clone(),
+            )
+        })
+        .collect();
+    let want = (json!("k1"), json!(true), json!("config-inline"));
+    assert_eq!(identities, [want.clone(), want.clone()]);
+
+    canned(&records, "nested", "request.intercept_before", json!({}));
+    std::fs::write(
+        records.join("respond/nested/response.intercept_after.json"),
+        json!({"ok":true,"result":{},"host_calls":[{"method":"host.model.execute",
+            "request":{"entry_protocol":"openai","model":"fast","body":b64(BODY)}}]})
+        .to_string(),
+    )
+    .unwrap();
+    for path in ["/v1/models", "/v1beta/models"] {
+        let response = wreq::Client::new()
+            .get(format!("http://{addr}{path}"))
+            .header("authorization", "Bearer k1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{path}");
+    }
+    assert_eq!(seen.0.lock().unwrap().len(), 4, "one nested call per model list");
+    let identities: Vec<(Value, Value, Value)> = rt
+        .usage_queue()
+        .pop_oldest(10)
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(r).unwrap())
+        .map(|r| {
+            (
+                r["api_key"].clone(),
+                r["is_native_key"].clone(),
+                r["access_provider"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(identities, [want.clone(), want]);
+    rt.plugins().shutdown_all(None).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Go openai_responses_handlers.go (bootstrap EOF and error branches): a data frame still
 /// pending in the Responses framer is flushed and delivered before the bootstrap decides
 /// between SSE and an initial JSON error, whether or not a plugin hook made the executor
 /// hand over unframed payloads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn responses_bootstrap_flushes_a_pending_payload() {
+    let _serial = SERIAL.lock().await;
     use axum::response::IntoResponse;
     use futures_util::StreamExt as _;
     const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}"#;

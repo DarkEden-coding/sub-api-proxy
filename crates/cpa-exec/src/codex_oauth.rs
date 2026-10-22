@@ -5,6 +5,7 @@
 //! Executors never persist: refresh returns a [`MetadataPatch`] that the runtime commits.
 //! Only the explicit login commands write a credential file.
 
+use cpa_core::gostr::GoStr;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -32,8 +33,9 @@ pub const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/devicea
 pub const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const DEFAULT_PLAN: &str = "free";
-/// `CodexAuthenticator.RefreshLead`.
-pub const REFRESH_LEAD: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+/// Go `CodexOuterRefreshLead` (`CodexAuthenticator.RefreshLead`): well ahead of the
+/// nominal 10-day token expiry, since upstream can invalidate tokens early.
+pub const REFRESH_LEAD: chrono::TimeDelta = chrono::TimeDelta::hours(96);
 
 pub fn redirect_uri(port: u16) -> String {
     format!("http://localhost:{port}/auth/callback")
@@ -194,6 +196,7 @@ pub struct CodexOAuth {
     token_url: String,
     device_usercode_url: String,
     device_token_url: String,
+    siwc_token_url: String,
     refreshes: Refreshes,
     retry_delay: Duration,
 }
@@ -210,9 +213,20 @@ impl CodexOAuth {
             token_url: token.into(),
             device_usercode_url: usercode.into(),
             device_token_url: device_token.into(),
+            siwc_token_url: crate::codex_siwc::TOKEN_URL.into(),
             refreshes: Arc::default(),
             retry_delay: Duration::from_secs(1),
         }
+    }
+
+    /// The Sign in with ChatGPT token endpoint, for local mocks.
+    pub fn with_siwc_token_url(mut self, url: &str) -> Self {
+        self.siwc_token_url = url.into();
+        self
+    }
+
+    pub(crate) fn siwc_token_url(&self) -> &str {
+        &self.siwc_token_url
     }
 
     /// Tests shorten Go's 1s-per-attempt refresh backoff.
@@ -230,7 +244,12 @@ impl CodexOAuth {
     /// Posts a form or JSON body as Go's `http.Client.Do` does (Go net/http headers,
     /// redirects followed, transparent gzip). Returns the status and a bounded body;
     /// transport faults never echo URLs or payloads.
-    async fn post(&self, url: &str, content_type: &str, body: Vec<u8>) -> Result<(u16, bytes::Bytes), ExecError> {
+    pub(crate) async fn post(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<(u16, bytes::Bytes), ExecError> {
         let failed = || ExecError::local(502, FailureScope::Transport, "codex oauth request failed");
         let mut headers = crate::proxy::GoHeaders::new();
         headers.set("Content-Type", content_type);
@@ -594,7 +613,7 @@ fn parse_time(value: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
-/// `Manager.shouldRefresh` with the Codex lead (24h). Without an expiry, `last_refresh`
+/// `Manager.shouldRefresh` with the Codex lead (96h). Without an expiry, `last_refresh`
 /// older than the lead (or missing) is due.
 // ponytail: refresh_interval_seconds overrides and unauthorized/invalid-grant lifecycle
 // gating live in the runtime scheduler (M4-0027).
@@ -623,7 +642,7 @@ pub fn credential_file_name(email: &str, plan: &str, account_hash: &str) -> Stri
         .trim()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
-        .map(str::to_lowercase)
+        .map(GoStr::go_lower)
         .collect();
     let plan = plan.join("-");
     let hash = account_hash.trim();

@@ -758,11 +758,11 @@ pub fn import(auth_dir: &Path, key_path: &str, prefix: &str) -> Result<PathBuf, 
 /// `json.Unmarshal` into `map[string]any` with Go's error text; `None` for `null`.
 fn decode_service_account(data: &[u8]) -> Result<Option<BTreeMap<String, GoValue>>, String> {
     // Numbers become float64.
-    match GoValue::parse_f64(data) {
-        Some(GoValue::Object(sa)) => Ok(Some(sa)),
+    match GoValue::parse_f64(data).map(GoValue::into_object) {
+        Some(Ok(sa)) => Ok(Some(sa)),
         // `null` leaves the map nil.
-        Some(GoValue::Null) => Ok(None),
-        Some(other) => {
+        Some(Err(GoValue::Null)) => Ok(None),
+        Some(Err(other)) => {
             let kind = match other {
                 GoValue::Array(_) => "array",
                 GoValue::String(_) => "string",

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use bytes::Bytes;
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, GoValue};
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -108,13 +109,15 @@ impl Message {
                     msg.kind = gj::go_unquote(item.raw()).unwrap_or_default();
                     Ok(())
                 }
-                (Some("payload"), gj::Kind::Json) if item.is_object() => match GoValue::parse_f64(item.raw()) {
-                    Some(GoValue::Object(map)) => {
-                        msg.payload.get_or_insert_with(BTreeMap::new).extend(map);
-                        Ok(())
+                (Some("payload"), gj::Kind::Json) if item.is_object() => {
+                    match GoValue::parse_f64(item.raw()).map(GoValue::into_object) {
+                        Some(Ok(map)) => {
+                            msg.payload.get_or_insert_with(BTreeMap::new).extend(map);
+                            Ok(())
+                        }
+                        _ => Err("json: cannot unmarshal number into Go value of type float64".to_owned()),
                     }
-                    _ => Err("json: cannot unmarshal number into Go value of type float64".to_owned()),
-                },
+                }
                 (Some(name), _) => Err(format!(
                     "json: cannot unmarshal {} into Go struct field Message.{name}",
                     meta_wire::kind_name(&item)
@@ -331,7 +334,7 @@ impl Relay {
         let (out, frames) = mpsc::unbounded_channel();
         let (closed, _) = watch::channel(false);
         let session = Arc::new(Session {
-            provider: provider.to_lowercase(),
+            provider: provider.go_lower(),
             relay: Arc::downgrade(self),
             out,
             closed,
@@ -361,7 +364,7 @@ impl Relay {
     }
 
     fn session(&self, provider: &str) -> Option<Arc<Session>> {
-        lock(&self.sessions).get(&provider.trim().to_lowercase()).cloned()
+        lock(&self.sessions).get(&provider.trim().go_lower()).cloned()
     }
 
     /// `Manager.Send`.

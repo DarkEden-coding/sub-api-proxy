@@ -7,7 +7,7 @@
 //! resources opened through it, which close with the context.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use bytes::Bytes;
@@ -18,6 +18,15 @@ use crate::go_struct;
 use crate::gojson::{self, Metadata};
 use crate::host::{Host, Inner, lock};
 use crate::streams::{Chunk, StreamBridge};
+
+/// Synchronous plugin calls (translator hooks, thinking appliers) currently blocking a
+/// current-thread runtime's only thread. While any is, callbacks that would block on a
+/// current-thread runtime fail instead of hanging.
+// ponytail: process-wide, so one parked current-thread runtime also refuses callbacks
+// bound to another current-thread runtime. The binary runs multi-threaded, where
+// synchronous calls use `block_in_place` and callbacks always work; per-runtime
+// tracking is the upgrade if an embedder needs current-thread runtimes side by side.
+pub(crate) static PARKED_CURRENT_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 /// What a callback context remembers about the request it serves.
 #[derive(Clone, Default)]
@@ -37,6 +46,10 @@ pub struct RequestScope {
     pub pinned_auth_id: Option<String>,
     pub execution_session: Option<String>,
     pub request_path: String,
+    /// The client's usage identity (Go's parent callback context: `userApiKey` and
+    /// `accessProvider`), for the usage records of nested `host.model.*` calls.
+    pub api_key: String,
+    pub access_provider: String,
 }
 
 impl std::fmt::Debug for RequestScope {
@@ -147,9 +160,16 @@ impl Callbacks {
     }
 
     /// The runtime async callbacks run on (captured when plugins were handed the
-    /// dispatcher).
+    /// dispatcher). `None` while a current-thread runtime is parked in a synchronous
+    /// plugin call ([`PARKED_CURRENT_THREAD`]): blocking on it would never finish.
     pub fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
-        self.runtime.get().cloned()
+        let handle = self.runtime.get()?;
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+            && PARKED_CURRENT_THREAD.load(Ordering::Acquire) > 0
+        {
+            return None;
+        }
+        Some(handle.clone())
     }
 
     /// Go `addCallbackCleanupHandle`: runs `cleanup` when the context closes; `None`

@@ -3,6 +3,7 @@
 //! codex_executor_request.go, codex_websockets_request.go, helps/codex_input_ids.go,
 //! helps/codex_tool_schema.go, openai_responses_signature.go).
 
+use cpa_core::gostr::GoStr;
 use std::time::Duration;
 
 use cpa_core::config::Config;
@@ -54,8 +55,7 @@ pub(crate) struct Settings {
     pub image_generation: bool,
     /// `requests.payload` rules and image-generation mode for this config snapshot.
     pub payload: cpa_common::payload::Rules,
-    /// Multi-agent v2 and orphan-delegation settings (Go reads them from `ForAPIKey` for
-    /// API keys, as [`Settings::scoped`] does).
+    /// Multi-agent v2 and orphan-delegation settings, both shared by every credential kind.
     pub client: cpa_common::codex_client::Settings,
     /// The `models` of the `codex-api-key` entry the credential resolves to.
     pub key_models: Vec<serde_json::Value>,
@@ -68,9 +68,9 @@ pub(crate) struct Settings {
     pub image_base_model: String,
 }
 
-/// `codex.response-steering` in its v8 home; the legacy key is already moved there.
+/// `upstream.codex.response-steering`; the older spellings are already moved there.
 pub(crate) fn response_steering(cfg: &Config) -> bool {
-    setting(cfg, &["oauth", "providers", "codex", "response-steering"])
+    setting(cfg, &["upstream", "codex", "response-steering"])
         .and_then(serde_yaml_ng::Value::as_bool)
         .unwrap_or(false)
 }
@@ -89,7 +89,8 @@ fn setting<'a>(cfg: &'a Config, path: &[&str]) -> Option<&'a serde_yaml_ng::Valu
 
 impl Settings {
     /// The settings `view`'s credential sees: API keys get Go's `ForAPIKey` view, where
-    /// `oauth.providers.codex.*` written in v8 form does not apply.
+    /// the OAuth-only `oauth.providers.codex.*` settings (the header defaults) do not
+    /// apply.
     pub fn scoped(cfg: &Config, view: &View<'_>) -> Self {
         let mut settings = if view.api_key {
             Self::from(&cfg.for_api_key())
@@ -120,7 +121,7 @@ impl Settings {
         if let Some(resolved) = &req.resolved_model {
             return resolved.is_compat();
         }
-        let fold = |a: &str, b: &str| !b.is_empty() && a.to_lowercase() == b.to_lowercase();
+        let fold = |a: &str, b: &str| !b.is_empty() && a.go_eq_fold(b);
         let requested = req.model.trim();
         let base = base_model(&req.model);
         let target = base.trim();
@@ -146,7 +147,8 @@ impl Settings {
     }
 
     pub fn from(cfg: &Config) -> Self {
-        let codex = |k: &str| setting(cfg, &["oauth", "providers", "codex", k]);
+        // Shared settings (`upstream.codex`); the header defaults stay OAuth-only.
+        let codex = |k: &str| setting(cfg, &["upstream", "codex", k]);
         let flag = |k: &str| codex(k).and_then(|v| v.as_bool()).unwrap_or(false);
         let text = |path: &[&str]| {
             setting(cfg, path)
@@ -220,6 +222,8 @@ pub(crate) struct View<'a> {
     /// keep idle chatgpt.com connections instead of Go's connection per request. Read
     /// from the config snapshot of each request, so a reload applies to the next one.
     pub chatgpt_keep_alive: bool,
+    /// `requests.tls-handshake-timeout-seconds` for chatgpt.com ([`crate::tls::handshake_timeout`]).
+    pub handshake: Option<std::time::Duration>,
 }
 
 impl<'a> View<'a> {
@@ -228,6 +232,7 @@ impl<'a> View<'a> {
         Self {
             proxy: crate::proxy::Proxy::effective(credential, cfg),
             chatgpt_keep_alive: chatgpt_keep_alive(cfg),
+            handshake: crate::tls::handshake_timeout(cfg),
             ..Self::new(credential)
         }
     }
@@ -260,6 +265,7 @@ impl<'a> View<'a> {
             proxy: crate::proxy::Proxy::Inherit,
             session: None,
             chatgpt_keep_alive: false,
+            handshake: None,
         }
     }
 
@@ -318,9 +324,14 @@ pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
 }
 
-/// `util.IsCodexResponsesLiteRequest`.
+/// `util.IsCodexResponsesLiteRequest`. The header is decoded as UTF-8 rather than through
+/// [`header`], so Go's `TrimSpace` also strips non-ASCII spaces such as U+00A0.
 pub(crate) fn is_lite(body: &str, headers: &HeaderMap) -> bool {
-    if header(headers, LITE_HEADER).trim().eq_ignore_ascii_case("true") {
+    let lite = headers
+        .get(LITE_HEADER)
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        .unwrap_or_default();
+    if lite.trim().go_eq_fold("true") {
         return true;
     }
     let v = gjson::get(
@@ -341,9 +352,8 @@ pub(crate) fn is_native(req: &ExecRequest) -> bool {
 /// `translateCodexRequestPairWithUpdateIntent` + `helps.ApplyRequestThinking`: the
 /// registered pair (Go's model-rewrite fallback for same-format bodies), then the
 /// thinking pipeline for `codex` (`openai-response` for compact). Also returns the
-/// translated original request, which payload default rules consult.
-// ponytail: the translator's configuration-update intent is not surfaced, so
-// `updates_changed` stays false.
+/// translated original request, which payload default rules consult. Thinking reads the
+/// working translation's configuration-update intent (a plugin normalizer's edit).
 fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(String, Vec<u8>), ExecError> {
     let target = call.target();
     let registered = cpa_translate::pair(req.source_format, target).is_some();
@@ -377,16 +387,18 @@ fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(
         if is_compat && req.source_format == Format::Claude && target == Format::Codex {
             crate::codex_client::translate_request(req.source_format, target, &ctx, raw, &compat)
         } else {
-            cpa_translate::translate_request(req.source_format, target, &ctx, raw)
+            cpa_translate::translate_request_tracked(req.source_format, target, &ctx, raw)
         }
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
     };
-    let body = translate(&req.body)?;
-    let original = if req.original_body.is_empty() || req.original_body == req.body {
-        body.clone()
+    // Go translates the original first, and equal payloads once.
+    let (original, working) = if req.original_body.is_empty() || req.original_body == req.body {
+        let working = translate(&req.body)?;
+        (working.body.clone(), working)
     } else {
-        translate(&req.original_body)?
+        (translate(&req.original_body)?.body, translate(&req.body)?)
     };
+    let body = working.body;
     let caps = req
         .resolved_model
         .as_ref()
@@ -401,7 +413,7 @@ fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(
         provider: "codex",
         resolved: caps.as_ref().map(Some),
         has_request_transformer: registered,
-        updates_changed: false,
+        updates_changed: working.configuration_updates_changed,
     })
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let body = String::from_utf8(thought)
@@ -519,11 +531,19 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
             body = delete(&body, "stream");
         }
     }
+    // Go runs this before the instructions default, except on compact: an appended
+    // `tools` key lands before or after an appended `instructions` key accordingly.
+    if call != Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
+    }
     if !is_native(req) {
         let instructions = gjson::get(&body, "instructions");
         if !instructions.exists() || instructions.kind() == Kind::Null {
             body = set_str(&body, "instructions", "");
         }
+    }
+    if call == Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
     }
     if call != Call::Compact && settings.image_generation {
         body = ensure_image_tool(body, model, view, &req.headers);
@@ -553,6 +573,53 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
         optimized,
         conflict,
     })
+}
+
+/// `ensureWebSearchToolForHistory` (e7d4c731): upstream rejects replayed
+/// `web_search_call` input items without a web search tool ("response protection is
+/// unavailable"). A standard request gets `{"type":"web_search"}`; a Responses Lite
+/// request, which carries no top-level hosted tools, drops the replayed items instead.
+fn ensure_web_search_for_history(body: String, headers: &HeaderMap) -> String {
+    use cpa_common::json as gj;
+    if !body.contains("web_search_call") {
+        return body;
+    }
+    let input = gj::get(body.as_bytes(), "input");
+    if !input.is_array() {
+        return body;
+    }
+    let is_call = |item: &gj::Res<'_>| item.get("type").str().trim() == "web_search_call";
+    // Detection walks with ForEach and the rebuild with Array(), as Go does: on a malformed
+    // array such as `[{}{...}]`, ForEach stops after the first element.
+    let mut has_call = false;
+    input.each(|_, item| {
+        has_call = is_call(&item);
+        !has_call
+    });
+    if !has_call {
+        return body;
+    }
+    let tools = gj::get(body.as_bytes(), "tools");
+    if tools.is_array()
+        && tools.array().iter().any(|t| {
+            matches!(
+                t.get("type").str().trim(),
+                "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"
+            )
+        })
+    {
+        return body;
+    }
+    if is_lite(&body, headers) {
+        let items = input.array();
+        let kept: Vec<&[u8]> = items.iter().filter(|i| !is_call(i)).map(|i| i.raw()).collect();
+        let joined = kept.join(&b","[..]);
+        return set_raw(&body, "input", &format!("[{}]", String::from_utf8_lossy(&joined)));
+    }
+    if !tools.is_array() {
+        return set_raw(&body, "tools", r#"[{"type":"web_search"}]"#);
+    }
+    set_raw(&body, "tools.-1", r#"{"type":"web_search"}"#)
 }
 
 fn ensure_image_tool(body: String, model: &str, view: &View<'_>, headers: &HeaderMap) -> String {
@@ -672,11 +739,9 @@ fn sanitize_reasoning(body: String, is_compat: bool) -> String {
     }
 }
 
-/// `helps.NormalizeCodexToolSchemas`: collapse large pure-`const` unions into `enum`.
-/// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): only the Codex executors
-/// call it, so it lives here rather than in `cpa_common::payload`.
-// ponytail: the companion stripIncompatiblePatterns pass (drops `\p{..}` regex patterns by
-// re-encoding the schema) is not ported; such schemas pass through unchanged.
+/// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): strip what strict upstream
+/// validators reject, then collapse large pure-`const` unions into `enum`. Only the Codex
+/// executors call it, so it lives here rather than in `cpa_common::payload`.
 fn normalize_tool_schemas(body: String) -> String {
     let tools = gjson::get(&body, "tools");
     match normalize_tool_list(&tools) {
@@ -721,8 +786,10 @@ fn normalize_tool(tool: &gjson::Value<'_>) -> Option<String> {
             if params.kind() != Kind::Object {
                 return None;
             }
-            let mut raw = params.json().to_owned();
-            let mut changed = false;
+            let stripped = strip_incompatible(params.json());
+            let mut changed = stripped.is_some();
+            let mut raw = stripped.unwrap_or_else(|| params.json().to_owned());
+            let params = gjson::parse(&raw);
             let mut updates = Vec::new();
             let properties = params.get("properties");
             if properties.kind() == Kind::Object {
@@ -742,6 +809,154 @@ fn normalize_tool(tool: &gjson::Value<'_>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// `stripIncompatiblePatternsFromJSON`: drops `pattern`s (and `patternProperties` keys)
+/// with unsupported regex escapes and integer numeric bounds outside int64 (57d005fe),
+/// visiting only subschema locations. A changed schema is re-encoded as Go's Encoder
+/// writes a `map[string]any` (sorted keys, no HTML escaping, literal numbers).
+fn strip_incompatible(raw: &str) -> Option<String> {
+    // Go's fast path: a JSON-escaped `\\p{` contains `\p{`; `\\0`; any `\u` escape;
+    // the four bound keywords.
+    if !["\\p{", "\\P{", "\\u", "\\\\0", "inimum", "aximum"]
+        .iter()
+        .any(|needle| raw.contains(needle))
+    {
+        return None;
+    }
+    let mut root = cpa_common::json::GoValue::parse(raw.as_bytes())?;
+    if root == cpa_common::json::GoValue::Null || !strip_schema(&mut root) {
+        return None;
+    }
+    String::from_utf8(root.marshal_no_html()).ok()
+}
+
+/// `codexNumericBoundKeywords`.
+const NUMERIC_BOUNDS: [&str; 4] = ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"];
+
+/// `stripIncompatiblePatterns`.
+fn strip_schema(value: &mut cpa_common::json::GoValue) -> bool {
+    use cpa_common::json::GoValue;
+    let escape = |s: &str| cpa_common::schema::has_unsupported_unicode_property_escape(s.as_bytes());
+    let mut changed = false;
+    match value {
+        GoValue::Object(map) => {
+            if matches!(map.get("pattern"), Some(GoValue::String(p)) if escape(p)) {
+                map.remove("pattern");
+                changed = true;
+            }
+            for key in NUMERIC_BOUNDS {
+                if matches!(map.get(key), Some(GoValue::Number(n)) if bound_out_of_int64(n)) {
+                    map.remove(key);
+                    changed = true;
+                }
+            }
+            if let Some(GoValue::Object(patterns)) = map.get_mut("patternProperties") {
+                patterns.retain(|key, sub| {
+                    if escape(key) {
+                        changed = true;
+                        return false;
+                    }
+                    changed |= strip_schema(sub);
+                    true
+                });
+            }
+            for key in cpa_common::schema::SCHEMA_MAP_KEYWORDS {
+                let key = std::str::from_utf8(key).unwrap_or_default();
+                if key == "patternProperties" {
+                    continue;
+                }
+                if let Some(GoValue::Object(sub)) = map.get_mut(key) {
+                    for schema in sub.values_mut() {
+                        changed |= strip_schema(schema);
+                    }
+                }
+            }
+            for key in cpa_common::schema::SCHEMA_VALUE_KEYWORDS {
+                match map.get_mut(std::str::from_utf8(key).unwrap_or_default()) {
+                    Some(sub @ GoValue::Object(_)) => changed |= strip_schema(sub),
+                    Some(GoValue::Array(items)) => {
+                        for item in items {
+                            changed |= strip_schema(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        GoValue::Array(items) => {
+            for item in items {
+                changed |= strip_schema(item);
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+/// `isNumericBoundOutOfInt64`: whether a JSON number is an integer outside int64. A
+/// fraction or a negative effective exponent is not an integer and stays.
+fn bound_out_of_int64(number: &str) -> bool {
+    use std::num::IntErrorKind::{NegOverflow, PosOverflow};
+    let overflows = |text: &str| matches!(text.parse::<i64>(), Err(e) if matches!(e.kind(), PosOverflow | NegOverflow));
+    let raw = number.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if !raw.contains(['.', 'e', 'E']) {
+        return overflows(raw);
+    }
+    let (negative, s) = match raw.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+    };
+    let (mantissa, exp) = match s.find(['e', 'E']) {
+        Some(at) => {
+            let (mantissa, exp) = (&s[..at], &s[at + 1..]);
+            match exp.parse::<i64>() {
+                Ok(exp) => (mantissa, exp),
+                Err(e) if matches!(e.kind(), PosOverflow | NegOverflow) => {
+                    return !exp.starts_with('-') && !mantissa.trim_matches(['0', '.']).is_empty();
+                }
+                Err(_) => return false,
+            }
+        }
+        None => (s, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((_, frac)) if frac.contains('.') => return false,
+        Some(parts) => parts,
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return false;
+    }
+    if !int_part.bytes().chain(frac_part.bytes()).all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let digits = format!("{int_part}{frac_part}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return false;
+    }
+    let len = raw.len() as i64;
+    if exp < -len {
+        return false;
+    }
+    if exp > len + 20 {
+        return true;
+    }
+    let trimmed = significant.trim_end_matches('0');
+    let trailing_zeros = (significant.len() - trimmed.len()) as i64;
+    let effective = exp - frac_part.len() as i64 + trailing_zeros;
+    if effective < 0 {
+        return false;
+    }
+    if effective > 19 || trimmed.len() as i64 + effective > 19 {
+        return true;
+    }
+    let sign = if negative { "-" } else { "" };
+    overflows(&format!("{sign}{trimmed}{}", "0".repeat(effective as usize)))
 }
 
 fn normalize_property(prop: &gjson::Value<'_>) -> Option<String> {
@@ -1338,6 +1553,63 @@ pub(crate) fn ws_headers(
 mod tests {
     use super::*;
 
+    /// Go v8.0.35's `NormalizeCodexToolSchemas` (57d005fe bounds, patterns, re-encoding)
+    /// and `NormalizeCodexToolIntegerTypes` (d7914afd paths and namespaces), byte for
+    /// byte; see tests/reference/codex_tool_schema.
+    #[test]
+    fn tool_schema_passes_match_go() {
+        let go: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/codex_tool_schema_go.json")).unwrap();
+        let expected = |case: &serde_json::Value| case.get("out").unwrap_or(&case["in"]).as_str().unwrap().to_owned();
+        for case in go["schemas"].as_array().unwrap() {
+            let input = case["in"].as_str().unwrap().to_owned();
+            assert_eq!(normalize_tool_schemas(input), expected(case), "{}", case["name"]);
+        }
+        for case in go["integers"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            if let Some(ua) = case["ua"].as_str() {
+                headers.insert(http::header::USER_AGENT, ua.parse().unwrap());
+            }
+            let out = cpa_common::payload::normalize_codex_tool_integer_types(
+                case["in"].as_str().unwrap().as_bytes(),
+                &headers,
+            );
+            assert_eq!(
+                String::from_utf8(out.clone()).unwrap(),
+                expected(case),
+                "{} {:?}",
+                case["name"],
+                case["ua"]
+            );
+            // Go's tests also require a second pass to leave the output alone.
+            let again = cpa_common::payload::normalize_codex_tool_integer_types(&out, &headers);
+            assert_eq!(again, out, "{} is not idempotent", case["name"]);
+        }
+    }
+
+    /// Go v8.0.35's `ensureWebSearchToolForHistory` (e7d4c731), byte for byte; see
+    /// tests/reference/codex_web_search_history.
+    #[test]
+    fn web_search_history_matches_go() {
+        let go: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
+        for case in go["cases"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = case["lite_header"].as_str() {
+                // Raw bytes: a non-ASCII value such as U+00A0 reaches the Lite check as sent.
+                headers.insert(LITE_HEADER, HeaderValue::from_bytes(value.as_bytes()).unwrap());
+            }
+            let input = case["in"].as_str().unwrap();
+            let want = case.get("out").unwrap_or(&case["in"]).as_str().unwrap();
+            assert_eq!(
+                ensure_web_search_for_history(input.to_owned(), &headers),
+                want,
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     /// Go `TestHomeCodexCompatUsesSelectedCredentialOptions`: without a binding or config
     /// models, a Home credential's `credential_options` decide is-compat for the upstream
     /// name, its alias and its suffixed form; another credential and standalone mode do
@@ -1383,6 +1655,7 @@ mod tests {
             caller: cpa_core::exec::Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             resolved_model: None,
             usage: Default::default(),
@@ -1398,6 +1671,15 @@ mod tests {
         assert!(!settings(&other).is_compat(&request("upstream")));
         credential.attributes.clear();
         assert!(!settings(&credential).is_compat(&request("upstream")), "standalone");
+
+        // Config models compare names and aliases with Go's EqualFold: İ does not fold to
+        // i, while σ and ς fold together.
+        let keyed = |name: &str| Settings {
+            key_models: vec![serde_json::json!({"name": name, "is-compat": true})],
+            ..Settings::default()
+        };
+        assert!(!keyed("mİ").is_compat(&request("mi")), "dotted İ is not i");
+        assert!(keyed("ος").is_compat(&request("ΟΣ")), "final sigma folds");
     }
 
     #[test]

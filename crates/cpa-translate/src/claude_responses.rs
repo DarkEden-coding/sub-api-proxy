@@ -9,6 +9,7 @@ use crate::{
     thinking,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::gostr::GoStr;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -320,7 +321,7 @@ fn max_completion_tokens(model: &str) -> i64 {
 /// The `max_tokens` an OpenAI Chat or Responses request without one gets: the
 /// registered model's output limit, except that Fable keeps its 64000 ceiling.
 pub(crate) fn default_max_tokens(model: &str) -> i64 {
-    let fable = model.trim().to_lowercase().contains("fable");
+    let fable = model.trim().go_lower().contains("fable");
     let base = if fable { 64000 } else { 32000 };
     match max_completion_tokens(model) {
         limit if limit <= 0 || (fable && limit >= base) => base,
@@ -340,7 +341,7 @@ fn is_role(message: &[u8], role: &str) -> bool {
 /// 911f49cb) and Sonnet 4.6+, after any
 /// provider namespace and `claude-` prefix. Eight-digit snapshot dates are not versions.
 fn rejects_assistant_prefill(model: &str) -> bool {
-    let model = model.trim().to_lowercase();
+    let model = model.trim().go_lower();
     let model = model.rsplit('/').next().unwrap_or_default();
     let model = model.strip_prefix("claude-").unwrap_or(model).replace('.', "-");
     let tokens: Vec<&str> = model.split('-').collect();

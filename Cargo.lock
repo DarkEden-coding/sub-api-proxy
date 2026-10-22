@@ -858,6 +858,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2 0.10.9",
  "tracing",
+ "unsafe-libyaml",
  "yaml-edit",
 ]
 
@@ -988,6 +989,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-btls",
+ "tokio-tungstenite",
  "tower",
  "tower-service",
  "tracing",
@@ -1007,9 +1009,11 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bcrypt",
  "btls",
  "bytes",
  "chrono",
+ "cpa-core",
  "cpa-server",
  "futures-util",
  "serde",

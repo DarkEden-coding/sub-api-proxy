@@ -5,6 +5,7 @@
 use super::*;
 use crate::codex_testkit::{Captured, GO, Mock, Reply, Tap, Wiretap};
 use cpa_core::exec::Caller;
+use cpa_core::gostr::GoStr;
 use serde_json::Value;
 use std::path::Path;
 
@@ -74,6 +75,7 @@ fn request(case: &Value) -> ExecRequest {
         caller: Caller {
             principal: "client-key-FAKE".into(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
@@ -420,7 +422,7 @@ async fn prepare_refreshes_when_due_and_keeps_a_valid_token_on_failure() {
     assert_eq!(patch.set["access_token"], "at-new");
     assert_eq!(patch.set["refresh_token"], "rt-new");
     assert!(!executor.needs_prepare(
-        &cred("rt-4", &(Utc::now() + chrono::TimeDelta::days(3)).to_rfc3339()),
+        &cred("rt-4", &(Utc::now() + chrono::TimeDelta::days(5)).to_rfc3339()),
         &cfg
     ));
 }
@@ -525,6 +527,7 @@ fn plain_request(stream: bool, alt: Option<&str>) -> ExecRequest {
         caller: Caller {
             principal: String::new(),
             source: "authorization",
+            provider: String::new(),
         },
     }
 }
@@ -667,8 +670,8 @@ impl cpa_core::exec::UsageObserver for Recorded {
     }
 }
 
-/// Usage records see the upstream side, as Go's reporter does: the translated request
-/// (`SetTranslatedReasoningEffort`, before the prompt-cache key is added) and every
+/// Usage records see the upstream side, as Go's reporter does: the finalized request
+/// (`SetTranslatedReasoningEffort` on the upstream body, c7b4d573) and every
 /// upstream event in Codex format, or the compaction body in OpenAI Responses format,
 /// whatever the client speaks. Expected payloads come from the Go fixture.
 #[tokio::test]
@@ -702,11 +705,10 @@ async fn usage_records_see_upstream_payloads() {
         }
         let reports = recorded.0.lock().unwrap().clone();
         let upstream_format = if compact { Format::OpenAIResponse } else { Format::Codex };
-        let mut sent = case["upstream"]["body"].as_str().unwrap().as_bytes().to_vec();
-        cpa_common::json::delete(&mut sent, "prompt_cache_key");
+        let sent = case["upstream"]["body"].as_str().unwrap().to_owned();
         assert_eq!(
             reports[0],
-            ("request", upstream_format, String::from_utf8(sent).unwrap()),
+            ("request", upstream_format, sent),
             "{name}: translated request"
         );
         let upstream = case["upstream_body"].as_str().unwrap();
@@ -720,6 +722,144 @@ async fn usage_records_see_upstream_payloads() {
                 .collect()
         };
         assert_eq!(reports[1..], expected[..], "{name}: upstream payloads");
+    }
+}
+
+/// Go `Test*RecordsFinalizedPayloadOverrideReasoningEffort` (c7b4d573): a payload
+/// override of `reasoning.effort` reaches both the upstream body and the usage record,
+/// on the stream, non-stream and compact paths. The record reads the finalized body, the
+/// bytes sent upstream, so an input ID that sanitation prefixes is recorded prefixed.
+#[tokio::test]
+async fn usage_records_the_payload_override_reasoning_effort() {
+    let executor = executor();
+    for (name, protocol) in [
+        ("apikey_claude_not_compat", "codex"),
+        ("oauth_nonstream_no_instructions_free_plan", "codex"),
+        ("oauth_compact", "openai-response"),
+    ] {
+        let case = GO["executor"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        let mock = Mock::start().await;
+        let compact = case["alt"] == "responses/compact";
+        mock.script(
+            if compact { "/responses/compact" } else { "/responses" },
+            vec![reply(case)],
+        );
+        let credential = credential(case, &mock.url);
+        let cfg = Config::parse(&format!(
+            "payload:\n  override:\n    - models:\n        - name: gpt-5.4\n          protocol: {protocol}\n      params:\n        reasoning.effort: high\n"
+        ))
+        .unwrap();
+        let recorded = Arc::new(Recorded::default());
+        let mut req = request(case);
+        let body = String::from_utf8(req.body.to_vec()).unwrap().replace(
+            r#"{"type":"message","role":"user""#,
+            r#"{"type":"message","id":"abc","role":"user""#,
+        );
+        req.body = Bytes::from(body);
+        req.usage = cpa_core::exec::UsageSink::new(recorded.clone());
+        match executor.execute(&credential, req, &cfg).await.unwrap().body {
+            ResponseBody::Stream(mut stream) => while stream.next().await.is_some() {},
+            ResponseBody::Buffered(_) => {}
+        }
+        let sent = String::from_utf8(mock.take().pop().unwrap().body.to_vec()).unwrap();
+        assert_eq!(gjson::get(&sent, "reasoning.effort").str(), "high", "{name}: upstream");
+        let reports = recorded.0.lock().unwrap().clone();
+        assert_eq!(reports[0].0, "request", "{name}");
+        assert_eq!(reports[0].2, sent, "{name}: the usage record reads the sent body");
+    }
+}
+
+/// Go `TestCodexImageResolvedModelOnWire` ("custom upstream" and "routing and thinking
+/// suffix", 51bde0ff) through the executor: a configured, prefixed upstream name reaches
+/// the direct Images endpoint as resolved, for a JSON generation and a multipart edit.
+#[tokio::test]
+async fn direct_images_send_the_configured_upstream_model() {
+    let executor = executor();
+    let form = "--XB\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nREQ\r\n--XB\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndiagnostic\r\n--XB--\r\n";
+    for (requested, resolved, configured, want) in [
+        (
+            "gpt-image-2",
+            "openai/gpt-image-2-cpr",
+            "openai/gpt-image-2-cpr",
+            "openai/gpt-image-2-cpr",
+        ),
+        (
+            "tenant/gpt-image-2(high)",
+            "OpenAI/GPT-Image-2(high)",
+            "OpenAI/GPT-Image-2",
+            "OpenAI/GPT-Image-2",
+        ),
+    ] {
+        for (request_path, upstream_path, content_type, body) in [
+            (
+                "/v1/images/generations",
+                "/images/generations",
+                "application/json",
+                format!(r#"{{"model":"{requested}","prompt":"diagnostic"}}"#),
+            ),
+            (
+                "/v1/images/edits",
+                "/images/edits",
+                "multipart/form-data; boundary=XB",
+                form.replace("REQ", requested),
+            ),
+        ] {
+            let mock = Mock::start().await;
+            mock.script(
+                upstream_path,
+                vec![crate::codex_testkit::json(
+                    200,
+                    r#"{"created":1713833628,"data":[{"b64_json":"AA=="}]}"#,
+                )],
+            );
+            let cfg = Config::parse(&format!(
+                "codex-api-key:\n  - api-key: codex-token\n    base-url: {}\n    prefix: tenant\n    models:\n      - name: {configured}\n        alias: gpt-image-2\n",
+                mock.url
+            ))
+            .unwrap();
+            let credential = cpa_core::config::credentials::from_config(&cfg)
+                .into_iter()
+                .find(|c| c.provider == "codex")
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            let body = Bytes::from(body);
+            let req = ExecRequest {
+                operation: Operation::Generate,
+                source_format: Format::OpenAI,
+                response_format: Format::OpenAI,
+                stream_payloads: false,
+                requested_model: requested.into(),
+                model: resolved.into(),
+                original_body: body.clone(),
+                body,
+                stream: false,
+                alt: None,
+                session: None,
+                headers,
+                execution_session: None,
+                derived_session: None,
+                resolved_model: None,
+                usage: Default::default(),
+                request_path: request_path.into(),
+                caller: Caller {
+                    principal: "client-key-FAKE".into(),
+                    source: "authorization",
+                    provider: String::new(),
+                },
+            };
+            executor.images(&credential, req, request_path, &cfg).await.unwrap();
+            let captured = mock.take();
+            assert_eq!(captured.len(), 1, "{resolved} {request_path}");
+            assert_eq!(captured[0].path, upstream_path);
+            let sent: Value = serde_json::from_slice(&captured[0].body).unwrap();
+            assert_eq!(sent["model"], want, "{resolved} {request_path}");
+        }
     }
 }
 
@@ -773,6 +913,7 @@ async fn images_match_go_on_every_fixture_case() {
             caller: Caller {
                 principal: "client-key-FAKE".into(),
                 source: "authorization",
+                provider: String::new(),
             },
         };
         let result = executor.images(&credential, req, request_path, &cfg).await;
@@ -936,7 +1077,7 @@ async fn capture_records_each_attempt_as_go_does() {
         );
         assert_eq!(body.as_bytes(), sent.body.as_ref(), "{name}: request body");
         assert_eq!(*account, go_account(&credential), "{name}: account");
-        let mut recorded: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
+        let mut recorded: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.go_lower(), v.clone())).collect();
         recorded.sort();
         let mut wire: Vec<(String, String)> = sent
             .headers
@@ -1192,5 +1333,292 @@ async fn direct_images_return_the_read_error_of_a_broken_error_body() {
             [Tap::Error(String::from_utf8_lossy(&error.body).into_owned())],
             "stream={stream}: {taps:?}"
         );
+    }
+}
+
+/// A streamed (or buffered, `stream: false`) Responses request whose upstream sends `sse`:
+/// the client frames and the in-stream error, or the attempt's error.
+async fn through_sse(sse: &str, stream: bool, buffering: bool) -> Result<(Vec<String>, Option<ExecError>), ExecError> {
+    let mock = Mock::start().await;
+    mock.script(
+        "/responses",
+        vec![Reply {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: sse.into(),
+        }],
+    );
+    let synthetic = serde_json::json!({
+        "source": "openai-response",
+        "model": "gpt-5.4",
+        "payload": r#"{"model":"gpt-5.4","input":"hello"}"#,
+        "stream": stream,
+        "attributes": {"api_key": "test"},
+    });
+    let cfg = Config::parse(&format!("codex:\n  stream-bootstrap-buffering: {buffering}\n")).unwrap();
+    let response = executor()
+        .execute(&credential(&synthetic, &mock.url), request(&synthetic), &cfg)
+        .await?;
+    let (mut frames, mut failure) = (Vec::new(), None);
+    match response.body {
+        ResponseBody::Stream(mut body) => {
+            while let Some(item) = body.next().await {
+                match item {
+                    Ok(frame) => frames.push(String::from_utf8(frame.to_vec()).unwrap()),
+                    Err(error) => failure = Some(error),
+                }
+            }
+        }
+        ResponseBody::Buffered(body) => frames.push(String::from_utf8(body.to_vec()).unwrap()),
+    }
+    Ok((frames, failure))
+}
+
+const SPLIT_CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n";
+/// Go's `codexOverloadEvent`: an overload that fails the attempt over during bootstrap.
+const SPLIT_OVERLOAD: &str = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"service_unavailable_error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\",\"param\":null},\"sequence_number\":2}\n\n";
+
+/// Go's `codex_executor_sse_events_test.go` (7795de19) for events whose data spans several
+/// `data:` lines: a split event reads as its one-line form, stream and non-stream, with
+/// and without bootstrap buffering, and an invalid split stays invalid.
+#[tokio::test]
+async fn split_sse_events_read_as_one_event() {
+    let completed = r#"{"type":"response.completed","response":{"id":"resp_split","object":"response","model":"gpt-5.4","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}"#;
+    let cut = completed.find(r#""output":"#).unwrap();
+    let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n";
+    let one_line = format!("{SPLIT_CREATED}{delta}event: response.completed\ndata: {completed}\n\n");
+    let split = format!(
+        "{SPLIT_CREATED}{delta}event: response.completed\ndata: {}\ndata: {}\n\n",
+        &completed[..cut],
+        &completed[cut..]
+    );
+    for buffering in [false, true] {
+        // TestCodexExecuteStreamTreatsAnEventSplitAcrossDataLinesAsOneEvent
+        let want = through_sse(&one_line, true, buffering).await.unwrap();
+        let got = through_sse(&split, true, buffering).await.unwrap();
+        assert!(want.1.is_none() && want.0.last().unwrap().contains("response.completed"));
+        assert_eq!(got.0, want.0, "buffering={buffering}");
+        assert!(got.1.is_none());
+        // TestCodexExecuteStreamMinimalReproFromIssue6575 and
+        // TestCodexExecuteStreamAssemblesSplitEventsWithAndWithoutBootstrapBuffering
+        for sse in [
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"status\":\"in_progress\",\"output\":[]}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\ndata: \"output\":[]}}\n\n".to_owned(),
+            format!("{SPLIT_CREATED}data: {{\"type\":\"response.in_progress\",\"response\":{{\"id\":\"resp_split\",\"output\":[\ndata: {{\"x\":1}},\ndata: {{\"x\":1}}]}}}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_split\",\"status\":\"completed\",\ndata: \"output\":[]}}}}\n\n"),
+        ] {
+            let (frames, failure) = through_sse(&sse, true, buffering).await.unwrap();
+            assert!(failure.is_none(), "{failure:?}");
+            assert!(!frames.iter().any(|f| f.contains("data: {\"x\":1},")), "{frames:?}");
+            let last = frames.last().unwrap().trim_end();
+            assert!(last.contains("\"response.completed\""), "{last}");
+            let data = last.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+            assert!(serde_json::from_str::<Value>(data).is_ok(), "{last}");
+        }
+    }
+
+    // TestCodexExecuteNonStreamReadsAnEventSplitAcrossDataLines, CRLF included.
+    let sse = format!(
+        "event: response.completed\r\ndata: {}\r\ndata: {}\r\n\r\n",
+        &completed[..cut],
+        &completed[cut..]
+    );
+    let (frames, failure) = through_sse(&sse, false, false).await.unwrap();
+    assert!(failure.is_none());
+    let body: Value = serde_json::from_str(&frames[0]).unwrap();
+    assert_eq!(body["id"], "resp_split", "{body}");
+    assert_eq!(body["output"].as_array().unwrap().len(), 1, "{body}");
+}
+
+/// Go's bootstrap budget tests for split events (7795de19): a split handshake that passes
+/// the 48-line or 1 MiB budget while it is being collected releases the stream, so the
+/// overload after it arrives in-stream instead of failing over, and the lines before the
+/// failure in its event are delivered.
+#[tokio::test]
+async fn split_sse_events_spend_the_bootstrap_budget() {
+    let open = "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_split\",\"items\":[\n";
+    // TestCodexExecuteStreamSplitHandshakeExceedingLineBudgetReleasesBootstrapWithoutFailover
+    let over_lines = format!(
+        "{SPLIT_CREATED}{open}{}data: ]}}}}\n\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(50)
+    );
+    // TestCodexExecuteStreamEventExceedsBudgetWhileAssemblingReleasesStream: the event
+    // reaches 48 lines while collected, and the overload follows without a blank line.
+    let no_blank = format!(
+        "{SPLIT_CREATED}{open}{}data: {{\"key_at_boundary\":123}},\ndata: {{\"key_after_boundary\":456}}\ndata: ]}}}}\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(43)
+    );
+    // TestCodexExecuteStreamMixedFramingCommentInsideSplitEventCountsBudget
+    let comments = format!(
+        "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}: keepalive-1\n: keepalive-2\n{SPLIT_OVERLOAD}data: ]}}}}\n\n",
+        "data: \n".repeat(46)
+    );
+    // TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream
+    let large = format!("data: \"{}\",\n", "x".repeat(250 * 1024));
+    let over_bytes = format!(
+        "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: \"last\"]}}\n\n{SPLIT_OVERLOAD}",
+        large.repeat(5)
+    );
+    // An overload that precedes a long split payload in its event decides first.
+    let overload_first = format!(
+        "{SPLIT_CREATED}{}\n{open}{}data: ]}}}}\n\n",
+        SPLIT_OVERLOAD.trim_end(),
+        "data: \n".repeat(60)
+    );
+    let error = through_sse(&overload_first, true, true).await.expect_err("fails over");
+    assert_eq!(error.status, 503, "{error:?}");
+    // Control: a split handshake within the budget still lets the overload fail over.
+    let within = format!(
+        "{SPLIT_CREATED}{open}{}data: ]}}}}\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(10)
+    );
+    let error = through_sse(&within, true, true).await.expect_err("fails over");
+    assert_eq!(error.status, 503, "{error:?}");
+    // Each delivered line spends the budget before the next is read, and a handshake may
+    // fill it exactly (outcomes recorded from Go v8.0.35): 47 comments and the overload's
+    // `event:` line are 48 held lines; one comment of raw plus translated bytes equal to
+    // 1 MiB is held, so the overload after it fails over.
+    let overload_data = SPLIT_OVERLOAD.strip_prefix("event: error\n").unwrap();
+    let comment = |len: usize| format!(": {}\n", "p".repeat(len - 2));
+    // A completed 40-line split event, its blank line and `n` comments.
+    let split_40 = |n: usize| {
+        format!(
+            "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: ]}}\n\n{}{SPLIT_OVERLOAD}",
+            "data: \n".repeat(38),
+            ": k\n".repeat(n)
+        )
+    };
+    for (name, sse) in [
+        ("47 comments", format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(47))),
+        ("40 split lines and 6 comments", split_40(6)),
+        ("1 MiB exactly", format!("{}{overload_data}", comment(512 * 1024))),
+    ] {
+        let error = through_sse(&sse, true, true)
+            .await
+            .expect_err(&format!("{name}: fails over"));
+        assert_eq!(error.status, 503, "{name}: {error:?}");
+    }
+    // Go sends a delta as read, which starts the stream before the overload after it in
+    // the same event is seen.
+    let delta_first =
+        format!("{SPLIT_CREATED}data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n{SPLIT_OVERLOAD}");
+    // A split handshake that completes over the byte budget (600 KB read plus 600 KB
+    // translated) releases the stream before the overload after it is read.
+    let completed_over_bytes = format!(
+        "data: {{\"type\":\"response.in_progress\",\"response\":{{\"model\":\"gpt-5.4\"}},\"pad\":\"{}\",\ndata: \"n\":0}}\n{SPLIT_OVERLOAD}",
+        "x".repeat(600_000)
+    );
+    let comments_48 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(48));
+    let comments_49 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(49));
+    let over_one_mib = format!("{}{overload_data}", comment(512 * 1024 + 1));
+    let split_40_and_7 = split_40(7);
+    for (name, sse) in [
+        ("completed over the byte budget", &completed_over_bytes),
+        ("48 comments", &comments_48),
+        ("49 comments", &comments_49),
+        ("1 MiB and one byte", &over_one_mib),
+        ("40 split lines and 7 comments", &split_40_and_7),
+        ("delta first", &delta_first),
+        ("line budget", &over_lines),
+        ("no blank line", &no_blank),
+        ("comments", &comments),
+        ("byte budget", &over_bytes),
+    ] {
+        let (frames, failure) = through_sse(sse, true, true)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: the attempt failed over: {e:?}"));
+        assert!(failure.is_some(), "{name}: the failure arrives in-stream");
+        if name == "delta first" {
+            assert!(frames.iter().any(|f| f.contains("\"delta\":\"hi\"")), "{frames:?}");
+        }
+        if name == "no blank line" {
+            let progress = frames.iter().find(|f| f.contains("response.in_progress")).unwrap();
+            let data = progress.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                value["response"]["items"],
+                serde_json::json!([{"key_at_boundary": 123}, {"key_after_boundary": 456}])
+            );
+        }
+    }
+}
+
+/// Go `TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770`
+/// (e7d4c731) through the executor: the bodies sent on the stream, non-stream and compact
+/// paths, and the shaped WebSocket body, match Go's byte for byte, which pins where the
+/// web search tool lands beside the image tool and the `instructions` default.
+#[tokio::test]
+async fn replayed_web_search_history_matches_go() {
+    let go: Value = serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
+    let executor = executor();
+    for case in go["executor"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let call = case["call"].as_str().unwrap();
+        let mut attributes = serde_json::json!({"api_key": "test"});
+        if let Some(plan) = case["plan"].as_str() {
+            attributes["plan_type"] = plan.into();
+        }
+        let mut headers = serde_json::json!({});
+        if case["lite_header"] == true {
+            headers["x-openai-internal-codex-responses-lite"] = "true".into();
+        }
+        let synthetic = serde_json::json!({
+            "source": "openai-response",
+            "model": "gpt-6.1-sol",
+            "payload": case["payload"],
+            "stream": call != "non_stream" && call != "compact",
+            "alt": if call == "compact" { Value::from("responses/compact") } else { Value::Null },
+            "headers": headers,
+            "attributes": attributes,
+        });
+        let cfg = Config::parse(if case["no_image"] == true {
+            "disable-image-generation: true\n"
+        } else {
+            "{}"
+        })
+        .unwrap();
+        let sent = if call == "websocket" {
+            let credential = credential(&synthetic, "http://127.0.0.1:1");
+            request::shape(
+                &request(&synthetic),
+                &View::new(&credential),
+                &Settings::from(&cfg),
+                Call::Websocket,
+            )
+            .unwrap()
+            .body
+        } else {
+            let mock = Mock::start().await;
+            let (path, content_type, body) = if call == "compact" {
+                (
+                    "/responses/compact",
+                    "application/json",
+                    r#"{"id":"resp_compact_1","object":"response.compaction","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}"#,
+                )
+            } else {
+                (
+                    "/responses",
+                    "text/event-stream",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n",
+                )
+            };
+            mock.script(
+                path,
+                vec![Reply {
+                    status: 200,
+                    headers: vec![("content-type".into(), content_type.into())],
+                    body: body.into(),
+                }],
+            );
+            let credential = credential(&synthetic, &mock.url);
+            if let ResponseBody::Stream(mut stream) = executor
+                .execute(&credential, request(&synthetic), &cfg)
+                .await
+                .unwrap()
+                .body
+            {
+                while stream.next().await.is_some() {}
+            }
+            String::from_utf8(mock.take().pop().unwrap().body.to_vec()).unwrap()
+        };
+        assert_eq!(sent, case["sent"].as_str().unwrap(), "{name}");
     }
 }
