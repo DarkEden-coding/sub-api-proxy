@@ -126,6 +126,22 @@ pub trait UsageObserver: Send + Sync {
     /// The translated payload sent upstream in `format` (Go
     /// `SetTranslatedReasoningEffort`: the record's `reasoning_effort`).
     fn request(&self, format: Format, payload: &[u8]);
+    /// The attempt runs on a plugin executor registered for `provider` (Go
+    /// `NewExecutorUsageReporter` with the host's `executorAdapter`): the record's
+    /// provider is that identifier and its executor type `executorAdapter`.
+    fn plugin_executor(&self, provider: &str) {
+        let _ = provider;
+    }
+    /// Go `ParsePluginExecutorResponseUsage`: a plugin executor's whole response in its
+    /// output `protocol`, which may be a format cliproxy-rs does not know.
+    fn plugin_response_body(&self, protocol: &str, body: &[u8]) {
+        let _ = (protocol, body);
+    }
+    /// Go `ObservePluginExecutorStreamUsage` on one trimmed, non-empty line of a plugin
+    /// executor's stream in its output `protocol`.
+    fn plugin_response_line(&self, protocol: &str, line: &[u8]) {
+        let _ = (protocol, line);
+    }
     /// [`UsageObserver::request`] where Go passes an executor identifier instead of a
     /// format (Kimi passes `kimi`).
     fn request_for(&self, identifier: &str, payload: &[u8]) {
@@ -160,6 +176,11 @@ pub trait UsageObserver: Send + Sync {
     /// Go `PublishFailure` now with `status` (0 when the error carries none) and
     /// `body`; no usage. The first publish of an attempt wins.
     fn publish_failure(&self, status: u16, body: &str) {
+        let _ = (status, body);
+    }
+    /// Go `StreamUsageBuffer.PublishFailure`: [`UsageObserver::publish_failure`] with the
+    /// usage reported so far.
+    fn publish_failure_with_usage(&self, status: u16, body: &str) {
         let _ = (status, body);
     }
     /// The Go path has no `EnsurePublished`: an attempt that ends without reported
@@ -333,6 +354,30 @@ impl UsageSink {
     pub fn request(&self, format: Format, payload: &[u8]) {
         if let Some(o) = &self.0 {
             o.request(format, payload);
+        }
+    }
+
+    pub fn plugin_executor(&self, provider: &str) {
+        if let Some(o) = &self.0 {
+            o.plugin_executor(provider);
+        }
+    }
+
+    pub fn plugin_response_body(&self, protocol: &str, body: &[u8]) {
+        if let Some(o) = &self.0 {
+            o.plugin_response_body(protocol, body);
+        }
+    }
+
+    pub fn plugin_response_line(&self, protocol: &str, line: &[u8]) {
+        if let Some(o) = &self.0 {
+            o.plugin_response_line(protocol, line);
+        }
+    }
+
+    pub fn publish_failure_with_usage(&self, status: u16, body: &str) {
+        if let Some(o) = &self.0 {
+            o.publish_failure_with_usage(status, body);
         }
     }
 

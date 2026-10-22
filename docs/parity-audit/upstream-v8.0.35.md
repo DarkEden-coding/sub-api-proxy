@@ -21,14 +21,14 @@ Columns:
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
-| Codex | 19 | 6 | 13 | 0 | 0 | 0 |
+| Codex | 19 | 10 | 9 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 9 | 11 | 0 | 2 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 10 | 5 | 0 | 0 | 0 |
+| Config and Management API | 15 | 11 | 4 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 2 | 10 | 0 | 0 | 0 |
 | Usage and logging | 3 | 2 | 1 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **54** | **168** | **0** | **63** | **3** |
+| **All** | **288** | **59** | **163** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -134,29 +134,29 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go |
+| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go. Until this lands, Codex tool schema normalization and the pattern and int64-bound strip run after payload rules, so they can remove a bound or pattern a payload rule configured |
 
 ## Codex
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`8fbf152b`](https://github.com/router-for-me/CLIProxyAPI/commit/8fbf152b) | fix(executor): preserve top-level responses token usage when service tier is present | yes | to port | S (+26 −6) | top-level Responses usage kept beside `service_tier` |
+| [`8fbf152b`](https://github.com/router-for-me/CLIProxyAPI/commit/8fbf152b) | fix(executor): preserve top-level responses token usage when service tier is present | yes | to port | S (+26 −6) | top-level Responses usage kept beside `service_tier`; waits for plugin executor usage parsing (M6-0220, plugins area) |
 | [`d306f2c5`](https://github.com/router-for-me/CLIProxyAPI/commit/d306f2c5) | fix(codex): retain template freeform apply_patch capability by default | yes | ported here | S (+9 −5) | ported: templates that declare freeform `apply_patch` keep it while `enable-apply-patch` is off (codex catalog golden regenerated at v8.0.35) |
 | [`2044a01f`](https://github.com/router-for-me/CLIProxyAPI/commit/2044a01f) | fix(codex): preserve web search sources in responses request include | yes | ported here | S (+22 −4) | ported: `web_search_call.action.sources` stays in `include` beside `reasoning.encrypted_content`, with Go's no-rewrite cases (`codex_responses::tests`) |
-| [`a3b77566`](https://github.com/router-for-me/CLIProxyAPI/commit/a3b77566) | fix(codex): publish main usage before image tool usage in execute | yes | to port | S (+1 −1) | main usage published before image tool usage |
-| [`d7914afd`](https://github.com/router-for-me/CLIProxyAPI/commit/d7914afd) | fix(codex): expand integer field normalization mappings for tools | yes | to port | M (+107 −21) | integer field normalization for tool schemas |
+| [`a3b77566`](https://github.com/router-for-me/CLIProxyAPI/commit/a3b77566) | fix(codex): publish main usage before image tool usage in execute | yes | to port | S (+1 −1) | main usage published before image tool usage; waits for per-model usage records (Rust publishes no image tool usage yet) |
+| [`d7914afd`](https://github.com/router-for-me/CLIProxyAPI/commit/d7914afd) | fix(codex): expand integer field normalization mappings for tools | yes | ported here | M (+107 −21) | integer field paths, aliases and named namespaces for Codex tool schemas; Go goldens in `crates/cpa-exec/tests/reference/codex_tool_schema` |
 | [`d31b61cb`](https://github.com/router-for-me/CLIProxyAPI/commit/d31b61cb) | fix(websockets): propagate upstream disconnect errors during session activation | yes | to port | S (+47 −2) | upstream disconnects during session activation (Codex and xAI) |
 | [`16d98881`](https://github.com/router-for-me/CLIProxyAPI/commit/16d98881) | feat(codex): preserve URL citations in OpenAI response translation | yes | ported here | M (+125 −9) | URL citations kept in Chat Completions responses, stream and non-stream (every output_text part now joins the content); Go goldens in `crates/cpa-translate/tests/reference/codex_chat` |
-| [`c7b4d573`](https://github.com/router-for-me/CLIProxyAPI/commit/c7b4d573) | fix(codex): record reasoning effort after applying payload overrides | yes | to port | S (+5 −5) | reasoning effort recorded after payload overrides |
+| [`c7b4d573`](https://github.com/router-for-me/CLIProxyAPI/commit/c7b4d573) | fix(codex): record reasoning effort after applying payload overrides | yes | ported here | S (+5 −5) | usage reasoning effort read from the finalized upstream body (prompt-cache key included); replays the Execute, stream and compact override tests |
 | [`6331b38b`](https://github.com/router-for-me/CLIProxyAPI/commit/6331b38b) | feat(openai): support response.interrupt in responses websocket handling | yes | to port | M (+257 −24) | `response.interrupt` on the Responses WebSocket |
-| [`51bde0ff`](https://github.com/router-for-me/CLIProxyAPI/commit/51bde0ff) | fix(codex): preserve resolved upstream model in direct openai image requests | yes | to port | S (+42 −7) | resolved upstream model kept for direct image requests |
+| [`51bde0ff`](https://github.com/router-for-me/CLIProxyAPI/commit/51bde0ff) | fix(codex): preserve resolved upstream model in direct openai image requests | yes | ported here | S (+42 −7) | resolved upstream model kept for direct image requests; replays `TestCodexImagePayloadPreservesResolvedAlias` (the payload-rule rows wait for 868e137) |
 | [`d318bcc3`](https://github.com/router-for-me/CLIProxyAPI/commit/d318bcc3) | fix(codex): handle late response interrupts on websocket sessions | yes | to port | M (+106 −13) | late `response.interrupt` on WebSocket sessions |
 | [`b0debb35`](https://github.com/router-for-me/CLIProxyAPI/commit/b0debb35) | fix(codex): shorten over-length tool call IDs in chat completions | yes | ported here | S (+26 −0) | over-length Chat Completions tool call IDs shortened for Codex; Go goldens in `crates/cpa-translate/tests/reference/codex_chat` |
 | [`7b0319fb`](https://github.com/router-for-me/CLIProxyAPI/commit/7b0319fb) | feat(codex): support Sign in with ChatGPT | yes | to port | L (+2384 −256) | Sign in with ChatGPT |
 | [`e240bd84`](https://github.com/router-for-me/CLIProxyAPI/commit/e240bd84) | fix(codex): fallback default model template when gpt-5.5 is missing | yes | ported here | M (+85 −25) | ported: the default template falls back to the catalog's first model and validation no longer requires `gpt-5.5`; the embedded catalog is synced to v8.0.35 (`fetch_codex_models` is a Go tool) |
 | [`1e37b52b`](https://github.com/router-for-me/CLIProxyAPI/commit/1e37b52b) | fix(executor): preserve websocket sessions across reload and auth removal | yes | to port | M (+199 −33) | WebSocket sessions survive reload and credential removal |
 | [`7795de19`](https://github.com/router-for-me/CLIProxyAPI/commit/7795de19) | feat(sse): implement CodexSSEScanner for improved event data handling | yes | to port | L (+379 −24) | Codex SSE event assembly, error events and terminal markers; Rust has a scanner, but needs these new cases |
-| [`57d005fe`](https://github.com/router-for-me/CLIProxyAPI/commit/57d005fe) | fix(codex): strip out-of-range int64 numeric bounds from tool schemas | yes | to port | M (+111 −6) | strip out-of-range int64 numeric bounds from tool schemas |
+| [`57d005fe`](https://github.com/router-for-me/CLIProxyAPI/commit/57d005fe) | fix(codex): strip out-of-range int64 numeric bounds from tool schemas | yes | ported here | M (+111 −6) | out-of-range int64 bounds stripped, with the unsupported-regex `pattern` strip it extends (previously unported); Go goldens in `crates/cpa-exec/tests/reference/codex_tool_schema` |
 | [`8df4e42a`](https://github.com/router-for-me/CLIProxyAPI/commit/8df4e42a) | fix(codex): advertise direct tool mode and disable responses lite for non-codex routes | yes | ported here | S (+16 −0) | ported: non-template and non-Codex catalog entries get `tool_mode: direct`, `use_responses_lite: false` and `supports_reasoning_effort_updates: false` (`fetch_codex_models` is a Go tool, not applicable) |
 | [`e7d4c731`](https://github.com/router-for-me/CLIProxyAPI/commit/e7d4c731) | fix(codex): reconcile replayed web_search_call history with tool declarations | yes | to port | M (+80 −0) | reconcile replayed web_search_call history with tool declarations |
 
@@ -278,7 +278,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | ported here | S (+3 −1) | `quota_plugin_id` only on v8 credential lists |
 | [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | ported here | M (+48 −43) | root `requests.tls-handshake-timeout-seconds` with the flat legacy spelling |
 | [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
-| [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |
+| [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | ported here | M (+167 −24) | `cpa_core::config::prepare_for_upload` hashes the effective plaintext management secret, drops legacy fields a v8 field overrides and refuses a file that would still hold the plaintext; the object, PostgreSQL and git seed paths call it first (a refused git template copy is removed); replays its Go tests. The startup load's own conflicting-field cleanup stays with M4-0280 |
 | [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | ported here | M (+74 −3) | ETag/If-Match on v8 config writes and the exposed ETag header (M5-0309, M5-0315, tests/management.rs config_writes_honour_if_match_against_the_file_etag); `?value=` masked in access logs (observability.rs go_access_and_redaction_goldens) |
 | [`d69962e4`](https://github.com/router-for-me/CLIProxyAPI/commit/d69962e4) | feat(management): add safe Modify method for auth records with epoch validation and locking | yes | to port | M (+112 −53) | add safe Modify method for auth records with epoch validation and locking. Partly ported: Modify applies an edit to the record as it is now; a fields patch on a config credential answers 404 (with 3e309fb4). The registration-epoch check is not ported |
 | [`50cfd238`](https://github.com/router-for-me/CLIProxyAPI/commit/50cfd238) | feat(management): add support for static and plugin model definitions retrieval by channel | yes | ported here | S (+33 −1) | channel-selectable static and plugin model definitions, all four Go cases (M5-0311) |
