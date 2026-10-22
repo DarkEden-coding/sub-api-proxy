@@ -97,6 +97,16 @@ The installer never runs sudo or changes that policy itself.
 
    Logs are in `~/.local/state/sub-api-proxy/{router,server}.log`. LaunchAgents
    run during the user's login session, so this fallback requires that session.
+   To add the menu-bar launcher, build and install the native app:
+
+   ```sh
+   sh packaging/sub-api-proxy/macos/build.sh
+   sh packaging/sub-api-proxy/macos/install.sh
+   ```
+
+   Click its branching-arrow icon to open the admin panel. Right-click and choose
+   Copy admin key, then paste it into the panel's Settings page and save. The app
+   starts at login. Quitting it leaves the router and server running.
 4. Put the management key in the mode-0600 file described above. Set
    `SAP_CLIENT_KEY` in the environment from which you launch your coding client.
    This is a client key accepted by both servers, not the management key.
