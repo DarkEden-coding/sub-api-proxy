@@ -2295,6 +2295,50 @@ async fn a_plugin_save_applies_the_files_settings_and_persists_as_go_does() {
         assert_eq!(store.get(id).unwrap().metadata["access_token"], "parsed", "{name}");
     }
 
+    // Persisting records the auth's disabled state in its metadata before the storage
+    // fails to serialize (Go `FileTokenStore.Save`), and the file keeps the saved bytes.
+    answer(json!({"Provider":"acme","ID":"d","Disabled":true,"StorageJSON":"W10=",
+        "Metadata":{"type":"acme","disabled":false}}));
+    let submitted = json!({"type":"acme","disabled":false});
+    assert_eq!(host_save(&env, "acme", "d.json", submitted.clone()).await["ok"], true);
+    let d = store.get("d").unwrap();
+    assert!(d.disabled);
+    assert_eq!(d.metadata["disabled"], true);
+    assert_eq!(serde_json::from_slice::<Value>(&on_disk("d.json")).unwrap(), submitted);
+    for id in ["r", "v"] {
+        assert!(store.get(id).unwrap().metadata.get("disabled").is_none(), "{id}");
+    }
+
+    // Only Go's save-time rules apply: the file's excluded models do not replace the
+    // parsed auth's (the watcher applies them when it next parses the file).
+    answer(
+        json!({"Provider":"acme","ID":"x","Attributes":{"excluded_models":"plugin-model"},
+        "Metadata":{"type":"acme","excluded_models":["plugin-model"]}}),
+    );
+    let saved = host_save(
+        &env,
+        "acme",
+        "x.json",
+        json!({"type":"acme","excluded_models":["file-model"]}),
+    )
+    .await;
+    assert_eq!(saved["ok"], true, "{saved}");
+    let x = store.get("x").unwrap();
+    assert_eq!(x.attributes["excluded_models"], "plugin-model");
+    assert_eq!(x.metadata["excluded_models"], json!(["plugin-model"]));
+
+    // JSON null decodes as Go decodes it into a map (no fields): the auth provider that
+    // handles it is registered, and its document (the null storage overlaid with its
+    // metadata) is persisted.
+    answer(json!({"Provider":"acme","ID":"n","Metadata":{"type":"acme"}}));
+    let saved = host_save(&env, "acme", "n.json", Value::Null).await;
+    assert_eq!(saved["ok"], true, "{saved}");
+    assert!(store.get("n").is_some());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&on_disk("n.json")).unwrap(),
+        json!({"type":"acme","disabled":false})
+    );
+
     // An auth naming another file is refused, and nothing is written.
     answer(json!({"Provider":"acme","ID":"l","FileName":"logical.json","Metadata":{"type":"acme"}}));
     let refused = host_save(&env, "acme", "physical.json", json!({"type":"acme"})).await;
@@ -2473,6 +2517,47 @@ async fn a_save_whose_parse_saves_the_same_file_completes_after_one_parse() {
     assert_eq!((&on_disk["type"], &on_disk["n"]), (&json!("acme"), &json!(1)));
     assert!(env.rt.store().get("acme-a").is_some());
     drop(management);
+    env.finish().await;
+}
+
+/// On a current-thread runtime the plugin call runs on a scoped thread while the
+/// runtime waits, and a native plugin's synchronous callbacks arrive there: a save of
+/// the file being parsed, made from inside the parse, is still the nested save, written
+/// without a second parse (the watcher publishes the file on its next reload).
+#[tokio::test(flavor = "current_thread")]
+async fn a_nested_save_on_a_current_thread_runtime_skips_the_parse() {
+    let Some(env) = env(
+        "plugin-owned-auth-save-current-thread",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("auth.parse.json"),
+                parse_saving("acme-a", json!({"type":"acme","n":1})),
+            )
+            .unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        cpa_server::plugins::reload_plugin_auth_files(&env.rt),
+    )
+    .await
+    .expect("the reload never completed");
+    let inner = calls(&env.records, "acme", "host_callback");
+    assert_eq!(inner.len(), 1, "{inner:?}");
+    assert_eq!(inner[0]["ok"], true, "{}", inner[0]);
+    assert_eq!(calls(&env.records, "acme", "auth.parse").len(), 1, "no second parse");
+    let on_disk: Value =
+        serde_json::from_slice(&std::fs::read(env.rt.config().auth_dir.join("acme.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["n"], 1);
     env.finish().await;
 }
 

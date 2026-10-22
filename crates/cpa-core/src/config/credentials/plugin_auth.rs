@@ -378,15 +378,132 @@ pub(super) fn credentials(
     }))
 }
 
-/// The credentials for `auths`, what a plugin parsed from auth file `path` holding
-/// `data` (Go `buildAuthsFromFileData`'s handled branch, for `host.auth.save`): the
-/// file's settings applied as the auth-folder scan applies them, so the next scan
-/// publishes the same credentials.
-pub fn plugin_file_credentials(path: &Path, data: &[u8], auths: Vec<ParsedAuth>) -> Result<Vec<Credential>, String> {
-    let mut meta = serde_json::from_slice::<Map<String, Json>>(data).map_err(|e| format!("invalid auth file: {e}"))?;
-    super::normalize_metadata(&mut meta);
+/// Go `buildAuthsFromFileData`'s plugin branch for a `host.auth.save`: the parsed auths
+/// with the save's own rules (see [`apply_save_rules`]) from `meta`, the saved file's
+/// decoded and normalized metadata. The watcher's other file rules (excluded models,
+/// model aliases, fingerprint profile, auth kind) apply when it next parses the file.
+pub fn plugin_save_credentials(
+    path: &Path,
+    meta: &Map<String, Json>,
+    auths: Vec<ParsedAuth>,
+) -> Result<Vec<Credential>, String> {
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    build(auths, &meta, path, &file_name)
+    let count = auths.len();
+    let mut out = Vec::with_capacity(count);
+    for (index, mut auth) in auths.into_iter().enumerate() {
+        apply_save_rules(&mut auth, meta, path, &file_name, index, count)?;
+        out.push(into_credential(auth, path));
+    }
+    Ok(out)
+}
+
+/// The rules Go applies to a plugin-parsed auth from its file both when saving and when
+/// the watcher loads it: plugin-virtual marking when the file holds several, the file's
+/// path, its disabled state, proxy URL, prefix, weight and priority, and the auth's own
+/// header metadata (`buildAuthsFromFileData`, auth_callbacks.go L366-425).
+fn apply_save_rules(
+    auth: &mut ParsedAuth,
+    meta: &Map<String, Json>,
+    path: &Path,
+    file_name: &str,
+    index: usize,
+    count: usize,
+) -> Result<(), String> {
+    let full = path.display().to_string();
+    let file_disabled = meta.get("disabled").and_then(Json::as_bool) == Some(true);
+    let file_str = |key: &str| meta.get(key).and_then(Json::as_str);
+    super::normalize_metadata(&mut auth.metadata);
+    let attrs = &mut auth.attributes;
+    if count > 1 {
+        // Go `MarkPluginVirtualAuth`.
+        attrs.insert("plugin_virtual".into(), "true".into());
+        attrs.insert("virtual_source".into(), full.clone());
+        let seed = [auth.id.trim(), auth.file_name.trim()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .map_or_else(|| index.to_string(), str::to_owned);
+        let seed = format!("{}|{full}|{seed}|{index}", auth.provider.trim().go_lower());
+        attrs.insert("auth_index_seed".into(), seed);
+    }
+    for key in ["path", "source"] {
+        attrs.insert(key.into(), full.clone());
+    }
+    attrs.insert("source_backend".into(), "file".into());
+    if file_disabled {
+        auth.disabled = true;
+        auth.metadata.insert("disabled".into(), true.into());
+    }
+    if auth.proxy_url.is_empty()
+        && let Some(proxy) = file_str("proxy_url")
+    {
+        auth.proxy_url = proxy.trim().to_owned();
+    }
+    if auth.prefix.is_empty()
+        && let Some(prefix) = file_str("prefix")
+    {
+        auth.prefix = prefix.trim().trim_matches('/').to_owned();
+    }
+    // Go `ApplyAuthWeightMetadata`: the auth was validated above.
+    if let Some(weight) = meta.get("weight") {
+        let weight = parse_weight(weight)
+            .map_err(|e| format!("invalid plugin auth weight in {file_name}: invalid metadata weight: {e}"))?;
+        attrs.insert("weight".into(), weight.to_string());
+    }
+    // Go `ApplyAuthPriorityMetadata` from the file.
+    attrs.remove("file_priority");
+    let priority = match meta.get("priority") {
+        Some(Json::Number(n)) => Some(n.as_f64().map(|f| f.trunc() as i64).unwrap_or(0).to_string()),
+        Some(Json::String(s)) if s.trim().parse::<i64>().is_ok() => Some(s.trim().to_owned()),
+        _ => None,
+    };
+    if let Some(priority) = priority {
+        // A save's metadata is decoded as Go decodes it (numbers as floats); a whole
+        // number keeps the integer form Go's encoder writes.
+        let value = match &meta["priority"] {
+            Json::Number(n)
+                if n.as_i64().is_none() && n.as_f64().is_some_and(|f| f.fract() == 0.0 && f.abs() < 9e15) =>
+            {
+                Json::from(n.as_f64().unwrap_or_default() as i64)
+            }
+            other => other.clone(),
+        };
+        auth.metadata.insert("priority".into(), value);
+        attrs.insert("priority".into(), priority);
+        attrs.insert("file_priority".into(), "true".into());
+    }
+    // Go `ApplyCustomHeadersFromMetadata` reads the parsed auth's metadata.
+    if let Some(Json::Object(headers)) = auth.metadata.get("headers") {
+        for (k, v) in headers {
+            if let (k, Some(v)) = (k.trim(), v.as_str().map(str::trim))
+                && !k.is_empty()
+                && !v.is_empty()
+            {
+                attrs.insert(format!("header:{k}"), v.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The credential of a parsed auth from the file at `path`. Go keeps `Prefix` and
+/// `ProxyURL` as fields; here they are attributes, as for every file credential.
+fn into_credential(mut auth: ParsedAuth, path: &Path) -> Credential {
+    auth.attributes.insert("prefix".into(), auth.prefix);
+    if !auth.proxy_url.is_empty() {
+        auth.attributes.insert("proxy_url".into(), auth.proxy_url);
+    }
+    // ponytail: the label and disabled state come from the plugin; a later metadata
+    // patch recomputes them from the metadata as for every credential.
+    Credential {
+        id: auth.id,
+        provider: auth.provider,
+        source: Source::File(path.to_owned()),
+        disabled: auth.disabled,
+        label: auth.label,
+        attributes: auth.attributes,
+        metadata: auth.metadata,
+        revision: 0,
+    }
 }
 
 fn build(
@@ -402,66 +519,18 @@ fn build(
     if auths.is_empty() {
         return Ok(Vec::new());
     }
-    let full = path.display().to_string();
     let excluded = excluded_union(&[&per_account]);
     let aliases = oauth_aliases(meta.get("model_aliases"));
-    let file_disabled = meta.get("disabled").and_then(Json::as_bool) == Some(true);
-    let file_str = |key: &str| meta.get(key).and_then(Json::as_str);
-    let fingerprint = file_str("fingerprint_profile")
+    let fingerprint = meta
+        .get("fingerprint_profile")
+        .and_then(Json::as_str)
         .map(|s| s.trim().go_lower())
         .filter(|p| !p.is_empty());
     let count = auths.len();
     let mut out = Vec::with_capacity(count);
     for (index, mut auth) in auths.into_iter().enumerate() {
-        super::normalize_metadata(&mut auth.metadata);
+        apply_save_rules(&mut auth, meta, path, file_name, index, count)?;
         let attrs = &mut auth.attributes;
-        if count > 1 {
-            // Go `MarkPluginVirtualAuth`.
-            attrs.insert("plugin_virtual".into(), "true".into());
-            attrs.insert("virtual_source".into(), full.clone());
-            let seed = [auth.id.trim(), auth.file_name.trim()]
-                .into_iter()
-                .find(|s| !s.is_empty())
-                .map_or_else(|| index.to_string(), str::to_owned);
-            let seed = format!("{}|{full}|{seed}|{index}", auth.provider.trim().go_lower());
-            attrs.insert("auth_index_seed".into(), seed);
-        }
-        for key in ["path", "source"] {
-            attrs.insert(key.into(), full.clone());
-        }
-        attrs.insert("source_backend".into(), "file".into());
-        if file_disabled {
-            auth.disabled = true;
-            auth.metadata.insert("disabled".into(), true.into());
-        }
-        if auth.proxy_url.is_empty()
-            && let Some(proxy) = file_str("proxy_url")
-        {
-            auth.proxy_url = proxy.trim().to_owned();
-        }
-        if auth.prefix.is_empty()
-            && let Some(prefix) = file_str("prefix")
-        {
-            auth.prefix = prefix.trim().trim_matches('/').to_owned();
-        }
-        // Go `ApplyAuthWeightMetadata`: the auth was validated above.
-        if let Some(weight) = meta.get("weight") {
-            let weight = parse_weight(weight)
-                .map_err(|e| format!("invalid plugin auth weight in {file_name}: invalid metadata weight: {e}"))?;
-            attrs.insert("weight".into(), weight.to_string());
-        }
-        // Go `ApplyAuthPriorityMetadata` from the file.
-        attrs.remove("file_priority");
-        let priority = match meta.get("priority") {
-            Some(Json::Number(n)) => Some(n.as_f64().map(|f| f.trunc() as i64).unwrap_or(0).to_string()),
-            Some(Json::String(s)) if s.trim().parse::<i64>().is_ok() => Some(s.trim().to_owned()),
-            _ => None,
-        };
-        if let Some(priority) = priority {
-            auth.metadata.insert("priority".into(), meta["priority"].clone());
-            attrs.insert("priority".into(), priority);
-            attrs.insert("file_priority".into(), "true".into());
-        }
         if let Some(aliases) = &aliases {
             attrs.insert("model_aliases".into(), aliases.clone());
         }
@@ -470,38 +539,10 @@ fn build(
             attrs.insert("excluded_models".into(), excluded.join(","));
         }
         attrs.insert("auth_kind".into(), "oauth".into());
-        // Go `ApplyCustomHeadersFromMetadata` reads the parsed auth's metadata.
-        if let Some(Json::Object(headers)) = auth.metadata.get("headers") {
-            for (k, v) in headers {
-                if let (k, Some(v)) = (k.trim(), v.as_str().map(str::trim))
-                    && !k.is_empty()
-                    && !v.is_empty()
-                {
-                    attrs.insert(format!("header:{k}"), v.into());
-                }
-            }
-        }
         if let Some(profile) = &fingerprint {
             attrs.insert("fingerprint_profile".into(), profile.clone());
         }
-        // Go keeps `Prefix` and `ProxyURL` as fields; here they are attributes, as for
-        // every file credential.
-        attrs.insert("prefix".into(), auth.prefix);
-        if !auth.proxy_url.is_empty() {
-            attrs.insert("proxy_url".into(), auth.proxy_url);
-        }
-        // ponytail: the label and disabled state come from the plugin; a later metadata
-        // patch recomputes them from the metadata as for every credential.
-        out.push(Credential {
-            id: auth.id,
-            provider: auth.provider,
-            source: Source::File(path.to_owned()),
-            disabled: auth.disabled,
-            label: auth.label,
-            attributes: auth.attributes,
-            metadata: auth.metadata,
-            revision: 0,
-        });
+        out.push(into_credential(auth, path));
     }
     Ok(out)
 }

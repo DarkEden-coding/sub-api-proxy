@@ -607,7 +607,17 @@ impl Host {
             req.provider = identifier.clone();
         }
         let parsing = Parsing::new(self, record, &req.path, save);
-        let resp = self.call_blocking(record, method::AUTH_PARSE, &req);
+        // The thread entry goes on the thread that calls the plugin, where its
+        // synchronous callbacks arrive (not this one under a current-thread runtime).
+        let (instance, path) = (parsing.instance.clone(), parsing.path.clone());
+        let resp = record
+            .client
+            .call_blocking_in(method::AUTH_PARSE, &crate::gojson::to_vec(&req), move || {
+                ParsingHere::enter(instance, path)
+            })
+            .map_err(CallError::from)
+            .and_then(|raw| crate::rpc::decode_response(method::AUTH_PARSE, &raw));
+        let resp = self.fuse_on_panic(&record.id, method::AUTH_PARSE, resp);
         drop(parsing);
         let resp: AuthParseResponse = match resp {
             Ok(resp) => resp,
@@ -828,7 +838,6 @@ impl<'a> Parsing<'a> {
         let instance = record.client.instance().clone();
         let path = cpa_core::config::credentials::absolute_clean_path(std::path::Path::new(path));
         crate::host::lock(&host.inner.auth_parses).push((instance.clone(), path.clone(), save));
-        PARSING_HERE.with_borrow_mut(|here| here.push((instance.clone(), path.clone())));
         Self {
             host,
             instance,
@@ -842,13 +851,35 @@ impl<'a> Parsing<'a> {
     }
 }
 
-impl Drop for Parsing<'_> {
+/// This thread's entry in [`PARSING_HERE`] while it calls the plugin's `auth.parse`.
+/// Dropped, unwinding included, when the call returns.
+struct ParsingHere {
+    instance: std::sync::Arc<crate::client::CallbackInstance>,
+    path: std::path::PathBuf,
+}
+
+impl ParsingHere {
+    fn enter(instance: std::sync::Arc<crate::client::CallbackInstance>, path: std::path::PathBuf) -> Self {
+        PARSING_HERE.with_borrow_mut(|here| here.push((instance.clone(), path.clone())));
+        Self { instance, path }
+    }
+}
+
+impl Drop for ParsingHere {
     fn drop(&mut self) {
         PARSING_HERE.with_borrow_mut(|here| {
-            if let Some(at) = here.iter().rposition(|(i, p)| self.is(i, p)) {
+            if let Some(at) = here
+                .iter()
+                .rposition(|(i, p)| std::sync::Arc::ptr_eq(i, &self.instance) && *p == self.path)
+            {
                 here.remove(at);
             }
         });
+    }
+}
+
+impl Drop for Parsing<'_> {
+    fn drop(&mut self) {
         let mut parses = crate::host::lock(&self.host.inner.auth_parses);
         if let Some(at) = parses
             .iter()

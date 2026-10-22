@@ -460,16 +460,22 @@ impl Host {
                 // with the saved bytes; the auth is registered either way.
                 let marked = |key: &str| auth.attributes.get(key).is_some_and(|v| v.trim().go_eq_fold("true"));
                 persist = !marked("runtime_only") && !marked("plugin_virtual");
-                if persist && let Err(error) = auth.storage_payload() {
-                    tracing::warn!(id = %auth.id, provider = %auth.provider, %error, "failed to persist registered auth");
-                    persist = false;
+                if persist {
+                    // Go `FileTokenStore.Save` records the disabled state before the
+                    // storage serializes, so it stays even when serializing fails.
+                    auth.metadata.insert("disabled".into(), auth.disabled.into());
+                    if let Err(error) = auth.storage_payload() {
+                        tracing::warn!(id = %auth.id, provider = %auth.provider, %error, "failed to persist registered auth");
+                        persist = false;
+                    }
                 }
             }
             auths.push(auth.into_parsed());
         }
-        // The original file's settings (priority, weight, prefix, proxy URL, ...) apply
-        // to the parsed auths, as Go applies them before registering.
-        let credentials = cpa_core::config::credentials::plugin_file_credentials(path, data, auths).map_err(err)?;
+        // The saved file's settings Go applies when saving (priority, weight, prefix,
+        // proxy URL, ...), from its decoded metadata.
+        let credentials =
+            cpa_core::config::credentials::plugin_save_credentials(path, &metadata, auths).map_err(err)?;
         Ok(SavedAuths::Plugin {
             path: path.to_owned(),
             credentials,

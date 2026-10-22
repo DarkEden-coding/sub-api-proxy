@@ -28,7 +28,7 @@ use plugin_auth::Ask;
 pub use plugin_auth::with_thread_plugin_auth_parser;
 pub use plugin_auth::{
     ParseRequest, Parsed, ParsedAuth, PluginAuthParser, clean as absolute_clean_path, note_plugin_auth_write,
-    on_plugin_auth_change, plugin_auth_epoch, plugin_auth_parser_active, plugin_file_credentials, preparse_auth_dir,
+    on_plugin_auth_change, plugin_auth_epoch, plugin_auth_parser_active, plugin_save_credentials, preparse_auth_dir,
     set_plugin_auth_parser, set_plugin_auth_providers,
 };
 
