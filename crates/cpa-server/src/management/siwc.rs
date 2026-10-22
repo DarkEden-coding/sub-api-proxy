@@ -101,6 +101,48 @@ fn canonical(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The spelling two canonical paths are compared in, never used for I/O: Go's
+/// `filepath.Clean` (`.` dropped, `..` applied lexically, never above the root), with
+/// the verbatim `\\?\C:\` and `\\?\UNC\server\share` prefixes that
+/// `fs::canonicalize` gives on Windows written as `C:\` and `\\server\share`, as
+/// Go's `EvalSymlinks` and `Abs` spell them.
+///
+/// ponytail: a mapped drive that canonicalizes to its UNC share still differs from the
+/// drive-letter spelling once its folder is gone; resolving it needs the mount table.
+fn clean(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut out = PathBuf::new();
+    let mut depth = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => out.push(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = std::ffi::OsString::from(r"\\");
+                    unc.push(server);
+                    unc.push(r"\");
+                    unc.push(share);
+                    out.push(unc);
+                }
+                _ => out.push(prefix.as_os_str()),
+            },
+            Component::RootDir => out.push(component),
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => {
+                out.pop();
+                depth -= 1;
+            }
+            Component::ParentDir if !out.has_root() => out.push(".."),
+            Component::ParentDir => {}
+            Component::Normal(name) => {
+                out.push(name);
+                depth += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Go `sameSIWCMutationPath`: one file (Go `os.SameFile`, which also catches hard links
 /// and another spelling on a case-insensitive file system), else one canonical path,
 /// compared case-insensitively on Windows.
@@ -110,7 +152,7 @@ pub(super) fn same_path(a: &Path, b: &Path) -> bool {
     {
         return true;
     }
-    let (a, b) = (canonical(a), canonical(b));
+    let (a, b) = (clean(&canonical(a)), clean(&canonical(b)));
     if cfg!(windows) {
         a.to_string_lossy().go_eq_fold(&b.to_string_lossy())
     } else {
@@ -689,6 +731,89 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Go `TestSIWCFileMutationRejectsLateExchange`: the exchange has returned and its
+    /// commit waits on `disk` while a v8 mutation of the file runs there. The commit
+    /// then finds the binding failed and writes nothing: a reupload keeps its bytes,
+    /// and a deleted file stays gone. The deletes run the route's own code under the
+    /// lock; the upload does what `store_file` does there.
+    ///
+    /// Single-threaded, as in the test above: once the preparation lock is taken, the
+    /// commit is running on the blocking pool, paused on `disk`.
+    #[tokio::test]
+    async fn a_late_exchange_lands_nothing_after_a_v8_mutation() {
+        let app = axum::Router::new().route(
+            "/api/accounts/oauth/token",
+            axum::routing::post(|| async {
+                r#"{"access_token":"siwc-at","refresh_token":"siwc-rt","id_token":"siwc-id","scope":"openid chatgpt.tokens.use.direct","expires_in":3600}"#
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (operation, query, body) in [
+            ("upload", "", ""),
+            ("delete", "name=codex.json", ""),
+            ("delete-all", "all=true", ""),
+            ("delete-batch", "", r#"["codex.json","other.json"]"#),
+        ] {
+            let (dir, file, state) = fixture(Some(base.clone()));
+            std::fs::write(dir.join("other.json"), codex_file("other")).unwrap();
+            let sid = started_state(bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)).await).await;
+            let reupload = codex_file("reuploaded");
+            let (held_tx, held) = std::sync::mpsc::channel();
+            let (go, go_rx) = std::sync::mpsc::channel::<()>();
+            let mutation = std::thread::spawn({
+                let (state, file, reupload) = (state.clone(), file.clone(), reupload.clone());
+                move || {
+                    let _disk = state.disk.lock().unwrap();
+                    held_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    if operation == "upload" {
+                        state.oauth.invalidate_siwc(&file);
+                        std::fs::write(&file, reupload).unwrap();
+                    } else {
+                        let q = Query::parse(Some(query.to_owned()));
+                        let response = super::super::auth_files::delete_sync(&state, &q, body.as_bytes(), true);
+                        assert_eq!(response.status(), StatusCode::OK, "{operation}");
+                    }
+                }
+            });
+            held.recv().unwrap();
+            let req = CallbackRequest {
+                state: sid.clone(),
+                code: "c".into(),
+                client_id: "oaiapp_issued".into(),
+                ..Default::default()
+            };
+            assert_eq!(callback(&state, &req, None).unwrap().status(), StatusCode::OK);
+            let lock = state.rt.store().prepare_lock("codex.json");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while lock.try_lock().is_ok() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the commit waits on disk");
+            go.send(()).unwrap();
+            mutation.join().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), lock.lock_owned())
+                .await
+                .expect("the commit returns");
+            let (_, status, _, _, completed) = state.oauth.details(&sid).unwrap();
+            assert_eq!(
+                (status.as_str(), completed),
+                ("SIWC binding target changed; start a new binding", false),
+                "{operation}"
+            );
+            if operation == "upload" {
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), reupload, "{operation}");
+            } else {
+                assert!(!file.exists(), "{operation}: the deleted file came back");
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     /// Go `TestSIWCMutationPathAliases`, plus what Go's `os.SameFile` adds: a hard link
     /// is the same file, and a file that is gone matches through its folder's real path.
     #[cfg(unix)]
@@ -710,6 +835,49 @@ mod tests {
         assert!(!same_path(&path, &at("real/other.json")));
         assert!(!same_path(&path, &at("real/gone.json")));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// With the file and its folder both gone, the binding's canonical path (saved at
+    /// start) and a mutation path compare as Go's `Abs` and `Clean` spell them.
+    #[cfg(unix)]
+    #[test]
+    fn a_gone_folder_compares_cleaned_paths() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("cpa-siwc-gone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("auth")).unwrap();
+        std::fs::write(root.join("auth/codex.json"), "{}").unwrap();
+        let bound = std::fs::canonicalize(root.join("auth/codex.json")).unwrap();
+        std::fs::remove_dir_all(root.join("auth")).unwrap();
+        assert!(same_path(&root.join("auth/../auth/codex.json"), &bound));
+        assert!(same_path(&root.join("auth/./codex.json"), &bound));
+        assert!(!same_path(&root.join("auth/../codex.json"), &bound));
+        assert!(!same_path(&root.join("other/../auth/other.json"), &bound));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Windows: `fs::canonicalize` gives the verbatim `\\?\` spelling; once the folder
+    /// is gone, the ordinary spelling of the same path still matches, case-insensitively.
+    #[cfg(windows)]
+    #[test]
+    fn a_gone_folder_matches_the_verbatim_binding_path() {
+        let root = std::env::temp_dir().join(format!("cpa-siwc-gone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("auth")).unwrap();
+        std::fs::write(root.join(r"auth\codex.json"), "{}").unwrap();
+        let bound = std::fs::canonicalize(root.join(r"auth\codex.json")).unwrap();
+        let ordinary = PathBuf::from(bound.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+        std::fs::remove_dir_all(root.join("auth")).unwrap();
+        assert!(same_path(&ordinary, &bound));
+        assert!(!same_path(&ordinary.with_file_name("other.json"), &bound));
+        assert!(same_path(
+            &PathBuf::from(ordinary.to_str().unwrap().replace(r"\auth\", r"\auth\.\..\AUTH\")),
+            &bound
+        ));
+        assert_eq!(
+            clean(Path::new(r"\\?\UNC\server\share\dir\f.json")),
+            PathBuf::from(r"\\server\share\dir\f.json")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn codex_file(account: &str) -> String {
