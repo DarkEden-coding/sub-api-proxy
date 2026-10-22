@@ -20,7 +20,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M2 | 189 | 71 | 114 | 4 |
 | M3 | 424 | 197 | 209 | 18 |
 | M4 | 589 | 253 | 325 | 11 |
-| M5 | 331 | 219 | 109 | 3 |
+| M5 | 331 | 220 | 108 | 3 |
 | M6 | 267 | 131 | 126 | 10 |
 
 ### Gaps by area
@@ -35,7 +35,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | translate | 5 | 122 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
 | openai-xai | 3 | 30 | M3-0356, M3-0359, M6-0217 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
-| manage | 1 | 134 | M4-0526 |
+| manage | 1 | 133 | M4-0526 |
 | tui | 1 | 9 | M4-0521 |
 | home | 0 | 26 | — |
 | realtime | 0 | 8 | — |
@@ -1954,7 +1954,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M5-0309 | internal/api/handlers/management/config_v8_etag_test.go | covered | 1/1 case: TestConfigV8ETagIfMatch in tests/management.rs config_writes_honour_if_match_against_the_file_etag (stale PATCH, PUT and DELETE, weak and malformed validators, repeated header lines, quoted comma, blank header, wildcard) |  |  |
 | M5-0310 | internal/api/handlers/management/config_v8_upstream_test.go | partial | Existing subsystem: crates/cpa-server/src/management/; new Go suite internal/api/handlers/management/config_v8_upstream_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | manage | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M5-0311 | internal/api/handlers/management/model_definitions_test.go | covered | 4/4 cases: tests/management.rs model_definitions_fall_back_to_registered_models_by_channel (BuiltInChannel, FallsBackToRegistryModelsForPerAuthPlugin, RejectsUnknownChannel) and model_definitions_fall_back_to_plugin_static_models (FallsBackToPluginStaticModels, Go recorder plugin); auth_files.rs plugin_models_encode_like_go_registry_model_info |  | The plugin case relies on the startup plugin sync registering static models. |
-| M5-0312 | internal/api/handlers/management/oauth_siwc_mutations_test.go | partial | crates/cpa-server/tests/management.rs siwc_binding_flows_follow_go; crates/cpa-server/src/management/siwc.rs tests::mutation_paths_match_every_alias_of_the_file | manage | Added since 6fecc6e. TestSIWCMutationPathAliases is ported, with what Go's os.SameFile adds: a symlink, a hard link and a folder alias name the target, another file does not (one file by device and inode, or by volume serial and file index on Windows, else one canonical path, case-insensitive on Windows). A late exchange after a v8 upload or delete is rejected, and only v8 mutations invalidate. Not ported case by case: the delete-all and delete-batch invalidations, and the scope cases (an invalid v8 upload body or an unrelated name keeps the binding). |
+| M5-0312 | internal/api/handlers/management/oauth_siwc_mutations_test.go | covered | crates/cpa-server/tests/management.rs siwc_binding_flows_follow_go (late exchange after a v8 upload, delete, delete-all and delete-batch; a refused v8 upload, another file and a v0 upload keep the binding); crates/cpa-server/src/management/siwc.rs tests::mutation_paths_match_every_alias_of_the_file, tests::a_gone_folder_compares_cleaned_paths |  | Added since 6fecc6e. Paths match as in Go: one file (device and inode, or volume serial and file index on Windows), else Go's Abs and Clean spelling, case-insensitive and with verbatim prefixes written the ordinary way on Windows. Go's commit gate is the management disk lock, held from the invalidation through the write and publication. A mapped Windows drive whose folder is gone is not matched to its UNC spelling (ponytail in siwc.rs). |
 | M5-0313 | internal/api/handlers/management/oauth_siwc_test.go | partial | crates/cpa-server/tests/management.rs siwc_binding_flows_follow_go; crates/cpa-server/src/management/oauth.rs tests::a_claimed_siwc_commit_outlives_the_session_expiry | manage | Added since 6fecc6e. Callback forms and summary, invalid callbacks without an exchange, duplicates and cancellation, exchange errors, OAuth errors, eligibility, the legacy callback, the symlink target and target validation are covered by behavior. TestSIWCBindCommitSurvivesSessionExpiry is ported; its CompleteProvider step has no counterpart (Go's SDK session API, which cliproxy-rs does not expose). The reimport case depends on registration epochs (see M5-0304). |
 | M5-0314 | internal/api/server_claude_tool_search_test.go | missing | Existing subsystem: crates/cpa-exec/src/claude/; new Go suite internal/api/server_claude_tool_search_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | claude | Added since 6fecc6e. |
 | M5-0315 | internal/api/server_config_v8_etag_test.go | covered | 1/1 case: TestConfigV8ETagExposedForCORS in tests/management.rs config_writes_honour_if_match_against_the_file_etag (every 200 and 412 answer exposes ETag); tests/manage_go.rs goldens carry the exposed header |  |  |
@@ -2008,7 +2008,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0020 | credentials.in-flight.max-string-bytes | covered | read in crates/cpa-home/src/config.rs; set in crates/cpa-home/tests/fixtures/credential_in_flight_contract.json, crates/cpa-server/tests/fixtures/manage_go.json |  | heuristic: key name match |
 | M6-0021 | credentials.in-flight.staging-retention | covered | read in crates/cpa-home/src/config.rs; set in crates/cpa-home/tests/fixtures/credential_in_flight_contract.json, crates/cpa-server/tests/fixtures/manage_go.json |  | heuristic: key name match |
 | M6-0022 | plugins.enabled | covered | read in crates/cliproxy/src/discovery/mod.rs, crates/cliproxy/src/tui/auth.rs (+24); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/home_plugins.rs (+40) |  | heuristic: key name match |
-| M6-0023 | plugins.dir | covered | read in crates/cpa-plugin/src/config.rs, crates/cpa-server/src/management/legacy/view.rs (+1); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/home_plugins.rs (+50) |  | heuristic: key name match |
+| M6-0023 | plugins.dir | covered | read in crates/cpa-plugin/src/config.rs, crates/cpa-server/src/management/legacy/view.rs (+1); set in crates/cliproxy/src/home.rs, crates/cliproxy/src/home_plugins.rs (+51) |  | heuristic: key name match |
 | M6-0024 | plugins.store-sources | covered | read in crates/cpa-plugin/src/config.rs; set in crates/cpa-server/tests/fixtures/plugin_routes_go.json |  | heuristic: key name match |
 | M6-0025 | plugins.store-auth[].match | covered | read in crates/cpa-common/src/payload.rs, crates/cpa-core/src/config/credentials.rs (+7); set in crates/cliproxy/src/home_plugins.rs, crates/cpa-common/tests/fixtures/payload_go.json (+14) |  | heuristic: key name match |
 | M6-0026 | plugins.store-auth[].apply-to | partial | read in crates/cpa-plugin/src/config.rs; no test sets it | plugins | heuristic: key name match |
