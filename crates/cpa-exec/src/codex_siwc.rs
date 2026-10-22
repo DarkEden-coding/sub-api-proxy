@@ -93,20 +93,96 @@ fn text<'a>(siwc: &'a Map<String, Value>, key: &str) -> &'a str {
     siwc.get(key).and_then(Value::as_str).map(str::trim).unwrap_or_default()
 }
 
-/// Go `SIWCExpirationTime`: the partition's expiry keys, else its access token's JWT `exp`.
-// ponytail: Go also reads `expires_in` plus a timestamp and a nested `token` map; `ToMap`
-// writes only `expired`, so those shapes come only from hand-edited files.
-fn expiry(siwc: &Map<String, Value>) -> Option<chrono::DateTime<chrono::Utc>> {
-    ["expired", "expire", "expires_at", "expiresAt", "expiry", "expires"]
+type Time = chrono::DateTime<chrono::Utc>;
+
+/// Go `normaliseUnix`: `Some(None)` is Go's zero time (a non-positive value).
+fn go_unix(raw: i64) -> Option<Option<Time>> {
+    Some(match raw {
+        ..=0 => None,
+        1_000_000_000_001.. => chrono::DateTime::from_timestamp_millis(raw),
+        _ => chrono::DateTime::from_timestamp(raw, 0),
+    })
+}
+
+/// Go `parseTimeValue` on a decoded JSON value: `None` when it does not parse,
+/// `Some(None)` for Go's zero time, which still ends a key search.
+fn go_time(value: &Value) -> Option<Option<Time>> {
+    match value {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            // Go's RFC3339 layout needs an upper-case `T`, which chrono does not.
+            if s.as_bytes().get(10) == Some(&b'T')
+                && let Ok(t) = chrono::DateTime::parse_from_rfc3339(s)
+            {
+                return Some(Some(t.with_timezone(&chrono::Utc)));
+            }
+            for layout in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+                if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, layout) {
+                    return Some(Some(t.and_utc()));
+                }
+            }
+            go_unix(s.parse().ok()?)
+        }
+        // encoding/json decodes numbers into float64; Go truncates to int64.
+        Value::Number(n) => go_unix(n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64)),
+        _ => None,
+    }
+}
+
+/// Go `lookupMetadataTime`: the first key whose value parses, zero time included.
+fn lookup_time(map: &Map<String, Value>, keys: &[&str]) -> Option<Option<Time>> {
+    keys.iter().find_map(|k| map.get(*k).and_then(go_time))
+}
+
+/// Go `parseIntAny` for `expires_in`: whole seconds from a number or a decimal string.
+fn go_int(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(n) => Some(n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64)),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Go `expirationFromMap`: the expiry keys, then `expires_in` after its issue time, then
+/// a nested `token` or `Token` map.
+fn expiration_from_map(map: &Map<String, Value>) -> Option<Option<Time>> {
+    if let Some(t) = lookup_time(
+        map,
+        &["expired", "expire", "expires_at", "expiresAt", "expiry", "expires"],
+    ) {
+        return Some(t);
+    }
+    let seconds = ["expires_in", "expiresIn"]
         .iter()
-        .find_map(|k| siwc.get(*k).and_then(crate::codex_oauth::parse_time))
+        .find_map(|k| map.get(*k).and_then(go_int).filter(|s| *s > 0));
+    if let Some(seconds) = seconds {
+        let issued = ["timestamp", "issued_at", "issuedAt"]
+            .iter()
+            .find_map(|k| map.get(*k).and_then(go_time).flatten());
+        if let Some(issued) = issued {
+            return Some(issued.checked_add_signed(TimeDelta::seconds(seconds)));
+        }
+    }
+    ["token", "Token"].iter().find_map(|k| match map.get(*k) {
+        Some(Value::Object(nested)) => expiration_from_map(nested),
+        _ => None,
+    })
+}
+
+/// Go `SIWCExpirationTime`: the partition's expiration, else its access token's JWT `exp`.
+fn expiry(siwc: &Map<String, Value>) -> Option<Time> {
+    expiration_from_map(siwc)
+        .flatten()
         .or_else(|| crate::codex_oauth::jwt_exp(text(siwc, "access_token")))
 }
 
 /// Go `CodexSIWCNeedsRefresh`: `None` when the partition cannot refresh (no refresh
 /// token or client ID), else whether it is due at `now`: no access token, five minutes
 /// before its expiry, five minutes after its last refresh, or now when neither is known.
-pub fn refresh_due(credential: &cpa_core::credential::Credential, now: chrono::DateTime<chrono::Utc>) -> Option<bool> {
+pub fn refresh_due(credential: &cpa_core::credential::Credential, now: Time) -> Option<bool> {
     let siwc = partition(credential)?;
     if text(siwc, "refresh_token").is_empty() || text(siwc, "client_id").is_empty() {
         return None;
@@ -117,9 +193,7 @@ pub fn refresh_due(credential: &cpa_core::credential::Credential, now: chrono::D
     if let Some(expiry) = expiry(siwc) {
         return Some(expiry - REFRESH_LEAD <= now);
     }
-    let last = ["last_refresh", "lastRefresh"]
-        .iter()
-        .find_map(|k| siwc.get(*k).and_then(crate::codex_oauth::parse_time));
+    let last = lookup_time(siwc, &["last_refresh", "lastRefresh"]).flatten();
     Some(last.is_none_or(|last| last + REFRESH_LEAD <= now))
 }
 

@@ -317,7 +317,8 @@ impl Executors {
             return true;
         }
         // Go `CodexSIWCNeedsRefresh`'s hasRefresh: a `siwc` refresh token and client ID.
-        if codex_siwc::refresh_due(credential, chrono::Utc::now()).is_some() {
+        // ponytail: Go asks it of every provider; Codex only until the Claude replay.
+        if credential.provider == "codex" && codex_siwc::refresh_due(credential, chrono::Utc::now()).is_some() {
             return true;
         }
         credential.provider.trim().eq_ignore_ascii_case("meta")
@@ -648,6 +649,10 @@ mod readiness_tests {
         assert!(!has(
             serde_json::json!({"type": "codex", "siwc": {"refresh_token": "fake"}})
         ));
+        assert!(
+            !has(serde_json::json!({"type": "claude", "siwc": {"refresh_token": "fake", "client_id": "c"}})),
+            "SIWC is Codex's"
+        );
         assert!(has(serde_json::json!({"type": "meta", "dca_token": "fake"})));
         assert!(
             !has(serde_json::json!({"type": "claude", "dca_token": "fake"})),

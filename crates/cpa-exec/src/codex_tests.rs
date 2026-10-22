@@ -1750,6 +1750,19 @@ async fn siwc_requests_match_go() {
             }
         }
     }
+    // Without a `base_url` (the cases above dial a mock): Go's `defaultOpenAISIWCBaseURL`.
+    let production = Credential::from_file(
+        Path::new("/fake"),
+        Path::new("/fake/c.json"),
+        serde_json::json!({"type": "codex", "use_siwc": true, "access_token": "outer-at",
+                           "siwc": {"access_token": "siwc-at"}})
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .unwrap();
+    let view = View::new(&production);
+    assert_eq!((view.base_url, view.token), ("https://api.openai.com/v1", "siwc-at"));
 }
 
 /// Sign in with ChatGPT refresh (Go `refreshLocked`): the `siwc` partition refreshes on
@@ -1843,6 +1856,18 @@ async fn siwc_partition_refreshes_like_go() {
     let patch = executor.refresh_all(&cred("f", false, &at(60)), &cfg).await.unwrap();
     assert_eq!(patch.set.keys().collect::<Vec<_>>(), ["siwc"]);
     mock.take();
+    mock.script(OUTER, vec![outer_ok()]);
+    mock.script(SIWC, vec![json(500, "{}"); 3]);
+    let patch = executor.refresh_all(&cred("k", false, &at(60)), &cfg).await.unwrap();
+    assert_eq!(patch.set["access_token"], "outer-new");
+    assert!(!patch.set.contains_key("siwc"));
+    assert_eq!(mock.take().len(), 4);
+    // A retry right after: the outer success is retained, the SIWC failure is not (Go's
+    // singleflight forgets it), so only the SIWC endpoint is called again.
+    mock.script(SIWC, vec![siwc_ok()]);
+    let patch = executor.refresh_all(&cred("k", false, &at(60)), &cfg).await.unwrap();
+    assert_eq!(paths(mock.take()), [SIWC]);
+    assert_eq!(patch.set["siwc"]["access_token"], "siwc-new");
     mock.script(OUTER, vec![json(500, "{}"); 3]);
     mock.script(SIWC, vec![json(500, "{}"); 3]);
     let error = executor

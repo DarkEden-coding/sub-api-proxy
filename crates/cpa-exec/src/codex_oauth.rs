@@ -197,13 +197,14 @@ struct Refreshes {
 }
 
 /// Single-flights `run` per `key` on `table`, detached from the caller so a cancelled
-/// request cannot strand a rotated token.
-// ponytail: results are retained for 5 minutes, matching Go's refresh failure backoff;
-// success retention absorbs stale duplicate snapshots.
+/// request cannot strand a rotated token. A success is retained for 5 minutes, so a stale
+/// snapshot cannot send the rotated refresh token again; a failure only when
+/// `retain_failures` (the outer tokens' backoff).
 fn single_flight<T: Clone + Send + Sync + 'static>(
     table: &Table<T>,
     key: [u8; 32],
     run: BoxFuture<'static, Result<T, ExecError>>,
+    retain_failures: bool,
 ) -> RefreshResult<T> {
     let mut locked = table.lock().expect("refresh table");
     locked.retain(|_, (until, _)| *until > Instant::now());
@@ -226,9 +227,13 @@ fn single_flight<T: Clone + Send + Sync + 'static>(
     let retained = table.clone();
     let task = tokio::spawn(async move {
         let result = run.await;
-        if let Some((until, _)) = retained.lock().expect("refresh table").get_mut(&key) {
+        let mut table = retained.lock().expect("refresh table");
+        if result.is_err() && !retain_failures {
+            table.remove(&key);
+        } else if let Some((until, _)) = table.get_mut(&key) {
             *until = Instant::now() + Duration::from_secs(300);
         }
+        drop(table);
         result
     });
     let shared = async move { task.await.map_err(|_| oauth_error(500, "codex refresh task failed"))? }
@@ -383,7 +388,7 @@ impl CodexOAuth {
         let oauth = self.clone();
         let token = refresh_token.to_owned();
         let run = async move { oauth.refresh_with_retry(&token).await }.boxed();
-        single_flight(&self.refreshes.outer, key, run).await
+        single_flight(&self.refreshes.outer, key, run, true).await
     }
 
     /// `RefreshSIWCTokensWithRetry(ctx, token, client, device, 3)`: the `siwc`
@@ -408,7 +413,7 @@ impl CodexOAuth {
         let oauth = self.clone();
         let (token, client, device) = (refresh_token.to_owned(), client_id.to_owned(), device_id.to_owned());
         let run = async move { oauth.refresh_siwc_with_retry(&token, &client, &device).await }.boxed();
-        single_flight(&self.refreshes.siwc, key, run).await
+        single_flight(&self.refreshes.siwc, key, run, false).await
     }
 
     async fn refresh_siwc_with_retry(
