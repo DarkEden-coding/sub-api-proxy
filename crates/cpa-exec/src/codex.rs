@@ -349,8 +349,8 @@ impl CodexExecutor {
         } = request::shape(&req, view, settings, Call::Stream)?;
         let (body, scope) = crate::codex_replay::apply(&self.replay, &req, body).await;
         let (body, cache) = request::prompt_cache(&req, body, ws_session, false);
-        report_request(&req, Format::Codex, &body);
         let body = request::sanitize_input_ids(body);
+        report_request(&req, Format::Codex, &body);
         let headers = request::http_headers(view, settings, &req.headers, &body, &model, cache.as_deref(), true);
         let url = format!("{}/responses", view.base_url);
         let started = Instant::now();
@@ -415,8 +415,8 @@ impl CodexExecutor {
         } = request::shape(&req, view, settings, Call::NonStream)?;
         let (body, scope) = crate::codex_replay::apply(&self.replay, &req, body).await;
         let (body, cache) = request::prompt_cache(&req, body, None, false);
-        report_request(&req, Format::Codex, &body);
         let body = request::sanitize_input_ids(body);
+        report_request(&req, Format::Codex, &body);
         let headers = request::http_headers(view, settings, &req.headers, &body, &model, cache.as_deref(), true);
         let url = format!("{}/responses", view.base_url);
         let wire = Wire::new(req.capture(), view.credential);
@@ -479,8 +479,8 @@ impl CodexExecutor {
             ..
         } = request::shape(&req, view, settings, Call::Compact)?;
         let (body, cache) = request::prompt_cache(&req, body, None, false);
-        report_request(&req, Format::OpenAIResponse, &body);
         let body = request::sanitize_input_ids(body);
+        report_request(&req, Format::OpenAIResponse, &body);
         let headers = request::http_headers(view, settings, &req.headers, &body, &model, cache.as_deref(), false);
         let url = format!("{}/responses/compact", view.base_url);
         let wire = Wire::new(req.capture(), view.credential);
@@ -809,8 +809,8 @@ fn go_headers(headers: &HeaderMap) -> crate::proxy::GoHeaders {
     out
 }
 
-/// Go `SetTranslatedReasoningEffort`: the finalized upstream payload, prompt-cache key
-/// included, for the usage record's reasoning effort (c7b4d573).
+/// Go `SetTranslatedReasoningEffort`: the finalized upstream payload (prompt-cache key
+/// set, input IDs sanitized), for the usage record's reasoning effort (c7b4d573).
 pub(crate) fn report_request(req: &ExecRequest, upstream: Format, body: &str) {
     if req.usage.enabled() {
         req.usage.request(upstream, body.as_bytes());

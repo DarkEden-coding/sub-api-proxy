@@ -727,7 +727,8 @@ async fn usage_records_see_upstream_payloads() {
 
 /// Go `Test*RecordsFinalizedPayloadOverrideReasoningEffort` (c7b4d573): a payload
 /// override of `reasoning.effort` reaches both the upstream body and the usage record,
-/// on the stream, non-stream and compact paths.
+/// on the stream, non-stream and compact paths. The record reads the finalized body, the
+/// bytes sent upstream, so an input ID that sanitation prefixes is recorded prefixed.
 #[tokio::test]
 async fn usage_records_the_payload_override_reasoning_effort() {
     let executor = executor();
@@ -755,6 +756,11 @@ async fn usage_records_the_payload_override_reasoning_effort() {
         .unwrap();
         let recorded = Arc::new(Recorded::default());
         let mut req = request(case);
+        let body = String::from_utf8(req.body.to_vec()).unwrap().replace(
+            r#"{"type":"message","role":"user""#,
+            r#"{"type":"message","id":"abc","role":"user""#,
+        );
+        req.body = Bytes::from(body);
         req.usage = cpa_core::exec::UsageSink::new(recorded.clone());
         match executor.execute(&credential, req, &cfg).await.unwrap().body {
             ResponseBody::Stream(mut stream) => while stream.next().await.is_some() {},
@@ -764,11 +770,96 @@ async fn usage_records_the_payload_override_reasoning_effort() {
         assert_eq!(gjson::get(&sent, "reasoning.effort").str(), "high", "{name}: upstream");
         let reports = recorded.0.lock().unwrap().clone();
         assert_eq!(reports[0].0, "request", "{name}");
-        assert_eq!(
-            gjson::get(&reports[0].2, "reasoning.effort").str(),
-            "high",
-            "{name}: usage record"
-        );
+        assert_eq!(reports[0].2, sent, "{name}: the usage record reads the sent body");
+    }
+}
+
+/// Go `TestCodexImageResolvedModelOnWire` ("custom upstream" and "routing and thinking
+/// suffix", 51bde0ff) through the executor: a configured, prefixed upstream name reaches
+/// the direct Images endpoint as resolved, for a JSON generation and a multipart edit.
+#[tokio::test]
+async fn direct_images_send_the_configured_upstream_model() {
+    let executor = executor();
+    let form = "--XB\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nREQ\r\n--XB\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndiagnostic\r\n--XB--\r\n";
+    for (requested, resolved, configured, want) in [
+        (
+            "gpt-image-2",
+            "openai/gpt-image-2-cpr",
+            "openai/gpt-image-2-cpr",
+            "openai/gpt-image-2-cpr",
+        ),
+        (
+            "tenant/gpt-image-2(high)",
+            "OpenAI/GPT-Image-2(high)",
+            "OpenAI/GPT-Image-2",
+            "OpenAI/GPT-Image-2",
+        ),
+    ] {
+        for (request_path, upstream_path, content_type, body) in [
+            (
+                "/v1/images/generations",
+                "/images/generations",
+                "application/json",
+                format!(r#"{{"model":"{requested}","prompt":"diagnostic"}}"#),
+            ),
+            (
+                "/v1/images/edits",
+                "/images/edits",
+                "multipart/form-data; boundary=XB",
+                form.replace("REQ", requested),
+            ),
+        ] {
+            let mock = Mock::start().await;
+            mock.script(
+                upstream_path,
+                vec![crate::codex_testkit::json(
+                    200,
+                    r#"{"created":1713833628,"data":[{"b64_json":"AA=="}]}"#,
+                )],
+            );
+            let cfg = Config::parse(&format!(
+                "codex-api-key:\n  - api-key: codex-token\n    base-url: {}\n    prefix: tenant\n    models:\n      - name: {configured}\n        alias: gpt-image-2\n",
+                mock.url
+            ))
+            .unwrap();
+            let credential = cpa_core::config::credentials::from_config(&cfg)
+                .into_iter()
+                .find(|c| c.provider == "codex")
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+            let body = Bytes::from(body);
+            let req = ExecRequest {
+                operation: Operation::Generate,
+                source_format: Format::OpenAI,
+                response_format: Format::OpenAI,
+                stream_payloads: false,
+                requested_model: requested.into(),
+                model: resolved.into(),
+                original_body: body.clone(),
+                body,
+                stream: false,
+                alt: None,
+                session: None,
+                headers,
+                execution_session: None,
+                derived_session: None,
+                resolved_model: None,
+                usage: Default::default(),
+                request_path: request_path.into(),
+                caller: Caller {
+                    principal: "client-key-FAKE".into(),
+                    source: "authorization",
+                    provider: String::new(),
+                },
+            };
+            executor.images(&credential, req, request_path, &cfg).await.unwrap();
+            let captured = mock.take();
+            assert_eq!(captured.len(), 1, "{resolved} {request_path}");
+            assert_eq!(captured[0].path, upstream_path);
+            let sent: Value = serde_json::from_slice(&captured[0].body).unwrap();
+            assert_eq!(sent["model"], want, "{resolved} {request_path}");
+        }
     }
 }
 

@@ -211,8 +211,8 @@ impl CodexExecutor {
             Some(id) => set_str_if_different(body, "prompt_cache_key", id),
             None => body,
         };
-        report_request(&req, Format::Codex, &body);
         let body = request::sanitize_input_ids(body);
+        report_request(&req, Format::Codex, &body);
         let headers = request::image_headers(view, settings, &req.headers, main_model, cache.as_deref(), true);
         let url = format!("{}/responses", view.base_url);
         let wire = Wire::new(req.capture(), view.credential);
