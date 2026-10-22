@@ -256,11 +256,11 @@ async fn a_turn_activating_after_the_reader_stopped_gets_its_error() {
         *up.close_first.lock().unwrap() = close;
         let executor = CodexExecutor::new().unwrap();
         let session = executor.ws.session("conn-1");
-        let target = Target {
-            credential: "codex-ws.json".into(),
-            url: ws_url(&format!("{url}/responses")).unwrap(),
-            proxy: crate::proxy::Proxy::Direct,
-        };
+        let target = Target::new(
+            &credential(&url),
+            ws_url(&format!("{url}/responses")).unwrap(),
+            &Config::default(),
+        );
         let (conn, _) = executor
             .ensure(&session, &target, &HeaderMap::new(), "gpt-fixture", false, None)
             .await
@@ -434,6 +434,102 @@ async fn closing_the_session_ends_the_kept_pick() {
     ended(&up, 1).await;
 }
 
+/// Go 1e37b52b: after a reload that changes only `requests.proxy-url`, the session's
+/// open socket keeps serving its credential (continuation and new turn alike), while a
+/// new session dials through the new proxy and a credential's own proxy still re-targets.
+#[tokio::test]
+async fn a_global_proxy_reload_keeps_the_open_socket() {
+    let (up, url) = upstream(vec![Act::Send(vec![CREATED, COMPLETED]); 3]).await;
+    let executor = CodexExecutor::new().unwrap();
+    let cred = credential(&url);
+    // Nothing listens on port 1: a dial through this proxy fails.
+    let reloaded = Config::parse("requests:\n  proxy-url: http://127.0.0.1:1\n").unwrap();
+    for (cfg, continuation) in [(&Config::default(), false), (&reloaded, true), (&reloaded, false)] {
+        let response = executor
+            .execute_in_session(&cred, request(BODY), cfg, &session(continuation))
+            .await
+            .unwrap_or_else(|e| panic!("continuation={continuation}: {e:?}"));
+        let events = collect(response).await;
+        assert!(events.len() == 2 && events.iter().all(Result::is_ok), "{events:?}");
+    }
+    assert_eq!(up.dials.lock().unwrap().len(), 1, "every turn kept the first socket");
+
+    let mut other = request(BODY);
+    other.execution_session = Some("conn-2".into());
+    let fresh = ExecSession {
+        id: "conn-2".into(),
+        ..session(false)
+    };
+    let error = executor
+        .execute_in_session(&cred, other, &reloaded, &fresh)
+        .await
+        .err()
+        .expect("a new socket dials through the reloaded proxy");
+    assert_eq!(error.scope, FailureScope::Transport, "{error}");
+
+    let mut own = cred.clone();
+    own.attributes.insert("proxy_url".into(), "http://127.0.0.1:1".into());
+    let error = executor
+        .execute_in_session(&own, request(BODY), &reloaded, &session(true))
+        .await
+        .err()
+        .expect("the credential's own proxy no longer matches the socket");
+    assert!(error.is_replay_required(), "{error}");
+    assert_eq!(up.dials.lock().unwrap().len(), 1);
+}
+
+/// Go `websocketSessionTargetMatches` compares the trimmed proxy settings, not parsed
+/// proxies: `direct` and `none`, or two unparseable settings, are different targets. A
+/// continuation that changes `(global, own)` after the first turn keeps the socket or
+/// needs a replay as Go decides.
+#[tokio::test]
+async fn proxy_settings_match_as_go_compares_them() {
+    type Row = (
+        &'static str,
+        Option<&'static str>,
+        &'static str,
+        Option<&'static str>,
+        bool,
+    );
+    let rows: [Row; 6] = [
+        ("", None, "http://127.0.0.1:1", None, true),
+        ("direct", Some("none"), "http://127.0.0.1:1", None, false),
+        ("", Some("direct"), "", Some("none"), false),
+        ("", Some("bogus://a"), "", Some("bogus://b"), false),
+        ("", Some("direct"), "", Some(" direct "), true),
+        ("none", None, "NONE", None, true),
+    ];
+    for (dial_global, dial_own, global, own, reuse) in rows {
+        let row = format!("{dial_global:?} {dial_own:?} -> {global:?} {own:?}");
+        let (up, url) = upstream(vec![Act::Send(vec![CREATED, COMPLETED]); 2]).await;
+        let executor = CodexExecutor::new().unwrap();
+        let turn = |global: &str, own: Option<&str>, continuation: bool| {
+            let cfg = Config::parse(&format!("requests:\n  proxy-url: {global:?}\n")).unwrap();
+            let mut cred = credential(&url);
+            if let Some(own) = own {
+                cred.attributes.insert("proxy_url".into(), own.into());
+            }
+            let executor = &executor;
+            async move {
+                let response = executor
+                    .execute_in_session(&cred, request(BODY), &cfg, &session(continuation))
+                    .await?;
+                let events = collect(response).await;
+                assert!(events.len() == 2 && events.iter().all(Result::is_ok), "{events:?}");
+                Ok::<(), ExecError>(())
+            }
+        };
+        turn(dial_global, dial_own, false)
+            .await
+            .unwrap_or_else(|e| panic!("{row}: first turn {e:?}"));
+        match turn(global, own, true).await {
+            Ok(()) => assert!(reuse, "{row}: kept the socket"),
+            Err(e) => assert!(!reuse && e.is_replay_required(), "{row}: {e:?}"),
+        }
+        assert_eq!(up.dials.lock().unwrap().len(), 1, "{row}");
+    }
+}
+
 /// A rejected handshake reports the upstream status with Go's classification and the
 /// quota headers are observed.
 #[tokio::test]
@@ -537,7 +633,7 @@ async fn a_socket_dropped_without_a_close_frame_reads_as_close_1006() {
 async fn pings_do_not_extend_the_idle_deadline() {
     let (_up, url) = upstream(vec![Act::Pings(Duration::from_millis(100), 30)]).await;
     let mut executor = CodexExecutor::new().unwrap();
-    executor.ws = Pool::with_idle(Duration::from_millis(400));
+    executor.ws = Arc::new(Pool::with_idle(Duration::from_millis(400)));
     let response = executor
         .execute_in_session(&credential(&url), request(BODY), &Config::default(), &session(false))
         .await
@@ -576,10 +672,10 @@ async fn a_write_the_upstream_never_reads_times_out() {
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     let mut executor = CodexExecutor::new().unwrap();
-    executor.ws = Pool::with_write(WriteLimit {
+    executor.ws = Arc::new(Pool::with_write(WriteLimit {
         floor: Duration::from_millis(300),
         rate: usize::MAX,
-    });
+    }));
     // Far larger than loopback socket buffers, so the write cannot finish.
     let body = format!(
         r#"{{"model":"gpt-fixture","input":[{{"type":"message","role":"user","content":"{}"}}]}}"#,
@@ -1141,11 +1237,11 @@ async fn an_abandoned_turn_keeps_its_session_until_its_observation_returns() {
 /// A pooled socket on session "conn-1" to the mock at `url`, its reader running.
 async fn pooled(executor: &CodexExecutor, url: &str) -> Arc<super::Upstream> {
     let session = executor.ws.session("conn-1");
-    let target = Target {
-        credential: "codex-ws.json".into(),
-        url: ws_url(&format!("{url}/responses")).unwrap(),
-        proxy: crate::proxy::Proxy::Direct,
-    };
+    let target = Target::new(
+        &credential(url),
+        ws_url(&format!("{url}/responses")).unwrap(),
+        &Config::default(),
+    );
     executor
         .ensure(&session, &target, &HeaderMap::new(), "gpt-fixture", false, None)
         .await

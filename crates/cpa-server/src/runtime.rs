@@ -110,6 +110,10 @@ impl Runtime {
         rt.store.configure_cooldown_store(cooldown_dir);
         // Failed attempts publish Go's error events on the RESP `errors` channel.
         let _ = rt.store.error_events.set(rt.usage.clone());
+        let _ = rt
+            .store
+            .session_closer
+            .set(Box::new(rt.executors.credential_session_closer()));
         rt
     }
 
@@ -1172,6 +1176,22 @@ pub struct CredentialStore {
     /// `LastRefreshedAt`).
     unauthorized: Mutex<Rejections>,
     unauthorized_noted: tokio::sync::watch::Sender<()>,
+    /// Ends the upstream WebSocket sessions a removed credential serves (set by the
+    /// runtime to [`cpa_exec::Executors::credential_session_closer`]).
+    session_closer: std::sync::OnceLock<SessionCloser>,
+}
+
+/// Ends the upstream WebSocket sessions of one removed credential.
+type SessionCloser = Box<dyn Fn(&str) + Send + Sync>;
+
+/// The ids in `before` that `after` no longer has.
+fn removed_ids(before: &[Arc<Credential>], after: &[Arc<Credential>]) -> Vec<String> {
+    let kept: std::collections::HashSet<&str> = after.iter().map(|c| c.id.as_str()).collect();
+    before
+        .iter()
+        .filter(|c| !kept.contains(c.id.as_str()))
+        .map(|c| c.id.clone())
+        .collect()
 }
 
 /// Whether `key` is set to `true` on `credential` (Go `IsPluginVirtualAuth`,
@@ -1213,6 +1233,7 @@ impl CredentialStore {
             changed: tokio::sync::watch::Sender::new(()),
             unauthorized: Mutex::default(),
             unauthorized_noted: tokio::sync::watch::Sender::new(()),
+            session_closer: std::sync::OnceLock::new(),
         })
     }
 
@@ -1958,7 +1979,7 @@ impl CredentialStore {
     ) -> Result<(), PatchError> {
         // A new ID can replace another credential, whose own write lock is not held here.
         let exclusive = next.as_ref().is_some_and(|n| n.id != id);
-        self.write_unlocked(
+        let removed = self.write_unlocked(
             id,
             expected_revision,
             exclusive,
@@ -1969,7 +1990,7 @@ impl CredentialStore {
                 Ok(Some((path.clone(), bytes.to_vec(), next)))
             },
             |inner, index, _, next| {
-                inner.creds.remove(index);
+                let previous = inner.creds.remove(index);
                 if let Some(mut next) = next {
                     inner.generation += 1;
                     next.revision = inner.generation;
@@ -1983,11 +2004,23 @@ impl CredentialStore {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .reconcile(&inner.creds);
+                removed_ids(&[previous], &inner.creds)
             },
         )?;
+        self.close_sessions(removed.unwrap_or_default());
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
         Ok(())
+    }
+
+    /// Go `Service.removeAuth` (1e37b52b): a credential that left the set ends only the
+    /// upstream WebSocket sessions it serves. Runs with the set's locks released.
+    fn close_sessions(&self, removed: Vec<String>) {
+        if let Some(close) = self.session_closer.get() {
+            for id in removed {
+                close(&id);
+            }
+        }
     }
 
     /// Replaces the credential set (watcher reload, management import/delete). Unchanged
@@ -2064,6 +2097,7 @@ impl CredentialStore {
             .cloned()
             .collect();
         next.extend(runtime);
+        let removed = removed_ids(&inner.creds, &next);
         inner.creds = next;
         inner.epoch += 1;
         self.changed.send_replace(());
@@ -2073,6 +2107,7 @@ impl CredentialStore {
             .reconcile(&inner.creds);
         drop(guard);
         drop(reload);
+        self.close_sessions(removed);
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
         rejected
@@ -2107,6 +2142,7 @@ impl CredentialStore {
                 }
             }
         }
+        let removed = removed_ids(&inner.creds, &next);
         inner.creds = next;
         inner.epoch += 1;
         self.changed.send_replace(());
@@ -2116,6 +2152,7 @@ impl CredentialStore {
             .reconcile(&inner.creds);
         drop(inner);
         drop(reload);
+        self.close_sessions(removed);
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
     }
