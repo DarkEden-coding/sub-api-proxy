@@ -289,12 +289,12 @@ impl Sessions {
     /// Go `beginSIWCFileMutation` (callers hold `disk`): a v8 upload or delete of a
     /// binding's file, even an identical one, fails that binding.
     pub(super) fn invalidate_siwc(&self, path: &std::path::Path) {
-        let target = super::siwc::canonical(path);
         let mut map = self.lock();
         for s in map.values_mut() {
-            if let Some(flow) = s.siwc.as_ref().filter(|f| f.path == target)
+            if let Some(flow) = s.siwc.as_ref()
                 && !s.completed
                 && s.status.is_empty()
+                && super::siwc::same_path(path, &flow.path)
             {
                 flow.cancel();
                 s.status = "SIWC binding target changed; start a new binding".into();
@@ -1660,6 +1660,25 @@ mod tests {
         s.register("live", "kimi");
         assert!(s.cancel("live"));
         assert!(s.get("live").is_none());
+    }
+
+    /// Go `TestSIWCBindCommitSurvivesSessionExpiry`: a binding whose disk commit has
+    /// started outlives its session expiry so it can report the outcome, and completing
+    /// it releases that hold.
+    #[test]
+    fn a_claimed_siwc_commit_outlives_the_session_expiry() {
+        let s = Sessions::default();
+        let flow = super::super::siwc::Flow::idle("codex.json");
+        assert!(s.register_siwc("st", flow.clone(), Duration::from_secs(300)));
+        assert!(s.claim_siwc_commit("st", &flow));
+        let expire = || s.lock().get_mut("st").unwrap().expires = Instant::now();
+        expire();
+        assert_eq!(s.get("st"), Some(("codex".into(), String::new(), false)));
+        assert!(!s.cancel("st"), "a started commit is past cancelling");
+        s.complete("st");
+        assert_eq!(s.get("st"), Some(("codex".into(), String::new(), true)));
+        expire();
+        assert!(s.get("st").is_none(), "the completed session no longer holds on");
     }
 
     #[test]
