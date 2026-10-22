@@ -126,6 +126,12 @@ pub trait UsageObserver: Send + Sync {
     /// The translated payload sent upstream in `format` (Go
     /// `SetTranslatedReasoningEffort`: the record's `reasoning_effort`).
     fn request(&self, format: Format, payload: &[u8]);
+    /// The attempt runs on a plugin executor registered for `provider` (Go
+    /// `NewExecutorUsageReporter` with the host's `executorAdapter`): the record's
+    /// provider is that identifier and its executor type `executorAdapter`.
+    fn plugin_executor(&self, provider: &str) {
+        let _ = provider;
+    }
     /// Go `ParsePluginExecutorResponseUsage`: a plugin executor's whole response in its
     /// output `protocol`, which may be a format cliproxy-rs does not know.
     fn plugin_response_body(&self, protocol: &str, body: &[u8]) {
@@ -348,6 +354,12 @@ impl UsageSink {
     pub fn request(&self, format: Format, payload: &[u8]) {
         if let Some(o) = &self.0 {
             o.request(format, payload);
+        }
+    }
+
+    pub fn plugin_executor(&self, provider: &str) {
+        if let Some(o) = &self.0 {
+            o.plugin_executor(provider);
         }
     }
 

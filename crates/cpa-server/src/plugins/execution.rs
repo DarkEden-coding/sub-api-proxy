@@ -406,6 +406,7 @@ pub(crate) async fn execute_credential(
     // Go `SetTranslatedReasoningEffort` and `StartResponseTTFT`; counting has no
     // reporter.
     if !count {
+        req.usage.plugin_executor(&adapter.provider);
         req.usage.request_for(&negotiated.input, &request.payload);
         req.usage.round_trip_started();
     }
@@ -718,6 +719,8 @@ struct JsonScan {
     in_string: bool,
     escaped: bool,
     opened: bool,
+    /// The last non-whitespace byte scanned.
+    last: u8,
     /// A close without an open, or a balanced value that failed validation: no
     /// extension of the line can become one whole JSON value.
     broken: bool,
@@ -728,6 +731,9 @@ impl JsonScan {
     /// whole object or array.
     fn advance(&mut self, buffer: &[u8]) -> bool {
         for &b in &buffer[self.offset..] {
+            if !b.is_ascii_whitespace() {
+                self.last = b;
+            }
             if self.in_string {
                 match b {
                     _ if self.escaped => self.escaped = false,
@@ -751,11 +757,7 @@ impl JsonScan {
             }
         }
         self.offset = buffer.len();
-        !self.broken
-            && self.opened
-            && self.depth == 0
-            && !self.in_string
-            && matches!(buffer.trim_ascii_end().last(), Some(b'}' | b']'))
+        !self.broken && self.opened && self.depth == 0 && !self.in_string && matches!(self.last, b'}' | b']')
     }
 }
 
@@ -775,10 +777,14 @@ impl StreamUsage {
             self.scan = JsonScan::default();
         }
         // A complete JSON payload without its newline counts now, as Go's does. Go
-        // revalidates the whole remainder on every chunk; here only a remainder whose
-        // brackets have just balanced is validated, once.
-        // ponytail: a bare scalar payload without its newline waits for the next line
-        // (Go flushes it); no usage line is a scalar.
+        // runs `json.Valid` on the whole remainder after every chunk (quadratic in a
+        // line split into many chunks); here each byte is scanned once, and the
+        // remainder is validated only when its outer brackets close: a valid one is
+        // consumed, an invalid one is never validated again.
+        // ponytail: a newline-free scalar remainder such as `data: null` is not flushed
+        // (Go flushes it, since `json.Valid("null")` holds), so the next chunk joins it
+        // into one invalid line and a usage line arriving that way is lost. Flushing
+        // would mean validating scalar prefixes; add it if a plugin emits scalars.
         if self.scan.advance(&self.buffer) {
             if extract_stream_json(&self.buffer).is_some_and(cpa_common::json::std_valid) {
                 let rest = std::mem::take(&mut self.buffer);

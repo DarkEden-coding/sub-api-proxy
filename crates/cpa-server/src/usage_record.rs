@@ -1924,6 +1924,8 @@ struct Reported {
     discarded: bool,
     exchange: Exchange,
     claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
+    /// The plugin executor's provider when a plugin runs the attempt.
+    plugin_provider: Option<String>,
 }
 
 impl Reported {
@@ -1992,6 +1994,10 @@ impl cpa_core::exec::UsageObserver for Observer {
         r.model.observe(line, &self.provider);
     }
 
+    fn plugin_executor(&self, provider: &str) {
+        self.lock().plugin_provider = Some(provider.to_owned());
+    }
+
     fn plugin_response_body(&self, protocol: &str, body: &[u8]) {
         let mut r = self.lock();
         r.seen = true;
@@ -2003,8 +2009,11 @@ impl cpa_core::exec::UsageObserver for Observer {
         r.seen = true;
         r.stream.plugin_line(protocol, line);
         // Go `ObserveResponseModel` on each chunk (the TTFT observers) and the stream
-        // buffer's own model.
-        r.model.observe(line, &self.provider);
+        // buffer's own model, for the executor's provider.
+        let Reported {
+            model, plugin_provider, ..
+        } = &mut *r;
+        model.observe(line, plugin_provider.as_deref().unwrap_or(&self.provider));
     }
 
     fn request(&self, format: Format, payload: &[u8]) {
@@ -2256,6 +2265,11 @@ impl Tracker {
         // Keep the returned TTL buckets as observations, not inferred accounting.
         let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
         let mut record = std::mem::take(&mut self.record);
+        if let Some(provider) = &reported.plugin_provider {
+            // Go `ExecutorTypeName` of the host's `*executorAdapter`.
+            record.provider.clone_from(provider);
+            record.executor_type = "executorAdapter".into();
+        }
         let mut telemetry_only = false;
         let (latency, ttft);
         if let Some(outcome) = reported.outcome {

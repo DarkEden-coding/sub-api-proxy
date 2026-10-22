@@ -1508,6 +1508,7 @@ async fn a_plugin_executor_publishes_the_usage_of_its_own_answer() {
         assert_eq!(response.status().as_u16(), 200, "{answer}");
         let record = &usage_records(&env.rt, 1).await[0];
         assert_eq!(record["provider"], "acme", "{record}");
+        assert_eq!(record["executor_type"], "executorAdapter", "{record}");
         assert_eq!(record["stream"], false, "{record}");
         assert_eq!(record["failed"], false, "{record}");
         assert_eq!(record["reasoning_effort"], "high", "{record}");
@@ -1599,5 +1600,188 @@ async fn a_plugin_executor_stream_publishes_its_usage_even_when_it_fails() {
         "{record}"
     );
     assert_eq!(record["fail"]["body"], "mid-stream chunk failure", "{record}");
+    env.finish().await;
+}
+
+/// Go `NewExecutorUsageReporter(ctx, a, …)` for a credential-bound plugin attempt whose
+/// formats differ from the client's: exactly one record per attempt, typed as the
+/// host's `executorAdapter` for the plugin's provider, with usage read in the plugin's
+/// Claude output (the client's chat format misses its cache reads) and the reasoning effort
+/// of the translated payload (`max` becomes a 128000-token budget, which reads back as
+/// `xhigh`). A stream the client drops publishes one 499 "context canceled" record
+/// keeping the usage seen so far. Counting tokens and the model router's credential-less
+/// attempts create no reporter, so they publish nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
+    let Some(env) = env(
+        "plugin-owned-usage-formats",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: claude\n      outputs: claude"),
+            ("rt", "model_router,executor"),
+        ],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let no_more_records = || async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let extra = env.rt.usage_queue().pop_oldest(10);
+        assert!(
+            extra.is_empty(),
+            "{:?}",
+            extra.iter().map(|r| String::from_utf8_lossy(r)).collect::<Vec<_>>()
+        );
+    };
+    let encode = |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+    let tokens = |record: &Value| {
+        let t = &record["tokens"];
+        (
+            t["input_tokens"].as_i64().unwrap(),
+            t["output_tokens"].as_i64().unwrap(),
+            t["cache_read_tokens"].as_i64().unwrap(),
+        )
+    };
+
+    // Buffered.
+    canned(
+        &env.records,
+        "acme",
+        "executor.execute",
+        json!({"Payload": encode(
+            r#"{"id":"msg_1","type":"message","role":"assistant","model":"acme-1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":34,"output_tokens":499,"cache_read_input_tokens":6}}"#
+        )}),
+    );
+    let (got, body) = env
+        .post(r#"{"model":"acme-1","reasoning_effort":"max","messages":[{"role":"user","content":"hi"}]}"#.into())
+        .await;
+    assert_eq!(got, 200, "{body}");
+    let sent = calls(&env.records, "acme", "executor.execute");
+    let payload = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        sent[0]["Payload"].as_str().unwrap(),
+    )
+    .unwrap();
+    let payload: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(payload["thinking"]["budget_tokens"], 128000, "{payload}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    no_more_records().await;
+    assert_eq!(
+        (
+            &record["provider"],
+            &record["executor_type"],
+            &record["reasoning_effort"]
+        ),
+        (&json!("acme"), &json!("executorAdapter"), &json!("xhigh")),
+        "{record}"
+    );
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(false), (34, 499, 6)),
+        "{record}"
+    );
+
+    // A stream the client drops while the plugin holds it open. Each chunk is one
+    // `data:` line, as Go's Claude translator reads a chunk.
+    let dir = env.records.join("respond").join("acme");
+    std::fs::write(dir.join("executor.execute_stream.close.hold"), "").unwrap();
+    std::fs::write(
+        dir.join("executor.execute_stream.script.once.json"),
+        json!({"chunks": [
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"acme-1\",\"content\":[],\"usage\":{\"input_tokens\":21,\"output_tokens\":0,\"cache_read_input_tokens\":4}}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":21,\"output_tokens\":9,\"cache_read_input_tokens\":4}}\n"
+        ], "error": ""})
+        .to_string(),
+    )
+    .unwrap();
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = r#"{"model":"acme-1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let mut conn = tokio::net::TcpStream::connect(env.proxy).await.unwrap();
+        let head = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            env.proxy,
+            body.len()
+        );
+        conn.write_all(head.as_bytes()).await.unwrap();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !String::from_utf8_lossy(&seen).contains("data:") {
+            let n = tokio::time::timeout(Duration::from_secs(5), conn.read(&mut buf))
+                .await
+                .unwrap_or_else(|_| panic!("no first event: {}", String::from_utf8_lossy(&seen)))
+                .unwrap();
+            assert!(n > 0, "stream ended early: {}", String::from_utf8_lossy(&seen));
+            seen.extend_from_slice(&buf[..n]);
+        }
+        // Both chunks are emitted before the hold; give the second one time to land.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let record = &usage_records(&env.rt, 1).await[0];
+    std::fs::remove_file(dir.join("executor.execute_stream.close.hold")).unwrap();
+    no_more_records().await;
+    assert_eq!(
+        (
+            record["failed"].clone(),
+            record["fail"]["status_code"].clone(),
+            record["fail"]["body"].clone(),
+            tokens(record)
+        ),
+        (json!(true), json!(499), json!("context canceled"), (21, 9, 4)),
+        "{record}"
+    );
+    assert_eq!(record["executor_type"], "executorAdapter", "{record}");
+
+    // Counting tokens.
+    canned(
+        &env.records,
+        "acme",
+        "executor.count_tokens",
+        json!({"Payload": encode(r#"{"input_tokens":5}"#)}),
+    );
+    let response = wreq::Client::new()
+        .post(format!("http://{}/v1/messages/count_tokens", env.proxy))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"acme-1","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "{}", response.text().await.unwrap());
+    assert_eq!(calls(&env.records, "acme", "executor.count_tokens").len(), 1);
+    no_more_records().await;
+
+    // The model router's own executor, without a credential.
+    std::fs::create_dir_all(env.records.join("respond").join("rt")).unwrap();
+    std::fs::write(
+        env.records.join("respond").join("rt").join("model.route.once.json"),
+        json!({"ok":true,"result":{"Handled":true,"TargetKind":"self","Target":"rt","Reason":"test"}}).to_string(),
+    )
+    .unwrap();
+    canned(
+        &env.records,
+        "rt",
+        "executor.execute",
+        json!({"Payload": encode(
+            r#"{"id":"c1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#
+        )}),
+    );
+    let (got, body) = env.chat("routed-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(calls(&env.records, "rt", "executor.execute").len(), 1);
+    no_more_records().await;
     env.finish().await;
 }
