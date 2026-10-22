@@ -2068,6 +2068,48 @@ impl CredentialStore {
         rejected
     }
 
+    /// Replaces the config-sourced credentials (Home config API keys, Go
+    /// `registerConfigAPIKeyAuths`) under a single write lock and keeps every other
+    /// current entry, so a concurrent [`Self::upsert`] or relay session change is never
+    /// undone the way a snapshot followed by [`Self::reconcile`] could undo it. An
+    /// unchanged key keeps its revision, as in `reconcile`.
+    pub fn replace_config(&self, keys: Vec<Credential>) {
+        let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let mut next: Vec<_> = inner
+            .creds
+            .iter()
+            .filter(|c| !matches!(c.source, Source::Config { .. }))
+            .cloned()
+            .collect();
+        for mut key in keys {
+            match inner
+                .creds
+                .iter()
+                .find(|c| c.id == key.id && unchanged(c, &key))
+                .cloned()
+            {
+                Some(existing) => next.push(existing),
+                None => {
+                    inner.generation += 1;
+                    key.revision = inner.generation;
+                    next.push(Arc::new(key));
+                }
+            }
+        }
+        inner.creds = next;
+        inner.epoch += 1;
+        self.changed.send_replace(());
+        self.scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconcile(&inner.creds);
+        drop(inner);
+        drop(reload);
+        self.clear_disabled_cooldowns();
+        self.persist_cooldowns();
+    }
+
     /// Inserts or replaces one credential (a plugin's `host.auth.save`) under a single
     /// write lock, so a concurrent `apply_patch` on another credential is never undone
     /// the way a snapshot followed by [`Self::reconcile`] could undo it. An unchanged
@@ -2838,6 +2880,57 @@ mod tests {
         assert_eq!(store.get("saved.json").unwrap().metadata["n"], 499);
         assert_eq!(store.snapshot().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Home config updates replacing the config keys never undo a concurrent plugin save
+    /// or relay session change, and unchanged keys keep their revision.
+    #[test]
+    fn replace_config_keeps_concurrent_changes_to_other_credentials() {
+        let keys = |key: &str| {
+            let cfg = cpa_core::config::Config::parse(&format!(
+                "codex-api-key:\n  - api-key: {key}\n    base-url: http://127.0.0.1:9\n"
+            ))
+            .unwrap();
+            cpa_core::config::credentials::from_config(&cfg)
+        };
+        let store = Arc::new(CredentialStore::new(keys("sk-a")));
+        let mut saved = Credential::relay_session("saved");
+        saved.source = Source::File("saved.json".into());
+        saved.id = "saved.json".into();
+        // Each step checks that the previous one survived the concurrent replacements.
+        let changer = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for n in 0..2000 {
+                    if n > 0 {
+                        assert_eq!(
+                            store.get("saved.json").unwrap().metadata["n"],
+                            n - 1,
+                            "a save was undone"
+                        );
+                        assert!(store.get("relay").is_none(), "a closed relay session came back");
+                    }
+                    let mut next = saved.clone();
+                    next.metadata.insert("n".into(), n.into());
+                    store.upsert(next);
+                    store.add_runtime(Credential::relay_session("relay"));
+                    store.remove_runtime("relay");
+                }
+            })
+        };
+        let mut n = 0;
+        while !changer.is_finished() {
+            store.replace_config(keys(if n % 2 == 0 { "sk-b" } else { "sk-a" }));
+            n += 1;
+        }
+        changer.join().unwrap();
+        store.replace_config(keys("sk-a"));
+        let revision = store.snapshot().iter().find(|c| c.id != "saved.json").unwrap().revision;
+        store.replace_config(keys("sk-a"));
+        let ids: Vec<_> = store.snapshot().iter().map(|c| (c.id.clone(), c.revision)).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&(keys("sk-a")[0].id.clone(), revision)), "{ids:?}");
+        assert_eq!(store.get("saved.json").unwrap().metadata["n"], 1999);
     }
 
     /// The next write of `path` (from any thread) stops inside [`write_bytes_atomic`],
