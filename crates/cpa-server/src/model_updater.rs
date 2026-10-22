@@ -246,15 +246,14 @@ mod tests {
             openai: Default::default(),
             google: Default::default(),
         };
-        let rt = Arc::new(crate::testing::runtime(
-            cpa_core::config::Config::default(),
-            Vec::new(),
-            executors,
-        ));
+        let dir = std::env::temp_dir().join(format!("cpa-updater-{}", uuid::Uuid::new_v4()));
+        let cfg = cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.display())).unwrap();
+        let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
         start(&rt, false);
         start(&rt, true);
         let _ = crate::codex_models::response(&rt, "0.130.0");
         assert!(!cpa_exec::codex_catalog_updater::codex_client_models_updater_started());
         assert!(MODELS_STARTED.get().is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
