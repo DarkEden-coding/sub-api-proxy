@@ -731,6 +731,89 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Go `TestSIWCFileMutationRejectsLateExchange`: the exchange has returned and its
+    /// commit waits on `disk` while a v8 mutation of the file runs there. The commit
+    /// then finds the binding failed and writes nothing: a reupload keeps its bytes,
+    /// and a deleted file stays gone. The deletes run the route's own code under the
+    /// lock; the upload does what `store_file` does there.
+    ///
+    /// Single-threaded, as in the test above: once the preparation lock is taken, the
+    /// commit is running on the blocking pool, paused on `disk`.
+    #[tokio::test]
+    async fn a_late_exchange_lands_nothing_after_a_v8_mutation() {
+        let app = axum::Router::new().route(
+            "/api/accounts/oauth/token",
+            axum::routing::post(|| async {
+                r#"{"access_token":"siwc-at","refresh_token":"siwc-rt","id_token":"siwc-id","scope":"openid chatgpt.tokens.use.direct","expires_in":3600}"#
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (operation, query, body) in [
+            ("upload", "", ""),
+            ("delete", "name=codex.json", ""),
+            ("delete-all", "all=true", ""),
+            ("delete-batch", "", r#"["codex.json","other.json"]"#),
+        ] {
+            let (dir, file, state) = fixture(Some(base.clone()));
+            std::fs::write(dir.join("other.json"), codex_file("other")).unwrap();
+            let sid = started_state(bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)).await).await;
+            let reupload = codex_file("reuploaded");
+            let (held_tx, held) = std::sync::mpsc::channel();
+            let (go, go_rx) = std::sync::mpsc::channel::<()>();
+            let mutation = std::thread::spawn({
+                let (state, file, reupload) = (state.clone(), file.clone(), reupload.clone());
+                move || {
+                    let _disk = state.disk.lock().unwrap();
+                    held_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    if operation == "upload" {
+                        state.oauth.invalidate_siwc(&file);
+                        std::fs::write(&file, reupload).unwrap();
+                    } else {
+                        let q = Query::parse(Some(query.to_owned()));
+                        let response = super::super::auth_files::delete_sync(&state, &q, body.as_bytes(), true);
+                        assert_eq!(response.status(), StatusCode::OK, "{operation}");
+                    }
+                }
+            });
+            held.recv().unwrap();
+            let req = CallbackRequest {
+                state: sid.clone(),
+                code: "c".into(),
+                client_id: "oaiapp_issued".into(),
+                ..Default::default()
+            };
+            assert_eq!(callback(&state, &req, None).unwrap().status(), StatusCode::OK);
+            let lock = state.rt.store().prepare_lock("codex.json");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while lock.try_lock().is_ok() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the commit waits on disk");
+            go.send(()).unwrap();
+            mutation.join().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), lock.lock_owned())
+                .await
+                .expect("the commit returns");
+            let (_, status, _, _, completed) = state.oauth.details(&sid).unwrap();
+            assert_eq!(
+                (status.as_str(), completed),
+                ("SIWC binding target changed; start a new binding", false),
+                "{operation}"
+            );
+            if operation == "upload" {
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), reupload, "{operation}");
+            } else {
+                assert!(!file.exists(), "{operation}: the deleted file came back");
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     /// Go `TestSIWCMutationPathAliases`, plus what Go's `os.SameFile` adds: a hard link
     /// is the same file, and a file that is gone matches through its folder's real path.
     #[cfg(unix)]

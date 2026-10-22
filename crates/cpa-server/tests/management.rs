@@ -4025,9 +4025,10 @@ async fn siwc_binding_flows_follow_go() {
     assert_eq!(upload("v8").await.0, 200);
     assert_eq!(final_status(&base, &sid, 5).await, changed);
 
-    // Go `TestSIWCFileMutationRejectsLateExchange`: every v8 mutation of the file fails
-    // a pending binding, and nothing lands after it: a reupload keeps its bytes, and a
-    // deleted file and its registration stay gone.
+    // Go `TestSIWCFileMutationRejectsLateExchange`, by route: each v8 mutation of the
+    // file fails a binding whose exchange is in flight, and stops that exchange. A
+    // result that returns while the mutation runs is
+    // `management::siwc::tests::a_late_exchange_lands_nothing_after_a_v8_mutation`.
     for operation in ["upload", "delete", "delete-all", "delete-batch"] {
         let sid = pending().await;
         let before = bound_file();
