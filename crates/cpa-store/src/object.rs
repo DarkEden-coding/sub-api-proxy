@@ -644,6 +644,33 @@ impl cpa_server::persist::StorePersister for ObjectPersister {
     }
 }
 
+/// On every platform: the template reaches a new folder, and no template gives an
+/// empty file.
+#[cfg(test)]
+mod seed_tests {
+    #[test]
+    fn seed_config_copies_the_template() {
+        let root = std::env::temp_dir().join(format!(
+            "cpa-store-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let example = root.join("config.example.yaml");
+        std::fs::write(&example, "port: 8317\r\n").unwrap();
+        let target = root.join("store").join("config").join("config.yaml");
+        super::seed_config(&example, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"port: 8317\r\n");
+        let empty = root.join("empty.yaml");
+        super::seed_config(std::path::Path::new(""), &empty).unwrap();
+        assert_eq!(std::fs::read(&empty).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 // Mode-bit assertions: Unix only.
 #[cfg(all(test, unix))]
 mod tests {
