@@ -7,6 +7,7 @@ use crate::{
     thinking,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::gostr::GoStr;
 use std::collections::{HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -37,7 +38,7 @@ pub(crate) fn apply_effort(out: &mut Vec<u8>, v: &Res<'_>, model: &str) {
     if !v.exists() {
         return;
     }
-    let effort = v.str().trim().to_lowercase();
+    let effort = v.str().trim().go_lower();
     if effort.is_empty() {
         return;
     }
@@ -312,9 +313,9 @@ fn tools(out: &mut Vec<u8>, root: &Res<'_>) {
                 allowed_names.insert(name);
             }
         }
-        let mut value = choice.get("allowed_tools.mode").str().trim().to_lowercase();
+        let mut value = choice.get("allowed_tools.mode").str().trim().go_lower();
         if value.is_empty() {
-            value = choice.get("mode").str().trim().to_lowercase();
+            value = choice.get("mode").str().trim().go_lower();
         }
         if !value.is_empty() {
             mode = value;

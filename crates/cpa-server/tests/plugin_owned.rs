@@ -1,7 +1,8 @@
 //! Go v8.0.35 plugin-owned providers without a model router: a catalog-only plugin's
 //! models bind to the credentials of their provider (with the credential's excluded
 //! models applied), and a plugin executor serves those credentials through the
-//! ordinary selection loop. Private auth-dir, native test plugins, no upstream.
+//! ordinary selection loop. Plugin schedulers choose among built-in credentials.
+//! Private auth-dir, native test plugins, loopback-only upstreams.
 #![cfg(unix)]
 
 use std::net::SocketAddr;
@@ -53,6 +54,18 @@ async fn env(
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
 ) -> Option<Env> {
+    env_with(name, plugins, extra_yaml, auths, prepare, Default::default()).await
+}
+
+/// [`env`] with a Codex executor (for Codex live endpoints on a local mock).
+async fn env_with(
+    name: &str,
+    plugins: &[(&str, &str)],
+    extra_yaml: &str,
+    auths: &[(&str, &str)],
+    prepare: impl FnOnce(&Path),
+    codex: cpa_exec::codex::CodexExecutor,
+) -> Option<Env> {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let serial = SERIAL.lock().await;
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -85,7 +98,7 @@ async fn env(
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex: Default::default(),
+            codex,
             devices: Default::default(),
             openai: Default::default(),
             google: Default::default(),
@@ -536,6 +549,560 @@ async fn a_refused_translation_answers_400_without_calling_the_routed_executor()
     env.finish().await;
 }
 
+/// A loopback OpenAI-compatible upstream that records each request's bearer key and
+/// fails with 500 for the key in `fail`.
+async fn keyed_upstream(seen: Arc<std::sync::Mutex<Vec<String>>>, fail: Arc<std::sync::Mutex<String>>) -> String {
+    let handler = move |headers: axum::http::HeaderMap| {
+        let (seen, fail) = (seen.clone(), fail.clone());
+        async move {
+            let key = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .trim_start_matches("Bearer ")
+                .to_owned();
+            seen.lock().unwrap().push(key.clone());
+            if *fail.lock().unwrap() == key {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "down".to_owned());
+            }
+            (
+                axum::http::StatusCode::OK,
+                r#"{"id":"r","object":"chat.completion","created":1,"model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.to_owned(),
+            )
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handler))
+            .await
+            .unwrap()
+    });
+    url
+}
+
+/// Go `pickViaPluginScheduler` in `pickNextMixedLegacy`: the plugin scheduler sees the
+/// ready candidates of the highest priority tier (all tiers when it asks), without
+/// secret attributes, and picks one, rejects, or delegates to a built-in strategy;
+/// an unusable answer leaves the choice to the configured selector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_scheduler_picks_rejects_or_delegates() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::Mutex::new(String::new()));
+    let upstream = keyed_upstream(seen.clone(), fail.clone()).await;
+    let yaml = format!(
+        "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    priority: 5\n    api-key-entries: [{{api-key: k-a}}, {{api-key: k-b}}]\n    models: [{{name: up-model}}]\n  - name: low\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-low}}]\n    models: [{{name: up-model}}]\n"
+    );
+    // Codex live calls answer 201 with the `Thread-Id` as the call ID.
+    let live_upstream = {
+        let handler = |headers: axum::http::HeaderMap| async move {
+            let id = headers["thread-id"].to_str().unwrap().to_owned();
+            (
+                axum::http::StatusCode::CREATED,
+                [
+                    ("location", format!("/v1/live/{id}")),
+                    ("content-type", "application/sdp".to_owned()),
+                ],
+                "v=0",
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
+    for across in [false, true] {
+        // The second run also turns session affinity on.
+        let (caps, yaml) = if across {
+            (
+                "scheduler,scheduler_across_priorities",
+                format!("{yaml}routing:\n  session-affinity: true\n"),
+            )
+        } else {
+            ("scheduler", yaml.clone())
+        };
+        let codex = cpa_exec::codex::CodexExecutor::with_client(
+            wreq::Client::new(),
+            cpa_exec::codex_oauth::CodexOAuth::new(wreq::Client::new()),
+        )
+        .with_live_endpoints(
+            format!("{live_upstream}/backend-api/codex/realtime/calls"),
+            format!("ws{}/v1", live_upstream.trim_start_matches("http")),
+        );
+        let Some(env) = env_with(
+            &format!("plugin-scheduler-{across}"),
+            &[("sched", caps)],
+            &yaml,
+            &[(
+                "codex.json",
+                r#"{"type":"codex","access_token":"at-FAKE","account_id":"acct-FAKE"}"#,
+            )],
+            |_| {},
+            codex,
+        )
+        .await
+        else {
+            return;
+        };
+        let key_of = |id: &str| env.rt.store().get(id).unwrap().attributes["api_key"].clone();
+        let respond = |method: &str, once: bool, envelope: Value| {
+            let dir = env.records.join("respond").join("sched");
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = if once {
+                format!("{method}.once.json")
+            } else {
+                format!("{method}.json")
+            };
+            std::fs::write(dir.join(file), envelope.to_string()).unwrap();
+        };
+        let picks = || calls(&env.records, "sched", "scheduler.pick");
+        // Alpha Search selects one provider (Go `pickNextLegacy`), which the request
+        // names, and returns a reject unenriched with Go's 503 fallback status.
+        let alpha = || async {
+            respond(
+                "scheduler.pick",
+                true,
+                json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+            );
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let alpha = wreq::Client::new()
+                .post(format!("http://{}/backend-api/codex/alpha/search", env.proxy))
+                .header("x-custom", "v")
+                .body(r#"{"id":"s-1","model":"gpt-5.5","query":"q"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(alpha.status().as_u16(), 503);
+            assert_eq!(alpha.text().await.unwrap(), r#"{"error":"quota_hold: wait"}"#);
+            let pick = picks().pop().expect("the scheduler was asked");
+            assert_eq!(pick["Provider"], "codex");
+            assert_eq!(pick["Providers"], json!(["codex"]));
+            assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+            // The synthesized session header (Go `Header.Set` casing).
+            assert_eq!(pick["Options"]["Headers"]["X-Session-Id"], json!(["s-1"]));
+            assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+            assert!(
+                pick["Options"]["Metadata"].get("canonical_session_id").is_none(),
+                "no Enrich"
+            );
+            pick
+        };
+        let send_full = || async {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            seen.lock().unwrap().clear();
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .header("x-custom", "v")
+                .body(r#"{"model":"up-model","messages":[{"role":"user","content":"hi"}]}"#)
+                .send()
+                .await
+                .unwrap();
+            let headers = response.headers().clone();
+            (response.status().as_u16(), headers, response.text().await.unwrap())
+        };
+        let send = || async {
+            let (status, _, body) = send_full().await;
+            (status, body)
+        };
+
+        // The recorder picks the last candidate.
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let pick = picks().pop().expect("the scheduler was asked");
+        let candidates = pick["Candidates"].as_array().unwrap();
+        let keys: Vec<String> = candidates.iter().map(|c| key_of(c["ID"].as_str().unwrap())).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        let want: &[&str] = if across {
+            &["k-a", "k-b", "k-low"]
+        } else {
+            &["k-a", "k-b"]
+        };
+        assert_eq!(sorted, want, "across={across}: the candidates");
+        for c in candidates {
+            let priority = if key_of(c["ID"].as_str().unwrap()) == "k-low" {
+                0
+            } else {
+                5
+            };
+            assert_eq!(c["Priority"], priority);
+            assert_eq!(c["Status"], "active");
+            assert!(
+                c["Attributes"].get("api_key").is_none(),
+                "secret attributes stay out: {c}"
+            );
+            assert!(c["Attributes"].get("base_url").is_some(), "{c}");
+        }
+        let ids: Vec<&str> = candidates.iter().map(|c| c["ID"].as_str().unwrap()).collect();
+        let mut by_id = ids.clone();
+        by_id.sort();
+        assert_eq!(ids, by_id, "candidates are ordered by ID");
+        assert_eq!(pick["Provider"], "");
+        assert_eq!(pick["Model"], "up-model");
+        assert_eq!(pick["Stream"], false);
+        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+        let meta = &pick["Options"]["Metadata"];
+        assert_eq!(meta["session_affinity_provider"], "mixed");
+        assert_eq!(meta["session_affinity_model"], if across { "up-model" } else { "" });
+        assert_eq!(meta["request_path"], "/v1/chat/completions");
+        // Go `session.Enrich`: without an explicit session only the derived identity.
+        assert!(
+            meta["derived_session_id"].as_str().is_some_and(|d| !d.is_empty()),
+            "{meta}"
+        );
+        assert!(meta.get("canonical_session_id").is_none(), "{meta}");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [keys.last().unwrap().clone()],
+            "the picked credential serves"
+        );
+        if across {
+            // Go's affinity lookup cannot observe bindings a plugin scheduler made.
+            let host = env.rt.plugins().clone();
+            let instance = Arc::new(cpa_plugin::client::CallbackInstance::default());
+            let guard = cpa_plugin::testing::callback_context(
+                &host,
+                "sched",
+                instance.clone(),
+                cpa_plugin::callbacks::RequestScope::default(),
+            );
+            let lookup = tokio::task::spawn_blocking(move || {
+                cpa_plugin::testing::call_from_plugin(
+                    &host,
+                    "sched",
+                    &instance,
+                    "host.affinity.lookup",
+                    br#"{"provider":"up","model":"up-model","session_id":"s1"}"#,
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap();
+            drop(guard);
+            let lookup: Value = serde_json::from_slice(&lookup).unwrap();
+            assert_eq!(lookup["result"]["status"], "unsupported", "{lookup}");
+            // Under session affinity Alpha's selector argument is the route model.
+            assert_eq!(
+                alpha().await["Options"]["Metadata"]["session_affinity_model"],
+                "gpt-5.5"
+            );
+            env.finish().await;
+            continue;
+        }
+
+        // An unknown ID leaves the choice to the configured selector.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":"nope"}}),
+        );
+        assert_eq!(send().await.0, 200);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // Rejects: Go's auth codes are enriched, another code keeps its text.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true}}),
+        );
+        let (status, headers, body) = send_full().await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body,
+            r#"{"error":{"message":"auth_unavailable: scheduler rejected candidate selection (providers=openai-compatible-up,openai-compatible-low, model=up-model)","type":"server_error","code":"internal_server_error"}}"#
+        );
+        assert!(headers.get("retry-after").is_none(), "{headers:?}");
+        for c in env.rt.store().snapshot() {
+            assert!(
+                env.rt.store().cooldowns(&c.id).is_empty(),
+                "a reject cools nothing down"
+            );
+        }
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.contains("quota_hold: wait"), "{body}");
+        assert!(seen.lock().unwrap().is_empty(), "a reject sends nothing");
+
+        assert_eq!(alpha().await["Options"]["Metadata"]["session_affinity_model"], "");
+
+        // So does realtime, with Go's empty local model; any reject is a 503.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":false,"error":{"code":"busy","message":"scheduler busy"}}),
+        );
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let live = wreq::Client::new()
+            .post(format!("http://{}/v1/live", env.proxy))
+            .header("content-type", "application/json")
+            .header("x-custom", "v")
+            .body(r#"{"sdp":"v=0"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(live.status().as_u16(), 503, "a statusless scheduler error");
+        assert!(live.text().await.unwrap().contains("scheduler busy"));
+        let pick = picks().pop().expect("the scheduler was asked");
+        assert_eq!(pick["Provider"], "codex");
+        assert_eq!(pick["Model"], "");
+        assert_eq!(pick["Options"]["Headers"]["X-Custom"], json!(["v"]));
+        assert_eq!(pick["Options"]["Metadata"]["session_affinity_provider"], "codex");
+        assert_eq!(pick["Options"]["Metadata"]["session_affinity_model"], "");
+        assert!(pick["Options"]["Metadata"].get("pinned_auth_id").is_none());
+
+        // An existing call's selection (here a hangup) names its credential and call.
+        let codex_id = env
+            .rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.provider == "codex")
+            .unwrap()
+            .id
+            .clone();
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"auth_id":codex_id}}),
+        );
+        let created = wreq::Client::new()
+            .post(format!("http://{}/v1/live", env.proxy))
+            .header("content-type", "application/json")
+            .header("thread-id", "call-1")
+            .body(r#"{"sdp":"v=0"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status().as_u16(), 201, "{}", created.text().await.unwrap());
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":true,"result":{"handled":true,"reject":true,"reject_code":"quota_hold","reject_reason":"wait"}}),
+        );
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let hangup = wreq::Client::new()
+            .post(format!("http://{}/v1/realtime/calls/call-1/hangup", env.proxy))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hangup.status().as_u16(), 503);
+        let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+        assert_eq!(meta["pinned_auth_id"], codex_id.as_str(), "{meta}");
+        assert_eq!(meta["execution_session_id"], "call-1", "{meta}");
+        assert_eq!(meta["session_affinity_model"], "", "{meta}");
+
+        // A session Go's `ExtractSessionInfo` sees but `hasExplicitSession` does not
+        // (`metadata.sessionID`) leaves only the derived identity, and a prompt cache key
+        // is canonical without its conversation alias as a parent.
+        for (body, canonical) in [
+            (
+                r#"{"model":"up-model","metadata":{"sessionID":"x"},"messages":[{"role":"user","content":"hi"}]}"#,
+                None,
+            ),
+            (
+                r#"{"model":"up-model","prompt_cache_key":"p1","conversation":{"id":"c1"},"messages":[{"role":"user","content":"hi"}]}"#,
+                Some("pck:p1"),
+            ),
+        ] {
+            let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+            let response = wreq::Client::new()
+                .post(format!("http://{}/v1/chat/completions", env.proxy))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+            match canonical {
+                None => {
+                    assert!(meta.get("canonical_session_id").is_none(), "{meta}");
+                    assert!(
+                        meta["derived_session_id"].as_str().is_some_and(|d| !d.is_empty()),
+                        "{meta}"
+                    );
+                }
+                Some(canonical) => {
+                    assert_eq!(meta["canonical_session_id"], canonical, "{meta}");
+                    assert!(meta.get("parent_session_id").is_none(), "{meta}");
+                    assert!(meta.get("derived_session_id").is_none(), "{meta}");
+                }
+            }
+        }
+
+        // An explicit session is canonical, with its parent; no derived identity.
+        let _ = std::fs::remove_file(env.records.join("sched.jsonl"));
+        let explicit = wreq::Client::new()
+            .post(format!("http://{}/v1/chat/completions", env.proxy))
+            .header("content-type", "application/json")
+            .header("x-session-id", "child")
+            .body(r#"{"model":"up-model","parent_session_id":"parent","messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(explicit.status().as_u16(), 200);
+        let meta = picks().pop().expect("the scheduler was asked")["Options"]["Metadata"].clone();
+        assert_eq!(meta["canonical_session_id"], "header:child", "{meta}");
+        assert_eq!(meta["parent_session_id"], "header:parent", "{meta}");
+        assert!(meta.get("derived_session_id").is_none(), "{meta}");
+        seen.lock().unwrap().clear();
+
+        // The scheduler's own failure answers with its status.
+        respond(
+            "scheduler.pick",
+            true,
+            json!({"ok":false,"error":{"code":"busy","message":"scheduler busy","http_status":429}}),
+        );
+        let (status, body) = send().await;
+        assert_eq!(status, 429, "{body}");
+
+        // Delegation to the built-in strategies, within the top tier.
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"fill-first"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        // Fill-first takes the top tier's first credential by ID.
+        let first_by_id = candidates
+            .iter()
+            .map(|c| c["ID"].as_str().unwrap())
+            .min()
+            .map(key_of)
+            .unwrap();
+        assert_eq!(served, [first_by_id.as_str(); 3], "fill-first stays on one credential");
+        respond(
+            "scheduler.pick",
+            false,
+            json!({"ok":true,"result":{"handled":true,"delegate_builtin":"round-robin"}}),
+        );
+        let mut served = Vec::new();
+        for _ in 0..4 {
+            assert_eq!(send().await.0, 200);
+            served.extend(seen.lock().unwrap().clone());
+        }
+        served.sort();
+        assert_eq!(served, ["k-a", "k-a", "k-b", "k-b"], "round-robin alternates");
+
+        // A failed attempt is not offered again: the retry's candidates exclude it.
+        std::fs::remove_file(env.records.join("respond").join("sched").join("scheduler.pick.json")).unwrap();
+        let first = keys.last().unwrap().clone();
+        *fail.lock().unwrap() = first.clone();
+        let (status, body) = send().await;
+        assert_eq!(status, 200, "{body}");
+        let picks = picks();
+        assert_eq!(picks.len(), 2, "one pick per attempt");
+        let retry: Vec<String> = picks[1]["Candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| key_of(c["ID"].as_str().unwrap()))
+            .collect();
+        assert!(!retry.contains(&first), "{retry:?}");
+        fail.lock().unwrap().clear();
+        env.finish().await;
+    }
+}
+
+/// Go's plugin availability pass does not filter by weight: under weighted round-robin
+/// a ready weight-0 credential is offered and can be picked, and with every weight at
+/// zero the scheduler is still asked. A picked credential that stopped being ready
+/// while the plugin answered falls back to the configured selector (Go serves it from
+/// its snapshot; docs/DIFFERENCES-FROM-GO.md).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_scheduler_sees_zero_weights_and_a_stale_pick_falls_back() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fail = Arc::new(std::sync::Mutex::new(String::new()));
+    let upstream = keyed_upstream(seen.clone(), fail).await;
+    let yaml = format!(
+        "routing:\n  strategy: weighted-round-robin\nopenai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k-a, weight: 0}}, {{api-key: k-b, weight: 1}}]\n    models: [{{name: up-model}}]\n"
+    );
+    let Some(env) = env(
+        "plugin-scheduler-weights",
+        &[("sched", "scheduler")],
+        &yaml,
+        &[],
+        |_| {},
+    )
+    .await
+    else {
+        return;
+    };
+    let credential = |key: &str| {
+        env.rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| c.attributes.get("api_key").map(String::as_str) == Some(key))
+            .unwrap()
+    };
+    let dir = env.records.join("respond").join("sched");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pick_once = |key: &str| {
+        let envelope = json!({"ok":true,"result":{"handled":true,"auth_id":credential(key).id}});
+        std::fs::write(dir.join("scheduler.pick.once.json"), envelope.to_string()).unwrap();
+    };
+    let picks = || calls(&env.records, "sched", "scheduler.pick");
+    let send = || async {
+        seen.lock().unwrap().clear();
+        let response = wreq::Client::new()
+            .post(format!("http://{}/v1/chat/completions", env.proxy))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"up-model","messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{}", response.text().await.unwrap());
+        seen.lock().unwrap().clone()
+    };
+
+    // The weight-0 credential is offered and serves when picked.
+    pick_once("k-a");
+    assert_eq!(send().await, ["k-a"]);
+    let offered: Vec<Value> = picks().pop().unwrap()["Candidates"].as_array().unwrap().clone();
+    assert_eq!(offered.len(), 2, "{offered:?}");
+
+    // k-a stops being ready while the plugin answers: weighted selection serves k-b.
+    pick_once("k-a");
+    let hold = dir.join("scheduler.pick.hold");
+    std::fs::write(&hold, "").unwrap();
+    let before = picks().len();
+    let disable = async {
+        while picks().len() == before {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut off = (*credential("k-a")).clone();
+        off.disabled = true;
+        env.rt.store().upsert(off);
+        std::fs::remove_file(&hold).unwrap();
+    };
+    let (served, ()) = tokio::join!(send(), disable);
+    assert_eq!(served, ["k-b"]);
+
+    // Every weight at zero: the scheduler is still asked, and its pick serves.
+    let mut zero = (*credential("k-b")).clone();
+    zero.attributes.insert("weight".into(), "0".into());
+    env.rt.store().upsert(zero);
+    pick_once("k-b");
+    let before = picks().len();
+    assert_eq!(send().await, ["k-b"]);
+    assert_eq!(picks().len(), before + 1);
+    env.finish().await;
+}
+
 /// Go keeps the cooldown skip and the retry round apart: a statusless lifecycle text
 /// (`context deadline exceeded`) skips the cooldown but earns no request-retry round,
 /// while transient transport text (`broken pipe`) earns one (`isRequestRetryRoundError`).
@@ -867,4 +1434,1179 @@ async fn a_plugin_executor_takes_an_unconfigured_compatible_provider() {
         );
         env.finish().await;
     }
+}
+
+/// The next `count` usage records, as JSON; a stream's record comes as it ends.
+async fn usage_records(rt: &cpa_server::Runtime, count: usize) -> Vec<Value> {
+    let mut records = Vec::new();
+    for _ in 0..200 {
+        records.extend(rt.usage_queue().pop_oldest(count - records.len()));
+        if records.len() == count {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(records.len(), count);
+    records.iter().map(|r| serde_json::from_slice(r).unwrap()).collect()
+}
+
+const USAGE_ON: &str = "observability:\n  usage:\n    usage-statistics-enabled: true\n";
+
+/// Go `TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth`: a
+/// credential-bound plugin executor's buffered answer publishes its usage, read from
+/// the plugin's Responses output (an event's `response.usage`, else the completed
+/// object's top-level usage), with the reasoning effort of the payload it was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_publishes_the_usage_of_its_own_answer() {
+    let Some(env) = env(
+        "plugin-owned-usage",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: responses\n      outputs: responses"),
+        ],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let answers = [
+        // A completed Responses object: top-level usage.
+        (
+            r#"{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}"#,
+            (34, 499, 533),
+        ),
+        // A terminal event: `response.usage`, which the client-format parser misses.
+        (
+            r#"{"type":"response.completed","response":{"id":"resp_2","usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}}"#,
+            (5, 7, 12),
+        ),
+    ];
+    for (answer, expected) in answers {
+        let payload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, answer);
+        canned(&env.records, "acme", "executor.execute", json!({"Payload": payload}));
+        let response = wreq::Client::new()
+            .post(format!("http://{}/v1/responses", env.proxy))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"acme-1","input":"Write me a poem","reasoning":{"effort":"high"}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{answer}");
+        let record = &usage_records(&env.rt, 1).await[0];
+        assert_eq!(record["provider"], "acme", "{record}");
+        assert_eq!(record["executor_type"], "executorAdapter", "{record}");
+        assert_eq!(record["stream"], false, "{record}");
+        assert_eq!(record["failed"], false, "{record}");
+        assert_eq!(record["reasoning_effort"], "high", "{record}");
+        let tokens = &record["tokens"];
+        let got = (
+            tokens["input_tokens"].as_i64().unwrap(),
+            tokens["output_tokens"].as_i64().unwrap(),
+            tokens["total_tokens"].as_i64().unwrap(),
+        );
+        assert_eq!(got, expected, "{record}");
+    }
+    env.finish().await;
+}
+
+/// Go `TestExecutorAdapterExecuteStreamSplitAcrossBraceBoundary`,
+/// `…TwoCompleteChunksWithoutNewline` and `…ErrorChunk`: a plugin stream's usage is
+/// read from its own lines, however its chunks split them, and a stream that fails
+/// after its usage line publishes the failure with that usage
+/// (`StreamUsageBuffer.PublishFailure`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_stream_publishes_its_usage_even_when_it_fails() {
+    let Some(env) = env(
+        "plugin-owned-stream-usage",
+        &[("catalog", "model_provider"), ("acme", "executor")],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let script = |chunks: Value, error: &str| {
+        let dir = env.records.join("respond").join("acme");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("executor.execute_stream.script.once.json"),
+            json!({"chunks":chunks,"error":error}).to_string(),
+        )
+        .unwrap();
+    };
+    let tokens = |record: &Value| {
+        let t = &record["tokens"];
+        (
+            t["input_tokens"].as_i64().unwrap(),
+            t["output_tokens"].as_i64().unwrap(),
+            t["total_tokens"].as_i64().unwrap(),
+        )
+    };
+    // Split just before the usage object's opening brace.
+    script(
+        json!([
+            "data: {\"choices\":[],\"usage\":",
+            "{\"prompt_tokens\":18,\"completion_tokens\":22,\"total_tokens\":40}}\n\n",
+            "data: [DONE]\n\n"
+        ]),
+        "",
+    );
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(false), (18, 22, 40)),
+        "{record}"
+    );
+    // Complete payloads without newlines, then a failure.
+    script(
+        json!([
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33}}"
+        ]),
+        "mid-stream chunk failure",
+    );
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(true), (11, 22, 33)),
+        "{record}"
+    );
+    assert_eq!(record["fail"]["body"], "mid-stream chunk failure", "{record}");
+    env.finish().await;
+}
+
+/// Go `NewExecutorUsageReporter(ctx, a, …)` for a credential-bound plugin attempt whose
+/// formats differ from the client's: exactly one record per attempt, typed as the
+/// host's `executorAdapter` for the plugin's provider, with usage read in the plugin's
+/// Claude output (the client's chat format misses its cache reads) and the reasoning effort
+/// of the translated payload (`max` becomes a 128000-token budget, which reads back as
+/// `xhigh`). A stream the client drops publishes one 499 "context canceled" record
+/// keeping the usage seen so far, and a request that fails before the plugin is called
+/// (no translator into its input format) one failure record of the same type. Counting tokens and the model router's credential-less
+/// attempts create no reporter, so they publish nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
+    let Some(env) = env(
+        "plugin-owned-usage-formats",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: claude\n      outputs: claude"),
+            ("rt", "model_router,executor"),
+            ("privcat", "model_provider"),
+            ("priv", "executor\n      inputs: private-v1\n      outputs: private-v1"),
+        ],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#), ("priv.json", r#"{"type":"priv"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            );
+            canned(
+                records,
+                "privcat",
+                "model.static",
+                json!({"Provider":"priv","Models":[{"ID":"priv-1"}]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let no_more_records = || async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let extra = env.rt.usage_queue().pop_oldest(10);
+        assert!(
+            extra.is_empty(),
+            "{:?}",
+            extra.iter().map(|r| String::from_utf8_lossy(r)).collect::<Vec<_>>()
+        );
+    };
+    let encode = |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+    let tokens = |record: &Value| {
+        let t = &record["tokens"];
+        (
+            t["input_tokens"].as_i64().unwrap(),
+            t["output_tokens"].as_i64().unwrap(),
+            t["cache_read_tokens"].as_i64().unwrap(),
+        )
+    };
+
+    // Buffered.
+    canned(
+        &env.records,
+        "acme",
+        "executor.execute",
+        json!({"Payload": encode(
+            r#"{"id":"msg_1","type":"message","role":"assistant","model":"acme-1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":34,"output_tokens":499,"cache_read_input_tokens":6}}"#
+        )}),
+    );
+    let (got, body) = env
+        .post(r#"{"model":"acme-1","reasoning_effort":"max","messages":[{"role":"user","content":"hi"}]}"#.into())
+        .await;
+    assert_eq!(got, 200, "{body}");
+    let sent = calls(&env.records, "acme", "executor.execute");
+    let payload = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        sent[0]["Payload"].as_str().unwrap(),
+    )
+    .unwrap();
+    let payload: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(payload["thinking"]["budget_tokens"], 128000, "{payload}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    no_more_records().await;
+    assert_eq!(
+        (
+            &record["provider"],
+            &record["executor_type"],
+            &record["reasoning_effort"]
+        ),
+        (&json!("acme"), &json!("executorAdapter"), &json!("xhigh")),
+        "{record}"
+    );
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(false), (34, 499, 6)),
+        "{record}"
+    );
+
+    // A stream the client drops while the plugin holds it open. Each chunk is one
+    // `data:` line, as Go's Claude translator reads a chunk.
+    let dir = env.records.join("respond").join("acme");
+    std::fs::write(dir.join("executor.execute_stream.close.hold"), "").unwrap();
+    std::fs::write(
+        dir.join("executor.execute_stream.script.once.json"),
+        json!({"chunks": [
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"acme-1\",\"content\":[],\"usage\":{\"input_tokens\":21,\"output_tokens\":0,\"cache_read_input_tokens\":4}}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":21,\"output_tokens\":9,\"cache_read_input_tokens\":4}}\n"
+        ], "error": ""})
+        .to_string(),
+    )
+    .unwrap();
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body = r#"{"model":"acme-1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let mut conn = tokio::net::TcpStream::connect(env.proxy).await.unwrap();
+        let head = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            env.proxy,
+            body.len()
+        );
+        conn.write_all(head.as_bytes()).await.unwrap();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !String::from_utf8_lossy(&seen).contains("data:") {
+            let n = tokio::time::timeout(Duration::from_secs(5), conn.read(&mut buf))
+                .await
+                .unwrap_or_else(|_| panic!("no first event: {}", String::from_utf8_lossy(&seen)))
+                .unwrap();
+            assert!(n > 0, "stream ended early: {}", String::from_utf8_lossy(&seen));
+            seen.extend_from_slice(&buf[..n]);
+        }
+        // Both chunks are emitted before the hold; give the second one time to land.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let record = &usage_records(&env.rt, 1).await[0];
+    std::fs::remove_file(dir.join("executor.execute_stream.close.hold")).unwrap();
+    no_more_records().await;
+    assert_eq!(
+        (
+            record["failed"].clone(),
+            record["fail"]["status_code"].clone(),
+            record["fail"]["body"].clone(),
+            tokens(record)
+        ),
+        (json!(true), json!(499), json!("context canceled"), (21, 9, 4)),
+        "{record}"
+    );
+    assert_eq!(record["executor_type"], "executorAdapter", "{record}");
+
+    // Counting tokens.
+    canned(
+        &env.records,
+        "acme",
+        "executor.count_tokens",
+        json!({"Payload": encode(r#"{"input_tokens":5}"#)}),
+    );
+    let response = wreq::Client::new()
+        .post(format!("http://{}/v1/messages/count_tokens", env.proxy))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"acme-1","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200, "{}", response.text().await.unwrap());
+    assert_eq!(calls(&env.records, "acme", "executor.count_tokens").len(), 1);
+    no_more_records().await;
+
+    // A request the plugin cannot take (no translator to `private-v1`) fails before
+    // the plugin is called, still as the plugin executor's attempt.
+    let (got, body) = env.chat_stream("priv-1").await;
+    assert_ne!(got, 200, "{body}");
+    assert!(calls(&env.records, "priv", "executor.execute_stream").is_empty());
+    let record = &usage_records(&env.rt, 1).await[0];
+    no_more_records().await;
+    assert_eq!(
+        (&record["failed"], &record["provider"], &record["executor_type"]),
+        (&json!(true), &json!("priv"), &json!("executorAdapter")),
+        "{record}"
+    );
+
+    // The model router's own executor, without a credential.
+    std::fs::create_dir_all(env.records.join("respond").join("rt")).unwrap();
+    std::fs::write(
+        env.records.join("respond").join("rt").join("model.route.once.json"),
+        json!({"ok":true,"result":{"Handled":true,"TargetKind":"self","Target":"rt","Reason":"test"}}).to_string(),
+    )
+    .unwrap();
+    canned(
+        &env.records,
+        "rt",
+        "executor.execute",
+        json!({"Payload": encode(
+            r#"{"id":"c1","object":"chat.completion","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#
+        )}),
+    );
+    let (got, body) = env.chat("routed-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(calls(&env.records, "rt", "executor.execute").len(), 1);
+    no_more_records().await;
+    env.finish().await;
+}
+
+/// Go's registry hooks on the plugin executor path: an executor that answers only in a
+/// format no built-in translator knows is offered once a plugin translates responses,
+/// and its answer reaches the client through that plugin's `response.translate`
+/// (upstream format as `FromFormat`, the client's as `ToFormat`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_response_translator_serves_a_private_executor_format() {
+    let Some(env) = env(
+        "plugin-owned-response-translator",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: openai\n      outputs: private-v1"),
+            ("tr", "response_translator"),
+        ],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let encode = |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+    canned(
+        &env.records,
+        "acme",
+        "executor.execute",
+        json!({"Payload": encode("private answer")}),
+    );
+    let translated = r#"{"id":"c1","object":"chat.completion","model":"acme-1","choices":[{"index":0,"message":{"role":"assistant","content":"translated"},"finish_reason":"stop"}]}"#;
+    canned(
+        &env.records,
+        "tr",
+        "response.translate",
+        json!({"Body": encode(translated)}),
+    );
+    let (got, body) = env.chat("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"],
+        "translated",
+        "{body}"
+    );
+    let asked = calls(&env.records, "tr", "response.translate");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(
+        (&asked[0]["FromFormat"], &asked[0]["ToFormat"]),
+        (&json!("private-v1"), &json!("openai"))
+    );
+    let sent = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        asked[0]["Body"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sent, b"private answer");
+
+    // A stream: each plugin chunk is one translator call, framed for the chat client.
+    let chunk = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
+    canned(&env.records, "tr", "response.translate", json!({"Body": encode(chunk)}));
+    let dir = env.records.join("respond").join("acme");
+    std::fs::write(
+        dir.join("executor.execute_stream.script.once.json"),
+        json!({"chunks": ["private chunk"], "error": ""}).to_string(),
+    )
+    .unwrap();
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert!(body.starts_with(&format!("data: {chunk}\n\n")), "{body}");
+    let asked = calls(&env.records, "tr", "response.translate");
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1]["Stream"], true);
+    env.finish().await;
+}
+
+/// Go's OpenAI-compatible executor calls `TranslateStream` once per upstream frame
+/// (`data: ` plus the joined payload), so plugin response hooks run once per frame. An
+/// after normalizer that answers even an empty input exposes any extra call: a blank
+/// line passed after each frame would add a second chunk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_response_hooks_run_once_per_openai_compatible_stream_frame() {
+    let upstream = {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let handler = move || async move {
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                sse.to_owned(),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
+    let compat = format!(
+        "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k1}}]\n    models: [{{name: up-model}}]\n"
+    );
+    let Some(env) = env(
+        "plugin-owned-stream-hooks",
+        &[("norm", "response_after_translator")],
+        &compat,
+        &[],
+        |records| {
+            let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, r#"{"plugin":true}"#);
+            canned(records, "norm", "response.normalize_after", json!({ "Body": body }));
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (got, body) = env.chat_stream("up-model").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(body, "data: {\"plugin\":true}\n\ndata: [DONE]\n\n");
+    let asked = calls(&env.records, "norm", "response.normalize_after");
+    assert_eq!(
+        asked.len(),
+        1,
+        "one call for the content frame, none for [DONE]: {asked:?}"
+    );
+    env.finish().await;
+}
+
+/// Go's file synthesizer asks the plugin auth provider whose identifier is the file's
+/// type before the built-in path. Credentials load before plugins start, so they load
+/// again once plugins are up, before serving: here two credentials from one file,
+/// served by the plugin executor. Of two auth providers with the same identifier,
+/// only the first in priority order is asked; a type no plugin owns stays built-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_parsed_auth_files_load_through_the_first_matching_auth_provider() {
+    let parsed = |id: &str, token: &str| json!({"Provider":"acme","ID":id,"Metadata":{"type":"acme","token":token}});
+    let Some(env) = env(
+        "plugin-owned-auth-parse",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "auth_provider,executor"),
+            ("other", "auth_provider"),
+        ],
+        "",
+        &[
+            ("acme.json", r#"{"type":"acme","wrapped":"material","priority":4}"#),
+            ("claude.json", r#"{"type":"claude","access_token":"fake"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            );
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("acme-a", "tok-a"), parsed("acme-b", "tok-b")]}),
+            );
+            canned(records, "other", "auth.identifier", json!({"identifier":"acme"}));
+            canned(
+                records,
+                "other",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("other-a", "tok-o")]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let ids = |rt: &cpa_server::Runtime| {
+        let mut ids: Vec<String> = rt.store().snapshot().iter().map(|c| c.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(&env.rt),
+        ["acme.json", "claude.json"],
+        "loaded before plugins start"
+    );
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    assert_eq!(ids(&env.rt), ["acme-a", "acme-b", "claude.json"]);
+    let asked = calls(&env.records, "acme", "auth.parse");
+    assert!(!asked.is_empty());
+    for req in &asked {
+        assert_eq!(req["Provider"], "acme", "only the file whose type it owns: {req}");
+        assert!(req["Path"].as_str().unwrap().ends_with("acme.json"), "{req}");
+    }
+    assert!(
+        calls(&env.records, "other", "auth.parse").is_empty(),
+        "the second provider with the same identifier is never asked"
+    );
+    let store = env.rt.store();
+    let a = store.get("acme-a").unwrap();
+    assert_eq!(a.provider, "acme");
+    assert_eq!(a.attributes["plugin_virtual"], "true");
+    assert_eq!(a.attributes["priority"], "4", "the file's priority");
+    assert_eq!(a.metadata["token"], "tok-a");
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    let executed = calls(&env.records, "acme", "executor.execute");
+    assert_eq!(executed.len(), 1);
+    let auth = executed[0]["AuthID"].as_str().unwrap();
+    let token = if auth == "acme-a" { "tok-a" } else { "tok-b" };
+    assert!(["acme-a", "acme-b"].contains(&auth), "{auth}");
+    assert_eq!(executed[0]["AuthMetadata"]["token"], token);
+    // Go `Manager.persist` skips plugin-virtual auths: the result never rewrites the
+    // shared source file with one credential's document.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(env.rt.config().auth_dir.join("acme.json")).unwrap(),
+        r#"{"type":"acme","wrapped":"material","priority":4}"#
+    );
+    env.finish().await;
+}
+
+/// Waits up to 10 seconds for `done`.
+async fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Removes a recorder hold file when dropped, so a failed assertion never leaves a
+/// plugin call waiting.
+struct Release(PathBuf);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Asserts the saved file and its registered credential hold the same document.
+fn file_matches_store(env: &Env, name: &str) {
+    let on_disk: Value = serde_json::from_slice(&std::fs::read(env.rt.config().auth_dir.join(name)).unwrap()).unwrap();
+    let stored = env.rt.store().get(name).unwrap();
+    assert_eq!(on_disk, Value::Object(stored.metadata.clone()), "{name}");
+}
+
+/// As in Go, an auth provider can save a credential (`host.auth.save`) while it parses
+/// a file for a reload: plugins parse before the reload takes the management disk lock
+/// the save takes. The save lands, the reload completes, and the saved file and its
+/// credential agree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auth_provider_can_save_while_it_parses() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-save",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme","wrapped":"material"}"#)],
+        |records| {
+            // The recorder makes the envelope's `host_calls` before it answers.
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = json!({
+                "ok": true,
+                "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]},
+                "host_calls": [{
+                    "method": "host.auth.save",
+                    "request": {"name": "saved.json", "json": {"type": "claude", "access_token": "fake"}}
+                }]
+            });
+            std::fs::write(dir.join("auth.parse.json"), envelope.to_string()).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    // The watcher's first observation reloads the auth folder.
+    let watcher = cpa_server::watching::start(&management);
+    eventually("the reload stalled", || env.rt.store().get("acme-a").is_some()).await;
+    let saved = calls(&env.records, "acme", "host_callback");
+    assert!(!saved.is_empty());
+    for response in &saved {
+        assert_eq!(response["ok"], true, "{response}");
+    }
+    eventually("the saved credential was never registered", || {
+        env.rt.store().get("saved.json").is_some()
+    })
+    .await;
+    file_matches_store(&env, "saved.json");
+    assert_eq!(
+        env.rt.store().get("saved.json").unwrap().metadata["access_token"],
+        "fake"
+    );
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// The lock inversion a reload that parsed under the disk lock would deadlock on: a
+/// plugin that answers one call at a time (`serial`) is saving a credential, holding
+/// its turn while the save waits for the disk lock, when a reload, held on an earlier
+/// file's parse, reaches that plugin's file. The reload parses before it takes the
+/// lock, so the save lands, then the parse, and both credentials are published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_and_a_serial_plugins_save_both_complete() {
+    let auth = |id: &str| json!({"Handled":true,"Auths":[{"Provider":"acme","ID":id,"Metadata":{"type":"acme"}}]});
+    let Some(env) = env(
+        "plugin-owned-auth-parse-inversion",
+        &[
+            ("slow", "auth_provider"),
+            ("acme", "auth_provider,management_api\n      serial: true"),
+        ],
+        "",
+        &[
+            ("a-slow.json", r#"{"type":"slow"}"#),
+            ("z-acme.json", r#"{"type":"acme"}"#),
+        ],
+        |records| {
+            canned(records, "slow", "auth.parse", auth("slow-a"));
+            canned(records, "acme", "auth.parse", auth("acme-a"));
+            std::fs::write(records.join("respond/slow/auth.parse.hold"), "").unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let release = Release(env.records.join("respond/slow/auth.parse.hold"));
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    eventually("the reload never reached the first file", || {
+        !calls(&env.records, "slow", "auth.parse").is_empty()
+    })
+    .await;
+    // acme takes its turn and saves; the save needs the disk lock.
+    let body = json!({"calls":[{"method":"host.auth.save","request":{
+        "name":"saved.json","json":{"type":"claude","access_token":"fake"}}}]});
+    let saving = tokio::spawn({
+        let host = env.rt.plugins().clone();
+        async move {
+            host.serve_management(cpa_plugin::management::Inbound {
+                method: "POST".into(),
+                path: "/v0/management/rec/acme/calls".into(),
+                body: serde_json::to_vec(&body).unwrap().into(),
+                ..Default::default()
+            })
+            .await
+        }
+    });
+    eventually("acme never took the save", || {
+        !calls(&env.records, "acme", "management.handle").is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The reload goes on to acme's file, whose parse needs acme's turn.
+    drop(release);
+    let response = tokio::time::timeout(Duration::from_secs(10), saving)
+        .await
+        .expect("the save stalled")
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&response.body).unwrap();
+    let result = response["results"][0].as_str().unwrap();
+    assert!(result.starts_with("0 "), "{result}");
+    eventually("the reload stalled", || {
+        let store = env.rt.store();
+        ["slow-a", "acme-a", "saved.json"]
+            .iter()
+            .all(|id| store.get(id).is_some())
+    })
+    .await;
+    file_matches_store(&env, "saved.json");
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// A file that changes after plugins parsed it, before the reload's scan reads it, is
+/// not parsed again by the scan (which may run under the disk lock): it keeps its
+/// credentials until the next reload parses the new bytes. A file that appears then is
+/// published only once parsed, as Go's watcher asks the plugin first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_changed_after_its_parse_keeps_its_credentials_until_the_next_reload() {
+    let auth = |provider: &str, id: &str| json!({"Handled":true,"Auths":[{"Provider":provider,"ID":id,"Metadata":{"type":provider}}]});
+    let Some(env) = env(
+        "plugin-owned-auth-parse-deferred",
+        &[("acme", "auth_provider"), ("slow", "auth_provider")],
+        "",
+        &[
+            ("0-acme.json", r#"{"type":"acme","v":1}"#),
+            ("a-slow.json", r#"{"type":"slow"}"#),
+        ],
+        |records| {
+            canned(records, "acme", "auth.parse", auth("acme", "acme-a"));
+            canned(records, "slow", "auth.parse", auth("slow", "slow-a"));
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    assert!(env.rt.store().get("acme-a").is_some());
+    let parsed = || calls(&env.records, "acme", "auth.parse").len();
+    assert_eq!(parsed(), 1);
+    let hold = env.records.join("respond/slow/auth.parse.hold");
+    std::fs::write(&hold, "").unwrap();
+    let release = Release(hold);
+    let slow_parses = calls(&env.records, "slow", "auth.parse").len();
+    // Changed, so the next reload asks about it again, and is held there.
+    std::fs::write(env.rt.config().auth_dir.join("a-slow.json"), r#"{"type":"slow","v":2}"#).unwrap();
+    let reload = tokio::spawn({
+        let rt = env.rt.clone();
+        async move { cpa_server::plugins::reload_plugin_auth_files(&rt).await }
+    });
+    eventually("the reload never reached the held parse", || {
+        calls(&env.records, "slow", "auth.parse").len() > slow_parses
+    })
+    .await;
+    // acme's file was parsed (cached) before the held one; it changes now.
+    std::fs::write(env.rt.config().auth_dir.join("0-acme.json"), r#"{"type":"acme","v":2}"#).unwrap();
+    std::fs::write(
+        env.rt.config().auth_dir.join("1-new.json"),
+        r#"{"type":"claude","access_token":"fake"}"#,
+    )
+    .unwrap();
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(10), reload)
+        .await
+        .expect("the reload stalled")
+        .unwrap();
+    assert_eq!(parsed(), 1, "the scan parsed the changed file");
+    assert!(
+        env.rt.store().get("acme-a").is_some(),
+        "the changed file lost its credential"
+    );
+    assert!(env.rt.store().get("slow-a").is_some());
+    assert!(
+        env.rt.store().get("1-new.json").is_none(),
+        "published before it was parsed"
+    );
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    assert_eq!(env.rt.store().get("1-new.json").unwrap().provider, "claude");
+    assert_eq!(parsed(), 2, "the next reload parses the new bytes");
+    assert!(env.rt.store().get("acme-a").is_some());
+    env.finish().await;
+}
+
+/// Asserts that, with nothing changing, the plugin auth epoch and `label`'s parse count
+/// stay put over a second of watcher ticks: a reload and its config sync must not
+/// retire the cached answers and reload again forever.
+async fn settles(env: &Env, label: &str) {
+    let now = || {
+        (
+            cpa_core::config::credentials::plugin_auth_epoch(),
+            calls(&env.records, label, "auth.parse").len(),
+        )
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = now();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(now(), before, "the auth reloads never settle (epoch, parses)");
+}
+
+/// Unloading an auth provider changes what its file loads to with no file changing:
+/// the watcher reloads the auth folder on its own. Here P parsed `p.json` into two
+/// credentials and Q, another auth provider, keeps plugin auth parsing on, so a reload
+/// that only read cached answers would keep P's credentials. This is what the
+/// management delete of a plugin does before it publishes (its file goes too, so a
+/// later config sync does not load it again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-unload",
+        &[("pp", "auth_provider"), ("qq", "auth_provider")],
+        "",
+        &[("p.json", r#"{"type":"pp"}"#)],
+        |records| {
+            let auth = |id: &str| json!({"Provider":"pp","ID":id,"Metadata":{"type":"pp"}});
+            canned(
+                records,
+                "pp",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[auth("p1"), auth("p2")]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    let store = env.rt.store().clone();
+    eventually("P's credentials never loaded", || {
+        store.get("p1").is_some() && store.get("p2").is_some()
+    })
+    .await;
+    // Nothing changes from here: the reloads and syncs settle.
+    settles(&env, "pp").await;
+    std::fs::remove_file(env.plugins.join("pp.so")).unwrap();
+    assert!(env.rt.plugins().unload_plugin("pp", None).await);
+    eventually("P's credentials outlived P", || {
+        store.get("p1").is_none() && store.get("p2").is_none()
+    })
+    .await;
+    // No plugin owns the type now: the built-in synthesizer loads the file.
+    eventually("the file never loaded", || store.get("p.json").is_some()).await;
+    settles(&env, "qq").await;
+    assert!(store.get("p1").is_none() && store.get("p.json").is_some());
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// Recorder `auth.parse` envelope answering credential `id` and saving `save` to the
+/// file it parses (`host.auth.save` from inside the parse).
+fn parse_saving(id: &str, save: Value) -> String {
+    json!({
+        "ok": true,
+        "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":id,"Metadata":{"type":"acme"}}]},
+        "host_calls": [{"method": "host.auth.save", "request": {"name": "acme.json", "json": save}}]
+    })
+    .to_string()
+}
+
+/// Starts the config watcher over `env` (its config file written first).
+fn watch(env: &Env) -> (Arc<cpa_server::management::Management>, tokio::task::JoinHandle<()>) {
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    (management, watcher)
+}
+
+/// A plugin that saves the file it parses: the parse's answer is published, and the
+/// saved bytes are parsed next, as Go parses the file again on the write's event. Here
+/// parse(B0) answers `acme-old` and saves B1, and parse(B1) answers `acme-new` and saves
+/// B1 again (unchanged), so the file ends up applied with parse(B1)'s credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_that_saves_its_file_while_parsing_ends_with_the_parse_of_the_saved_bytes() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-own-save",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved = json!({"type": "acme", "v": 1});
+            std::fs::write(
+                dir.join("auth.parse.once.json"),
+                parse_saving("acme-old", saved.clone()),
+            )
+            .unwrap();
+            std::fs::write(dir.join("auth.parse.json"), parse_saving("acme-new", saved)).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    let store = env.rt.store().clone();
+    eventually("parse(B1) was never published", || {
+        store.get("acme-new").is_some() && store.get("acme-old").is_none()
+    })
+    .await;
+    settles(&env, "acme").await;
+    assert!(store.get("acme-new").is_some() && store.get("acme-old").is_none());
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// A plugin that saves new bytes to the file it parses on every parse keeps being
+/// asked again, as Go parses the file again on every write event, and the published
+/// credential follows its recent parses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_rewriting_its_file_on_every_parse_publishes_its_recent_parses() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-rewrite",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = parse_saving("acme-$seq", json!({"type": "acme", "n": "$seq"}));
+            std::fs::write(dir.join("auth.parse.json"), envelope).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    let published = || -> Option<u64> {
+        env.rt
+            .store()
+            .snapshot()
+            .iter()
+            .filter_map(|c| c.id.strip_prefix("acme-")?.parse().ok())
+            .max()
+    };
+    eventually("no parse was published", || published().is_some()).await;
+    let first = published().unwrap();
+    eventually("the published credential stopped following the parses", || {
+        published().is_some_and(|n| n > first + 1)
+    })
+    .await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// The auth identifier a plugin reports takes part in what its parses mean: one that
+/// failed (no identifier, so the plugin owns no file type) and recovers on a later sync,
+/// with the same plugin and config, makes the watcher parse the files again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auth_identifier_recovering_from_an_error_reparses_the_auth_files() {
+    let identifier = |records: &Path, envelope: Value| {
+        std::fs::write(records.join("respond/acme/auth.identifier.json"), envelope.to_string()).unwrap();
+    };
+    let Some(env) = env(
+        "plugin-owned-auth-parse-identifier",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+            identifier(
+                records,
+                json!({"ok": false, "error": {"code": "down", "message": "down"}}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    let store = env.rt.store().clone();
+    eventually("the file never loaded", || store.get("acme.json").is_some()).await;
+    settles(&env, "acme").await;
+    assert!(store.get("acme-a").is_none(), "parsed without an identifier");
+    identifier(&env.records, json!({"ok": true, "result": {"identifier": "acme"}}));
+    cpa_server::plugins::sync(&env.rt, env.rt.config()).await;
+    eventually("the recovered identifier's files were never parsed", || {
+        store.get("acme-a").is_some()
+    })
+    .await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// Every parse request carries the host config summary: a config change that only
+/// touches it (here `requests.proxy-url`) makes the watcher ask the plugins again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_config_change_reparses_the_auth_files() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-host-config",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    eventually("the file was never parsed", || env.rt.store().get("acme-a").is_some()).await;
+    settles(&env, "acme").await;
+    let proxy = "http://127.0.0.1:9";
+    std::fs::write(
+        env.dir.join("config.yaml"),
+        format!("requests:\n  proxy-url: {proxy}\n{}", env.yaml),
+    )
+    .unwrap();
+    eventually("the plugin was never asked with the new host config", || {
+        calls(&env.records, "acme", "auth.parse")
+            .iter()
+            .any(|req| req["Host"]["ProxyURL"] == proxy)
+    })
+    .await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// The binary runs the startup reload off the async workers: with one worker thread, a
+/// parse can still make a host callback that needs the runtime (`host.http.do` to the
+/// proxy this runtime serves).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn the_startup_reload_lets_a_parse_use_the_runtime_with_one_worker() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-one-worker",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| std::fs::create_dir_all(records.join("respond/acme")).unwrap(),
+    )
+    .await
+    else {
+        return;
+    };
+    let envelope = json!({
+        "ok": true,
+        "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]},
+        "host_calls": [{"method": "host.http.do", "request": {"url": format!("http://{}/v1/models", env.proxy)}}]
+    });
+    std::fs::write(env.records.join("respond/acme/auth.parse.json"), envelope.to_string()).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        cpa_server::plugins::reload_plugin_auth_files(&env.rt),
+    )
+    .await
+    .expect("the reload stalled");
+    assert!(env.rt.store().get("acme-a").is_some());
+    let response = &calls(&env.records, "acme", "host_callback")[0];
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(response["result"]["StatusCode"].as_u64().is_some(), "{response}");
+    env.finish().await;
+}
+
+/// The startup reload publishes its scan the way the watcher does (Go c4c1d43e): a token
+/// refresh that commits while a slow plugin parse holds the reload keeps its token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_committed_during_the_startup_reload_survives_it() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-refresh",
+        &[("acme", "auth_provider")],
+        "",
+        &[
+            // Read before the plugin's file, which sorts after it.
+            ("a-claude.json", r#"{"type":"claude","access_token":"old"}"#),
+            ("acme.json", r#"{"type":"acme","wrapped":"material"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+            std::fs::write(records.join("respond/acme/auth.parse.hold"), "").unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let release = Release(env.records.join("respond/acme/auth.parse.hold"));
+    let reload = tokio::spawn({
+        let rt = env.rt.clone();
+        async move { cpa_server::plugins::reload_plugin_auth_files(&rt).await }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while calls(&env.records, "acme", "auth.parse").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the parse never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // A refresh commits while the parse holds the reload.
+    let store = env.rt.store();
+    let current = store.get("a-claude.json").unwrap();
+    let mut patch = cpa_core::credential::MetadataPatch::default();
+    patch.set.insert("access_token".into(), "refreshed".into());
+    store.apply_patch("a-claude.json", current.revision, &patch).unwrap();
+    drop(release);
+    reload.await.unwrap();
+    assert!(
+        store.get("acme-a").is_some(),
+        "the reload published the plugin credential"
+    );
+    assert_eq!(
+        store.get("a-claude.json").unwrap().metadata["access_token"],
+        "refreshed"
+    );
+    env.finish().await;
 }

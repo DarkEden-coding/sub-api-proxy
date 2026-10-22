@@ -45,6 +45,7 @@ fn request(scenario: &Value, turn: &Value) -> ExecRequest {
         caller: Caller {
             principal: "client-key-FAKE".into(),
             source: "authorization",
+            provider: String::new(),
         },
         resolved_model: None,
         usage: Default::default(),
