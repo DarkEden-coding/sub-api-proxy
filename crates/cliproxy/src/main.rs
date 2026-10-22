@@ -42,6 +42,9 @@ struct Args {
     /// Configure File Path
     #[arg(long, default_value = "")]
     config: String,
+    // sub-api-proxy: optional node integration.
+    #[arg(long)]
+    sap_config: Option<PathBuf>,
     /// Write process logs to this file (10 MiB rotation), without a shell wrapper.
     #[arg(long)]
     log_file: Option<PathBuf>,
@@ -912,6 +915,7 @@ async fn run(args: Args, plugins: cpa_plugin::Host, builtin: Vec<(String, String
         config,
         config_path,
         args.password,
+        args.sap_config, // sub-api-proxy: install before building routes.
         args.local_model,
         store,
         home_config,
@@ -1069,6 +1073,7 @@ async fn standalone_tui(
         config,
         config_path,
         password.clone(),
+        None, // sub-api-proxy: embedded TUI has no node configuration.
         local_model,
         store,
         home_config,
@@ -1291,6 +1296,7 @@ async fn serve(
     config: Config,
     config_path: PathBuf,
     password: String,
+    sap_config: Option<PathBuf>, // sub-api-proxy: node configuration.
     local_model: bool,
     store: Option<cpa_store::Store>,
     home_config: Option<cpa_home::HomeConfig>,
@@ -1331,6 +1337,21 @@ async fn serve(
         google: Default::default(),
     };
     let rt = Arc::new(Runtime::new(config, credentials, executors).with_plugin_host(plugins));
+    // sub-api-proxy: hooks must exist before router construction.
+    let sap_node = sap_config
+        .as_deref()
+        .map(|path| sap_server::install(&rt, path))
+        .transpose()?;
+    // sub-api-proxy: private loopback authentication reuses the existing OAuth handler.
+    let password = if sap_node.is_some() && password.is_empty() {
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|_| anyhow::anyhow!("SAP login key generation failed"))?;
+        random.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    } else {
+        password
+    };
+    // sub-api-proxy: retain only for the node's in-process management request.
+    let sap_password = password.clone();
     rt.set_local_model(local_model);
     if let Some(cooldown) = store.as_ref().and_then(|store| store.cooldown.clone()) {
         rt.set_cooldown_backend(cooldown);
@@ -1355,6 +1376,10 @@ async fn serve(
         ..Default::default()
     };
     let management = cpa_server::management::Management::with_options(rt.clone(), config_path, options);
+    // sub-api-proxy: use the same OAuth sessions and callback sink as management.
+    if let Some(node) = sap_node {
+        node.attach_management(&management, sap_password);
+    }
     if home.is_some() {
         // Go enables the usage queue in Home mode whatever the management secret
         // (`redisqueue.SetEnabled(... || cfg.Home.Enabled)`); the forwarder drains it.
@@ -1593,12 +1618,17 @@ mod tests {
             "-devin-login",
             "-config",
             "c.yaml",
+            // sub-api-proxy: accept Go-style node configuration flags too.
+            "-sap-config",
+            "sap.yaml",
             "-password",
             "pw",
         ]))
         .unwrap();
         assert!(args.discover && args.discover_json && args.tui && args.standalone && args.local_model);
         assert!(args.antigravity_login && args.devin_login && args.home_disable_cluster_discovery);
+        // sub-api-proxy: the optional flag reaches startup.
+        assert_eq!(args.sap_config, Some(PathBuf::from("sap.yaml")));
         assert_eq!(args.discover_timeout, -2);
         assert_eq!(csv_flags(&args.discover_include), ["eth0", "en0", "wl*"]);
         assert_eq!(args.management_base_url, "https://x");
@@ -1755,6 +1785,7 @@ mod tests {
             config,
             path,
             "fake-tui-password".into(),
+            None, // sub-api-proxy: node disabled in upstream test.
             true,
             None,
             None,

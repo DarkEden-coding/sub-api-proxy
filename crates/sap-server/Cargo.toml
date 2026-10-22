@@ -25,3 +25,7 @@ serde_json.workspace = true
 serde_yaml_ng.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+cpa-exec.workspace = true

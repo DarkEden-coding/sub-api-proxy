@@ -132,6 +132,8 @@ fn api(rt: Arc<Runtime>) -> Router {
     } else {
         Router::new()
     };
+    // sub-api-proxy: node routes carry their own state and authentication.
+    let sap_routes = rt.sap_hooks().and_then(|h| h.routes()).unwrap_or_default();
     Router::new()
         .merge(sap_health)
         .route("/healthz", get(healthz).head(healthz))
@@ -151,6 +153,8 @@ fn api(rt: Arc<Runtime>) -> Router {
         .layer(middleware::from_fn(go_framing))
         .layer(middleware::from_fn(request_logging::response))
         .with_state(rt)
+        // sub-api-proxy: merge after assigning runtime state.
+        .merge(sap_routes)
 }
 
 /// gin registers HEAD for `/healthz` only, so a HEAD never falls back to a GET handler;
