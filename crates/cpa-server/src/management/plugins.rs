@@ -578,14 +578,19 @@ pub(crate) async fn patch_enabled(
         Ok(id) => id,
         Err(r) => return *r,
     };
-    // gin ShouldBindJSON into `struct{ Enabled *bool }`.
-    let enabled = match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(map)) => match map.get("enabled") {
-            Some(Value::Bool(b)) => Some(*b),
-            _ => None,
-        },
-        _ => None,
-    };
+    // gin ShouldBindJSON into `struct{ Enabled *bool }`: the first JSON value, every
+    // member in order; a type mismatch fails the bind even if a later duplicate fixes it.
+    let mut enabled = None;
+    for (key, value) in super::api_call::first_object(&body).into_iter().flatten() {
+        if super::api_call::go_field(&["enabled"], &key).is_none() {
+            continue;
+        }
+        match value {
+            Value::Bool(b) => enabled = Some(b),
+            Value::Null => enabled = None,
+            _ => return error(StatusCode::BAD_REQUEST, "invalid_body", "enabled is required"),
+        }
+    }
     let Some(enabled) = enabled else {
         return error(StatusCode::BAD_REQUEST, "invalid_body", "enabled is required");
     };

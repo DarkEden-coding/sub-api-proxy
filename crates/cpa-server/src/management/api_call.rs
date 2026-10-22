@@ -62,6 +62,25 @@ impl<'de> serde::Deserialize<'de> for Members {
     }
 }
 
+/// gin `ShouldBindJSON` into a struct: the members of the first JSON value (what
+/// follows it is never read), empty for null; `None` when the value is not an object.
+pub(super) fn first_object(body: &[u8]) -> Option<Vec<(String, Value)>> {
+    let Members(members) = serde_json::Deserializer::from_slice(body)
+        .into_iter::<Members>()
+        .next()?
+        .ok()?;
+    Some(members.unwrap_or_default())
+}
+
+/// The struct field `key` decodes into (`encoding/json`): an exact name first, else
+/// the first name equal under Unicode case folding.
+pub(super) fn go_field(fields: &[&str], key: &str) -> Option<usize> {
+    fields
+        .iter()
+        .position(|f| *f == key)
+        .or_else(|| fields.iter().position(|f| f.go_eq_fold(key)))
+}
+
 /// gin `ShouldBindJSON` into `apiCallRequest`: the first JSON value only (trailing data
 /// is ignored); every member applied in order with field names matched exactly first
 /// and then case-insensitively in struct order; null leaves a string as it was, clears
