@@ -290,14 +290,17 @@ impl Host {
         Arc::new(TranslatorHooks(Arc::downgrade(&self.inner)))
     }
 
-    /// Publishes whether an unfused plugin among `records` offers a translator hook.
-    /// Callers hold the state lock, so updates follow the lifecycle's order.
+    /// Publishes whether an unfused plugin among `records` offers a translator hook, and
+    /// an auth provider, to whichever of the registry and credential loading hold this
+    /// host. Callers hold the state lock, so updates follow the lifecycle's order.
     pub(crate) fn publish_hook_activity(&self, state: &crate::host::State, records: &[Record]) {
-        if self.inner.hooks_installed.load(std::sync::atomic::Ordering::Acquire) {
-            let active = records
-                .iter()
-                .any(|r| translator_hook(r) && !state.fused.contains_key(&r.id));
-            cpa_translate::hooks::set_plugin_hooks_active(active);
+        use std::sync::atomic::Ordering;
+        let offers = |has: fn(&Record) -> bool| records.iter().any(|r| has(r) && !state.fused.contains_key(&r.id));
+        if self.inner.hooks_installed.load(Ordering::Acquire) {
+            cpa_translate::hooks::set_plugin_hooks_active(offers(translator_hook));
+        }
+        if self.inner.auth_parser_installed.load(Ordering::Acquire) {
+            cpa_core::config::credentials::set_plugin_auth_parser_active(offers(|r| r.plugin.caps.auth_provider));
         }
     }
 

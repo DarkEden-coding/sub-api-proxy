@@ -181,6 +181,38 @@ pub(super) fn runtime_only(c: &Credential) -> bool {
     matches!(c.source, Source::Runtime)
 }
 
+/// Go `errPluginVirtualAuth`.
+const PLUGIN_VIRTUAL: &str = "plugin virtual auth cannot be modified directly; edit or delete the source auth file";
+
+/// Go `IsPluginVirtualAuth`: one of several credentials a plugin parsed from one file.
+fn plugin_virtual(c: &Credential) -> bool {
+    c.attributes
+        .get("plugin_virtual")
+        .is_some_and(|v| v.trim().go_eq_fold("true"))
+}
+
+/// The file a plugin-virtual credential was parsed from (Go `virtual_source`, else
+/// `path`).
+fn virtual_source(c: &Credential) -> &str {
+    let attr = |key: &str| c.attributes.get(key).map_or("", |v| v.trim());
+    Some(attr("virtual_source"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| attr("path"))
+}
+
+/// Go `isPluginVirtualSourceDelete`: a plugin-virtual credential is changed or deleted
+/// only through its source file's name.
+fn names_virtual_source(name: &str, c: &Credential) -> bool {
+    if !plugin_virtual(c) {
+        return true;
+    }
+    let base = |p: &str| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned());
+    match (base(name.trim()), base(virtual_source(c))) {
+        (Some(name), Some(source)) => name.go_eq_fold(&source),
+        _ => false,
+    }
+}
+
 /// Go `authFileListName`: the file name, else the credential ID.
 fn list_name(c: &Credential) -> String {
     file_name(c).unwrap_or_else(|| c.id.clone())
@@ -1098,6 +1130,9 @@ fn delete_one(state: &Management, name: &str, v8: bool) -> Result<String, (Statu
     if found.is_some_and(|c| runtime_only(c)) {
         return Err((StatusCode::NOT_FOUND, "auth file not found".into()));
     }
+    if found.is_some_and(|c| !names_virtual_source(name, c)) {
+        return Err((StatusCode::CONFLICT, PLUGIN_VIRTUAL.into()));
+    }
     let target: PathBuf = found
         .and_then(|c| path_of(c).map(Path::to_path_buf))
         .unwrap_or_else(|| cfg.auth_dir.join(&base));
@@ -1425,6 +1460,14 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<By
     }
     tokio::task::spawn_blocking(move || {
         let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        if plugin_virtual(&target) {
+            // Go: only through the source file's name, which toggles the file and every
+            // credential parsed from it; a parsed credential alone cannot be changed.
+            if !names_virtual_source(&name, &target) {
+                return fail(StatusCode::CONFLICT, PLUGIN_VIRTUAL);
+            }
+            return virtual_source_status(&state, &target, disabled);
+        }
         if matches!(target.source, Source::Config { .. }) {
             return match toggle_config_key(&state, &target.id, disabled) {
                 Ok(true) => reply(
@@ -1467,6 +1510,104 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<By
     })
     .await
     .unwrap_or_else(|_| patch_error(None))
+}
+
+/// Go `patchPluginVirtualSourceStatus`: writes `disabled` into the source file (Go's
+/// `setSourceAuthFileDisabled`: normalized keys, `json.Marshal` form) and sets it on
+/// every credential parsed from that file, in memory (the store never writes a
+/// plugin-virtual credential's file). The watcher's reload of the file agrees.
+fn virtual_source_status(state: &Management, target: &Credential, disabled: bool) -> Response {
+    let source = virtual_source(target).to_owned();
+    if source.is_empty() {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, PLUGIN_VIRTUAL);
+    }
+    let data = match std::fs::read(&source) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return fail(StatusCode::NOT_FOUND, "auth file not found");
+        }
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to update source auth file: {e}"),
+            );
+        }
+    };
+    let mut meta = if data.trim_ascii().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_slice::<Map<String, Value>>(&data) {
+            Ok(meta) => meta,
+            Err(e) => {
+                return fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to update source auth file: invalid auth file: {e}"),
+                );
+            }
+        }
+    };
+    // Go `NormalizeCredentialMetadata`, whose aliases include the OpenAPI pair the field
+    // edits do not take: the alias goes, and a canonical spelling already there wins.
+    let openapi = [
+        ("openapi-location", "openapi_location"),
+        ("openapi-models", "openapi_models"),
+    ];
+    for (alias, canon) in ALIASES.iter().chain(openapi.iter()) {
+        if let Some(v) = meta.remove(*alias) {
+            meta.entry(*canon).or_insert(v);
+        }
+    }
+    meta.insert("disabled".into(), disabled.into());
+    let raw = serde_json::to_vec(&meta)
+        .ok()
+        .and_then(|b| cpa_common::json::GoValue::parse_f64(&b))
+        .map(|v| v.marshal());
+    let Some(raw) = raw else {
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to update source auth file: marshal auth file",
+        );
+    };
+    if let Err(e) = write_file(Path::new(&source), &raw) {
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to update source auth file: {e}"),
+        );
+    }
+    let same = |p: &str| {
+        let clean = |p: &str| std::path::absolute(p.trim()).ok();
+        !p.trim().is_empty() && clean(p) == clean(&source)
+    };
+    let store = state.rt.store();
+    for c in store.snapshot().iter() {
+        let path = c.attributes.get("path").map_or("", String::as_str);
+        let from = c.attributes.get("virtual_source").map_or("", String::as_str);
+        if !same(path) && !same(from) {
+            continue;
+        }
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("disabled".into(), disabled.into());
+        let mut current = c.clone();
+        for _ in 0..16 {
+            match store.apply_patch(&current.id, current.revision, &patch) {
+                Ok(_) => {
+                    note_disabled(state, &current.id, Some(disabled));
+                    break;
+                }
+                Err(PatchError::Stale { .. }) => match store.get(&current.id) {
+                    Some(next) => current = next,
+                    None => break,
+                },
+                Err(e) => {
+                    return fail(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to update auth {}: {e:?}", current.id),
+                    );
+                }
+            }
+        }
+    }
+    reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())])
 }
 
 const ALIASES: &[(&str, &str)] = &[
@@ -1584,6 +1725,9 @@ fn apply_fields(
     // endpoints, not as auth files.
     if matches!(target.source, Source::Config { .. }) {
         return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
+    }
+    if plugin_virtual(&target) {
+        return Some(fail(StatusCode::CONFLICT, PLUGIN_VIRTUAL));
     }
     // Start from Go's normalized metadata so aliases persist under canonical names.
     let mut meta = target.metadata.clone();
