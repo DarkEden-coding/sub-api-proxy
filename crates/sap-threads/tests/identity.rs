@@ -187,3 +187,13 @@ fn fallback_precedence_and_invalid_inputs() {
         RequestClass::Prewarm
     );
 }
+
+#[test]
+fn malformed_codex_turn_metadata_still_identifies_the_thread() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("thread-id", "t-1".parse().unwrap());
+    headers.insert("x-codex-turn-metadata", "{not json".parse().unwrap());
+    let identity = sap_threads::identify_codex(&headers, br#"{"type":"response.create","model":"m"}"#)
+        .expect("a thread-id is enough to identify the thread");
+    assert_eq!(identity.key.id, "t-1");
+}

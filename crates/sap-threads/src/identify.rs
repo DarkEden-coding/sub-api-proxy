@@ -152,7 +152,8 @@ pub fn identify_codex(headers: &HeaderMap, body: &[u8]) -> Option<ThreadIdentity
         .and_then(|m| m.turn_metadata.as_deref())
         .or_else(|| header(headers, "x-codex-turn-metadata"));
     let metadata: TurnMetadata = match metadata {
-        Some(raw) => serde_json::from_str(raw).ok()?,
+        // Malformed metadata loses lineage details but must not hide the thread.
+        Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
         None => TurnMetadata::default(),
     };
     let parent = metadata.parent_thread_id.filter(|s| !s.is_empty());

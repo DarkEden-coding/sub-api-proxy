@@ -372,7 +372,8 @@ async fn api_sse_drops_slow_subscribers_independently() {
     assert!(std::str::from_utf8(&bytes).unwrap().contains("event: snapshot"));
 }
 
-#[tokio::test]
+// Paused time skips the real 15-second interval.
+#[tokio::test(start_paused = true)]
 async fn api_sse_keeps_idle_connections_alive() {
     let response = request(app(Fake::new()), "GET", "/sap/api/stream", json!(null), true).await;
     let mut stream = response.into_body().into_data_stream();
