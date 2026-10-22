@@ -9,7 +9,7 @@ complete `api.NewServer` driven through `httptest`. It opens no sockets and call
 provider, GitHub or OAuth endpoint. Secrets are `fake-*` strings; bcrypt hashes are
 regenerated on every run, so tests hash the same plaintext themselves.
 
-Regenerate with a temporary module inside the reference module's internal-package
+Record with Go 1.26.4, the toolchain of the v8.0.35 release build (`GO_VERSION` in the reference's `.github/workflows/release.yaml`); from 1.26.4 `textproto` quotes MIME header diagnostics with `%q`. Regenerate with a temporary module inside the reference module's internal-package
 boundary (the reference checkout is not modified). Copying the reference's `go.sum`
 pins its dependency versions; `-mod=mod` lets the temporary module record them.
 Between two runs only timestamps, OAuth state and PKCE values, bcrypt hashes and
@@ -27,7 +27,7 @@ cp "$crate/tests/reference/manage/main.go" "$tmp/main.go"
   go mod edit -replace=github.com/router-for-me/CLIProxyAPI/v8="$reference"
   cp "$reference/go.sum" .
   go mod tidy
-  TZ=UTC GOFLAGS=-mod=mod go run . "$crate/tests/fixtures/manage_go.json" /tmp/model_definitions.json
+  TZ=UTC GOFLAGS=-mod=mod GOTOOLCHAIN=local /path/to/go1.26.4/bin/go run . "$crate/tests/fixtures/manage_go.json" /tmp/model_definitions.json
 )
 rm -rf "$tmp"
 ```

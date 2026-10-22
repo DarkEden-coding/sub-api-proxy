@@ -33,7 +33,7 @@ pub struct CodexExecutor {
     oauth: CodexOAuth,
     quota: Arc<QuotaSignals>,
     /// Upstream Responses WebSocket sockets per downstream session.
-    pub(crate) ws: crate::codex_ws::Pool,
+    pub(crate) ws: Arc<crate::codex_ws::Pool>,
     /// Claude clients' reasoning replay (process-wide in Go).
     pub(crate) replay: Arc<crate::codex_replay::Cache>,
     /// Base for OAuth Alpha Search, which Go never derives from credential attributes.
@@ -109,7 +109,7 @@ impl CodexExecutor {
         let view = View::for_request(credential, cfg).with_session(explicit_session(&req));
         let settings = Settings::scoped(cfg, &view);
         if view.websockets() {
-            return self.stream_ws(&view, &settings, req, session).await;
+            return self.stream_ws(&view, &settings, req, session, cfg).await;
         }
         if session.continuation {
             return Err(ExecError::replay_required());

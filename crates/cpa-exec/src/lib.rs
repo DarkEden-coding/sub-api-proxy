@@ -280,6 +280,18 @@ impl Executors {
         self.openai.xai.close_session(id);
     }
 
+    /// Go `CloseCodexWebsocketSessionsForAuthID` and `CloseXAIWebsocketSessionsForAuthID`
+    /// for the credential store: given a removed credential's id, ends only the upstream
+    /// WebSocket sessions that credential serves.
+    pub fn credential_session_closer(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let codex = self.codex.ws.clone();
+        let xai = self.openai.xai.ws.clone();
+        move |id| {
+            codex.close_credential(id);
+            xai.close_credential(id);
+        }
+    }
+
     /// Whether an executor serves this provider. Credentials of other providers never
     /// enter selection (Go skips auths whose executor is not registered).
     pub fn supports(&self, provider: &str) -> bool {
