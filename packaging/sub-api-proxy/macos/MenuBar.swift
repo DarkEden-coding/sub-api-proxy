@@ -3,6 +3,7 @@ import AppKit
 @main
 final class MenuBar: NSObject, NSApplicationDelegate {
     private var item: NSStatusItem!
+    private var copiedRevision: Int?
     private let panel = URL(string: "http://127.0.0.1:8317/sap/")!
 
     static func main() {
@@ -62,9 +63,16 @@ final class MenuBar: NSObject, NSApplicationDelegate {
         pasteboard.clearContents()
         pasteboard.setString(contents.trimmingCharacters(in: .whitespacesAndNewlines), forType: .string)
         let revision = pasteboard.changeCount
+        copiedRevision = revision
         // Clear our key after one minute, unless the user copied something else.
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
             if pasteboard.changeCount == revision { pasteboard.clearContents() }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let revision = copiedRevision, NSPasteboard.general.changeCount == revision {
+            NSPasteboard.general.clearContents()
         }
     }
 
