@@ -526,7 +526,7 @@ impl Runtime {
                 let mut revision = current.revision;
                 let mut attempt = patch.clone();
                 loop {
-                    match store.apply_refresh(&id, revision, &attempt, &publish_proxy, |c| {
+                    match store.apply_refresh(&id, revision, &attempt, publish_proxy, |c| {
                         credentials_changed(&current, c)
                     }) {
                         // Edited since the snapshot (the prepare lock does not hold off other
