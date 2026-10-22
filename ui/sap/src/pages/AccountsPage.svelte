@@ -4,7 +4,7 @@
   import AccountDetail from "../components/AccountDetail.svelte";
   import QuotaBars from "../components/QuotaBars.svelte";
   import { presentAccount } from "../model/accounts.ts";
-  import { planLabel } from "../model/format.ts";
+  import { planName } from "../model/plans.ts";
   import { store } from "../store.svelte.ts";
 
   const snap = $derived(store.snapshot!);
@@ -40,7 +40,7 @@
         {@const p = presentAccount(a, snap.now)}
         <tr class="row {a.provider}" class:greyed={p.greyed} onclick={() => (open = open === a.id ? null : a.id)}>
           <td><span class="name">{a.label}</span><div class="faint">{a.email ?? a.id}</div></td>
-          <td>{planLabel(a.plan)}</td>
+          <td>{planName(a.plan)}</td>
           <td>{a.state.replace("_", " ")}{#if p.flag}<div class="flag">{p.flag}</div>{/if}</td>
           <td>{p.tone === "blocked" ? "—" : `${Math.round(a.weight_percent)}%`}</td>
           <td>{a.priority}</td>

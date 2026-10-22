@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchHistory, patchAccount, startLogin } from "../api/client.ts";
   import type { AccountView, HistoryPoint } from "../api/types.ts";
-  import { planLabel } from "../model/format.ts";
+  import { planName } from "../model/plans.ts";
   import History from "./History.svelte";
 
   let { account, onerror }: { account: AccountView; onerror: (message: string) => void } = $props();
@@ -29,7 +29,7 @@
 <div class="detail">
   <dl class="kv">
     <dt>email</dt><dd>{account.email ?? "—"}</dd>
-    <dt>plan</dt><dd>{planLabel(account.plan) || "unknown"}</dd>
+    <dt>plan</dt><dd>{planName(account.plan) || "unknown"}</dd>
     <dt>capacity</dt><dd>{account.capacity_multiplier}× <span class="faint">({account.capacity_source})</span></dd>
     <dt>active threads</dt><dd>{account.active_threads}</dd>
   </dl>

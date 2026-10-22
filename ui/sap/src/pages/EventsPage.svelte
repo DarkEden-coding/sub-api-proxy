@@ -1,16 +1,13 @@
 <script lang="ts">
   import { fetchEvents } from "../api/client.ts";
-  import type { EventView } from "../api/types.ts";
   import EventList from "../components/EventList.svelte";
   import { store } from "../store.svelte.ts";
 
-  let events = $state<EventView[]>([]);
   let message = $state("");
-  const newest = $derived(store.snapshot?.events[0]?.id);
 
+  // The stream appends from here on; this only loads what happened before.
   $effect(() => {
-    void newest;
-    fetchEvents(200).then((e) => (events = e), (e) => (message = e.message));
+    fetchEvents(200).then((e) => store.addEvents(e), (e) => (message = e.message));
   });
 </script>
 
@@ -18,7 +15,7 @@
   <h2>Events</h2>
   <div class="lede">routing, failover, compaction and sync, newest first</div>
   {#if message}<p class="err">{message}</p>{/if}
-  <EventList {events} />
+  <EventList events={store.events} />
 </div>
 
 <style>

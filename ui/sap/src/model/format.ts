@@ -81,14 +81,3 @@ export function shortKey(key: ThreadKey): string {
   if (slash >= 0) return `agent ${id.slice(slash + 1, slash + 5)}`;
   return id.length > 9 ? `${id.slice(0, 4)}·${id.slice(-4)}` : id;
 }
-
-/** "Max 20×" from "default_claude_max_20x", "Plus" from "plus". */
-export function planLabel(plan: string | null): string {
-  if (!plan) return "";
-  const words = plan
-    .replace(/^default_/, "")
-    .replace(/^(claude|chatgpt|codex)_/, "")
-    .split("_")
-    .map((w) => (/^\d+x$/.test(w) ? `${w.slice(0, -1)}×` : w.charAt(0).toUpperCase() + w.slice(1)));
-  return words.join(" ");
-}
