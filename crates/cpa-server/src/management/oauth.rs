@@ -13,10 +13,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use cpa_core::exec::ExecError;
 use cpa_exec::proxy::Proxy;
 use serde_json::{Value, json};
@@ -490,26 +489,43 @@ pub(crate) async fn import(
     State(state): State<Arc<Management>>,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
     let query = Query::parse(raw);
     match query.first("provider").trim().go_lower().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
-        "vertex" => import_vertex(state, &query, &headers, &body).await,
+        "vertex" => import_vertex(state, &query, &headers, read).await,
         _ => fail(StatusCode::NOT_FOUND, "provider_not_found"),
     }
 }
 
 /// Go `ImportVertexCredential`: a service-account key uploaded as the `file` form field;
 /// `location` from the form, else the query.
-async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMap, body: &[u8]) -> Response {
+async fn import_vertex(
+    state: Arc<Management>,
+    query: &Query,
+    headers: &HeaderMap,
+    read: crate::body_limit::Read,
+) -> Response {
+    use super::multipart::Failed;
     use cpa_exec::vertex_auth::{UploadError, import_upload};
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    // Go `FormFile("file")`: any form error reads as a missing file.
-    let Ok((mut files, values)) = super::multipart::form(content_type, body) else {
+    // Go `FormFile("file")`: any form error reads as a missing file, with the limit's
+    // status for the limit error.
+    let body = match super::multipart::body(read, content_type) {
+        Ok(body) => body,
+        Err(Failed::Read(rejection)) => return rejection.into_response(),
+        Err(Failed::Form(status, _)) => {
+            return fail(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+                "file required",
+            );
+        }
+    };
+    let Ok((mut files, values)) = super::multipart::form(content_type, &body) else {
         return fail(StatusCode::BAD_REQUEST, "file required");
     };
     let Some(file) = files.remove("file").and_then(|parts| parts.into_iter().next()) else {
@@ -1425,10 +1441,10 @@ pub(crate) async fn callback_get(
 pub(crate) async fn callback_post(
     State(state): State<Arc<Management>>,
     uri: axum::http::Uri,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+    body: Result<crate::body_limit::FirstJson, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => body,
+        Ok(crate::body_limit::FirstJson(body)) => body,
         Err(rejection) => return status_error(super::read_status(&rejection), "invalid body"),
     };
     let v8 = uri.path().starts_with("/v8/");

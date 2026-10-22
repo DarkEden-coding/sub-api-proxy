@@ -30,7 +30,7 @@ Columns:
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
 | Config and Management API | 15 | 11 | 4 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
-| Server, handlers and streaming | 12 | 3 | 9 | 0 | 0 | 0 |
+| Server, handlers and streaming | 12 | 4 | 8 | 0 | 0 | 0 |
 | Usage and logging | 3 | 2 | 1 | 0 | 0 | 0 |
 | Antigravity | 25 | 7 | 18 | 0 | 0 | 0 |
 | Docs and assets | 20 | 0 | 0 | 0 | 20 | 0 |
@@ -308,7 +308,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 |---|---|---|---|---|---|
 | [`c997cbb5`](https://github.com/router-for-me/CLIProxyAPI/commit/c997cbb5) | feat(httpwire): introduce error-aware response flushing helper | no | to port | L (+328 −66) | error-aware flushing (Go `http.Flusher` plumbing; check the Rust writers) |
 | [`cd9e5ace`](https://github.com/router-for-me/CLIProxyAPI/commit/cd9e5ace) | fix(api): compact json error response bodies for SSE compatibility | yes | ported here | S (+6 −1) | upstream JSON error bodies compacted to one line for SSE: errors.rs openai_body and the Responses WebSocket error_body compact valid JSON as Go's json.Compact does (M4-0385) |
-| [`dd7b4334`](https://github.com/router-for-me/CLIProxyAPI/commit/dd7b4334) | feat(server): support max-request-body-bytes request body limit | yes | to port | M (+222 −68) | partly ported: `server.max-request-body-bytes` (M4-0513), the Content-Length and streamed limit held per request, the 413 answers of the changed handlers, the zstd decode limit, plugin auth and realtime mapping; replays answers recorded from Go (tests/body_limit_go.rs). Gaps: Go's first-value JSON decoding and multipart error precedence when the limit falls inside a body |
+| [`dd7b4334`](https://github.com/router-for-me/CLIProxyAPI/commit/dd7b4334) | feat(server): support max-request-body-bytes request body limit | yes | ported here | M (+222 −68) | `server.max-request-body-bytes` (M4-0513), the Content-Length and streamed limit held per request, the 413 answers of the changed handlers, the zstd decode limit, plugin auth and realtime mapping, Go's first-value JSON decoding and multipart error precedence when the limit falls inside a body; replays answers recorded from Go (tests/body_limit_go.rs). The fixed 64 MiB client-route limit and the plain-text 400 of whole-body Management reads are in docs/DIFFERENCES-FROM-GO.md |
 | [`519d590e`](https://github.com/router-for-me/CLIProxyAPI/commit/519d590e) | feat(streaming): support send-keepalive-before-ft option | yes | to port | L (+475 −123) | `send-keepalive-before-ft` |
 | [`e235fb3d`](https://github.com/router-for-me/CLIProxyAPI/commit/e235fb3d) | fix(server): prevent data races during concurrent config access and reloads | no | to port | M (+132 −76) | Go config access race fix; Rust uses locked snapshots, but equivalent reload consistency needs verification |
 | [`51952a7b`](https://github.com/router-for-me/CLIProxyAPI/commit/51952a7b) | feat(httptransport): add request-scoped HTTP transport decorator | yes | to port | M (+91 −5) | add request-scoped HTTP transport decorator |
