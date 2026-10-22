@@ -42,6 +42,7 @@ mod respond;
 pub mod runtime;
 pub mod safe_mode;
 mod sanitize;
+pub mod sap_hooks; // sub-api-proxy: optional thread routing hooks.
 pub mod scheduler;
 mod session;
 mod speech;
@@ -121,9 +122,18 @@ fn api(rt: Arc<Runtime>) -> Router {
         .route("/v1beta/models/{*action}", post(gemini::action).get(models::gemini_get))
         .merge(codex_alpha::routes())
         .merge(websocket::routes())
+        // sub-api-proxy: after client auth, before route-specific body transformations.
+        .route_layer(middleware::from_fn_with_state(rt.clone(), sap_hooks::identify_http))
         // Only matched routes: gin's NoRoute runs no group middleware.
         .route_layer(auth());
+    // sub-api-proxy: register health only for a hooked server at startup.
+    let sap_health = if rt.sap_hooks().is_some() {
+        Router::new().route(sap_core::health::HEALTH_PATH, get(sap_hooks::health))
+    } else {
+        Router::new()
+    };
     Router::new()
+        .merge(sap_health)
         .route("/healthz", get(healthz).head(healthz))
         .route("/", get(root))
         .route("/anthropic/callback", get(callback))
