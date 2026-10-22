@@ -66,6 +66,7 @@ media-relay = ["dep:webrtc", "dep:rtc", "dep:async-trait"]
 pprof = ["dep:pprof", "dep:backtrace"]
 
 [dev-dependencies]
+cpa-core = { workspace = true, features = ["test-support"] }
 cpa-plugin = { workspace = true, features = ["test-support"] }
 url = "2"
 tokio = { workspace = true, features = ["test-util"] }
