@@ -86,6 +86,7 @@ export function openStream(h: StreamHandlers): () => void {
       } catch (e) {
         if (abort.signal.aborted) return;
         h.onError?.(e instanceof RequestError ? e : new RequestError(0, (e as Error).message));
+        if (e instanceof RequestError && (e.status === 401 || e.status === 403)) return;
         await new Promise((r) => setTimeout(r, delay));
         delay = Math.min(delay * 2, 15_000);
       }

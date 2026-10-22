@@ -1,5 +1,5 @@
 import { mergeEvents } from "./model/events.ts";
-import { fetchFlow, isDemo, RequestError, subscribe, useDemo } from "./api/client.ts";
+import { fetchFlow, isDemo, managementKey, RequestError, subscribe, useDemo } from "./api/client.ts";
 import type { AccountView, EventView, FlowSnapshot, ThreadKey, ThreadView } from "./api/types.ts";
 
 export type Status = "connecting" | "live" | "demo" | "offline" | "unauthorized";
@@ -41,6 +41,12 @@ class Store {
 
   start() {
     this.#stop?.();
+    if (!isDemo() && !managementKey()) {
+      this.status = "unauthorized";
+      this.error = "Enter the management key in Settings.";
+      this.go("settings");
+      return;
+    }
     this.status = isDemo() ? "demo" : "connecting";
     this.#stop = subscribe({
       onOpen: () => (this.status = isDemo() ? "demo" : "live"),
