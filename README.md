@@ -139,7 +139,7 @@ This project is for one person using their own accounts on their own machines. K
 
 Use the provider's sanctioned path where one exists:
 
-- OpenAI offers [Sign in with ChatGPT](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt) so eligible users can use their plan in participating tools, including local personal projects. That permission depends on the integration and consent scopes. cliproxy-rs's Codex login follows CLIProxyAPI's existing login flow; it is not the new Sign in with ChatGPT integration. The Management API can already bind Sign in with ChatGPT tokens to a Codex credential, but requests do not use them yet.
+- OpenAI offers [Sign in with ChatGPT](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt) so eligible users can use their plan in participating tools, including local personal projects. That permission depends on the integration and consent scopes. cliproxy-rs's Codex login follows CLIProxyAPI's existing login flow; it is not the new Sign in with ChatGPT integration. The Management API can bind Sign in with ChatGPT tokens to a Codex credential, and Codex requests use them when the credential's `use_siwc` is on.
 - Claude Code supports [gateway configuration](https://code.claude.com/docs/en/llm-gateway-connect). You can route other models into Claude Code through the proxy using their API keys. Anthropic's [authentication rules](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) reserve Claude subscription OAuth for Claude Code and other native Anthropic applications. Use an API key or supported cloud provider for Claude in third-party tools.
 
 Personal use is still subject to each provider's terms, and providers can restrict or suspend accounts that break them. Sharing an account, or using it to serve other people, is the clearest case.
@@ -164,7 +164,7 @@ Not in cliproxy-rs yet:
 
 - An AUR package.
 - Per-credential plugin model discovery (`model.for_auth`) and plugin response hooks on a Claude client's buffered Claude answer. Existing plugins can load, serve routes and quotas, install from the store, parse the credential files of their provider (`auth.parse`) and participate in frontend auth, model routing, credential scheduling, interceptors, request and response translation, thinking and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
-- Codex requests through bound Sign in with ChatGPT tokens (`use_siwc`) and the `--siwc-bind` command.
+- The `--siwc-bind` command, which binds Sign in with ChatGPT tokens from the command line. The Management API binding and requests through the bound tokens (`use_siwc`) already work.
 - Sending `server.github-token` on plugin store requests to the GitHub API that no `plugins.store-auth` rule covers. The setting is already accepted and kept.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 

@@ -39,6 +39,137 @@ pub fn identifier(cfg: &Config) -> String {
         .unwrap_or_else(|| DEFAULT_IDENTIFIER.to_owned())
 }
 
+/// Go `codexUseSIWC`: the `use_siwc` attribute (`strconv.ParseBool`), else the metadata
+/// bool or string.
+pub fn enabled(credential: &cpa_core::credential::Credential) -> bool {
+    let attribute = credential
+        .attributes
+        .get("use_siwc")
+        .and_then(|raw| parse_bool(raw.trim()))
+        .unwrap_or(false);
+    attribute
+        || match credential.metadata.get("use_siwc") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => parse_bool(s.trim()).unwrap_or(false),
+            _ => false,
+        }
+}
+
+/// Go `codexSIWCAccessToken`: `siwc.access_token`, else `siwc.access`, trimmed.
+pub fn access_token(credential: &cpa_core::credential::Credential) -> &str {
+    let Some(Value::Object(siwc)) = credential.metadata.get("siwc") else {
+        return "";
+    };
+    ["access_token", "access"]
+        .iter()
+        .filter_map(|k| siwc.get(*k).and_then(Value::as_str).map(str::trim))
+        .find(|t| !t.is_empty())
+        .unwrap_or_default()
+}
+
+/// Go `ensureCodexSIWCCredentials`: an SIWC credential without its token fails before
+/// any request is built.
+pub fn require_token(credential: &cpa_core::credential::Credential) -> Result<(), ExecError> {
+    if enabled(credential) && access_token(credential).is_empty() {
+        return Err(siwc_error(
+            401,
+            "codex executor: use_siwc is enabled but siwc access_token is missing",
+        ));
+    }
+    Ok(())
+}
+
+/// Go `CodexSIWCRefreshLead`.
+const REFRESH_LEAD: TimeDelta = TimeDelta::minutes(5);
+
+fn partition(credential: &cpa_core::credential::Credential) -> Option<&Map<String, Value>> {
+    match credential.metadata.get("siwc") {
+        Some(Value::Object(siwc)) if !siwc.is_empty() => Some(siwc),
+        _ => None,
+    }
+}
+
+fn text<'a>(siwc: &'a Map<String, Value>, key: &str) -> &'a str {
+    siwc.get(key).and_then(Value::as_str).map(str::trim).unwrap_or_default()
+}
+
+/// Go `SIWCExpirationTime`: the partition's expiry keys, else its access token's JWT `exp`.
+// ponytail: Go also reads `expires_in` plus a timestamp and a nested `token` map; `ToMap`
+// writes only `expired`, so those shapes come only from hand-edited files.
+fn expiry(siwc: &Map<String, Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    ["expired", "expire", "expires_at", "expiresAt", "expiry", "expires"]
+        .iter()
+        .find_map(|k| siwc.get(*k).and_then(crate::codex_oauth::parse_time))
+        .or_else(|| crate::codex_oauth::jwt_exp(text(siwc, "access_token")))
+}
+
+/// Go `CodexSIWCNeedsRefresh`: `None` when the partition cannot refresh (no refresh
+/// token or client ID), else whether it is due at `now`: no access token, five minutes
+/// before its expiry, five minutes after its last refresh, or now when neither is known.
+pub fn refresh_due(credential: &cpa_core::credential::Credential, now: chrono::DateTime<chrono::Utc>) -> Option<bool> {
+    let siwc = partition(credential)?;
+    if text(siwc, "refresh_token").is_empty() || text(siwc, "client_id").is_empty() {
+        return None;
+    }
+    if text(siwc, "access_token").is_empty() {
+        return Some(true);
+    }
+    if let Some(expiry) = expiry(siwc) {
+        return Some(expiry - REFRESH_LEAD <= now);
+    }
+    let last = ["last_refresh", "lastRefresh"]
+        .iter()
+        .find_map(|k| siwc.get(*k).and_then(crate::codex_oauth::parse_time));
+    Some(last.is_none_or(|last| last + REFRESH_LEAD <= now))
+}
+
+/// The partition's request token is present and not expired at `now`.
+pub(crate) fn access_usable(credential: &cpa_core::credential::Credential, now: chrono::DateTime<chrono::Utc>) -> bool {
+    !access_token(credential).is_empty() && partition(credential).and_then(expiry).is_none_or(|exp| exp > now)
+}
+
+/// The `siwc` patch of a refresh: the stored partition with the refreshed fields over it.
+pub(crate) fn refresh_patch(
+    credential: &cpa_core::credential::Credential,
+    tokens: &Tokens,
+) -> cpa_core::credential::MetadataPatch {
+    let mut merged = partition(credential).cloned().unwrap_or_default();
+    merged.extend(tokens.to_map());
+    let mut patch = cpa_core::credential::MetadataPatch::default();
+    patch.set.insert("siwc".into(), Value::Object(merged));
+    patch
+}
+
+/// The partition's refresh grant inputs: refresh token, client ID and device ID.
+pub(crate) fn refresh_inputs(credential: &cpa_core::credential::Credential) -> (&str, &str, &str) {
+    partition(credential).map_or(("", "", ""), |siwc| {
+        (
+            text(siwc, "refresh_token"),
+            text(siwc, "client_id"),
+            text(siwc, "device_id"),
+        )
+    })
+}
+
+/// Go `codexSIWCUserAgent`: `<identifier> (<GOOS>; <GOARCH>)`.
+pub fn user_agent(cfg: &Config) -> String {
+    format!(
+        "{} ({}; {})",
+        identifier(cfg),
+        crate::kimi_http::go_os(),
+        crate::kimi_http::go_arch()
+    )
+}
+
+/// Go `strconv.ParseBool`.
+fn parse_bool(s: &str) -> Option<bool> {
+    match s {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Some(true),
+        "0" | "f" | "F" | "false" | "FALSE" | "False" => Some(false),
+        _ => None,
+    }
+}
+
 /// Go `IsValidUUID`: a canonical 36-character UUID, any case, surrounding space ignored.
 pub fn is_valid_uuid(raw: &str) -> bool {
     let raw = raw.trim().as_bytes();
@@ -179,6 +310,17 @@ impl CodexOAuth {
                 body.into_bytes(),
             )
             .await?;
+        if status != 200 && !require_id_token {
+            // A refresh keeps the OAuth error code (Go echoes the body), so
+            // `refresh_token_reused` stops the retries; bodies may echo request material.
+            return Err(crate::codex_oauth::refresh_error(
+                status,
+                &format!(
+                    "OpenAI OAuth token request failed ({status}): {}",
+                    crate::codex_oauth::oauth_code(&body)
+                ),
+            ));
+        }
         if status != 200 {
             return Err(siwc_error(
                 status,

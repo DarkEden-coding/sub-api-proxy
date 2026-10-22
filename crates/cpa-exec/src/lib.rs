@@ -316,6 +316,10 @@ impl Executors {
         if filled(credential.str("refresh_token")) || filled(credential.str("refreshToken")) {
             return true;
         }
+        // Go `CodexSIWCNeedsRefresh`'s hasRefresh: a `siwc` refresh token and client ID.
+        if codex_siwc::refresh_due(credential, chrono::Utc::now()).is_some() {
+            return true;
+        }
         credential.provider.trim().eq_ignore_ascii_case("meta")
             && (filled(credential.str("dca_token"))
                 || filled(credential.attributes.get("dca_token").map(String::as_str)))
@@ -403,6 +407,15 @@ impl Executors {
         match credential.provider.as_str() {
             "codex" => self.codex.refresh_now(credential, cfg).await,
             _ => self.prepare(credential, cfg).await,
+        }
+    }
+
+    /// [`Self::prepare_forced`] for a management refresh (Go `IsForceRefreshContext`):
+    /// Codex refreshes every token partition that can refresh.
+    pub async fn prepare_management(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
+        match credential.provider.as_str() {
+            "codex" => self.codex.refresh_all(credential, cfg).await,
+            _ => self.prepare_forced(credential, cfg).await,
         }
     }
 
@@ -628,6 +641,13 @@ mod readiness_tests {
         assert!(has(serde_json::json!({"type": "claude", "refresh_token": "fake"})));
         assert!(has(serde_json::json!({"type": "kimi", "refreshToken": "fake"})));
         assert!(!has(serde_json::json!({"type": "claude", "refresh_token": "  "})));
+        // A Sign in with ChatGPT partition needs its refresh token and client ID.
+        assert!(has(
+            serde_json::json!({"type": "codex", "siwc": {"refresh_token": "fake", "client_id": "c"}})
+        ));
+        assert!(!has(
+            serde_json::json!({"type": "codex", "siwc": {"refresh_token": "fake"}})
+        ));
         assert!(has(serde_json::json!({"type": "meta", "dca_token": "fake"})));
         assert!(
             !has(serde_json::json!({"type": "claude", "dca_token": "fake"})),

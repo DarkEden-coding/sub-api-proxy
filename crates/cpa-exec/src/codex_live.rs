@@ -1071,6 +1071,8 @@ impl CodexExecutor {
         headers: Vec<(String, String)>,
         body: Bytes,
     ) -> Result<Upstream, ExecError> {
+        // `PrepareRequest`: Sign in with ChatGPT needs its token.
+        crate::codex_siwc::require_token(target.credential)?;
         let view = target.view();
         let headers = Self::live_credential_headers(&view, target.client, headers);
         target.record_post(url, &headers, &body);
@@ -1105,6 +1107,15 @@ impl CodexExecutor {
         headers: Vec<(String, String)>,
         protocols: Vec<String>,
     ) -> Result<LiveSocket, DialError> {
+        // ponytail: Go's `PrepareHttpRequest` fails a Sign in with ChatGPT credential
+        // without its token with status 401; a dial error carries no status here, so the
+        // route answers 502. Give `DialError` a status to match.
+        if let Err(error) = crate::codex_siwc::require_token(target.credential) {
+            return Err(DialError {
+                response: None,
+                message: String::from_utf8_lossy(&error.body).into_owned(),
+            });
+        }
         let view = target.view();
         let mut map = HeaderMap::new();
         for (name, value) in Self::live_credential_headers(&view, target.client, headers) {
