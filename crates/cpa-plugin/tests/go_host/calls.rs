@@ -123,41 +123,35 @@ pub async fn call(host: &Host, args: &Value) -> Value {
         }
         "pick_auth" => outcome(host.pick_auth(decode(req)).await, gv),
         "route_model" => outcome(Ok(host.route_model(decode(req), "", &[], &scope).await), gv),
-        "normalize_request" => text(
-            host.normalize_request(
+        "normalize_request" => text(host.normalize_request(
+            s(args, "from"),
+            s(args, "to"),
+            s(args, "model"),
+            body(),
+            flag(args, "stream"),
+        )),
+        "translate_request" => {
+            let input = body();
+            match host.translate_request(
                 s(args, "from"),
                 s(args, "to"),
                 s(args, "model"),
-                body(),
+                &input,
                 flag(args, "stream"),
-            )
-            .await,
-        ),
-        "translate_request" => {
-            let input = body();
-            match host
-                .translate_request(
-                    s(args, "from"),
-                    s(args, "to"),
-                    s(args, "model"),
-                    &input,
-                    flag(args, "stream"),
-                )
-                .await
-            {
+            ) {
                 Some(out) => json!({"body": text(out), "ok": true}),
                 None => json!({"body": text(input), "ok": false}),
             }
         }
-        "normalize_response_before" => text(host.normalize_response_before(&transform(), body()).await),
+        "normalize_response_before" => text(host.normalize_response_before(&transform(), body())),
         "translate_response" => {
             let input = body();
-            match host.translate_response(&transform(), &input).await {
+            match host.translate_response(&transform(), &input) {
                 Some(out) => json!({"body": text(out), "ok": true}),
                 None => json!({"body": text(input), "ok": false}),
             }
         }
-        "normalize_response_after" => text(host.normalize_response_after(&transform(), body()).await),
+        "normalize_response_after" => text(host.normalize_response_after(&transform(), body())),
         "thinking" => {
             let provider = s(args, "provider");
             let plugin = host.thinking_provider(provider).is_some();
@@ -174,7 +168,7 @@ pub async fn call(host: &Host, args: &Value) -> Value {
                     budget: args.get("budget").and_then(Value::as_i64).unwrap_or_default(),
                     level: s(args, "level").into(),
                 };
-                host.apply_thinking(provider, model, config, body(), &scope).await
+                host.apply_thinking(provider, model, config, body(), &scope)
             } else {
                 body()
             };

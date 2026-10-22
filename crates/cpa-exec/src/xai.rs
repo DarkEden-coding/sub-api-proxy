@@ -332,17 +332,15 @@ async fn upstream_error(upstream: wire::Upstream, capture: &wire::Capture) -> Ex
 /// `sdktranslator.TranslateNonStream(to, responseFormat)`: identity without a pair. An
 /// empty or rejected translation is the apply_patch 502.
 fn translate_non_stream(req: &ExecRequest, p: &Prepared, to: Format, data: &[u8]) -> Result<Bytes, ExecError> {
+    let ctx = ResponseCtx {
+        model: &req.model,
+        original_request: &p.original_payload,
+        translated_request: &p.body,
+    };
     let out = match cpa_translate::pair(req.response_format, to) {
-        Some(pair) => (pair.non_stream)(
-            &ResponseCtx {
-                model: &req.model,
-                original_request: &p.original_payload,
-                translated_request: &p.body,
-            },
-            data,
-        )
-        .map_err(|_| apply_patch_error())?,
-        None => data.to_vec(),
+        Some(pair) => (pair.non_stream)(&ctx, data).map_err(|_| apply_patch_error())?,
+        None => cpa_translate::hooks::unregistered_non_stream(to.as_str(), req.response_format.as_str(), &ctx, data)
+            .unwrap_or_else(|| data.to_vec()),
     };
     if out.is_empty() {
         return Err(apply_patch_error());
