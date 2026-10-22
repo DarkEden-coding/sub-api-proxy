@@ -434,12 +434,17 @@ pub fn escape_json_body_if_likely(body: &[u8], content_type: &str) -> Option<Byt
     Some(Bytes::from(escape_strings(value).marshal_no_html()))
 }
 
-fn escape_strings(v: GoValue) -> GoValue {
-    match v {
-        GoValue::String(s) => GoValue::String(html_escape(&s)),
-        GoValue::Array(items) => GoValue::Array(items.into_iter().map(escape_strings).collect()),
-        GoValue::Object(map) => GoValue::Object(map.into_iter().map(|(k, v)| (k, escape_strings(v))).collect()),
-        other => other,
+fn escape_strings(mut v: GoValue) -> GoValue {
+    match &mut v {
+        GoValue::String(s) => GoValue::String(html_escape(s)),
+        GoValue::Array(items) => GoValue::Array(std::mem::take(items).into_iter().map(escape_strings).collect()),
+        GoValue::Object(map) => GoValue::Object(
+            std::mem::take(map)
+                .into_iter()
+                .map(|(k, v)| (k, escape_strings(v)))
+                .collect(),
+        ),
+        _ => v,
     }
 }
 
