@@ -82,28 +82,56 @@ fn answers() -> std::sync::MutexGuard<'static, Option<HashMap<PathBuf, Answer>>>
     ANSWERS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Retires every cached answer (the parser or a plugin changed).
+/// Called after answers are retired, so auth files are loaded again.
+static ON_CHANGE: RwLock<Option<Arc<dyn Fn() + Send + Sync>>> = RwLock::new(None);
+
+/// Retires every cached answer (the parser or a plugin changed) and tells the
+/// [`on_plugin_auth_change`] callback.
 fn retire() {
     EPOCH.fetch_add(1, Ordering::AcqRel);
     *answers() = None;
+    let wake = ON_CHANGE.read().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some(wake) = wake {
+        wake();
+    }
+}
+
+/// Installs the callback told whenever plugin auth providers may answer differently (a
+/// plugin offering one was loaded, unloaded or fused, or the parser changed). It runs
+/// on the thread making the change, which may hold plugin host locks: it should only
+/// schedule an auth-folder reload.
+pub fn on_plugin_auth_change(wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+    *ON_CHANGE.write().unwrap_or_else(PoisonError::into_inner) = wake;
+}
+
+/// Counts the changes [`on_plugin_auth_change`] is told about.
+pub fn plugin_auth_epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
 }
 
 /// Go `RegisterPluginAuthParser` / `Watcher.SetPluginAuthParser`. Clearing it also
 /// clears the activity flag.
 pub fn set_plugin_auth_parser(parser: Option<Arc<dyn PluginAuthParser>>) {
     let mut slot = PARSER.write().unwrap_or_else(PoisonError::into_inner);
+    let was = ACTIVE.load(Ordering::Acquire);
     if parser.is_none() {
         ACTIVE.store(false, Ordering::Release);
     }
     *slot = parser;
-    retire();
+    drop(slot);
+    if was {
+        retire();
+    }
 }
 
 /// Set by the parser's owner whenever its plugins change (a load, unload or fuse), so
-/// answers cached before are asked again.
+/// answers cached before are asked again. Nothing happens while no plugin offers an
+/// auth provider before or after.
 pub fn set_plugin_auth_parser_active(active: bool) {
-    ACTIVE.store(active, Ordering::Release);
-    retire();
+    let was = ACTIVE.swap(active, Ordering::AcqRel);
+    if was || active {
+        retire();
+    }
 }
 
 /// Whether auth files go to the installed parser first.
@@ -208,7 +236,7 @@ pub(super) fn credentials(
         raw_json: data,
     });
     let Some(parsed) = parsed else {
-        return Some(Ok(super::FileCredentials::Deferred(None)));
+        return Some(Ok(super::FileCredentials::Deferred));
     };
     let Parsed::Handled(auths) = parsed else {
         return None;
@@ -573,7 +601,7 @@ mod tests {
             let show = |r: Result<Option<FileCredentials>, String>| match r {
                 Ok(Some(FileCredentials::One(c))) => format!("{c:?}"),
                 Ok(Some(FileCredentials::Plugin(all))) => format!("plugin {all:?}"),
-                Ok(Some(FileCredentials::Deferred(_))) => "deferred".into(),
+                Ok(Some(FileCredentials::Deferred)) => "deferred".into(),
                 Ok(None) => "none".into(),
                 Err(e) => e,
             };
@@ -670,12 +698,9 @@ mod tests {
         std::fs::write(dir.join("c.json"), r#"{"type":"acme"}"#).unwrap();
         let scan = scan_with(&cfg, Some(Ask::Cached));
         assert_eq!(ids(&scan), ["a.json"]);
-        assert_eq!(names(scan.deferred.keys().collect()), ["b.json", "c.json"]);
+        assert_eq!(names(scan.deferred.iter().collect()), ["b.json", "c.json"]);
         assert_eq!(names(scan.read.keys().collect()), ["a.json"]);
         assert_eq!(asked().len(), 2, "the locked scan asked a plugin");
-        // A deferred file carries what the built-in synthesizer makes of it.
-        let builtin = scan.deferred[&dir.join("c.json")].as_ref().unwrap();
-        assert_eq!((builtin.id.as_str(), builtin.provider.as_str()), ("c.json", "acme"));
 
         scan_with(&cfg, Some(Ask::Fill(&parser)));
         assert_eq!(
@@ -686,7 +711,7 @@ mod tests {
         assert_eq!(ids(&scan_with(&cfg, Some(Ask::Cached))), ["a.json", "b.json", "c.json"]);
 
         // A plugin change retires every answer.
-        set_plugin_auth_parser_active(false);
+        set_plugin_auth_parser_active(true);
         let scan = scan_with(&cfg, Some(Ask::Cached));
         assert!(scan.credentials.is_empty());
         assert_eq!(scan.deferred.len(), 3);

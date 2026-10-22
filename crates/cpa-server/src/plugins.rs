@@ -156,45 +156,40 @@ pub async fn reload_plugin_auth_files(rt: &Arc<Runtime>) {
                 all.push(cpa_core::credential::Credential::clone(&existing));
             }
         }
-        keep_deferred(&rt, &mut all, scan.deferred);
         all.extend(credentials::from_config(&cfg));
-        rt.store().reconcile_scanned(all, &scan.read);
+        rt.store().reconcile_scanned_with(all, &scan.read, |current, all| {
+            keep_deferred(current, all, &scan.deferred)
+        });
     });
     if let Err(e) = reload.await {
         tracing::error!(error = %e, "reloading auth files for plugin auth providers failed");
     }
 }
 
-/// The credentials of the files a scan deferred (no plugin auth provider has answered
-/// for their current bytes yet): a file keeps the credentials it has, and a file without
-/// any takes its built-in credential, as Go's management upload registers one before
-/// its watcher asks plugins. The watcher's next reload parses them.
+/// Keeps the store's `current` credentials of the files a scan deferred (no plugin auth
+/// provider has answered for their current bytes yet) and publishes nothing new for
+/// them, as Go's watcher asks the plugin first; the watcher's next reload parses them.
+/// Run under the store's reconciliation gate
+/// ([`crate::runtime::CredentialStore::reconcile_scanned_with`]), so a refresh committed
+/// after the scan is what is kept.
 pub(crate) fn keep_deferred(
-    rt: &Runtime,
+    current: &[Arc<cpa_core::credential::Credential>],
     all: &mut Vec<cpa_core::credential::Credential>,
-    deferred: std::collections::HashMap<std::path::PathBuf, Option<cpa_core::credential::Credential>>,
+    deferred: &std::collections::HashSet<std::path::PathBuf>,
 ) {
     use cpa_core::credential::{Credential, Source};
     if deferred.is_empty() {
         return;
     }
-    let current = rt.store().snapshot();
     // Saves and uploads record absolute paths; a relative auth-dir scans relative ones.
     let absolute = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
-    for (path, builtin) in deferred {
-        let path = absolute(&path);
-        let mut kept = false;
-        for existing in current
-            .iter()
-            .filter(|c| matches!(&c.source, Source::File(p) if absolute(p) == path))
+    let deferred: std::collections::HashSet<_> = deferred.iter().map(|p| absolute(p)).collect();
+    for existing in current {
+        if let Source::File(p) = &existing.source
+            && deferred.contains(&absolute(p))
+            && !all.iter().any(|c| c.id == existing.id)
         {
-            kept = true;
-            if !all.iter().any(|c| c.id == existing.id) {
-                all.push(Credential::clone(existing));
-            }
-        }
-        if !kept && let Some(builtin) = builtin {
-            all.push(builtin);
+            all.push(Credential::clone(existing));
         }
     }
 }

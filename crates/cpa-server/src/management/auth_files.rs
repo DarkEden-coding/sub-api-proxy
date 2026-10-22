@@ -971,7 +971,7 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
             fallbacks.remove(&dst);
         }
     }
-    resync(state);
+    state.publish_upload((*state.rt.config()).clone(), None, synthesized);
     Ok(())
 }
 
@@ -2422,6 +2422,32 @@ mod tests {
             (a.provider.as_str(), a.disabled, &a.metadata["note"]),
             ("codex", true, &json!(1))
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An upload registers what it uploaded, as Go's upload does without asking plugin
+    /// auth providers, even while one is active and has not parsed the new bytes: it
+    /// replaces the credential with the same ID instead of keeping the old one.
+    #[tokio::test]
+    async fn an_upload_replaces_its_credential_while_plugins_parse_auth_files() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-plugins",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        credentials::set_plugin_auth_parser(Some(Arc::new(Nothing)));
+        credentials::set_plugin_auth_parser_active(true);
+        let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
+        assert_eq!(token(&state), "fake-0");
+        store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+        assert_eq!(token(&state), "fake-1");
+        credentials::set_plugin_auth_parser(None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

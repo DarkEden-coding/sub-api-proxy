@@ -15,7 +15,7 @@ use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
 use cpa_common::gostr::GoStr;
 use cpa_core::config::{Config, ConfigDocument, archive_comments, credentials, is_bcrypt};
-use cpa_core::credential::Source;
+use cpa_core::credential::{Credential, Source};
 use serde_json::{Value, json};
 
 use crate::Runtime;
@@ -239,13 +239,20 @@ impl Management {
     /// c4c1d43e). Callers hold `disk`. Infallible on purpose: access settings of a
     /// valid config (a rotated or removed secret) always take effect.
     pub(crate) fn publish(&self, cfg: Config, files: Option<credentials::AuthScan>) {
+        self.publish_upload(cfg, files, None);
+    }
+
+    /// [`Self::publish`] after an upload wrote `upload`'s file. While plugin auth
+    /// providers have not parsed the new bytes, the uploaded credential is registered as
+    /// built, as Go's upload registers it (`buildAuthFromFileData`, no plugin parser),
+    /// replacing one with the same ID; the watcher's next reload asks the plugins.
+    pub(crate) fn publish_upload(&self, cfg: Config, files: Option<credentials::AuthScan>, upload: Option<Credential>) {
         let mut cfg = cfg;
         self.lock_auth_dir(&mut cfg);
         use sha2::{Digest, Sha256};
         let scan = files.unwrap_or_else(|| credentials::scan_auth_dir(&cfg));
         let mut all = scan.credentials;
         let mut read = scan.read;
-        crate::plugins::keep_deferred(&self.rt, &mut all, scan.deferred);
         // Uploads record absolute paths; a relative auth-dir scans relative ones.
         let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
         // Fallbacks follow their file: gone with it, replaced once a synthesizer
@@ -293,7 +300,16 @@ impl Management {
         self.rt.usage_queue().configure(self.access.available(), &cfg);
         let policy = policy(&cfg);
         self.rt.publish_config_and_policy(cfg, policy);
-        let rejected = self.rt.store().reconcile_scanned(all, &read);
+        let rejected = self.rt.store().reconcile_scanned_with(all, &read, |current, all| {
+            crate::plugins::keep_deferred(current, all, &scan.deferred);
+            if let Some(upload) = upload
+                && let Source::File(path) = &upload.source
+                && scan.deferred.iter().any(|p| absolute(p) == absolute(path))
+            {
+                all.retain(|c| c.id != upload.id);
+                all.push(upload);
+            }
+        });
         // A synthesizer claimed the file but its credential was rejected as stale, so the
         // fallback stays live: keep tracking it, or the next reload would drop it.
         let kept: Vec<PathBuf> = claimed

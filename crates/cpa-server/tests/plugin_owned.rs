@@ -2196,8 +2196,8 @@ async fn a_reload_and_a_serial_plugins_save_both_complete() {
 
 /// A file that changes after plugins parsed it, before the reload's scan reads it, is
 /// not parsed again by the scan (which may run under the disk lock): it keeps its
-/// credentials until the next reload parses the new bytes. A file that appears then
-/// gets its built-in credential meanwhile, as a Go management upload does.
+/// credentials until the next reload parses the new bytes. A file that appears then is
+/// published only once parsed, as Go's watcher asks the plugin first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_file_changed_after_its_parse_keeps_its_credentials_until_the_next_reload() {
     let auth = |provider: &str, id: &str| json!({"Handled":true,"Auths":[{"Provider":provider,"ID":id,"Metadata":{"type":provider}}]});
@@ -2254,10 +2254,63 @@ async fn a_file_changed_after_its_parse_keeps_its_credentials_until_the_next_rel
         "the changed file lost its credential"
     );
     assert!(env.rt.store().get("slow-a").is_some());
-    assert_eq!(env.rt.store().get("1-new.json").unwrap().provider, "claude");
+    assert!(
+        env.rt.store().get("1-new.json").is_none(),
+        "published before it was parsed"
+    );
     cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    assert_eq!(env.rt.store().get("1-new.json").unwrap().provider, "claude");
     assert_eq!(parsed(), 2, "the next reload parses the new bytes");
     assert!(env.rt.store().get("acme-a").is_some());
+    env.finish().await;
+}
+
+/// Unloading an auth provider changes what its file loads to with no file changing:
+/// the watcher reloads the auth folder on its own. Here P parsed `p.json` into two
+/// credentials and Q, another auth provider, keeps plugin auth parsing on, so a reload
+/// that only read cached answers would keep P's credentials. This is what the
+/// management delete of a plugin does before it publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-unload",
+        &[("pp", "auth_provider"), ("qq", "auth_provider")],
+        "",
+        &[("p.json", r#"{"type":"pp"}"#)],
+        |records| {
+            let auth = |id: &str| json!({"Provider":"pp","ID":id,"Metadata":{"type":"pp"}});
+            canned(
+                records,
+                "pp",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[auth("p1"), auth("p2")]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    let store = env.rt.store().clone();
+    eventually("P's credentials never loaded", || {
+        store.get("p1").is_some() && store.get("p2").is_some()
+    })
+    .await;
+    // Settled: nothing changes on disk from here.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(env.rt.plugins().unload_plugin("pp", None).await);
+    eventually("P's credentials outlived P", || {
+        store.get("p1").is_none() && store.get("p2").is_none()
+    })
+    .await;
+    // No plugin owns the type now: the built-in synthesizer loads the file.
+    eventually("the file never loaded", || store.get("p.json").is_some()).await;
+    watcher.abort();
+    drop(management);
     env.finish().await;
 }
 

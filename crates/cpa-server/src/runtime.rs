@@ -2011,9 +2011,21 @@ impl CredentialStore {
         credentials: Vec<Credential>,
         read: &std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>,
     ) -> Vec<std::path::PathBuf> {
+        self.reconcile_scanned_with(credentials, read, |_, _| {})
+    }
+
+    /// [`Self::reconcile_scanned`]; `keep` first adds to the set from the current
+    /// credentials, under the gate, so no write lands between what it reads and the swap.
+    pub fn reconcile_scanned_with(
+        &self,
+        credentials: Vec<Credential>,
+        read: &std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>,
+        keep: impl FnOnce(&[Arc<Credential>], &mut Vec<Credential>),
+    ) -> Vec<std::path::PathBuf> {
         use sha2::{Digest, Sha256};
         let reload = self.reload.write().unwrap_or_else(PoisonError::into_inner);
         let mut credentials = credentials;
+        keep(&self.snapshot(), &mut credentials);
         let mut rejected = Vec::new();
         if !read.is_empty() {
             let current = self.snapshot();
