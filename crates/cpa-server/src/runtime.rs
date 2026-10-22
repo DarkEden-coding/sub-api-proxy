@@ -478,13 +478,15 @@ impl Runtime {
         match failed {
             Some(revision) if current.revision != revision => return Ok(current),
             Some(_) => {}
-            None if self.executors.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
+            None if self.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
             None => {}
         }
         let view = self.for_executor(&current);
-        let patch = match failed {
-            Some(_) => self.executors.prepare_forced(&view, cfg).await?,
-            None => self.executors.prepare(&view, cfg).await?,
+        let plugin = crate::plugins::refresh::route(self, &current, cfg);
+        let patch = match (&plugin, failed) {
+            (Some(route), _) => crate::plugins::refresh::refresh(self, route, &view).await?,
+            (None, Some(_)) => self.executors.prepare_forced(&view, cfg).await?,
+            (None, None) => self.executors.prepare(&view, cfg).await?,
         };
         let store = self.store.clone();
         let committed = tokio::task::spawn_blocking({
@@ -508,11 +510,11 @@ impl Runtime {
                         Err(PatchError::Stale { .. }) => {
                             let latest = store.get(&id).ok_or(PatchError::NotFound)?;
                             if credentials_changed(&current, &latest) {
-                                return Ok(latest);
+                                return Ok((latest, false));
                             }
                             attempt = rebase_patch(&current.provider, &current.metadata, &latest.metadata, &patch);
                             if attempt.set.is_empty() && attempt.remove.is_empty() {
-                                return Ok(latest);
+                                return Ok((latest, false));
                             }
                             revision = latest.revision;
                         }
@@ -524,7 +526,7 @@ impl Runtime {
                             if rotated {
                                 store.recover_unauthorized(&id);
                             }
-                            return Ok(committed);
+                            return Ok((committed, true));
                         }
                     }
                 }
@@ -540,7 +542,25 @@ impl Runtime {
                 format!("committing prepared credential: {e:?}"),
             )
         })?;
+        let (committed, ours) = committed;
+        if ours && plugin.is_some() {
+            crate::plugins::refresh::committed(self, id, committed.revision, chrono::Utc::now());
+        }
         Ok(committed)
+    }
+
+    /// [`Executors::readiness`], plus the schedule of credentials a plugin refreshes
+    /// ([`crate::plugins::refresh`]), which never holds a request. Built-in providers
+    /// read their executor alone.
+    fn readiness(&self, c: &Credential, cfg: &Config) -> Readiness {
+        match self.executors.readiness(c, cfg) {
+            Readiness::Ready if self.plugin_refresh_due(c, cfg, chrono::Utc::now()) => Readiness::RefreshSoon,
+            readiness => readiness,
+        }
+    }
+
+    fn plugin_refresh_due(&self, c: &Credential, cfg: &Config, now: chrono::DateTime<chrono::Utc>) -> bool {
+        crate::plugins::refresh::due_at(self, c, cfg).is_some_and(|at| at <= now)
     }
 
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
@@ -629,10 +649,15 @@ impl Runtime {
                             }
                             continue;
                         }
-                        if rt.executors.needs_prepare_at(c, &cfg, eventually) {
+                        let plugin_due = crate::plugins::refresh::due_at(&rt, c, &cfg);
+                        if rt.executors.needs_prepare_at(c, &cfg, eventually) || plugin_due.is_some() {
                             soonest(now + HORIZON);
                         }
-                        match rt.executors.prepare_due(c, &cfg, wall, horizon) {
+                        let due = rt
+                            .executors
+                            .prepare_due(c, &cfg, wall, horizon)
+                            .or_else(|| plugin_due.filter(|at| *at <= wall + horizon).map(|at| at.max(wall)));
+                        match due {
                             Some(at) if at > wall => soonest(now + (at - wall).to_std().unwrap_or_default()),
                             Some(_) if state.reserve(c, now) => jobs.push((c.clone(), false)),
                             // Reserved or backing off: look again when that ends.
@@ -673,8 +698,7 @@ impl Runtime {
                             {
                                 return;
                             }
-                            let ineffective =
-                                result.is_ok() && rt.executors.readiness(&current, &cfg) != Readiness::Ready;
+                            let ineffective = result.is_ok() && rt.readiness(&current, &cfg) != Readiness::Ready;
                             rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner).finish(
                                 &current,
                                 result.as_ref().err(),

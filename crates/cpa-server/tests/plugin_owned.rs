@@ -54,17 +54,29 @@ async fn env(
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
 ) -> Option<Env> {
-    env_with(name, plugins, extra_yaml, auths, prepare, Default::default()).await
+    env_with(name, plugins, extra_yaml, auths, prepare, executors()).await
 }
 
-/// [`env`] with a Codex executor (for Codex live endpoints on a local mock).
+/// Executors whose built-in upstreams are dead local ports.
+fn executors() -> Executors {
+    Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: Default::default(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    }
+}
+
+/// [`env`] with these executors (for Codex live endpoints or Claude OAuth on a local
+/// mock).
 async fn env_with(
     name: &str,
     plugins: &[(&str, &str)],
     extra_yaml: &str,
     auths: &[(&str, &str)],
     prepare: impl FnOnce(&Path),
-    codex: cpa_exec::codex::CodexExecutor,
+    executors: Executors,
 ) -> Option<Env> {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let serial = SERIAL.lock().await;
@@ -93,17 +105,7 @@ async fn env_with(
     prepare(&records);
     let cfg = Config::parse(&yaml).unwrap();
     let credentials = cpa_core::config::credentials::load(&cfg);
-    let rt = Arc::new(cpa_server::testing::runtime(
-        cfg,
-        credentials,
-        Executors {
-            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
-            codex,
-            devices: Default::default(),
-            openai: Default::default(),
-            google: Default::default(),
-        },
-    ));
+    let rt = Arc::new(cpa_server::testing::runtime(cfg, credentials, executors));
     cpa_server::plugins::start(&rt).await;
     let proxy = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -644,7 +646,7 @@ async fn a_plugin_scheduler_picks_rejects_or_delegates() {
                 r#"{"type":"codex","access_token":"at-FAKE","account_id":"acct-FAKE"}"#,
             )],
             |_| {},
-            codex,
+            Executors { codex, ..executors() },
         )
         .await
         else {
@@ -2611,5 +2613,318 @@ async fn a_refresh_committed_during_the_startup_reload_survives_it() {
         store.get("a-claude.json").unwrap().metadata["access_token"],
         "refreshed"
     );
+    env.finish().await;
+}
+
+/// The auth file `name` as JSON.
+fn auth_file(env: &Env, name: &str) -> Value {
+    serde_json::from_slice(&std::fs::read(env.rt.config().auth_dir.join(name)).unwrap()).unwrap()
+}
+
+/// Go `executorAdapter.Refresh` through `tryRefreshAfterUnauthorized`: a 401 from a
+/// plugin executor refreshes its credential through the plugin's auth provider, which
+/// sees the stored document, and the retry carries the refreshed token. The refreshed
+/// metadata overlays the stored document, which keeps the keys the plugin left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_401_from_a_plugin_executor_refreshes_through_its_auth_provider() {
+    let Some(env) = env(
+        "plugin-owned-refresh-401",
+        &[("catalog", "model_provider"), ("acme", "auth_provider,executor")],
+        "",
+        &[(
+            "acme.json",
+            r#"{"type":"acme","access_token":"old","refresh_token":"r1","keep":"x"}"#,
+        )],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            );
+            canned(
+                records,
+                "acme",
+                "auth.refresh",
+                json!({"Auth":{"Metadata":{"type":"acme","access_token":"new","refresh_token":"r2"}}}),
+            );
+            std::fs::write(
+                records.join("respond/acme/executor.execute.once.json"),
+                json!({"ok":false,"error":{"code":"unauthorized","message":"token expired","http_status":401}})
+                    .to_string(),
+            )
+            .unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    let refreshes = calls(&env.records, "acme", "auth.refresh");
+    assert_eq!(refreshes.len(), 1, "{refreshes:?}");
+    assert_eq!(refreshes[0]["AuthID"], "acme.json");
+    assert_eq!(refreshes[0]["AuthProvider"], "acme");
+    assert_eq!(refreshes[0]["Metadata"]["refresh_token"], "r1");
+    let executed = calls(&env.records, "acme", "executor.execute");
+    assert_eq!(executed.len(), 2, "one retry after the refresh");
+    assert_eq!(executed[0]["AuthMetadata"]["access_token"], "old");
+    assert_eq!(executed[1]["AuthMetadata"]["access_token"], "new");
+    assert_eq!(
+        auth_file(&env, "acme.json"),
+        json!({"type":"acme","access_token":"new","refresh_token":"r2","keep":"x","disabled":false})
+    );
+    env.finish().await;
+}
+
+/// Go `pluginRefreshCompatExecutor`: a credential with no plugin executor refreshes
+/// through the auth provider of its provider. When only its `compat_name` matched an
+/// auth provider, no plugin answers for its provider, and with a refresh token the
+/// refresh fails with Go's error instead of keeping the credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compatible_credential_refreshes_through_its_providers_auth_provider() {
+    let Some(env) = env(
+        "plugin-owned-refresh-compat",
+        &[("acme", "auth_provider"), ("pool", "auth_provider")],
+        "",
+        &[
+            (
+                "acme.json",
+                r#"{"type":"acme","access_token":"old","refresh_token":"r1"}"#,
+            ),
+            ("pool.json", r#"{"type":"pool","wrapped":"material"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.refresh",
+                json!({"Auth":{"Metadata":{"type":"acme","access_token":"new"}}}),
+            );
+            canned(
+                records,
+                "pool",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"zeta","ID":"zeta-1",
+                    "Attributes":{"compat_name":"pool"},
+                    "Metadata":{"type":"zeta","access_token":"z","refresh_token":"rz"}}]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    let refreshed = env.rt.refresh_credential("acme.json").await.unwrap();
+    assert_eq!(refreshed.metadata["access_token"], "new");
+    assert_eq!(
+        refreshed.metadata["refresh_token"], "r1",
+        "kept from the stored document"
+    );
+    assert_eq!(calls(&env.records, "acme", "auth.refresh").len(), 1);
+    let before = env.rt.store().get("zeta-1").expect("the parsed credential");
+    let error = env.rt.refresh_credential("zeta-1").await.unwrap_err();
+    assert!(
+        String::from_utf8_lossy(&error.body)
+            .contains("plugin auth provider refresh is unavailable for provider openai-compatible-pool"),
+        "{error:?}"
+    );
+    assert!(calls(&env.records, "pool", "auth.refresh").is_empty());
+    assert_eq!(env.rt.store().get("zeta-1").unwrap().revision, before.revision);
+    env.finish().await;
+}
+
+/// Go `shouldRefresh` for a plugin-refreshed credential: only `refresh_interval`
+/// schedules a refresh. A credential never refreshed is due at once; after a refresh the
+/// next one waits the interval from it (Go `LastRefreshedAt`), whatever
+/// `NextRefreshAfter` the plugin answered (Go clears it when it commits the refresh).
+/// A recent `last_refresh` holds the refresh off, and no interval never schedules one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_refresh_interval_schedules_background_refreshes() {
+    let recent = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    let held = format!(r#"{{"type":"acme","access_token":"h","refresh_interval":"1h","last_refresh":"{recent}"}}"#);
+    let Some(env) = env(
+        "plugin-owned-refresh-interval",
+        &[("acme", "auth_provider")],
+        "",
+        &[
+            (
+                "due.json",
+                r#"{"type":"acme","access_token":"old","refresh_interval":"2s"}"#,
+            ),
+            ("held.json", &held),
+            (
+                "never.json",
+                r#"{"type":"acme","access_token":"n","refresh_token":"rn"}"#,
+            ),
+        ],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.refresh",
+                json!({"Auth":{"Metadata":{"type":"acme","access_token":"new"}},
+                    "NextRefreshAfter":"2099-01-01T00:00:00Z"}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.start_auto_refresh();
+    let refreshed = || {
+        calls(&env.records, "acme", "auth.refresh")
+            .iter()
+            .map(|r| r["AuthID"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    eventually("the first refresh", || !refreshed().is_empty()).await;
+    let first = std::time::Instant::now();
+    eventually("the second refresh", || refreshed().len() >= 2).await;
+    assert!(
+        first.elapsed() >= Duration::from_millis(1500),
+        "the second refresh waits the interval: {:?}",
+        first.elapsed()
+    );
+    assert_eq!(refreshed(), ["due.json", "due.json"]);
+    assert_eq!(env.rt.store().get("due.json").unwrap().metadata["access_token"], "new");
+    env.rt.stop_auto_refresh();
+    env.finish().await;
+}
+
+/// Built-in providers keep their own refresh: a plugin auth provider registered for
+/// `claude` never refreshes a Claude credential, even one with a `base_url`. A 401 and a
+/// management refresh each reach Claude's token endpoint once, as without the plugin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claude_credential_keeps_its_builtin_refresh_beside_a_claude_auth_provider() {
+    let tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let token_url = {
+        let tokens = tokens.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let n = tokens.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                async move {
+                    axum::Json(
+                        json!({"access_token":format!("plain-new-{n}"),"refresh_token":format!("r{}", n + 1),
+                        "expires_in":3600,"account":{"uuid":"acct-fake","email_address":"a@example.invalid"}}),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/token")
+    };
+    let oauth = cpa_exec::oauth::OAuth::with_endpoints(wreq::Client::new(), &token_url, &token_url, &token_url);
+    let Some(env) = env_with(
+        "plugin-owned-refresh-claude",
+        &[("claude", "auth_provider")],
+        "",
+        &[(
+            "claude.json",
+            r#"{"type":"claude","access_token":"plain-old","refresh_token":"r1","base_url":"http://127.0.0.1:1","expired":"2099-01-01T00:00:00Z"}"#,
+        )],
+        |records| {
+            canned(
+                records,
+                "claude",
+                "auth.refresh",
+                json!({"Auth":{"Metadata":{"type":"claude","access_token":"from-plugin"}}}),
+            );
+        },
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1")
+                .unwrap()
+                .with_oauth(oauth),
+            ..executors()
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    let cfg = env.rt.config();
+    let credential = env.rt.store().get("claude.json").unwrap();
+    let retried = env
+        .rt
+        .refresh_after_unauthorized(&credential, &cfg)
+        .await
+        .expect("refreshed");
+    assert_eq!(retried.metadata["access_token"], "plain-new-1");
+    assert_eq!(tokens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let forced = env.rt.refresh_credential("claude.json").await.unwrap();
+    assert_eq!(forced.metadata["access_token"], "plain-new-2");
+    assert_eq!(tokens.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(calls(&env.records, "claude", "auth.refresh").is_empty());
+    env.finish().await;
+}
+
+/// `executor.http_request` (M6-0114): the request goes over the wire in Go's
+/// `rpcExecutorHTTPRequest` encoding (fields in declaration order, bytes as base64, the
+/// callback ID last) and the plugin's `ExecutorHTTPResponse` decodes back. Go's server
+/// never calls it for a plugin executor (only Codex credentials use `HttpRequest`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn executor_http_request_crosses_the_wire_as_go_encodes_it() {
+    let Some(env) = env(
+        "plugin-owned-http-request",
+        &[("acme", "executor")],
+        "",
+        &[],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "executor.http_request",
+                json!({"StatusCode":201,"Headers":{"X-Up":["a","b"]},"Body":"aGk="}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let host = env.rt.plugins();
+    let adapter = host.executor_adapter("acme").await.unwrap();
+    let req = cpa_plugin::api::ExecutorHttpRequest {
+        auth_id: "a1".into(),
+        auth_provider: "acme".into(),
+        method: "POST".into(),
+        url: "https://up.invalid/v1/x?q=1".into(),
+        headers: [("X-Test".to_owned(), vec!["1".to_owned()])].into(),
+        body: bytes::Bytes::from_static(b"hello"),
+        storage_json: bytes::Bytes::from_static(b"{}"),
+        metadata: [("k".to_owned(), json!(1.5))].into(),
+        attributes: [("path".to_owned(), "/p".to_owned())].into(),
+    };
+    let resp = host
+        .executor_http_request(&adapter, &req, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code, 201);
+    assert_eq!(resp.headers["X-Up"], ["a", "b"]);
+    assert_eq!(&resp.body[..], b"hi");
+    let raw = std::fs::read_to_string(env.records.join("acme.jsonl")).unwrap();
+    let line: Value = raw
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|r| r["method"] == "executor.http_request")
+        .unwrap();
+    let sent = line["request"].as_str().unwrap();
+    let want = concat!(
+        r#"{"AuthID":"a1","AuthProvider":"acme","Method":"POST","URL":"https://up.invalid/v1/x?q=1","#,
+        r#""Headers":{"X-Test":["1"]},"Body":"aGVsbG8=","StorageJSON":"e30=","Metadata":{"k":1.5},"#,
+        r#""Attributes":{"path":"/p"},"host_callback_id":""#
+    );
+    let id = sent
+        .strip_prefix(want)
+        .and_then(|rest| rest.strip_suffix(r#""}"#))
+        .unwrap_or_else(|| panic!("{sent}"));
+    assert!(!id.is_empty() && !id.contains('"'), "{sent}");
     env.finish().await;
 }
