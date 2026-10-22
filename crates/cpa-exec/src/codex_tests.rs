@@ -670,8 +670,8 @@ impl cpa_core::exec::UsageObserver for Recorded {
     }
 }
 
-/// Usage records see the upstream side, as Go's reporter does: the translated request
-/// (`SetTranslatedReasoningEffort`, before the prompt-cache key is added) and every
+/// Usage records see the upstream side, as Go's reporter does: the finalized request
+/// (`SetTranslatedReasoningEffort` on the upstream body, c7b4d573) and every
 /// upstream event in Codex format, or the compaction body in OpenAI Responses format,
 /// whatever the client speaks. Expected payloads come from the Go fixture.
 #[tokio::test]
@@ -705,11 +705,10 @@ async fn usage_records_see_upstream_payloads() {
         }
         let reports = recorded.0.lock().unwrap().clone();
         let upstream_format = if compact { Format::OpenAIResponse } else { Format::Codex };
-        let mut sent = case["upstream"]["body"].as_str().unwrap().as_bytes().to_vec();
-        cpa_common::json::delete(&mut sent, "prompt_cache_key");
+        let sent = case["upstream"]["body"].as_str().unwrap().to_owned();
         assert_eq!(
             reports[0],
-            ("request", upstream_format, String::from_utf8(sent).unwrap()),
+            ("request", upstream_format, sent),
             "{name}: translated request"
         );
         let upstream = case["upstream_body"].as_str().unwrap();
@@ -723,6 +722,53 @@ async fn usage_records_see_upstream_payloads() {
                 .collect()
         };
         assert_eq!(reports[1..], expected[..], "{name}: upstream payloads");
+    }
+}
+
+/// Go `Test*RecordsFinalizedPayloadOverrideReasoningEffort` (c7b4d573): a payload
+/// override of `reasoning.effort` reaches both the upstream body and the usage record,
+/// on the stream, non-stream and compact paths.
+#[tokio::test]
+async fn usage_records_the_payload_override_reasoning_effort() {
+    let executor = executor();
+    for (name, protocol) in [
+        ("apikey_claude_not_compat", "codex"),
+        ("oauth_nonstream_no_instructions_free_plan", "codex"),
+        ("oauth_compact", "openai-response"),
+    ] {
+        let case = GO["executor"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        let mock = Mock::start().await;
+        let compact = case["alt"] == "responses/compact";
+        mock.script(
+            if compact { "/responses/compact" } else { "/responses" },
+            vec![reply(case)],
+        );
+        let credential = credential(case, &mock.url);
+        let cfg = Config::parse(&format!(
+            "payload:\n  override:\n    - models:\n        - name: gpt-5.4\n          protocol: {protocol}\n      params:\n        reasoning.effort: high\n"
+        ))
+        .unwrap();
+        let recorded = Arc::new(Recorded::default());
+        let mut req = request(case);
+        req.usage = cpa_core::exec::UsageSink::new(recorded.clone());
+        match executor.execute(&credential, req, &cfg).await.unwrap().body {
+            ResponseBody::Stream(mut stream) => while stream.next().await.is_some() {},
+            ResponseBody::Buffered(_) => {}
+        }
+        let sent = String::from_utf8(mock.take().pop().unwrap().body.to_vec()).unwrap();
+        assert_eq!(gjson::get(&sent, "reasoning.effort").str(), "high", "{name}: upstream");
+        let reports = recorded.0.lock().unwrap().clone();
+        assert_eq!(reports[0].0, "request", "{name}");
+        assert_eq!(
+            gjson::get(&reports[0].2, "reasoning.effort").str(),
+            "high",
+            "{name}: usage record"
+        );
     }
 }
 
