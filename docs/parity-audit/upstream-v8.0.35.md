@@ -21,7 +21,7 @@ Columns:
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
-| Codex | 19 | 11 | 8 | 0 | 0 | 0 |
+| Codex | 19 | 12 | 7 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **60** | **162** | **0** | **63** | **3** |
+| **All** | **288** | **61** | **161** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -155,7 +155,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`7b0319fb`](https://github.com/router-for-me/CLIProxyAPI/commit/7b0319fb) | feat(codex): support Sign in with ChatGPT | yes | to port | L (+2384 −256) | Sign in with ChatGPT |
 | [`e240bd84`](https://github.com/router-for-me/CLIProxyAPI/commit/e240bd84) | fix(codex): fallback default model template when gpt-5.5 is missing | yes | ported here | M (+85 −25) | ported: the default template falls back to the catalog's first model and validation no longer requires `gpt-5.5`; the embedded catalog is synced to v8.0.35 (`fetch_codex_models` is a Go tool) |
 | [`1e37b52b`](https://github.com/router-for-me/CLIProxyAPI/commit/1e37b52b) | fix(executor): preserve websocket sessions across reload and auth removal | yes | to port | M (+199 −33) | WebSocket sessions survive reload and credential removal |
-| [`7795de19`](https://github.com/router-for-me/CLIProxyAPI/commit/7795de19) | feat(sse): implement CodexSSEScanner for improved event data handling | yes | to port | L (+379 −24) | Codex SSE event assembly, error events and terminal markers; Rust has a scanner, but needs these new cases |
+| [`7795de19`](https://github.com/router-for-me/CLIProxyAPI/commit/7795de19) | feat(sse): implement CodexSSEScanner for improved event data handling | yes | ported here | L (+379 −24) | data split across `data:` lines is assembled into one event on the stream and non-stream paths (`codex_sse.rs`), and bootstrap buffering spends its budget line by line in Go's order, an event being collected included; replays the scanner and executor suites (M3-0394, M3-0381) except the clock-driven and allocation-count cases |
 | [`57d005fe`](https://github.com/router-for-me/CLIProxyAPI/commit/57d005fe) | fix(codex): strip out-of-range int64 numeric bounds from tool schemas | yes | ported here | M (+111 −6) | out-of-range int64 bounds stripped, with the unsupported-regex `pattern` strip it extends (previously unported); Go goldens in `crates/cpa-exec/tests/reference/codex_tool_schema` |
 | [`8df4e42a`](https://github.com/router-for-me/CLIProxyAPI/commit/8df4e42a) | fix(codex): advertise direct tool mode and disable responses lite for non-codex routes | yes | ported here | S (+16 −0) | ported: non-template and non-Codex catalog entries get `tool_mode: direct`, `use_responses_lite: false` and `supports_reasoning_effort_updates: false` (`fetch_codex_models` is a Go tool, not applicable) |
 | [`e7d4c731`](https://github.com/router-for-me/CLIProxyAPI/commit/e7d4c731) | fix(codex): reconcile replayed web_search_call history with tool declarations | yes | ported here | M (+80 −0) | replayed `web_search_call` input gets a `web_search` tool, or is dropped for Responses Lite, on the stream, non-stream, compact and WebSocket paths; Go goldens in `crates/cpa-exec/tests/reference/codex_web_search_history` (the payload-filter subtest waits for 868e137) |
