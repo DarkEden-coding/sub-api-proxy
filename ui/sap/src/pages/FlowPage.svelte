@@ -29,7 +29,7 @@
   <div class="panel">
     <h2>Recent events</h2>
     <div class="lede">routing, failover and sync</div>
-    <EventList events={snap.events} limit={6} />
+    <EventList events={store.events} limit={6} />
   </div>
 </section>
 

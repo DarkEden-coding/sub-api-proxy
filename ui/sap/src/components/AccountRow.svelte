@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { AccountView } from "../api/types.ts";
   import { presentAccount } from "../model/accounts.ts";
-  import { planLabel } from "../model/format.ts";
+  import { planName } from "../model/plans.ts";
   import QuotaBars from "./QuotaBars.svelte";
 
   let { account, now }: { account: AccountView; now: string } = $props();
@@ -11,7 +11,7 @@
 <div class="acct-row {account.provider}" class:greyed={p.greyed} class:blocked={p.tone === "blocked"} data-account={account.id}>
   <div class="top">
     <span class="aname">{account.label}</span>
-    <span class="plan">{planLabel(account.plan)}</span>
+    <span class="plan">{planName(account.plan)}</span>
     <span class="weight">{p.tone === "blocked" ? "—" : Math.round(account.weight_percent)}<small>{p.tone === "blocked" ? "" : "%"}</small></span>
   </div>
   {#if p.flag}<div class="flag" class:stale={p.tone !== "blocked"}>{p.flag}</div>{:else if p.tone === "idle"}<div class="flag idle">idle · no active threads</div>{/if}

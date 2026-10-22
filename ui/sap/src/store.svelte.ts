@@ -1,5 +1,6 @@
+import { mergeEvents } from "./model/events.ts";
 import { fetchFlow, isDemo, RequestError, subscribe, useDemo } from "./api/client.ts";
-import type { AccountView, FlowSnapshot, ThreadKey, ThreadView } from "./api/types.ts";
+import type { AccountView, EventView, FlowSnapshot, ThreadKey, ThreadView } from "./api/types.ts";
 
 export type Status = "connecting" | "live" | "demo" | "offline" | "unauthorized";
 export const PAGES = ["flow", "accounts", "threads", "nodes", "events", "settings"] as const;
@@ -12,6 +13,8 @@ const pageFromHash = (): Page => {
 
 class Store {
   snapshot = $state<FlowSnapshot | null>(null);
+  /** Recent events, newest first: the snapshot's, then each streamed `event`, capped at 500. */
+  events = $state<EventView[]>([]);
   status = $state<Status>("connecting");
   error = $state("");
   page = $state<Page>(pageFromHash());
@@ -43,11 +46,17 @@ class Store {
       onOpen: () => (this.status = isDemo() ? "demo" : "live"),
       onSnapshot: (s) => {
         this.snapshot = s;
+        this.addEvents(s.events);
         this.error = "";
       },
+      onEvent: (e) => this.addEvents([e]),
       onError: (e) => this.#failed(e),
     });
     if (!isDemo()) void fetchFlow().then((s) => (this.snapshot ??= s)).catch(() => {});
+  }
+
+  addEvents(incoming: EventView[]) {
+    this.events = mergeEvents(this.events, incoming);
   }
 
   #failed(e: RequestError) {

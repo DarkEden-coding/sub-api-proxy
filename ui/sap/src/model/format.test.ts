@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dayKey, duration, headerClock, planLabel, shortKey, when } from "./format.ts";
+import { dayKey, duration, headerClock, shortKey, when } from "./format.ts";
 
 test("durations", () => {
   assert.equal(duration(20_000), "<1 m");
@@ -22,10 +22,7 @@ test("clock and day labels", () => {
   assert.equal(dayKey("2026-10-22T23:59:00Z", "UTC"), "2026-10-22");
 });
 
-test("short keys and plan labels", () => {
+test("short keys", () => {
   assert.equal(shortKey("claude:7fe0a2c1-0d7e-4c1e-9b1a-16beb50f2bbb"), "7fe0·2bbb");
   assert.equal(shortKey("claude:7fe0a2c1-0d7e/6b98dc80"), "agent 6b98");
-  assert.equal(planLabel("default_claude_max_20x"), "Max 20×");
-  assert.equal(planLabel("plus"), "Plus");
-  assert.equal(planLabel(null), "");
 });
