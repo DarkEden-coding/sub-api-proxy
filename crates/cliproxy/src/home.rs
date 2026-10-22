@@ -903,13 +903,6 @@ async fn run_lifetimes(
                         // wakes decides executor and model ownership from the store.
                         rt.store().replace_config(config_api_keys(&cfg));
                         rt.publish_config(cfg);
-                        // Tests let the plugin worker finish first, the interleaving in
-                        // which a store change made after the publish would be missed.
-                        #[cfg(test)]
-                        tokio::select! {
-                            _ = lifetime.cancelled() => return helpers,
-                            _ = cpa_server::plugins::applied(&rt) => {}
-                        }
                         // Go applies the plugin config with the rest of the config
                         // (`applyConfigRuntime`) before it finalizes: load marks, delete
                         // tasks and the first dispatch all wait for the plugin worker.
