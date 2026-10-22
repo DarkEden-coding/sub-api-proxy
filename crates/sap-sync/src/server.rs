@@ -47,7 +47,7 @@ impl<C: ChangeLog + 'static> ServerState<C> {
         self
     }
 
-    /// Volatile ACKs for retention integration. ChangeLog has no durable ACK hook.
+    /// In-memory view of acknowledgements accepted during this process.
     pub fn acknowledgements(&self) -> BTreeMap<NodeId, SyncCursor> {
         self.acknowledgements.lock().expect("ACK lock poisoned").clone()
     }
@@ -206,8 +206,15 @@ async fn ack<C: ChangeLog + 'static>(
     axum::Extension(peer): axum::Extension<NodeId>,
     Json(cursor): Json<SyncCursor>,
 ) -> StatusCode {
-    // ponytail: ACKs survive only this process; add a ChangeLog peer-cursor hook
-    // to make retention acknowledgements durable in sap-store.
+    let log = state.log.clone();
+    let durable_peer = peer.clone();
+    let durable_cursor = cursor.clone();
+    if !matches!(
+        tokio::task::spawn_blocking(move || { log.record_peer_ack(&durable_peer, &durable_cursor) }).await,
+        Ok(Ok(()))
+    ) {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
     let mut acknowledgements = state.acknowledgements.lock().expect("ACK lock poisoned");
     let stored = acknowledgements.entry(peer).or_default();
     for (origin, seq) in cursor {

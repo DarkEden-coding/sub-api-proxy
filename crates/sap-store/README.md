@@ -47,6 +47,7 @@ node() -> &NodeId
 cursor() -> Result<SyncCursor>
 changes_since(since: &SyncCursor, limit: usize) -> Result<ChangeBatch>
 apply_remote(changes: &[Change]) -> Result<ApplyReport>
+record_peer_ack(peer: &NodeId, cursor: &SyncCursor) -> Result<()>
 ```
 
 `Limits` has public `Duration` fields `quota_max_age`, `usage_max_age`,
@@ -126,33 +127,35 @@ otherwise the batch rolls back. Interleaving different origins is allowed, inclu
 receiving a descendant before a causal dependency from another origin. Export
 preserves local insertion order and paginates without skipping an origin's sequence.
 
-## Causal envelope and contract requests
+## Causal context and remaining contracts
 
-The core `Change` type lacks a sender cursor. To implement causal conflict
-detection without editing sap-core, this store wraps Set values for accounts,
-settings, client access and threads as:
+Every operation carries `Change::context`, the origin's cursor when it made the
+change. Set and Append values are ordinary domain JSON, with no private envelope.
+An absent context deserializes as an empty cursor. All operations reject a context
+that claims to have observed their own sequence or a later one. Concurrent
+configuration deletes and field edits create conflicts regardless of delivery
+order; the higher HLC determines whether the record remains deleted or revives.
+Delete conflict sides use JSON null for the deleted value. Databases written by
+the earlier private-envelope prototype have no upgrade migration.
 
-```json
-{"sap_store_version":1,"context":{"node-a":12},"value":"original JSON value"}
-```
+`ChangeLog::record_peer_ack` delegates to the same durable, monotonic peer-cursor
+storage as `set_peer_cursor`. The sync ACK handler calls it before returning
+success, so accepted acknowledgements drive retention across restarts.
 
-Sync transports must preserve these values unchanged. Whole account/thread
-records use the same wrapper. Append values remain ordinary domain JSON.
-Unwrapped remote Sets are accepted with an unknown, empty causal context, so they
-can cause conservative conflicts. Delete has no value and cannot carry context;
-it is handled as an HLC tombstone without generating configuration conflicts.
+`changes_since` enumerates known origins from the cursor table and seeks through
+the unique `(origin, seq)` index. Each origin contributes at most `limit + 1`
+rows above the requested cursor, including origins missing from that cursor.
+A fixed-width radix merge orders candidates by insertion ID in linear time;
+only the selected page is deserialized. Historical rows below the cursor are
+never scanned. `more` reports whether any candidates remain after the page.
 
-Requested integration contracts:
+Remaining integration contracts:
 
-1. Add `context: SyncCursor` to `sap_core::sync::Change`, including Delete, and
-   retire the private envelope once all peers support that representation.
-2. Add peer-ack recording to `ChangeLog`, or have sap-sync's ACK route explicitly
-   call `Store::set_peer_cursor`. Its existing trait has no ACK hook.
-3. Define snapshot/bootstrap transfer and a typed history-unavailable response.
+1. Define snapshot/bootstrap transfer and a typed history-unavailable response.
    After pruning, an old or new peer cannot replay from an empty cursor. The store
    reports that the cursor predates retained history rather than silently losing
    data. Snapshot export/import is not implemented by this workstream.
-4. Define a core client-access record if that API needs a typed shape. This store
+2. Define a core client-access record if that API needs a typed shape. This store
    uses JSON objects until that contract exists.
 
 The server must wake its sync notifier after successful writes. Store does not
@@ -178,25 +181,30 @@ the minimum schema size, or a busy WAL reader prevent reaching the limit,
 run compaction from maintenance work rather than a request handler. Thread
 registry eviction in other crates is outside this store's scope.
 
-Known gaps are snapshot bootstrap, typed causal metadata and client-access
+Known gaps are snapshot bootstrap, typed client-access
 contracts, Windows ACL enforcement, and background integration. The initial
 migration is implemented; there are no historical schema upgrades yet. Tests
 cover local file and in-memory stores, not a distributed deployment or a soak.
 
 ## Validation
 
-Only sap-store and its dependencies were built, offline, with four build jobs.
-Each Cargo invocation was bounded by a 180-second subprocess timeout, except the
-first compilation, which had a 240-second timeout.
+Validation runs offline with four build jobs and a 240-second timeout per build
+or test invocation. The focused follow-up checks include sap-core, sap-store,
+sap-sync, sap-threads and sap-routing:
 
 ```sh
-CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo fmt -p sap-store
-CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo clippy -p sap-store --all-targets -- -D warnings
-CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo test -p sap-store
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo fmt -p sap-core -p sap-store -p sap-sync
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo clippy -p sap-core -p sap-store -p sap-sync -p sap-threads -p sap-routing --all-targets -- -D warnings
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo test -p sap-core -p sap-store -p sap-sync -p sap-threads -p sap-routing
 ```
 
-Final validation passed formatting, clippy with warnings denied, and all 15
-integration tests. There are no ignored tests.
+Formatting, clippy with warnings denied, and all 56 tests across the five crates
+passed. No tests were ignored.
+
+Regressions cover delete/edit conflict ordering and causal edits, validation of
+causal context for every operation, durable peer acknowledgements after reopen,
+and a nearly current cursor over 10,000 historical rows. The tail regression
+checks SQLite VM steps as well as avoiding historical JSON deserialization.
 
 The integration suite covers two-node convergence and resolution, causal edits
 and late ancestors, three-node conflict relay, append deduplication, cross-node

@@ -53,6 +53,10 @@ pub struct Change {
     pub origin: NodeId,
     pub seq: u64,
     pub hlc: Hlc,
+    /// The origin's cursor when it made this change, used to distinguish
+    /// concurrent edits from causal ones.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: SyncCursor,
     pub table: Table,
     pub key: String,
     pub op: ChangeOp,
@@ -107,6 +111,34 @@ pub trait ChangeLog: Send + Sync {
     fn cursor(&self) -> Result<SyncCursor, Self::Error>;
     /// Changes this node holds that are newer than `since`, oldest first, at most `limit`.
     fn changes_since(&self, since: &SyncCursor, limit: usize) -> Result<ChangeBatch, Self::Error>;
+    /// Durably record a peer's acknowledgement, advancing each origin monotonically.
+    fn record_peer_ack(&self, peer: &NodeId, cursor: &SyncCursor) -> Result<(), Self::Error>;
     /// Merge changes received from a peer. Idempotent.
     fn apply_remote(&self, changes: &[Change]) -> Result<ApplyReport, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_context_is_optional_on_the_wire() {
+        let change = Change {
+            origin: NodeId("a".into()),
+            seq: 1,
+            hlc: Hlc::zero(NodeId("a".into())),
+            context: SyncCursor::new(),
+            table: Table::Settings,
+            key: "key".into(),
+            op: ChangeOp::Delete,
+        };
+        let raw = serde_json::to_value(&change).unwrap();
+        assert!(raw.get("context").is_none());
+        assert_eq!(serde_json::from_value::<Change>(raw).unwrap(), change);
+        let mut contextual = change;
+        contextual.context.insert(NodeId("b".into()), 2);
+        let raw = serde_json::to_value(&contextual).unwrap();
+        assert_eq!(raw["context"]["b"], 2);
+        assert_eq!(serde_json::from_value::<Change>(raw).unwrap(), contextual);
+    }
 }

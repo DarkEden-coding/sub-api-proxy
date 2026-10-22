@@ -30,18 +30,9 @@ fn append_table(table: Table) -> bool {
     matches!(table, Table::QuotaObservations | Table::UsageBuckets | Table::Events)
 }
 
-// ponytail: Change has no causal context. Version 1 peers carry it in Set values;
-// move this to a Change.context contract field when sap-core provides one.
-#[derive(Serialize, Deserialize)]
-struct Envelope {
-    sap_store_version: u8,
-    context: SyncCursor,
-    value: Value,
-}
 #[derive(Serialize, Deserialize)]
 struct Version {
     change: Change,
-    context: SyncCursor,
     value: Value,
 }
 
@@ -80,7 +71,7 @@ pub(crate) fn put_record(conn: &Connection, table: Table, key: &str, value: &Val
     Ok(())
 }
 
-pub(crate) fn write(tx: &Transaction<'_>, node: &NodeId, table: Table, key: &str, mut op: ChangeOp) -> Result<Change> {
+pub(crate) fn write(tx: &Transaction<'_>, node: &NodeId, table: Table, key: &str, op: ChangeOp) -> Result<Change> {
     let context = cursor(tx)?;
     let seq = context
         .get(node)
@@ -89,15 +80,6 @@ pub(crate) fn write(tx: &Transaction<'_>, node: &NodeId, table: Table, key: &str
         .checked_add(1)
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| Error::Invalid("sequence exhausted".into()))?;
-    if (field_table(table) || table == Table::Threads)
-        && let ChangeOp::Set { value, .. } = &mut op
-    {
-        *value = serde_json::to_value(Envelope {
-            sap_store_version: 1,
-            context,
-            value: value.take(),
-        })?;
-    }
     let current = clock(tx)?;
     let now = Utc::now().timestamp_millis();
     if now <= current.wall_ms && current.counter >= u32::MAX - 1 {
@@ -109,6 +91,7 @@ pub(crate) fn write(tx: &Transaction<'_>, node: &NodeId, table: Table, key: &str
         origin: node.clone(),
         seq,
         hlc,
+        context,
         table,
         key: key.into(),
         op,
@@ -138,10 +121,9 @@ fn version(conn: &Connection, c: &Change, field: &str) -> Result<Option<Version>
         .optional()?;
     raw.map(|s| serde_json::from_str(&s).map_err(Into::into)).transpose()
 }
-fn save_version(conn: &Connection, c: &Change, field: &str, context: &SyncCursor, value: &Value) -> Result<()> {
+fn save_version(conn: &Connection, c: &Change, field: &str, value: &Value) -> Result<()> {
     let v = Version {
         change: c.clone(),
-        context: context.clone(),
         value: value.clone(),
     };
     conn.execute("INSERT INTO field_versions VALUES (?1,?2,?3,?4) ON CONFLICT(table_name,key,field) DO UPDATE SET value=excluded.value", params![name(c.table), c.key, field, serde_json::to_string(&v)?])?;
@@ -150,8 +132,8 @@ fn save_version(conn: &Connection, c: &Change, field: &str, context: &SyncCursor
 fn saw(context: &SyncCursor, c: &Change) -> bool {
     context.get(&c.origin).copied().unwrap_or(0) >= c.seq
 }
-fn concurrent(c: &Change, context: &SyncCursor, old: &Version) -> bool {
-    c.origin != old.change.origin && !saw(context, &old.change) && !saw(&old.context, c)
+fn concurrent(c: &Change, old: &Version) -> bool {
+    c.origin != old.change.origin && !saw(&c.context, &old.change) && !saw(&old.change.context, c)
 }
 fn conflict(
     tx: &Transaction<'_>,
@@ -204,21 +186,6 @@ fn conflict(
     }
     Ok(())
 }
-fn unpack(c: &Change, raw: &Value) -> Result<(SyncCursor, Value)> {
-    if (field_table(c.table) || c.table == Table::Threads) && raw.get("sap_store_version").is_some() {
-        let e: Envelope = serde_json::from_value(raw.clone())?;
-        if e.sap_store_version != 1 {
-            return Err(Error::Invalid("unsupported causal envelope".into()));
-        }
-        if e.context.get(&c.origin).copied().unwrap_or(0) >= c.seq {
-            return Err(Error::Invalid("change observes its own future".into()));
-        }
-        Ok((e.context, e.value))
-    } else {
-        Ok((SyncCursor::new(), raw.clone()))
-    }
-}
-
 fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyReport) -> Result<()> {
     if append_table(c.table) {
         let ChangeOp::Append { value } = &c.op else {
@@ -232,12 +199,9 @@ fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyRepo
         report.applied += 1;
         return Ok(());
     }
-    let (field, context, value) = match &c.op {
-        ChangeOp::Set { field, value } => {
-            let (context, value) = unpack(c, value)?;
-            (field.as_deref(), context, value)
-        }
-        ChangeOp::Delete => (None, SyncCursor::new(), Value::Null),
+    let (field, value) = match &c.op {
+        ChangeOp::Set { field, value } => (field.as_deref(), value.clone()),
+        ChangeOp::Delete => (None, Value::Null),
         ChangeOp::Append { .. } => return Err(Error::Invalid("record table requires Set or Delete".into())),
     };
     if field.is_some_and(str::is_empty) {
@@ -248,6 +212,35 @@ fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyRepo
     }
     let deleting = matches!(c.op, ChangeOp::Delete);
     let tombstone = version(tx, c, "")?;
+    // Check conflicts before HLC filtering, including when the delete arrived first.
+    if field_table(c.table) {
+        if deleting {
+            let mut stmt =
+                tx.prepare("SELECT field,value FROM field_versions WHERE table_name=?1 AND key=?2 AND field<>''")?;
+            let versions = stmt
+                .query_map(params![name(c.table), c.key], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (field, raw) in versions {
+                let old: Version = serde_json::from_str(&raw)?;
+                if concurrent(c, &old) {
+                    conflict(tx, node, c, &field, &Value::Null, &old, report)?;
+                }
+            }
+        } else if let Some(old) = &tombstone
+            && matches!(old.change.op, ChangeOp::Delete)
+            && concurrent(c, old)
+        {
+            if let Some(field) = field {
+                conflict(tx, node, c, field, &value, old, report)?;
+            } else if let Some(fields) = value.as_object() {
+                for (field, value) in fields {
+                    conflict(tx, node, c, field, value, old, report)?;
+                }
+            }
+        }
+    }
     if tombstone
         .as_ref()
         .is_some_and(|v| matches!(v.change.op, ChangeOp::Delete) && v.change.hlc >= c.hlc)
@@ -288,7 +281,7 @@ fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyRepo
         let mut applied = false;
         if fields.is_empty() && record(tx, c.table, &c.key)?.is_none() {
             put_record(tx, c.table, &c.key, &current)?;
-            save_version(tx, c, "", &context, &current)?;
+            save_version(tx, c, "", &current)?;
             applied = true;
         }
         let object = current
@@ -300,13 +293,13 @@ fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyRepo
             }
             let old = version(tx, c, &field)?;
             if let Some(old) = &old
-                && concurrent(c, &context, old)
+                && concurrent(c, old)
             {
                 conflict(tx, node, c, &field, &value, old, report)?;
             }
             if old.as_ref().is_none_or(|v| c.hlc > v.change.hlc) {
                 object.insert(field.clone(), value.clone());
-                save_version(tx, c, &field, &context, &value)?;
+                save_version(tx, c, &field, &value)?;
                 applied = true;
             }
         }
@@ -356,14 +349,14 @@ fn merge(tx: &Transaction<'_>, node: &NodeId, c: &Change, report: &mut ApplyRepo
             }
             put_record(tx, c.table, &c.key, &value)?;
         }
-        save_version(tx, c, "", &context, &value)?;
+        save_version(tx, c, "", &value)?;
         report.applied += 1;
         if c.table == Table::Threads
             && !deleting
             && let Some(old) = tombstone
             && !matches!(old.change.op, ChangeOp::Delete)
             && old.value != value
-            && concurrent(c, &context, &old)
+            && concurrent(c, &old)
             && old.value.get("assignment") != value.get("assignment")
         {
             let event = EventView {
@@ -414,26 +407,46 @@ impl ChangeLog for Store {
                 "cursor predates retained history: install a snapshot".into(),
             ));
         }
-        let mut stmt = conn.prepare("SELECT value FROM op_log ORDER BY id")?;
-        let mut rows = stmt.query([])?;
-        let mut changes = Vec::new();
-        let mut more = false;
-        while let Some(row) = rows.next()? {
-            let c: Change = serde_json::from_str(&row.get::<_, String>(0)?)?;
-            if c.seq <= since.get(&c.origin).copied().unwrap_or(0) {
+        // Enumerate the compact cursor table, then seek through UNIQUE(origin, seq).
+        // No retained history below the requested cursor is read or deserialized.
+        let origins = cursor(&conn)?;
+        let per_origin_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut stmt = conn.prepare("SELECT id,value FROM op_log WHERE origin=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?;
+        let mut candidates = Vec::new();
+        for origin in origins.keys() {
+            let seq = since.get(origin).copied().unwrap_or(0);
+            if seq >= i64::MAX as u64 {
                 continue;
             }
-            if changes.len() == limit {
-                more = true;
-                break;
+            for row in stmt.query_map(params![origin.0, seq, per_origin_limit], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })? {
+                candidates.push(row?);
             }
-            changes.push(c);
         }
+        // Fixed-width integer keys make this merge linear in the candidate count.
+        // Eight stable byte passes preserve insertion order without comparison sorting.
+        for shift in (0..64).step_by(8) {
+            let mut buckets: [_; 256] = std::array::from_fn(|_| Vec::new());
+            for row in candidates {
+                buckets[((row.0 as u64 >> shift) & 255) as usize].push(row);
+            }
+            candidates = buckets.into_iter().flatten().collect();
+        }
+        let more = candidates.len() > limit;
+        let changes = candidates
+            .into_iter()
+            .take(limit)
+            .map(|(_, raw)| serde_json::from_str(&raw).map_err(Into::into))
+            .collect::<Result<Vec<Change>>>()?;
         Ok(ChangeBatch {
             from: self.node.clone(),
             changes,
             more,
         })
+    }
+    fn record_peer_ack(&self, peer: &NodeId, cursor: &SyncCursor) -> Result<()> {
+        self.set_peer_cursor(peer.clone(), cursor)
     }
     fn apply_remote(&self, changes: &[Change]) -> Result<ApplyReport> {
         let mut conn = self.connection()?;
@@ -449,6 +462,9 @@ impl ChangeLog for Store {
                 || sap_core::DateTime::from_timestamp_millis(c.hlc.wall_ms).is_none()
             {
                 return Err(Error::Invalid("invalid change identity or HLC".into()));
+            }
+            if c.context.get(&c.origin).copied().unwrap_or(0) >= c.seq {
+                return Err(Error::Invalid("change observes its own future".into()));
             }
             let previous = seen.get(&c.origin).copied().unwrap_or(0);
             if c.seq <= previous {
@@ -478,5 +494,66 @@ impl ChangeLog for Store {
         save_clock(&tx, &hlc)?;
         tx.commit()?;
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearly_current_cursor_reads_only_large_logs_tail() {
+        let store = Store::open_in_memory(NodeId("a".into())).unwrap();
+        let conn = store.connection().unwrap();
+        // Seed a large history in one transaction without domain-write overhead.
+        conn.execute_batch("BEGIN").unwrap();
+        for seq in 1..=10_000 {
+            conn.execute(
+                "INSERT INTO op_log(origin,seq,wall_ms,value) VALUES ('a',?1,0,'invalid old JSON')",
+                [seq],
+            )
+            .unwrap();
+        }
+        let tail = Change {
+            origin: NodeId("a".into()),
+            seq: 10_001,
+            hlc: Hlc::zero(NodeId("a".into())),
+            context: SyncCursor::new(),
+            table: Table::Settings,
+            key: "tail".into(),
+            op: ChangeOp::Delete,
+        };
+        conn.execute(
+            "INSERT INTO op_log(origin,seq,wall_ms,value) VALUES ('a',10001,0,?1)",
+            [serde_json::to_string(&tail).unwrap()],
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO cursor VALUES ('a',10001); COMMIT")
+            .unwrap();
+        // Verify the seek uses bounded SQLite work, not merely bounded deserialization.
+        let mut stmt = conn
+            .prepare("SELECT id,value FROM op_log WHERE origin=?1 AND seq>?2 ORDER BY seq LIMIT ?3")
+            .unwrap();
+        let rows = stmt
+            .query_map(params!["a", 10_000, 2], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(stmt.get_status(rusqlite::StatementStatus::VmStep) < 100);
+        drop(stmt);
+        drop(conn);
+        let since = SyncCursor::from([(NodeId("a".into()), 10_000)]);
+        let batch = store.changes_since(&since, 1).unwrap();
+        assert_eq!(batch.changes, vec![tail]);
+        assert!(!batch.more);
+        assert!(store.changes_since(&since, 0).unwrap().more);
+        assert!(
+            store
+                .changes_since(&store.cursor().unwrap(), 1)
+                .unwrap()
+                .changes
+                .is_empty()
+        );
     }
 }
