@@ -718,6 +718,12 @@ impl Host {
             .ok_or_else(|| CallError::Other("auth provider refresh returned invalid auth data".into()))
     }
 
+    /// The `NextRefreshAfter` the plugin parser last returned for auth `id` (Go keeps it
+    /// on the auth it registers), if any.
+    pub fn parsed_next_refresh_after(&self, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        crate::host::lock(&self.inner.parsed_refresh_after).get(id).copied()
+    }
+
     /// Go `RegisterFrontendAuthProviders`: `(access provider key, plugin ID)` for each
     /// active frontend auth provider in order, and the exclusive key (highest priority,
     /// then lowest ID) if any. Keys are `plugin:<id>:<identifier>`; identifiers are asked
@@ -838,7 +844,7 @@ impl cpa_core::config::credentials::PluginAuthParser for AuthParser {
         let Some(inner) = self.0.upgrade() else {
             return Parsed::NotHandled;
         };
-        let result = Host::from_inner(inner).parse_auths(AuthParseRequest {
+        let result = Host::from_inner(inner.clone()).parse_auths(AuthParseRequest {
             provider: req.provider.to_owned(),
             path: req.path.display().to_string(),
             file_name: req.file_name.to_owned(),
@@ -849,11 +855,16 @@ impl cpa_core::config::credentials::PluginAuthParser for AuthParser {
         if result.error.is_some() || !result.handled {
             return Parsed::NotHandled;
         }
+        let mut deadlines = crate::host::lock(&inner.parsed_refresh_after);
         Parsed::Handled(
             result
                 .auths
                 .into_iter()
                 .map(|auth| {
+                    match auth.next_refresh_after.0 {
+                        Some(at) => deadlines.insert(auth.id.clone(), at.to_utc()),
+                        None => deadlines.remove(&auth.id),
+                    };
                     // The credential keeps one JSON document, the one Go saves for it
                     // (`pluginTokenStorage`): the plugin's storage overlaid with its
                     // metadata.

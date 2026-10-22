@@ -82,55 +82,128 @@ pub(crate) fn route(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<Route>
 }
 
 /// When `c` comes due for a plugin refresh: Go `shouldRefresh` for a provider with no
-/// refresh lead, so only a `refresh_interval` schedules one. The last refresh is the
-/// one this process committed for the credential's current revision (Go
-/// `LastRefreshedAt`), else the credential's own timestamp; without either it is due
-/// at once. `None` when it never comes due or no plugin refreshes it.
+/// refresh lead, so only a `refresh_interval` schedules one, and never before the
+/// credential's `NextRefreshAfter`. The last refresh is the one this process committed
+/// for the credential (Go `LastRefreshedAt`), else the credential's own timestamp;
+/// without either it is due at once. `None` when it never comes due or no plugin
+/// refreshes it.
 pub(crate) fn due_at(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<DateTime<Utc>> {
     let interval = cpa_exec::preferred_interval(c)?;
     route(rt, c, cfg)?;
-    let refreshed = rt
-        .plugin_runtime()
-        .refreshed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&c.id)
-        .filter(|(revision, _)| *revision == c.revision)
-        .map(|(_, at)| *at);
-    let by_last = refreshed
+    // Go registers a parsed auth with the plugin's `NextRefreshAfter`, and keeps both
+    // fields when the auth is registered again (`prepareCoreAuthForModelRegistration`).
+    let schedule = *lock(&rt.plugin_runtime().schedules)
+        .entry(c.id.clone())
+        .or_insert_with(|| Schedule {
+            last: None,
+            next_after: rt.plugins().parsed_next_refresh_after(&c.id),
+        });
+    let by_last = schedule
+        .last
         .or_else(|| cpa_exec::last_refresh(c))
         .map_or(DateTime::<Utc>::MIN_UTC, |last| {
             last.checked_add_signed(interval).unwrap_or(DateTime::<Utc>::MAX_UTC)
         });
     let by_expiry =
         cpa_exec::expiration(c).map(|expiry| expiry.checked_sub_signed(interval).unwrap_or(DateTime::<Utc>::MIN_UTC));
-    Some(by_expiry.map_or(by_last, |at| at.min(by_last)))
+    let due = by_expiry.map_or(by_last, |at| at.min(by_last));
+    Some(schedule.next_after.map_or(due, |after| due.max(after)))
 }
 
-/// Credential ID to the revision a plugin refresh committed and when.
-pub(crate) type Refreshed = Arc<Mutex<HashMap<String, (u64, DateTime<Utc>)>>>;
+/// Go's refresh lifecycle fields of one credential a plugin refreshes. Kept per
+/// credential ID, so an edit of the file keeps them, as Go's re-registration does.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Schedule {
+    /// Go `LastRefreshedAt`.
+    last: Option<DateTime<Utc>>,
+    /// Go `NextRefreshAfter`.
+    next_after: Option<DateTime<Utc>>,
+}
+
+/// Credential ID to its [`Schedule`].
+pub(crate) type Schedules = Arc<Mutex<HashMap<String, Schedule>>>;
+
+fn lock(schedules: &Schedules) -> std::sync::MutexGuard<'_, HashMap<String, Schedule>> {
+    schedules.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Where [`committed`] records plugin refreshes; cloned into the commit, which a
 /// cancelled caller cannot stop.
-pub(crate) fn refreshed(rt: &Runtime) -> Refreshed {
-    rt.plugin_runtime().refreshed.clone()
+pub(crate) fn schedules(rt: &Runtime) -> Schedules {
+    rt.plugin_runtime().schedules.clone()
 }
 
-/// Records a committed plugin refresh of revision `revision` (Go `LastRefreshedAt`).
-pub(crate) fn committed(refreshed: &Refreshed, id: &str, revision: u64, at: DateTime<Utc>) {
-    refreshed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id.to_owned(), (revision, at));
+/// Forgets the schedules of credentials that are gone or disabled: Go registers them
+/// afresh, without the previous `LastRefreshedAt` and `NextRefreshAfter`.
+pub(crate) fn reconcile(rt: &Runtime, snapshot: &[Arc<Credential>]) {
+    let live: std::collections::HashSet<&str> =
+        snapshot.iter().filter(|c| !c.disabled).map(|c| c.id.as_str()).collect();
+    lock(&rt.plugin_runtime().schedules).retain(|id, _| live.contains(id.as_str()));
 }
 
-/// Refreshes `c` through its plugin and returns the metadata change to commit.
+/// Records a committed plugin refresh of `c` (Go `refreshAuth` on success): the refresh
+/// time, and `NextRefreshAfter` 30 s on when the credential is still due
+/// (`refreshIneffectiveBackoff`).
+pub(crate) fn committed(schedules: &Schedules, c: &Credential, now: DateTime<Utc>) {
+    let still_due = cpa_exec::preferred_interval(c).is_some_and(|interval| {
+        cpa_exec::expiration(c).is_some_and(|expiry| expiry.checked_sub_signed(interval).is_none_or(|at| at <= now))
+    });
+    lock(schedules).insert(
+        c.id.clone(),
+        Schedule {
+            last: Some(now),
+            next_after: still_due.then(|| now + chrono::Duration::seconds(30)),
+        },
+    );
+}
+
+/// Records a failed plugin refresh of `c`, whatever triggered it: Go holds the next one
+/// off for `refreshFailureBackoff` (5 min), or until the access token expires when
+/// that comes sooner.
+// ponytail: Go's other failure branches (an invalid grant's growing backoff, a 401 on an
+// expired token retrying at once, a disabled credential) all take this 5 min; port them
+// if a plugin needs them.
+fn failed(rt: &Runtime, c: &Credential, now: DateTime<Utc>) {
+    let mut at = now + chrono::Duration::minutes(5);
+    if let Some(expiry) = cpa_exec::expiration(c).filter(|expiry| *expiry > now) {
+        at = at.min(expiry);
+    }
+    lock(&rt.plugin_runtime().schedules)
+        .entry(c.id.clone())
+        .or_default()
+        .next_after = Some(at);
+}
+
+/// Refreshes `c` through its plugin and returns the metadata change to commit. `stored`
+/// is the credential `c` was made from for the executor (which may route it through
+/// another proxy).
+pub(crate) async fn refresh(
+    rt: &Runtime,
+    route: &Route,
+    c: &Credential,
+    stored: &Credential,
+) -> Result<MetadataPatch, ExecError> {
+    let result = refresh_once(rt, route, c, stored).await;
+    if result.is_err() {
+        failed(rt, c, Utc::now());
+    }
+    result
+}
+
 // ponytail: only the credential's JSON document is committed (a file-backed one; the
-// commit refuses config-backed credentials, as for built-in refreshes); label, prefix,
-// proxy URL, attribute and provider changes wait for the next reload of the file. The
-// refresh time lasts for the committed revision only, so a later edit falls back to the
-// document's `last_refresh`; Go keeps `LastRefreshedAt` until re-registration.
-pub(crate) async fn refresh(rt: &Runtime, route: &Route, c: &Credential) -> Result<MetadataPatch, ExecError> {
+// commit refuses config-backed credentials, as for built-in refreshes). Go's document
+// is the refreshed storage overlaid with the merged metadata, its `disabled` and
+// canonical `proxy_url` included, and so is this one, but the running credential keeps
+// its previous proxy URL until the file is next loaded. Changes to the provider, ID,
+// label, prefix or attributes are not applied (a warning names them): the store cannot
+// move a credential to another provider or ID, and a refresh commits the document only.
+// Upgrade: a store write that also replaces a credential's attributes.
+async fn refresh_once(
+    rt: &Runtime,
+    route: &Route,
+    c: &Credential,
+    stored: &Credential,
+) -> Result<MetadataPatch, ExecError> {
     let metadata: cpa_plugin::gojson::Metadata = c.metadata.clone().into_iter().collect();
     let view = cpa_plugin::auth::AuthView {
         id: c.id.clone(),
@@ -161,7 +234,7 @@ pub(crate) async fn refresh(rt: &Runtime, route: &Route, c: &Credential) -> Resu
             };
             ExecError::local(status, FailureScope::Credential, e.to_string())
         })?;
-    let Some(refreshed) = refreshed else {
+    let Some(mut refreshed) = refreshed else {
         // No plugin answers for the credential's provider.
         return match route {
             Route::Executor => Ok(MetadataPatch::default()),
@@ -179,8 +252,67 @@ pub(crate) async fn refresh(rt: &Runtime, route: &Route, c: &Credential) -> Resu
             }
         };
     };
+    // Go `MergeRefreshedAuth` with nothing edited meanwhile (a concurrent edit is merged
+    // at commit): the response's `disabled`, and the three-way proxy URL of the auth's
+    // field (`proxy_url` attribute here) and its metadata, written to the metadata.
+    let base = (view.proxy_url.trim(), c.str("proxy_url").unwrap_or_default().trim());
+    let proxy_meta = refreshed
+        .metadata
+        .get("proxy_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let updated = (refreshed.proxy_url.trim().to_owned(), proxy_meta.trim().to_owned());
+    let proxy = match (updated.0 != base.0, updated.1 != base.1) {
+        (true, false) => updated.0.as_str(),
+        (false, true) => updated.1.as_str(),
+        (true, true) if !updated.0.is_empty() => updated.0.as_str(),
+        (true, true) => updated.1.as_str(),
+        // Unchanged: the stored credential's own proxy URL.
+        (false, false) => {
+            let own = stored.attributes.get("proxy_url").map_or("", |p| p.trim());
+            if own.is_empty() { base.1 } else { own }
+        }
+    }
+    .to_owned();
+    if proxy.is_empty() {
+        refreshed.metadata.remove("proxy_url");
+    } else {
+        refreshed.metadata.insert("proxy_url".into(), proxy.into());
+    }
+    refreshed.metadata.insert("disabled".into(), refreshed.disabled.into());
+    let mut ignored = Vec::new();
+    if cpa_plugin::host::normalize_provider(&refreshed.provider) != cpa_plugin::host::normalize_provider(&c.provider) {
+        ignored.push("provider".to_owned());
+    }
+    if refreshed.id != c.id {
+        ignored.push("id".to_owned());
+    }
+    if refreshed.prefix.trim() != view.prefix.trim() {
+        ignored.push("prefix".to_owned());
+    }
+    if refreshed.label.trim() != view.label.trim() {
+        ignored.push("label".to_owned());
+    }
+    // `path`, `source` and `source_backend` are filled in from the file.
+    ignored.extend(
+        refreshed
+            .attributes
+            .iter()
+            .filter(|(k, v)| {
+                !matches!(k.as_str(), "path" | "source" | "source_backend") && view.attributes.get(*k) != Some(*v)
+            })
+            .map(|(k, _)| format!("attributes.{k}")),
+    );
+    if !ignored.is_empty() {
+        tracing::warn!(
+            credential = %c.id,
+            fields = %ignored.join(", "),
+            "plugin refresh response changes not applied; the refreshed tokens and document are saved"
+        );
+    }
     // What Go's `pluginTokenStorage` saves: the storage overlaid with the metadata. Go
-    // fails to persist storage that does not decode, and the refresh fails with it.
+    // logs a failure to persist storage that does not decode and still publishes the
+    // refreshed auth; here the refresh fails (docs/DIFFERENCES-FROM-GO.md).
     let next: Map<String, Value> = refreshed
         .storage_payload()
         .and_then(|payload| serde_json::from_slice(&payload).map_err(|e| e.to_string()))
@@ -188,10 +320,10 @@ pub(crate) async fn refresh(rt: &Runtime, route: &Route, c: &Credential) -> Resu
     Ok(diff(&c.metadata, &next))
 }
 
-/// The patch turning `current` into `next`. `type` stays (a refresh cannot move a
-/// credential to another provider here) and the store writes `disabled` itself.
+/// The patch turning `current` into `next`. `type` stays: a refresh cannot move a
+/// credential to another provider here.
 fn diff(current: &Map<String, Value>, next: &Map<String, Value>) -> MetadataPatch {
-    let kept = |k: &str| k != "type" && k != "disabled";
+    let kept = |k: &str| k != "type";
     MetadataPatch {
         set: next
             .iter()

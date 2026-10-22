@@ -484,12 +484,12 @@ impl Runtime {
         let view = self.for_executor(&current);
         let plugin = crate::plugins::refresh::route(self, &current, cfg);
         let patch = match (&plugin, failed) {
-            (Some(route), _) => crate::plugins::refresh::refresh(self, route, &view).await?,
+            (Some(route), _) => crate::plugins::refresh::refresh(self, route, &view, &current).await?,
             (None, Some(_)) => self.executors.prepare_forced(&view, cfg).await?,
             (None, None) => self.executors.prepare(&view, cfg).await?,
         };
         let store = self.store.clone();
-        let plugin_refreshed = plugin.as_ref().map(|_| crate::plugins::refresh::refreshed(self));
+        let plugin_schedules = plugin.as_ref().map(|_| crate::plugins::refresh::schedules(self));
         let committed = tokio::task::spawn_blocking({
             let id = id.to_owned();
             move || {
@@ -515,6 +515,11 @@ impl Runtime {
                             }
                             attempt = rebase_patch(&current.provider, &current.metadata, &latest.metadata, &patch);
                             if attempt.set.is_empty() && attempt.remove.is_empty() {
+                                // Nothing left to write, but the refresh happened (Go
+                                // records `LastRefreshedAt` whatever the merge changes).
+                                if let Some(schedules) = &plugin_schedules {
+                                    crate::plugins::refresh::committed(schedules, &latest, chrono::Utc::now());
+                                }
                                 return Ok(latest);
                             }
                             revision = latest.revision;
@@ -528,13 +533,8 @@ impl Runtime {
                                 store.recover_unauthorized(&id);
                             }
                             // Go `LastRefreshedAt`, recorded with the commit.
-                            if let Some(refreshed) = &plugin_refreshed {
-                                crate::plugins::refresh::committed(
-                                    refreshed,
-                                    &id,
-                                    committed.revision,
-                                    chrono::Utc::now(),
-                                );
+                            if let Some(schedules) = &plugin_schedules {
+                                crate::plugins::refresh::committed(schedules, &committed, chrono::Utc::now());
                             }
                             return Ok(committed);
                         }
@@ -627,6 +627,7 @@ impl Runtime {
                 let jobs: Vec<_> = {
                     let mut state = rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner);
                     state.reconcile(&snapshot);
+                    crate::plugins::refresh::reconcile(&rt, &snapshot);
                     let mut jobs = Vec::new();
                     rt.store.forget_stale_unauthorized(&rejected, &snapshot);
                     // Far enough ahead that any expiry has passed, near enough for chrono.
