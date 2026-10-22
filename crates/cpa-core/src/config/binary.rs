@@ -10,7 +10,7 @@
 //!
 //! What this does not follow is refused rather than read differently: other literal
 //! short tags, a non-specific tag that resolves to a number or boolean, tagged or
-//! aliased mapping keys, a repeated anchor name (serde_yaml_ng binds a redefined
+//! aliased mapping keys and collection keys, a repeated anchor name (serde_yaml_ng binds a redefined
 //! anchor's aliases to a different node than libyaml does), and a `%00` escape in a
 //! tag (libyaml cuts the tag there; Go keeps the NUL).
 
@@ -50,17 +50,6 @@ pub(super) fn decode(text: &str, value: &mut Value) -> anyhow::Result<()> {
     // Without a tag or an anchor, serde_yaml_ng reads the file as yaml.v3 does here.
     if !text.contains(['!', '&']) {
         return Ok(());
-    }
-    if text.contains("%00") {
-        let tokens = yaml_edit::lex(text);
-        let nul = tokens.iter().any(|(kind, token)| {
-            matches!(kind, yaml_edit::SyntaxKind::TAG | yaml_edit::SyntaxKind::DIRECTIVE) && token.contains("%00")
-        });
-        // yaml-edit ends lines only at LF and CR, so with these it may misplace tags.
-        ensure!(
-            !nul && !text.contains(['\u{85}', '\u{2028}', '\u{2029}']),
-            UNSUPPORTED_TAG
-        );
     }
     let mut walk = Walk {
         events: events(text)?.into_iter(),
@@ -123,7 +112,10 @@ enum Event {
     End,
 }
 
+/// Fails on a tagged node or a document start whose source contains `%00`: libyaml
+/// cuts a tag at the NUL, so its tag would not be the one Go reads.
 fn events(text: &str) -> anyhow::Result<Vec<Event>> {
+    let nul_escape = text.contains("%00");
     struct Parser(Box<MaybeUninit<unsafe_libyaml::yaml_parser_t>>);
     impl Drop for Parser {
         fn drop(&mut self) {
@@ -157,6 +149,21 @@ fn events(text: &str) -> anyhow::Result<Vec<Event>> {
             );
             let event = event.assume_init_mut();
             let kind = event.type_;
+            if nul_escape {
+                let tagged = match kind {
+                    unsafe_libyaml::YAML_SCALAR_EVENT => !event.data.scalar.tag.is_null(),
+                    unsafe_libyaml::YAML_SEQUENCE_START_EVENT => !event.data.sequence_start.tag.is_null(),
+                    unsafe_libyaml::YAML_MAPPING_START_EVENT => !event.data.mapping_start.tag.is_null(),
+                    // Its span holds the document's directives.
+                    unsafe_libyaml::YAML_DOCUMENT_START_EVENT => true,
+                    _ => false,
+                };
+                let span = text.get(event.start_mark.index as usize..event.end_mark.index as usize);
+                if tagged && span.is_none_or(|s| s.contains("%00")) {
+                    unsafe_libyaml::yaml_event_delete(event);
+                    bail!(UNSUPPORTED_TAG);
+                }
+            }
             let next = match kind {
                 unsafe_libyaml::YAML_SCALAR_EVENT => {
                     let s = &event.data.scalar;
@@ -188,6 +195,19 @@ fn events(text: &str) -> anyhow::Result<Vec<Event>> {
     }
 }
 
+/// yaml.v3's null spellings.
+fn is_null(value: &[u8]) -> bool {
+    matches!(value, b"" | b"~" | b"null" | b"Null" | b"NULL")
+}
+
+/// A plain scalar that yaml.v3 resolves to a string, judged without resolving it: text
+/// that starts with a letter and is not a boolean word. Numbers, timestamps, `.inf`,
+/// `<<` and the like start with something else.
+fn resolves_to_text(value: &[u8]) -> bool {
+    const WORDS: &[&[u8]] = &[b"true", b"false", b"yes", b"no", b"on", b"off", b"y", b"n"];
+    value.first().is_some_and(u8::is_ascii_alphabetic) && !WORDS.iter().any(|w| value.eq_ignore_ascii_case(w))
+}
+
 /// What yaml.v3 reads for a tagged scalar, where serde_yaml_ng reads something else;
 /// `None` where they agree.
 fn rewrite(tag: &[u8], plain: bool, value: Vec<u8>) -> anyhow::Result<Option<Value>> {
@@ -205,15 +225,10 @@ fn rewrite(tag: &[u8], plain: bool, value: Vec<u8>) -> anyhow::Result<Option<Val
             Value::String(text)
         }
         // Non-specific: a plain scalar resolves as if untagged, a quoted one is text.
-        b"!" if plain => match serde_yaml_ng::from_str::<Value>(&text()?) {
-            Ok(v @ (Value::Null | Value::String(_))) => v,
-            _ => bail!(UNSUPPORTED_TAG),
-        },
+        b"!" if plain && is_null(&value) => Value::Null,
+        b"!" if plain && !resolves_to_text(&value) => bail!(UNSUPPORTED_TAG),
         b"!" | b"!!str" => Value::String(text()?),
-        b"!!null" => match serde_yaml_ng::from_str::<Value>(&text()?) {
-            Ok(Value::Null) => Value::Null,
-            _ => bail!(UNSUPPORTED_TAG),
-        },
+        b"!!null" if is_null(&value) => Value::Null,
         t if t.starts_with(b"!!") => bail!(UNSUPPORTED_TAG),
         // Any other local tag is unknown to yaml.v3: the scalar is its text.
         t if t.starts_with(b"!") => Value::String(text()?),
@@ -253,11 +268,9 @@ impl Walk {
             } => {
                 self.define(&anchor)?;
                 if let Some(tag) = tag {
-                    // yaml.v3's layout code matches keys by their written text.
-                    ensure!(!key || !tag.starts_with(b"!"), UNSUPPORTED_KEY);
-                    if tag == b"tag:yaml.org,2002:binary" {
-                        ensure!(!key, UNSUPPORTED_KEY);
-                    }
+                    // yaml.v3's layout code matches keys by their node, tag included
+                    // (`!!str <<` is no merge key).
+                    ensure!(!key, UNSUPPORTED_KEY);
                     if let Some(v) = rewrite(&tag, plain, value)? {
                         self.found.push((path.clone(), v));
                     }
@@ -277,6 +290,8 @@ impl Walk {
                 None
             }
             Event::Start { anchor, mapping } => {
+                // Paths address mapping values only; Go rejects collection keys.
+                ensure!(!key, UNSUPPORTED_KEY);
                 self.define(&anchor)?;
                 let mut i = 0;
                 loop {
@@ -291,7 +306,7 @@ impl Walk {
                         self.node(value, path, false)?;
                     } else {
                         path.push(i);
-                        self.node(event, path, key)?;
+                        self.node(event, path, false)?;
                     }
                     path.pop();
                     i += 1;

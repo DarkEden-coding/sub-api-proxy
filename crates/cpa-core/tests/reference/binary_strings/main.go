@@ -75,6 +75,21 @@ func main() {
 		// A NUL escape: libyaml cuts the tag there, Go keeps it.
 		{"NUL in a binary tag", "management:\n  secret-key: !!binary%00x c2VjcmV0\n"},
 		{"NUL in a tag directive", "%TAG !e! tag:yaml.org,2002:bin%00\n---\nmanagement:\n  secret-key: !e!ary c2VjcmV0\n"},
+		{"NUL in a tag after a block scalar holding a quote", "note: |\n  \"\nmanagement:\n  secret-key: !%21binary%00x c2VjcmV0\n"},
+		{"NUL escape in an untagged value", "management:\n  secret-key: secret%00\n"},
+		// Tagged keys, merge keys among them.
+		{"merge key", "<<:\n  management:\n    secret-key: secret\n"},
+		{"canonically tagged merge key", "!!str <<:\n  management:\n    secret-key: secret\n"},
+		{"canonically tagged port key", "!!str port: 1\n"},
+		// The non-specific tag keeps the scalar's own text.
+		{"non-specific document marker secret", "management:\n  secret-key: ! ---\n"},
+		{"non-specific multi-line secret", "management:\n  secret-key: ! first\n\n    second\n"},
+		{"non-specific boolean word secret", "management:\n  secret-key: ! yes\n"},
+		{"non-specific tilde secret", "management:\n  secret-key: ! ~\n"},
+		{"literal null tag on a tilde", "management:\n  secret-key: !<!!null> ~\n"},
+		// A collection as a mapping key.
+		{"binary inside a mapping key", "x-review:\n  first: keep\n  ? {x: !!binary c2VjcmV0}\n  : ignored\n"},
+		{"binary inside a mapping key under management", "management:\n  secret-key: plain\n  ? {x: !!binary c2VjcmV0}\n  : ignored\n"},
 		{"binary proxy-url", "proxy-url: !!binary aHR0cDovL3Byb3h5Lmxhbjo4MA==\n"},
 		{"binary api key", "api-keys: [plain, !!binary a2V5]\n"},
 		{"aliased binary secret", "proxy-url: &a !!binary c2VjcmV0\nmanagement:\n  secret-key: *a\n"},
