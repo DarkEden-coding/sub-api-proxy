@@ -525,11 +525,19 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
             body = delete(&body, "stream");
         }
     }
+    // Go runs this before the instructions default, except on compact: an appended
+    // `tools` key lands before or after an appended `instructions` key accordingly.
+    if call != Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
+    }
     if !is_native(req) {
         let instructions = gjson::get(&body, "instructions");
         if !instructions.exists() || instructions.kind() == Kind::Null {
             body = set_str(&body, "instructions", "");
         }
+    }
+    if call == Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
     }
     if call != Call::Compact && settings.image_generation {
         body = ensure_image_tool(body, model, view, &req.headers);
@@ -559,6 +567,44 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
         optimized,
         conflict,
     })
+}
+
+/// `ensureWebSearchToolForHistory` (e7d4c731): upstream rejects replayed
+/// `web_search_call` input items without a web search tool ("response protection is
+/// unavailable"). A standard request gets `{"type":"web_search"}`; a Responses Lite
+/// request, which carries no top-level hosted tools, drops the replayed items instead.
+fn ensure_web_search_for_history(body: String, headers: &HeaderMap) -> String {
+    if !body.contains("web_search_call") {
+        return body;
+    }
+    let input = gjson::get(&body, "input");
+    if input.kind() != Kind::Array {
+        return body;
+    }
+    let items = input.array();
+    let is_call = |item: &gjson::Value| item.get("type").str().trim() == "web_search_call";
+    if !items.iter().any(is_call) {
+        return body;
+    }
+    let tools = gjson::get(&body, "tools");
+    if tools.kind() == Kind::Array
+        && tools.array().iter().any(|t| {
+            matches!(
+                t.get("type").str().trim(),
+                "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"
+            )
+        })
+    {
+        return body;
+    }
+    if is_lite(&body, headers) {
+        let kept: Vec<&str> = items.iter().filter(|i| !is_call(i)).map(|i| i.json()).collect();
+        return set_raw(&body, "input", &format!("[{}]", kept.join(",")));
+    }
+    if tools.kind() != Kind::Array {
+        return set_raw(&body, "tools", r#"[{"type":"web_search"}]"#);
+    }
+    set_raw(&body, "tools.-1", r#"{"type":"web_search"}"#)
 }
 
 fn ensure_image_tool(body: String, model: &str, view: &View<'_>, headers: &HeaderMap) -> String {
@@ -1523,6 +1569,28 @@ mod tests {
             // Go's tests also require a second pass to leave the output alone.
             let again = cpa_common::payload::normalize_codex_tool_integer_types(&out, &headers);
             assert_eq!(again, out, "{} is not idempotent", case["name"]);
+        }
+    }
+
+    /// Go v8.0.35's `ensureWebSearchToolForHistory` (e7d4c731), byte for byte; see
+    /// tests/reference/codex_web_search_history.
+    #[test]
+    fn web_search_history_matches_go() {
+        let go: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
+        for case in go["cases"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            if case["lite_header"] == true {
+                headers.insert(LITE_HEADER, HeaderValue::from_static("true"));
+            }
+            let input = case["in"].as_str().unwrap();
+            let want = case.get("out").unwrap_or(&case["in"]).as_str().unwrap();
+            assert_eq!(
+                ensure_web_search_for_history(input.to_owned(), &headers),
+                want,
+                "{}",
+                case["name"]
+            );
         }
     }
 
