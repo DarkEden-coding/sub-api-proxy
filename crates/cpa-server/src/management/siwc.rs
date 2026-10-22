@@ -38,6 +38,22 @@ pub(crate) struct Flow {
     exchange: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
+#[cfg(test)]
+impl Flow {
+    /// A binding of `target_id` that never exchanges, for session-store tests.
+    pub(super) fn idle(target_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            target_id: target_id.into(),
+            path: PathBuf::new(),
+            device_id: String::new(),
+            account: None,
+            verifier: String::new(),
+            deadline: Instant::now() + TTL,
+            exchange: Mutex::default(),
+        })
+    }
+}
+
 impl Flow {
     /// Stops an in-flight token exchange. A commit already running finishes; it
     /// re-checks the session before writing.
@@ -69,7 +85,7 @@ pub(super) fn eligible(c: &Credential) -> bool {
 
 /// Go `sameSIWCMutationPath`'s canonical form: symlinks resolved, else those of the
 /// parent (for a file that is gone), else the absolute path.
-pub(super) fn canonical(path: &Path) -> PathBuf {
+fn canonical(path: &Path) -> PathBuf {
     if let Ok(real) = std::fs::canonicalize(path) {
         return real;
     }
@@ -83,6 +99,61 @@ pub(super) fn canonical(path: &Path) -> PathBuf {
         return parent.join(name);
     }
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Go `sameSIWCMutationPath`: one file (Go `os.SameFile`, which also catches hard links
+/// and another spelling on a case-insensitive file system), else one canonical path,
+/// compared case-insensitively on Windows.
+pub(super) fn same_path(a: &Path, b: &Path) -> bool {
+    if let (Some(x), Some(y)) = (file_id(a), file_id(b))
+        && x == y
+    {
+        return true;
+    }
+    let (a, b) = (canonical(a), canonical(b));
+    if cfg!(windows) {
+        a.to_string_lossy().go_eq_fold(&b.to_string_lossy())
+    } else {
+        a == b
+    }
+}
+
+/// The file `path` names after symlinks, as Go's `os.Stat` identifies it.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// The file `path` names after symlinks, as Go's `os.Stat` identifies it: the volume
+/// serial number and file index (`GetFileInformationByHandle`).
+#[cfg(windows)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain integers and FILETIMEs; all zeros is valid.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` stays open for the call and `info` outlives it.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    (ok != 0).then(|| {
+        (
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_id(_: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 /// Go `resolveSIWCBindFile`: the credential's real path inside `auth-dir` and its
@@ -615,6 +686,29 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), lock.lock_owned())
             .await
             .expect("released once the commit returns");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Go `TestSIWCMutationPathAliases`, plus what Go's `os.SameFile` adds: a hard link
+    /// is the same file, and a file that is gone matches through its folder's real path.
+    #[cfg(unix)]
+    #[test]
+    fn mutation_paths_match_every_alias_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("cpa-siwc-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        let path = dir.join("real").join("auth.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::os::unix::fs::symlink(&path, dir.join("real").join("alias.json")).unwrap();
+        std::fs::hard_link(&path, dir.join("real").join("hard.json")).unwrap();
+        std::fs::write(dir.join("real").join("other.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("linked")).unwrap();
+        let at = |rel: &str| dir.join(rel);
+        assert!(same_path(&at("real/alias.json"), &path));
+        assert!(same_path(&at("real/hard.json"), &path));
+        assert!(same_path(&at("linked/auth.json"), &path));
+        assert!(same_path(&at("linked/gone.json"), &at("real/gone.json")));
+        assert!(!same_path(&path, &at("real/other.json")));
+        assert!(!same_path(&path, &at("real/gone.json")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

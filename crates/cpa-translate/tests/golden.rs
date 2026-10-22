@@ -201,6 +201,13 @@ fn canonical(raw: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Pair fixtures (recorded at 6fecc6e) whose behaviour a later Go commit changed, each
+/// replayed at v8.0.35 by the named golden instead.
+const SUPERSEDED: &[(&str, &str)] = &[(
+    "openai->codex codex-events/non-stream/0",
+    "16d98881 joins every output_text part: codex_chat_go.json pair_codex_events_non_stream_0",
+)];
+
 #[test]
 fn reference_goldens() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pairs");
@@ -237,6 +244,9 @@ fn reference_goldens() {
                 upstream.as_str(),
                 f["name"].as_str().unwrap()
             );
+            if SUPERSEDED.iter().any(|(n, _)| *n == name) {
+                continue;
+            }
             let mut expected: Vec<Vec<u8>> = f["outputs"]
                 .as_array()
                 .unwrap()
