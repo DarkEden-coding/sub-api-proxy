@@ -40,6 +40,7 @@ pub mod json;
 #[cfg(test)]
 mod json_go_vectors;
 pub mod payload;
+pub mod schema;
 pub mod session;
 pub mod signature;
 pub mod thinking;
