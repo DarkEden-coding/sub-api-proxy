@@ -7,6 +7,7 @@
 //! clients send binary parts. Field and file order follow first appearance, one of the
 //! orders Go's map iteration can produce.
 
+use cpa_common::gostr::quote;
 use std::collections::BTreeMap;
 
 /// One parsed form part.
@@ -340,10 +341,7 @@ impl Reader<'_> {
                 return Ok(None);
             }
             if expect_new {
-                return Err(format!(
-                    "multipart: expecting a new Part; got line {:?}",
-                    String::from_utf8_lossy(&line)
-                ));
+                return Err(format!("multipart: expecting a new Part; got line {}", quote(&line)));
             }
             if self.parts_read == 0 {
                 continue;
@@ -352,16 +350,14 @@ impl Reader<'_> {
                 expect_new = true;
                 continue;
             }
-            return Err(format!(
-                "multipart: unexpected line in Next(): {:?}",
-                String::from_utf8_lossy(&line)
-            ));
+            return Err(format!("multipart: unexpected line in Next(): {}", quote(&line)));
         }
     }
 
     /// `textproto.ReadMIMEHeader`, then the body up to the next boundary.
     fn part(&mut self) -> Result<Part, String> {
-        let malformed = |line: &[u8]| format!("malformed MIME header line: {}", String::from_utf8_lossy(line));
+        // Go 1.26.4, v8.0.35's release toolchain, quotes these lines with %q.
+        let malformed = |line: &[u8]| format!("malformed MIME header line: {}", quote(line));
         let mut headers: Vec<(String, String)> = Vec::new();
         let mut first = true;
         loop {
@@ -369,10 +365,7 @@ impl Reader<'_> {
             let line = raw.strip_suffix(b"\n").unwrap_or(&raw);
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             if first && matches!(line.first(), Some(b' ' | b'\t')) {
-                return Err(format!(
-                    "malformed MIME header initial line: {}",
-                    String::from_utf8_lossy(line)
-                ));
+                return Err(format!("malformed MIME header initial line: {}", quote(line)));
             }
             first = false;
             if line.is_empty() {
@@ -394,7 +387,7 @@ impl Reader<'_> {
                 }
             }
             let Some(colon) = trimmed.iter().position(|b| *b == b':') else {
-                return Err(malformed(trimmed));
+                return Err(format!("malformed MIME header: missing colon: {}", quote(line)));
             };
             let (key, value) = (&trimmed[..colon], &trimmed[colon + 1..]);
             // canonicalMIMEHeaderKey: token bytes are canonicalized; keys with spaces are
@@ -675,6 +668,41 @@ mod tests {
         assert!(form(bad).is_err());
         let split = b"--b\r\nContent-Disposition: form-data; name=\"image\"; filename*0*=utf-8''%C3; filename*1*=%A9.png\r\n\r\nx\r\n--b--\r\n";
         assert_eq!(form(split).unwrap().files("image")[0].filename, "\u{e9}.png");
+    }
+
+    /// Go 1.26.4 `ReadForm` errors (v8.0.35's release toolchain quotes header lines).
+    #[test]
+    fn header_errors_read_as_go_prints_them() {
+        let cases: [(&[u8], &str); 5] = [
+            (
+                b"--b\r\n X: y\r\n\r\nv\r\n--b--\r\n",
+                r#"malformed MIME header initial line: " X: y""#,
+            ),
+            (
+                b"--b\r\nNoColon\r\n\r\nv\r\n--b--\r\n",
+                r#"malformed MIME header: missing colon: "NoColon""#,
+            ),
+            (
+                b"--b\r\nX: a\x01\xff\xc3\xa9\r\n\r\nv\r\n--b--\r\n",
+                "malformed MIME header line: \"X: a\\x01\\xff\u{e9}\"",
+            ),
+            (
+                b"--b\r\nBad(Key): x\r\n\r\nv\r\n--b--\r\n",
+                r#"malformed MIME header line: "Bad(Key): x""#,
+            ),
+            (
+                b"--b\r\n\r\nv\r\n--b\r\njunk\r\n",
+                r#"malformed MIME header: missing colon: "junk""#,
+            ),
+        ];
+        for (body, want) in cases {
+            assert_eq!(
+                form(body).err().as_deref(),
+                Some(want),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]

@@ -2,11 +2,11 @@
 //! `mime.ParseMediaType`, `mime/multipart.Reader` and the `textproto` header rules,
 //! applied to a body that is already fully in memory.
 //!
-//! ponytail: no quoted-printable part decoding, no header count or size limits, and
-//! `%q` quoting is exact for ASCII only.
+//! ponytail: no quoted-printable part decoding and no header count or size limits.
 
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
+use cpa_common::gostr::quote;
 use cpa_core::gostr::GoStr;
 
 use crate::body_limit::Read;
@@ -245,10 +245,7 @@ impl<'a> Reader<'a, '_> {
                 return Ok(None);
             }
             if expect_new_part {
-                return Err(format!(
-                    "multipart: expecting a new Part; got line {}",
-                    self.quote(line)
-                ));
+                return Err(format!("multipart: expecting a new Part; got line {}", quote(line)));
             }
             if self.parts_read == 0 {
                 continue;
@@ -257,7 +254,7 @@ impl<'a> Reader<'a, '_> {
                 expect_new_part = true;
                 continue;
             }
-            return Err(format!("multipart: unexpected line in Next(): {}", self.quote(line)));
+            return Err(format!("multipart: unexpected line in Next(): {}", quote(line)));
         }
     }
 
@@ -366,15 +363,6 @@ impl<'a> Reader<'a, '_> {
         Ok(self.read_line().map(Cow::Borrowed))
     }
 
-    /// `%q`: Go's `strconv.Quote` in the limited parse, the ASCII-exact quoting a
-    /// whole body has always used.
-    fn quote(&self, b: &[u8]) -> String {
-        match self.limited {
-            true => cpa_common::gostr::quote(b),
-            false => go_quote(b),
-        }
-    }
-
     /// The read error at the end of the body: `eof`, or the limit error.
     fn end(&mut self, eof: &str) -> String {
         if !self.limited {
@@ -407,13 +395,6 @@ impl<'a> Reader<'a, '_> {
             self.fill();
         }
         let limited = self.limited;
-        // Go v8.0.35's release toolchain (1.26.4) quotes these lines with %q; a whole
-        // body keeps the unquoted text of the earlier fixtures.
-        // ponytail: the limited parse only.
-        let show = |line: &[u8]| match limited {
-            true => cpa_common::gostr::quote(line),
-            false => String::from_utf8_lossy(line).into_owned(),
-        };
         let visible = if limited { self.window } else { self.buf.len() };
         if matches!(self.buf[..visible].get(self.pos), Some(b' ' | b'\t')) {
             let Some(line) = self.header_line(80)? else {
@@ -422,7 +403,7 @@ impl<'a> Reader<'a, '_> {
             if line.len() > 80 {
                 return Err(TOO_LARGE.into());
             }
-            return Err(format!("malformed MIME header initial line: {}", show(&line)));
+            return Err(format!("malformed MIME header initial line: {}", quote(&line)));
         }
         loop {
             let Some(first) = self.header_line(usize::MAX)? else {
@@ -433,7 +414,7 @@ impl<'a> Reader<'a, '_> {
                 return Ok(Some(headers));
             }
             if !first.contains(&b':') {
-                return Err(format!("malformed MIME header: missing colon: {}", self.quote(first)));
+                return Err(format!("malformed MIME header: missing colon: {}", quote(first)));
             }
             // textproto trims spaces and tabs; a whole body keeps the wider trim.
             // ponytail: the limited parse only, where a cut line can end in "\r".
@@ -461,7 +442,7 @@ impl<'a> Reader<'a, '_> {
                     None => break,
                 }
             }
-            let malformed = || format!("malformed MIME header line: {}", show(&kv));
+            let malformed = || format!("malformed MIME header line: {}", quote(&kv));
             let colon = kv.iter().position(|&b| b == b':').unwrap_or(kv.len());
             let (key, value) = (&kv[..colon], &kv[(colon + 1).min(kv.len())..]);
             if !key.iter().all(|&b| is_header_field_byte(b) || b == b' ') {
@@ -650,33 +631,6 @@ fn trim_ascii_space(b: &[u8]) -> &[u8] {
 
 fn is_header_field_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
-/// Go `strconv.Quote` for header and boundary lines.
-fn go_quote(b: &[u8]) -> String {
-    let mut out = String::from("\"");
-    for chunk in b.utf8_chunks() {
-        for c in chunk.valid().chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\x07' => out.push_str("\\a"),
-                '\x08' => out.push_str("\\b"),
-                '\x0c' => out.push_str("\\f"),
-                '\x0b' => out.push_str("\\v"),
-                c if (c as u32) < 0x20 || c == '\x7f' => out.push_str(&format!("\\x{:02x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        for byte in chunk.invalid() {
-            out.push_str(&format!("\\x{byte:02x}"));
-        }
-    }
-    out.push('"');
-    out
 }
 
 fn is_tspecial(c: u8) -> bool {
