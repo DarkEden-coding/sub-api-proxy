@@ -678,11 +678,9 @@ fn sanitize_reasoning(body: String, is_compat: bool) -> String {
     }
 }
 
-/// `helps.NormalizeCodexToolSchemas`: collapse large pure-`const` unions into `enum`.
-/// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): only the Codex executors
-/// call it, so it lives here rather than in `cpa_common::payload`.
-// ponytail: the companion stripIncompatiblePatterns pass (drops `\p{..}` regex patterns by
-// re-encoding the schema) is not ported; such schemas pass through unchanged.
+/// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): strip what strict upstream
+/// validators reject, then collapse large pure-`const` unions into `enum`. Only the Codex
+/// executors call it, so it lives here rather than in `cpa_common::payload`.
 fn normalize_tool_schemas(body: String) -> String {
     let tools = gjson::get(&body, "tools");
     match normalize_tool_list(&tools) {
@@ -727,8 +725,10 @@ fn normalize_tool(tool: &gjson::Value<'_>) -> Option<String> {
             if params.kind() != Kind::Object {
                 return None;
             }
-            let mut raw = params.json().to_owned();
-            let mut changed = false;
+            let stripped = strip_incompatible(params.json());
+            let mut changed = stripped.is_some();
+            let mut raw = stripped.unwrap_or_else(|| params.json().to_owned());
+            let params = gjson::parse(&raw);
             let mut updates = Vec::new();
             let properties = params.get("properties");
             if properties.kind() == Kind::Object {
@@ -748,6 +748,154 @@ fn normalize_tool(tool: &gjson::Value<'_>) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// `stripIncompatiblePatternsFromJSON`: drops `pattern`s (and `patternProperties` keys)
+/// with unsupported regex escapes and integer numeric bounds outside int64 (57d005fe),
+/// visiting only subschema locations. A changed schema is re-encoded as Go's Encoder
+/// writes a `map[string]any` (sorted keys, no HTML escaping, literal numbers).
+fn strip_incompatible(raw: &str) -> Option<String> {
+    // Go's fast path: a JSON-escaped `\\p{` contains `\p{`; `\\0`; any `\u` escape;
+    // the four bound keywords.
+    if !["\\p{", "\\P{", "\\u", "\\\\0", "inimum", "aximum"]
+        .iter()
+        .any(|needle| raw.contains(needle))
+    {
+        return None;
+    }
+    let mut root = cpa_common::json::GoValue::parse(raw.as_bytes())?;
+    if root == cpa_common::json::GoValue::Null || !strip_schema(&mut root) {
+        return None;
+    }
+    String::from_utf8(root.marshal_no_html()).ok()
+}
+
+/// `codexNumericBoundKeywords`.
+const NUMERIC_BOUNDS: [&str; 4] = ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"];
+
+/// `stripIncompatiblePatterns`.
+fn strip_schema(value: &mut cpa_common::json::GoValue) -> bool {
+    use cpa_common::json::GoValue;
+    let escape = |s: &str| cpa_common::schema::has_unsupported_unicode_property_escape(s.as_bytes());
+    let mut changed = false;
+    match value {
+        GoValue::Object(map) => {
+            if matches!(map.get("pattern"), Some(GoValue::String(p)) if escape(p)) {
+                map.remove("pattern");
+                changed = true;
+            }
+            for key in NUMERIC_BOUNDS {
+                if matches!(map.get(key), Some(GoValue::Number(n)) if bound_out_of_int64(n)) {
+                    map.remove(key);
+                    changed = true;
+                }
+            }
+            if let Some(GoValue::Object(patterns)) = map.get_mut("patternProperties") {
+                patterns.retain(|key, sub| {
+                    if escape(key) {
+                        changed = true;
+                        return false;
+                    }
+                    changed |= strip_schema(sub);
+                    true
+                });
+            }
+            for key in cpa_common::schema::SCHEMA_MAP_KEYWORDS {
+                let key = std::str::from_utf8(key).unwrap_or_default();
+                if key == "patternProperties" {
+                    continue;
+                }
+                if let Some(GoValue::Object(sub)) = map.get_mut(key) {
+                    for schema in sub.values_mut() {
+                        changed |= strip_schema(schema);
+                    }
+                }
+            }
+            for key in cpa_common::schema::SCHEMA_VALUE_KEYWORDS {
+                match map.get_mut(std::str::from_utf8(key).unwrap_or_default()) {
+                    Some(sub @ GoValue::Object(_)) => changed |= strip_schema(sub),
+                    Some(GoValue::Array(items)) => {
+                        for item in items {
+                            changed |= strip_schema(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        GoValue::Array(items) => {
+            for item in items {
+                changed |= strip_schema(item);
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+/// `isNumericBoundOutOfInt64`: whether a JSON number is an integer outside int64. A
+/// fraction or a negative effective exponent is not an integer and stays.
+fn bound_out_of_int64(number: &str) -> bool {
+    use std::num::IntErrorKind::{NegOverflow, PosOverflow};
+    let overflows = |text: &str| matches!(text.parse::<i64>(), Err(e) if matches!(e.kind(), PosOverflow | NegOverflow));
+    let raw = number.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if !raw.contains(['.', 'e', 'E']) {
+        return overflows(raw);
+    }
+    let (negative, s) = match raw.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+    };
+    let (mantissa, exp) = match s.find(['e', 'E']) {
+        Some(at) => {
+            let (mantissa, exp) = (&s[..at], &s[at + 1..]);
+            match exp.parse::<i64>() {
+                Ok(exp) => (mantissa, exp),
+                Err(e) if matches!(e.kind(), PosOverflow | NegOverflow) => {
+                    return !exp.starts_with('-') && !mantissa.trim_matches(['0', '.']).is_empty();
+                }
+                Err(_) => return false,
+            }
+        }
+        None => (s, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((_, frac)) if frac.contains('.') => return false,
+        Some(parts) => parts,
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return false;
+    }
+    if !int_part.bytes().chain(frac_part.bytes()).all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let digits = format!("{int_part}{frac_part}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return false;
+    }
+    let len = raw.len() as i64;
+    if exp < -len {
+        return false;
+    }
+    if exp > len + 20 {
+        return true;
+    }
+    let trimmed = significant.trim_end_matches('0');
+    let trailing_zeros = (significant.len() - trimmed.len()) as i64;
+    let effective = exp - frac_part.len() as i64 + trailing_zeros;
+    if effective < 0 {
+        return false;
+    }
+    if effective > 19 || trimmed.len() as i64 + effective > 19 {
+        return true;
+    }
+    let sign = if negative { "-" } else { "" };
+    overflows(&format!("{sign}{trimmed}{}", "0".repeat(effective as usize)))
 }
 
 fn normalize_property(prop: &gjson::Value<'_>) -> Option<String> {
@@ -1343,6 +1491,40 @@ pub(crate) fn ws_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Go v8.0.35's `NormalizeCodexToolSchemas` (57d005fe bounds, patterns, re-encoding)
+    /// and `NormalizeCodexToolIntegerTypes` (d7914afd paths and namespaces), byte for
+    /// byte; see tests/reference/codex_tool_schema.
+    #[test]
+    fn tool_schema_passes_match_go() {
+        let go: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/codex_tool_schema_go.json")).unwrap();
+        let expected = |case: &serde_json::Value| case.get("out").unwrap_or(&case["in"]).as_str().unwrap().to_owned();
+        for case in go["schemas"].as_array().unwrap() {
+            let input = case["in"].as_str().unwrap().to_owned();
+            assert_eq!(normalize_tool_schemas(input), expected(case), "{}", case["name"]);
+        }
+        for case in go["integers"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            if let Some(ua) = case["ua"].as_str() {
+                headers.insert(http::header::USER_AGENT, ua.parse().unwrap());
+            }
+            let out = cpa_common::payload::normalize_codex_tool_integer_types(
+                case["in"].as_str().unwrap().as_bytes(),
+                &headers,
+            );
+            assert_eq!(
+                String::from_utf8(out.clone()).unwrap(),
+                expected(case),
+                "{} {:?}",
+                case["name"],
+                case["ua"]
+            );
+            // Go's tests also require a second pass to leave the output alone.
+            let again = cpa_common::payload::normalize_codex_tool_integer_types(&out, &headers);
+            assert_eq!(again, out, "{} is not idempotent", case["name"]);
+        }
+    }
 
     /// Go `TestHomeCodexCompatUsesSelectedCredentialOptions`: without a binding or config
     /// models, a Home credential's `credential_options` decide is-compat for the upstream
