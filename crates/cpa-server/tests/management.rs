@@ -1461,7 +1461,14 @@ async fn model_definitions_match_go_by_channel() {
             .send()
     };
     // Aliases answer their canonical section under the requested (lowercased) name.
-    let aliases = [("Kimi.AI", "kimi"), ("x-ai", "xai"), ("GROK", "xai"), ("muse", "meta")];
+    let aliases = [
+        ("kimi-ai", "kimi"),
+        ("Kimi.AI", "kimi"),
+        ("kimi.com", "kimi"),
+        ("x-ai", "xai"),
+        ("GROK", "xai"),
+        ("muse", "meta"),
+    ];
     let requests = go
         .keys()
         .filter(|c| *c != "claude")
@@ -1479,7 +1486,7 @@ async fn model_definitions_match_go_by_channel() {
         assert_eq!(r.text().await.unwrap(), want, "{channel}");
         compared += 1;
     }
-    assert_eq!(compared, 14);
+    assert_eq!(compared, 16);
     server.abort();
 }
 

@@ -474,6 +474,19 @@ fn missing(s: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Go v8.0.35 (f62d4d28) dropped `gemini-3.7-flash`: with no registry entry
+/// `capGeminiMaxOutputTokens` leaves the request's limit alone, while the
+/// `gemini-3.8-flash` the historical golden now uses is capped at its completion limit.
+#[test]
+fn a_removed_model_has_no_output_cap() {
+    let body = br#"{"generationConfig":{"maxOutputTokens":70000}}"#.to_vec();
+    assert_eq!(payload::cap_max_output_tokens(body.clone(), "gemini-3.7-flash"), body);
+    assert_eq!(
+        payload::cap_max_output_tokens(body, "gemini-3.8-flash"),
+        br#"{"generationConfig":{"maxOutputTokens":65536}}"#
+    );
+}
+
 #[tokio::test]
 async fn go_reference_scenarios() {
     let scenarios = fixture()["scenarios"].as_array().unwrap();
