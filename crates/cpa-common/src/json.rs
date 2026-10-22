@@ -2915,6 +2915,21 @@ impl GoValue {
         }
     }
 
+    /// Calls `visit` on every value, each before its children, on a heap stack. `visit`
+    /// may edit the value it gets, removing children included; the children left are
+    /// visited next.
+    pub fn visit_mut(&mut self, mut visit: impl FnMut(&mut GoValue)) {
+        let mut stack = vec![self];
+        while let Some(value) = stack.pop() {
+            visit(value);
+            match value {
+                Self::Array(items) => stack.extend(items.iter_mut()),
+                Self::Object(map) => stack.extend(map.values_mut()),
+                _ => {}
+            }
+        }
+    }
+
     /// `Decoder.UseNumber()` then decode: numbers keep their literal text. `None` when
     /// encoding/json rejects the text, including nesting deeper than 10000.
     pub fn parse(text: &[u8]) -> Option<Self> {
@@ -2928,7 +2943,8 @@ impl GoValue {
     }
 
     /// One pass over a document [`std_valid`] accepted, containers on an explicit stack:
-    /// linear in the text and independent of the native stack.
+    /// independent of the native stack, and O(n log n) at worst, from the `BTreeMap`
+    /// insert per object member.
     fn decode(d: &[u8], float: bool) -> Option<Self> {
         use std::collections::BTreeMap;
         enum Open {
