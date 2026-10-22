@@ -505,7 +505,20 @@ where
 {
     let sse = call.media.as_ref().is_some_and(|m| m.sse);
     let speech = call.media.as_ref().is_some_and(|m| m.kind == MediaKind::Speech);
-    let interval = if sse {
+    // sub-api-proxy: a hook reply must precede any keep-alive commitment.
+    let sap = crate::sap_hooks::dispatch_context(rt, &call);
+    // sub-api-proxy: bypass route-specific error rendering for exact hook replies.
+    let reply = sap.clone();
+    let render = move |result| async move {
+        if let Some(response) = reply.and_then(|s| s.take_reply()) {
+            response
+        } else {
+            render(result).await
+        }
+    };
+    let interval = if sap.is_some() {
+        None
+    } else if sse {
         crate::respond::keepalive(&rt.config())
     } else {
         nonstream_keepalive(&call, &rt.config())
@@ -515,7 +528,8 @@ where
     let mut run = Box::pin(crate::remote::keep_query_credential({
         let (rt, trace) = (rt.clone(), trace.clone());
         async move {
-            let result = run_with_bootstrap_retries(&rt, call, &trace).await;
+            // sub-api-proxy: keep the context when execution moves into a response body.
+            let result = crate::sap_hooks::scope(sap, run_with_bootstrap_retries(&rt, call, &trace)).await;
             let cfg = rt.config();
             let upstream = upstream_headers(&cfg, &result);
             let result = match result {
@@ -678,6 +692,16 @@ fn bootstrap_retries(cfg: &Config) -> usize {
 /// Go handlers_stream.go: a stream that failed before its first payload is retried as a
 /// whole request when the status is statusless, auth, quota, timeout or 5xx.
 pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &Trace) -> Result<Done, Failure> {
+    // sub-api-proxy: direct dispatch callers also identify once, before interceptors.
+    let sap = crate::sap_hooks::dispatch_context(rt, &call);
+    crate::sap_hooks::scope(sap, Box::pin(run_with_bootstrap_retries_inner(rt, call, trace))).await
+}
+
+async fn run_with_bootstrap_retries_inner(rt: &Arc<Runtime>, mut call: Call, trace: &Trace) -> Result<Done, Failure> {
+    // sub-api-proxy: also strip routing metadata before plugin executor dispatch.
+    if rt.sap_hooks().is_some() {
+        call.headers.remove(sap_core::health::CLIENT_HOST_HEADER);
+    }
     // Go `applyModelRouter` runs once per request, before provider resolution: a plugin
     // executor takes the request whole; a provider decision replaces the registry route.
     use crate::plugins::execution::{self as plugin_execution, Route};
@@ -1118,7 +1142,13 @@ async fn run_routed(
                 Err(AcquireError::Rejected { code, message }) => {
                     break Some(scheduler_rejection(code, message, &providers, &model));
                 }
-                Err(AcquireError::Scheduler(error)) => break Some(Failure::Exec(error)),
+                Err(AcquireError::Scheduler(error)) => {
+                    // sub-api-proxy: exact replies cannot enter provider fallbacks.
+                    if crate::sap_hooks::current().is_some_and(|s| s.has_reply()) {
+                        return Err(Failure::Exec(error).into());
+                    }
+                    break Some(Failure::Exec(error));
+                }
                 Err(AcquireError::Unavailable { retry_after, cause }) => {
                     break Some(Failure::Unavailable {
                         code: if retry_after.is_some() {
@@ -2187,6 +2217,11 @@ async fn attempt(
         let mut tracker = start(&lease.credential, &mut req);
         observe(&lease.credential, &mut req);
         let session = session.as_ref();
+        // sub-api-proxy: observe executor payloads without modifying their bytes.
+        crate::sap_hooks::observe(rt, &lease.credential, &mut req);
+        if rt.sap_hooks().is_some() {
+            req.headers.remove(sap_core::health::CLIENT_HOST_HEADER);
+        }
         let private = lease.home_private().map(|p| p.attributes.clone()).unwrap_or_default();
         let private = &private;
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
@@ -2232,6 +2267,10 @@ async fn attempt(
             && classify::is_unauthorized(error)
             && let Some(current) = rt.refresh_after_unauthorized(&lease.credential, cfg).await
         {
+            // sub-api-proxy: the refresh retry is another upstream attempt.
+            if let Some(sap) = crate::sap_hooks::current() {
+                sap.outcome(&lease.credential.id, &Outcome::Failure(error.clone()));
+            }
             refreshed = true;
             if let Some(t) = tracker.take() {
                 t.fail(error);
@@ -2240,6 +2279,8 @@ async fn attempt(
             lease.redispatch();
             tracker = start(&lease.credential, &mut req);
             observe(&lease.credential, &mut req);
+            // sub-api-proxy: refresh attempts have a new usage sink.
+            crate::sap_hooks::observe(rt, &lease.credential, &mut req);
             executed = execute(lease.credential.clone(), req).await;
         }
         if let (Ok(response), Some(t)) = (&executed, tracker.as_mut()) {
@@ -2266,7 +2307,8 @@ async fn attempt(
                             Done::Stream {
                                 headers,
                                 first,
-                                rest: Completing::new(rest, lease).boxed(),
+                                // sub-api-proxy: retain stream accounting through EOF or drop.
+                                rest: crate::sap_hooks::stream(Completing::new(rest, lease).boxed()),
                             }
                         }
                         buffered => {

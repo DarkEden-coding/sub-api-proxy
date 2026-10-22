@@ -31,6 +31,8 @@ use crate::scheduler::{Policy, Scheduler};
 type RegistryCache = (Arc<Config>, (u64, u64, u64), Arc<Registry>);
 
 pub struct Runtime {
+    // sub-api-proxy: optional implementation installed by sap-server.
+    sap_hooks: RwLock<Option<Arc<dyn crate::sap_hooks::SapHooks>>>,
     config: RwLock<Arc<Config>>,
     store: Arc<CredentialStore>,
     pub executors: Executors,
@@ -82,6 +84,15 @@ pub enum OAuthDelivery {
 pub type OAuthCallbackSink = Arc<dyn Fn(&OAuthCallback) -> OAuthDelivery + Send + Sync>;
 
 impl Runtime {
+    // sub-api-proxy: keep installation independent of the application crate.
+    pub fn set_sap_hooks(&self, hooks: Arc<dyn crate::sap_hooks::SapHooks>) {
+        *self.sap_hooks.write().unwrap_or_else(PoisonError::into_inner) = Some(hooks);
+    }
+
+    pub fn sap_hooks(&self) -> Option<Arc<dyn crate::sap_hooks::SapHooks>> {
+        self.sap_hooks.read().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
     /// The scheduler policy is derived from the config (`routing` plus the OAuth
     /// provider rules), as on every publish.
     pub fn new(config: Config, credentials: Vec<Credential>, executors: Executors) -> Self {
@@ -91,6 +102,8 @@ impl Runtime {
         let (enabled, strict) = signature_cache_config(&config);
         cpa_translate::set_antigravity_signature_cache_config(enabled, strict);
         let rt = Self {
+            // sub-api-proxy: upstream behavior by default.
+            sap_hooks: RwLock::default(),
             config: RwLock::new(Arc::new(config)),
             store: CredentialStore::new(credentials),
             executors,
@@ -334,8 +347,28 @@ impl Runtime {
                 crate::scheduler::Windows::observed(&provider, &s.signals, s.observed_at, now)
             })
         };
-        let request = crate::plugins::scheduler_request(self, &selection, &policy, &admit)?;
-        let pick = crate::plugins::scheduler_pick(self, request).await?;
+        // sub-api-proxy: reuse ready-candidate validation and the existing external pick.
+        let pick = if let Some(context) = crate::sap_hooks::current() {
+            let candidates = self.store.scheduler_candidates(&selection, &policy, &admit, true);
+            context.select(candidates)?
+        } else {
+            let request = crate::plugins::scheduler_request(self, &selection, &policy, &admit)?;
+            crate::plugins::scheduler_pick(self, request).await?
+        };
+        // sub-api-proxy: an unavailable explicit hook pick must never fall back to
+        // another account, including if readiness changes between snapshot and commit.
+        let mut selection = selection;
+        if crate::sap_hooks::current().is_some()
+            && let Pick::Auth(id) = &pick
+        {
+            selection.exclude.extend(
+                self.store
+                    .snapshot()
+                    .iter()
+                    .filter(|c| c.id != *id)
+                    .map(|c| c.id.clone()),
+            );
+        }
         let mut lease = self.store.select_picked(selection, policy, &admit, &ranks, pick)?;
         if self.executors.readiness(&lease.credential, cfg) != Readiness::PrepareNow {
             return Ok(lease);
@@ -376,6 +409,8 @@ impl Runtime {
             (scheduler.outside_selection_generation(), scheduler.dispatch())
         };
         Some(Lease {
+            // sub-api-proxy: carry hooks beyond the request task.
+            sap: crate::sap_hooks::current(),
             store: self.store.clone(),
             credential: Arc::new(prepare(&credential)),
             execution_model: selection.model.clone(),
@@ -413,6 +448,8 @@ impl Runtime {
     ) -> Result<(Lease, Option<i64>, String), crate::remote::RemoteError> {
         let grant = dispatch.dispatch(request).await?;
         let lease = Lease {
+            // sub-api-proxy: carry hooks beyond the request task.
+            sap: crate::sap_hooks::current(),
             store: self.store.clone(),
             credential: Arc::new(grant.credential),
             execution_model: selection.model.clone(),
@@ -1009,6 +1046,8 @@ pub fn admission<'a>(
 
 /// One attempt with one credential. Not cloneable: it reports exactly one outcome.
 pub struct Lease {
+    // sub-api-proxy: retain request context until completion or cancellation.
+    sap: Option<Arc<crate::sap_hooks::Context>>,
     store: Arc<CredentialStore>,
     pub credential: Arc<Credential>,
     pub selection: Selection,
@@ -1092,6 +1131,10 @@ impl Lease {
     /// Records an intermediate outcome for one model of a pooled alias without ending
     /// the lease.
     pub fn note(&self, model: &str, outcome: &Outcome) {
+        // sub-api-proxy: pooled models report each attempt.
+        if let Some(sap) = &self.sap {
+            sap.outcome(&self.credential.id, outcome);
+        }
         if self.remote.is_none() {
             self.store.record_model(self, model, outcome);
         }
@@ -1100,6 +1143,10 @@ impl Lease {
     fn report(&mut self, outcome: Outcome) {
         if std::mem::replace(&mut self.reported, true) {
             return;
+        }
+        // sub-api-proxy: report once, including dropped streams.
+        if let Some(sap) = &self.sap {
+            sap.outcome(&self.credential.id, &outcome);
         }
         match &mut self.remote {
             // Go `reportHomeResult` leaves local cooldowns alone; the scope ends with
@@ -1546,6 +1593,8 @@ impl CredentialStore {
         let (credential, lcp, picked, seq) = credential;
         let execution_model = admit(&credential).unwrap_or_else(|| selection.model.clone());
         Ok(Lease {
+            // sub-api-proxy: carry hooks beyond the request task.
+            sap: crate::sap_hooks::current(),
             store: self.clone(),
             credential,
             selection,

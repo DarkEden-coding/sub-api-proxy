@@ -666,7 +666,10 @@ impl Connection {
                 timeline: sink.timeline.clone(),
             },
         );
-        if CodexExecutor::response_steering_configured(&self.rt.config()) {
+        // sub-api-proxy: every frame must pass identification and selection; steering
+        // otherwise forwards concurrent frames directly to the pinned upstream.
+        // ponytail: hooked sockets serialize turns until steering supports per-frame policy checks.
+        if self.rt.sap_hooks().is_none() && CodexExecutor::response_steering_configured(&self.rt.config()) {
             let store = self.rt.store().clone();
             // `WithWebsocketAuthCheck`. ponytail: Go falls back to the execution session's
             // snapshot of a credential removed since; a missing credential counts as enabled.
@@ -701,8 +704,10 @@ impl Connection {
             // simultaneous upstream-loss signal closes the connection. A duplex turn owns
             // closure: it drains acknowledgements and pending events in order first. A
             // client that went away cancels the turn (Go's reader cancels the request).
+            // sub-api-proxy: identify each original frame before normalization/replay.
+            let sap = crate::sap_hooks::identify(&self.rt, &self.request_path, &self.headers, &frame);
             let flow = {
-                let turn = self.turn(&mut sink, payload);
+                let turn = crate::sap_hooks::scope(sap.clone(), self.turn(&mut sink, payload));
                 tokio::pin!(turn);
                 tokio::select! {
                     biased;
@@ -724,6 +729,11 @@ impl Connection {
                     () = client.gone() => Err(None),
                 }
             };
+            // sub-api-proxy: close normally only after the current turn has drained.
+            if sap.as_ref().is_some_and(|s| s.close_requested()) {
+                close_with_code(&mut sink, 1000, "").await;
+                break;
+            }
             // A finished turn wakes idle work such as the heap trim (one atomic load).
             cpa_common::idle::activity();
             match flow {
