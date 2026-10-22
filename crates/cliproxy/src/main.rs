@@ -1381,9 +1381,14 @@ async fn serve(
     }
     // Auth-dir files and config API keys, synthesized as Go's watcher does. Home mode
     // runs on credentials Home dispatches per request.
-    let credentials = match home_config {
-        Some(_) => Vec::new(),
-        None => cpa_core::config::credentials::load(&config),
+    let (credentials, read) = match home_config {
+        Some(_) => Default::default(),
+        None => {
+            let scan = cpa_core::config::credentials::scan_auth_dir(&config);
+            let mut all = scan.credentials;
+            all.extend(cpa_core::config::credentials::from_config(&config));
+            (all, scan.read)
+        }
     };
     tracing::info!(credentials = credentials.len(), "credentials loaded");
     let listener =
@@ -1404,6 +1409,8 @@ async fn serve(
         google: Default::default(),
     };
     let rt = Arc::new(Runtime::new(config, credentials, executors).with_plugin_host(plugins));
+    // What each file credential was loaded from, for Go-exact management saves.
+    rt.store().note_loaded(&read);
     rt.set_local_model(local_model);
     if let Some(cooldown) = store.as_ref().and_then(|store| store.cooldown.clone()) {
         rt.set_cooldown_backend(cooldown);
