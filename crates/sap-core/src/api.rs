@@ -186,8 +186,9 @@ pub struct AccountPatch {
     pub label: Option<String>,
     pub disabled: Option<bool>,
     pub priority: Option<i32>,
-    /// `Some(None)` clears a manual capacity override.
-    #[serde(default, with = "double_option")]
+    /// `Some(None)` clears a manual capacity override. Omitted from JSON when `None`,
+    /// because a JSON `null` means "clear".
+    #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
     pub capacity_override: Option<Option<f64>>,
 }
 
