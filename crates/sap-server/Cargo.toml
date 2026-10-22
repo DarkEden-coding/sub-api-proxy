@@ -1,0 +1,27 @@
+[package]
+name = "sap-server"
+description = "Sub-Api-Proxy server integration: cpa-server hooks, node state, persistence, sync wiring and the management API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+cpa-core.workspace = true
+cpa-server.workspace = true
+futures-util.workspace = true
+http.workspace = true
+sap-core = { path = "../sap-core" }
+sap-routing = { path = "../sap-routing" }
+sap-store = { path = "../sap-store" }
+sap-sync = { path = "../sap-sync" }
+sap-threads = { path = "../sap-threads" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tracing.workspace = true

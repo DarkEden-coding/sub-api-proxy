@@ -3505,6 +3505,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sap-server"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "cpa-core",
+ "cpa-server",
+ "futures-util",
+ "http",
+ "sap-core",
+ "sap-routing",
+ "sap-store",
+ "sap-sync",
+ "sap-threads",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sap-store"
 version = "0.2.6"
 dependencies = [

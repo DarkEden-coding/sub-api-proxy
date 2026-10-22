@@ -284,3 +284,95 @@ pub enum SapPick {
 - no hooks means no behavior change
 
 **Build:** `cpa-server` is large, so use `CARGO_BUILD_JOBS=4 nice -n 19` and run only filtered tests (`cargo test -p cpa-server sap_hooks`), plus the existing tests of the modules you touch. Mark every upstream edit with a `// sub-api-proxy:` comment.
+
+## Workstreams H and I: `sap-server`
+
+`crates/sap-server` connects everything. It implements `cpa_server::sap_hooks::SapHooks` (merged from workstream G; read `crates/cpa-server/src/sap_hooks.rs`), and it serves the management API. Two workstreams share it through the trait in `crates/sap-server/src/control.rs`:
+
+- H implements `Control`.
+- I serves HTTP on top of it.
+
+Neither may change `control.rs` without listing the change in its report.
+
+### Workstream H: node state and hooks (backend)
+
+**Paths:**
+- `crates/sap-server/src/` except `api/`
+- `crates/sap-server/Cargo.toml`
+- `crates/sap-server/tests/node_*.rs`
+- One marked change in `crates/cpa-server/src/sap_hooks.rs` and `lib.rs`: add `fn routes(&self) -> Option<axum::Router> { None }` to `SapHooks`, merged into `cpa_server::router` when hooks are installed.
+- One marked change in `crates/cliproxy`: a `--sap-config <path>` flag that calls `sap_server::install(&rt, path)` before the router is built.
+
+**Build:**
+
+1. **Config:** `sap.yaml` with:
+   - `node` (`NodeId`), `role`, and `store_path`
+   - `limits` (store retention and budget)
+   - `peers` (`id`, `url`, `secret_file`)
+   - `routing` (`sap_core::routing::RoutingConfig`)
+   - `idle_window_secs` (600) and `registry_max` (10000)
+2. **Account discovery:**
+   - Map cliproxy credentials to logical accounts automatically. The Claude identity is the account UUID or email from the credential. Codex uses the ChatGPT `account_id`.
+   - Create the `Account` in the store on first sight, with `plan` from credential attributes or quota signals, and capacity from `sap_routing::plan_capacity`.
+   - Record a local `NodeCredential`. Re-scan when credentials change.
+   - A logical account known from a peer with no local credential is shown as `login_needed_on` for this node.
+3. **Hooks:**
+   - `identify` is `sap_threads::identify`, then `Registry::observe`.
+   - `select` builds a `RoutingInput` with `RoutingEvent` chosen from the registry:
+     - new
+     - child (the parent's assignment)
+     - continue
+     - compaction completed (set after a successful compaction request)
+     - after outcome (the last failure on the thread)
+   - It calls `ThreadAffinityPolicy` and maps `Decision`:
+     - `Use` → `SapPick::Credential` for this node's credential of that account. If the account changed and the request is `Continuation::Continue`, answer instead:
+       - Claude: `Reply` 400 `{"type":"error","error":{"type":"invalid_request_error","message":"..."}}`, which makes Claude Code resend the full history.
+       - Codex WebSocket: `CloseSocket`.
+       - Codex HTTP: `Reply` 400 with the OpenAI error shape for an unknown `previous_response_id`.
+     - `RetrySame` → `Credential` (the current account).
+     - `Reject` → a provider-shaped 429 with a retry time.
+   - Record the assignment and reason.
+4. **Outcomes and observations:**
+   - Classify `AttemptResult` together with the latest quota signals into `Outcome`:
+     - Claude unified `status` rejected with its representative claim, or Codex `limit_reached` → `Exhausted`
+     - 429 → `RateLimited`
+     - 503 or 529 → `Overloaded`
+     - 401 or 403 → `Revoked`
+   - Track cooling and exhaustion per account.
+   - `ResponseId` → `record_response`.
+   - `Usage` (cumulative per attempt) → a delta into the registry and the store's usage buckets.
+   - `Quota` signals → `QuotaWindow`s: Claude `anthropic-ratelimit-unified-*` 5h/7d utilization and reset, Codex primary/secondary `used_percent`/`window_minutes`/`reset_at`. Store them as `QuotaObservation`, throttled to changes or every 5 minutes, and feed them to `CapacityLearner`.
+   - `on_stream` → stream counts.
+5. **Persistence and sync:**
+   - Write thread records to the store when assignment, lineage or compaction changes, plus `last_seen` at most once a minute.
+   - At startup, import records into the registry from the store.
+   - Append `EventView`s for assignments, moves, compactions and account state changes.
+   - Mount the `sap_sync::router` routes through `SapHooks::routes`, run a `SyncAgent` to the peers, notify on local writes, and import remote thread changes into the registry.
+6. **`health()` and `Control`:** build every `Control` view from this state. For `start_login`, reuse cliproxy's existing management OAuth flow (`crates/cpa-server/src/management/oauth.rs`). Leave the HTTP layer to I. Export `pub fn install(rt: &Arc<Runtime>, config: &Path) -> anyhow::Result<Arc<Node>>`, where `Node: Control`.
+7. **Tests:** use `cpa_server::testing` runtimes with mock upstreams and private auth dirs:
+   - a new Claude thread is assigned and its continuation stays pinned
+   - a subagent starts on its parent's account
+   - exhaustion moves the thread, and a `continue` then gets the forced 400
+   - a Codex move closes the socket
+   - a store reopen restores assignments
+   - two in-process nodes replicate an assignment
+
+### Workstream I: management API and dashboard serving (backend)
+
+**Paths:** `crates/sap-server/src/api/**`, `crates/sap-server/build.rs`, `crates/sap-server/tests/api_*.rs`, and `ui/sap/.gitignore` (stop ignoring `dist/`, then build and commit `ui/sap/dist`, as upstream commits `ui/dist`).
+
+**Build:**
+
+1. `pub fn router(control: Arc<dyn Control>, auth: ManagementAuth) -> axum::Router`, serving every route in the `sap_core::api` route table plus the four reset-aware routes (`sap_core::reset_aware::BASE_PATH`).
+   - Errors are `ApiError` JSON with `ControlError::status`.
+   - Thread keys in paths arrive percent-encoded, because subagent keys contain `/` (`%2F`). Decode within one segment, and test it.
+2. **Stream:** `GET /sap/api/stream` uses SSE. It sends a `snapshot` event (`FlowSnapshot` JSON) on connect and after `ControlEvent::Changed`, coalesced to at most 4 per second, and an `event` event for each `ControlEvent::Event`. Add a keep-alive comment every 15 s, and drop slow subscribers without blocking others.
+3. **Auth:** every `/sap/api` and reset-aware route requires the cliproxy management key. Reuse the existing management-key verification in `crates/cpa-server/src/management*` (it hashes the key), and expose it as `ManagementAuth` without duplicating the crypto.
+4. **Dashboard:** serve `ui/sap/dist` at `/sap/`, embedded with a `build.rs` like `crates/cpa-server/build.rs`, with an SPA fallback to `index.html`, correct MIME types and cache headers (hashed assets immutable, `index.html` no-cache). Run `npm ci && npm run build` in `ui/sap` and commit `dist/`.
+5. **Tests:** a fake `Control` covering:
+   - each route's status and JSON shape
+   - auth required
+   - encoded thread keys
+   - SSE coalescing and event delivery
+   - the dashboard index and an asset
+   - SPA fallback
