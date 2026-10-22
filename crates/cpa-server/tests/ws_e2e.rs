@@ -41,6 +41,17 @@ struct Captured {
 struct Upstream {
     script: Mutex<VecDeque<Value>>,
     captured: Mutex<Vec<Captured>>,
+    /// Held SSE responses whose request the proxy canceled (Go `http_canceled`).
+    canceled: Mutex<u64>,
+}
+
+/// Counts a held SSE response as canceled once the server drops its body.
+struct Canceled(Arc<Upstream>);
+
+impl Drop for Canceled {
+    fn drop(&mut self) {
+        *self.0.canceled.lock().unwrap() += 1;
+    }
 }
 
 fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -86,6 +97,21 @@ async fn upstream_handler(
         let event = event.as_str().unwrap();
         let kind = gjson::get(event, "type");
         sse.push_str(&format!("event: {}\ndata: {event}\n\n", kind.str()));
+    }
+    if reply["then"] == "hold" {
+        // The events, then an open stream until the proxy cancels the request.
+        let guard = Canceled(up.clone());
+        let body = futures_util::stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(sse)) })
+            .chain(futures_util::stream::pending())
+            .map(move |item| {
+                let _ = &guard;
+                item
+            });
+        return (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(body),
+        )
+            .into_response();
     }
     ([("content-type", "text/event-stream")], sse).into_response()
 }
@@ -325,12 +351,14 @@ async fn run(name: &str) {
             assert!(expected.is_empty(), "{name} step {i}: Go read after close");
             continue;
         }
-        if step["disable"].as_bool() == Some(true) {
-            // Go `manager.Update` with `Disabled`: config credentials change in memory.
-            for credential in rt.store().snapshot() {
-                let mut disabled = cpa_core::credential::Credential::clone(&credential);
-                disabled.disabled = true;
-                rt.store().replace_config_backed(disabled, credential.revision).unwrap();
+        // Go `manager.Update` with `Disabled`: config credentials change in memory.
+        for (key, disabled) in [("disable", true), ("enable", false)] {
+            if step[key].as_bool() == Some(true) {
+                for credential in rt.store().snapshot() {
+                    let mut changed = cpa_core::credential::Credential::clone(&credential);
+                    changed.disabled = disabled;
+                    rt.store().replace_config_backed(changed, credential.revision).unwrap();
+                }
             }
         }
         if let Some(send) = step["send"].as_str() {
@@ -420,6 +448,11 @@ async fn run(name: &str) {
             "{name}: upstream headers #{i}"
         );
     }
+    assert_eq!(
+        *up.canceled.lock().unwrap(),
+        scenario["http_canceled"].as_u64().unwrap_or(0),
+        "{name}: held HTTP responses the proxy canceled"
+    );
 }
 
 #[tokio::test]
@@ -661,6 +694,34 @@ async fn steering_upstream_drop_while_pending_closes_the_client() {
     run("steer_disconnect_pending").await;
 }
 
+/// Go `TestResponsesInterruptInFlight`: idle, malformed and disabled-credential
+/// interrupts fail locally without touching upstream; an in-flight one reaches the
+/// socket unchanged, its `response.incomplete` ends the turn, and the socket continues.
+#[tokio::test]
+async fn interrupt_reaches_the_active_socket_unchanged() {
+    run("interrupt_in_flight").await;
+}
+
+#[tokio::test]
+async fn interrupt_reaches_the_active_socket_unchanged_with_steering() {
+    run("interrupt_in_flight_steering").await;
+}
+
+/// Go `TestResponsesInterruptStopsHTTPUpstream`: an HTTP turn ends locally with
+/// `response.incomplete` (reason interrupted, the collected output), its upstream request
+/// is canceled, and the next turn continues from that transcript.
+#[tokio::test]
+async fn interrupt_cancels_an_http_turn_locally() {
+    run("interrupt_http_local").await;
+}
+
+/// Go `TestResponsesLateInterruptDoesNotPoisonNextCreate`: an interrupt for a finished
+/// response is a silent no-op, before and during the next turn, and never reaches upstream.
+#[tokio::test]
+async fn late_interrupt_does_not_poison_the_next_turn() {
+    run("interrupt_late_ws").await;
+}
+
 #[test]
 fn every_go_scenario_has_a_test() {
     let names: Vec<&str> = FIXTURE.iter().map(|s| s["name"].as_str().unwrap()).collect();
@@ -709,6 +770,10 @@ fn every_go_scenario_has_a_test() {
             "steer_credential_disabled",
             "steer_rejected_when_disabled",
             "http_upstream_400_exposed",
+            "interrupt_in_flight",
+            "interrupt_in_flight_steering",
+            "interrupt_http_local",
+            "interrupt_late_ws",
         ]
     );
 }

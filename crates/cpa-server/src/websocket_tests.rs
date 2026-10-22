@@ -613,6 +613,360 @@ async fn request_log_records_terminal_errors_like_go() {
     assert_eq!(events[2], ("websocket.disconnect".to_owned(), CLOSE_SENT.to_owned()));
 }
 
+/// Go `TestResponsesInterruptDiagnosticsAreSanitized` and the outcome check of
+/// `TestResponsesLateInterruptDoesNotPoisonNextCreate`: every `response.interrupt` adds an
+/// `interrupt` and an `interrupt.outcome` part with the response ID hashed (first 8 bytes
+/// of its SHA-256) and nothing else from the frame, not a request part; the rejection's
+/// error event is not a response part.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_diagnostics_are_sanitized() {
+    use futures_util::StreamExt;
+    use wreq::ws::message::{CloseFrame as WsClose, Message as WsMessage};
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"r-http","output":[]}}"#;
+    // Releases the bootstrap buffer, which holds `response.created`. Event lines close
+    // each frame, as Codex sends them.
+    const ITEM: &str = r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","id":"msg_1","content":[{"type":"output_text","text":"partial"}]}}"#;
+    // An HTTP turn that stays open until the proxy cancels it.
+    let upstream = serve(axum::Router::new().fallback(|| async {
+        let events = futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(format!(
+                "event: response.created\ndata: {CREATED}\n\nevent: response.output_item.done\ndata: {ITEM}\n\n"
+            ))
+        })
+        .chain(futures_util::stream::pending());
+        (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(events),
+        )
+    }))
+    .await;
+    let dir = std::env::temp_dir().join(format!("cpa-ws-interrupt-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\nobservability: {{logs: {{request-log: true}}}}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n",
+        dir.join("auths").display()
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let management = crate::management::Management::with_options(
+        rt.clone(),
+        dir.join("config.yaml"),
+        crate::management::Options {
+            log_dir: Some(dir.clone()),
+            management_password: Some(String::new()),
+            ..Default::default()
+        },
+    );
+    let proxy = serve(crate::request_logging::router(&management, router(rt))).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    let secret = r#"{"type":"response.interrupt","response_id":"private-id-token","mode":"secret-mode","authorization":"Bearer secret-credential","input":"private-conversation"}"#;
+    socket.send(WsMessage::text(secret)).await.unwrap();
+    let rejected = read_text(&mut socket).await;
+    assert_eq!(
+        gjson::get(&rejected, "error.message").str(),
+        "no active upstream websocket for response.interrupt",
+        "{rejected}"
+    );
+    let create = r#"{"type":"response.create","model":"gpt-fixture","input":[]}"#;
+    socket.send(WsMessage::text(create)).await.unwrap();
+    let created = read_text(&mut socket).await;
+    assert_eq!(gjson::get(&created, "type").str(), "response.created", "{created}");
+    assert_eq!(read_text(&mut socket).await, ITEM);
+    socket
+        .send(WsMessage::text(
+            r#"{"type":"response.interrupt","response_id":"r-http"}"#,
+        ))
+        .await
+        .unwrap();
+    let incomplete = read_text(&mut socket).await;
+    assert_eq!(
+        gjson::get(&incomplete, "type").str(),
+        "response.incomplete",
+        "{incomplete}"
+    );
+    socket
+        .send(WsMessage::Close(Some(WsClose {
+            code: 1000.into(),
+            reason: "bye".into(),
+        })))
+        .await
+        .unwrap();
+    drop(socket);
+
+    let log = written_log(&dir).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let part = |event: &str, payload: &str| (event.to_owned(), payload.to_owned());
+    let hashed = |hash: &str, outcome: &str| {
+        let outcome = if outcome.is_empty() {
+            String::new()
+        } else {
+            format!(r#","outcome":"{outcome}""#)
+        };
+        format!(r#"{{"type":"response.interrupt","response_id_hash":"{hash}"{outcome}}}"#)
+    };
+    // sha256("private-id-token") and sha256("r-http"), first 8 bytes.
+    let (private, http) = ("6e621ae080fb54bf", "31a0066549f97718");
+    let mut events = timeline_events(&log);
+    assert_eq!(events.len(), 9, "\n{log}");
+    // The local outcome and the turn's incomplete event are written concurrently.
+    events[6..8].sort();
+    assert_eq!(
+        events,
+        [
+            part("websocket.interrupt", &hashed(private, "")),
+            part("websocket.interrupt.outcome", &hashed(private, "rejected")),
+            part("websocket.request", create),
+            part("websocket.response", &created),
+            part("websocket.response", ITEM),
+            part("websocket.interrupt", &hashed(http, "")),
+            part("websocket.interrupt.outcome", &hashed(http, "local_http")),
+            part("websocket.response", &incomplete),
+            part("websocket.disconnect", "websocket: close 1000 (normal): bye"),
+        ],
+        "\n{log}"
+    );
+    for secret in [
+        "private-id-token",
+        "secret-mode",
+        "secret-credential",
+        "private-conversation",
+    ] {
+        assert!(!log.contains(secret), "the log leaked {secret}:\n{log}");
+    }
+}
+
+async fn read_text(socket: &mut wreq::ws::WebSocket) -> String {
+    use futures_util::StreamExt;
+    match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+        Ok(Some(Ok(wreq::ws::message::Message::Text(text)))) => text.as_str().to_owned(),
+        other => panic!("no text frame: {other:?}"),
+    }
+}
+
+/// Turns that are not interrupted keep master's upstream bytes, here on the Claude
+/// executor: a first turn and a continuation the handler merges into a full transcript.
+/// The pinned bodies were recorded on master before the downstream reader handled
+/// `response.interrupt` and before `response.incomplete` ended a turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uninterrupted_claude_turns_send_masters_bytes() {
+    use futures_util::StreamExt;
+    use wreq::ws::message::Message as WsMessage;
+    const FIRST: &str = r#"{"model":"claude-opus-5-5","max_tokens":32000,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],"metadata":{"user_id":"2b35ba29f7cec38e9220a584fafaa8f9eb2a8d01350e9d1c3653ae728471c5bb"},"stream":true,"system":[{"type":"text","text":"be brief","cache_control":{"type":"ephemeral"}}]}"#;
+    const SECOND: &str = r#"{"model":"claude-opus-5-5","max_tokens":32000,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":[{"type":"text","text":"again","cache_control":{"type":"ephemeral"}}]}],"metadata":{"user_id":"2b35ba29f7cec38e9220a584fafaa8f9eb2a8d01350e9d1c3653ae728471c5bb"},"stream":true,"system":[{"type":"text","text":"be brief","cache_control":{"type":"ephemeral"}}]}"#;
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let upstream = {
+        let seen = seen.clone();
+        serve(axum::Router::new().fallback(move |body: axum::body::Bytes| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(String::from_utf8_lossy(&body).into_owned());
+                let events = [
+                    r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#,
+                    r#"{"type":"content_block_stop","index":0}"#,
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+                    r#"{"type":"message_stop"}"#,
+                ];
+                let sse: String = events
+                    .iter()
+                    .map(|e| format!("event: {}\ndata: {e}\n\n", gjson::get(e, "type").str()))
+                    .collect();
+                ([("content-type", "text/event-stream")], sse)
+            }
+        }))
+        .await
+    };
+    let dir = std::env::temp_dir().join(format!("cpa-ws-claude-{}", uuid::Uuid::new_v4()));
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\nclaude-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: claude-opus-5-5\n",
+        dir.join("auths").display()
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new(format!("http://{upstream}")).unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let proxy = serve(router(rt)).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    let turns = [
+        r#"{"type":"response.create","model":"claude-opus-5-5","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#,
+        r#"{"type":"response.create","model":"claude-opus-5-5","previous_response_id":"{{id}}","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"again"}]}]}"#,
+    ];
+    let mut id = String::new();
+    for turn in turns {
+        socket.send(WsMessage::text(turn.replace("{{id}}", &id))).await.unwrap();
+        loop {
+            let frame = match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+                Ok(Some(Ok(WsMessage::Text(text)))) => text.as_str().to_owned(),
+                other => panic!("no text frame: {other:?}"),
+            };
+            if gjson::get(&frame, "type").str() == "response.completed" {
+                id = gjson::get(&frame, "response.id").str().to_owned();
+                break;
+            }
+        }
+    }
+    drop(socket);
+    let _ = std::fs::remove_dir_all(&dir);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen, [FIRST, SECOND]);
+}
+
+/// Grants one Codex WebSocket credential that only this connection's session knows.
+struct HomeGrant(cpa_core::credential::Credential);
+
+impl crate::remote::RemoteDispatch for HomeGrant {
+    fn available(&self) -> bool {
+        true
+    }
+    fn dispatch(
+        &self,
+        _: crate::remote::RemoteRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<crate::remote::RemoteGrant, crate::remote::RemoteError>> {
+        let credential = self.0.clone();
+        Box::pin(async move {
+            Ok(crate::remote::RemoteGrant {
+                credential,
+                end: Box::new(|| None),
+                cancel: None,
+                request_retry: None,
+                user_api_key: String::new(),
+                private: Default::default(),
+            })
+        })
+    }
+    fn models(
+        &self,
+        _: Vec<(String, String)>,
+        _: Vec<(String, String)>,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<u8>, crate::remote::ModelsError>> {
+        Box::pin(async { Err(crate::remote::ModelsError::Unavailable) })
+    }
+}
+
+/// Go `TestResponsesInterruptUsesHomeSessionAuth`: a Home credential lives on the
+/// execution session, not in the store, and still passes the interrupt's account check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_accepts_the_sessions_home_credential() {
+    use wreq::ws::message::Message as WsMessage;
+    const INTERRUPT: &str =
+        r#"{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":"keep"}"#;
+    let frames: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let upstream = {
+        let frames = frames.clone();
+        serve(axum::Router::new().fallback(move |ws: WebSocketUpgrade| {
+            let frames = frames.clone();
+            async move {
+                ws.on_upgrade(move |mut socket: AxSocket| async move {
+                    while let Some(Ok(AxMessage::Text(text))) = socket.recv().await {
+                        frames.lock().unwrap().push(text.as_str().to_owned());
+                        // The create starts r1; only the interrupt finishes it.
+                        let reply = if gjson::get(text.as_str(), "type").str() == "response.interrupt" {
+                            r#"{"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}"#
+                        } else {
+                            r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#
+                        };
+                        if socket.send(AxMessage::Text(reply.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                })
+            }
+        }))
+        .await
+    };
+    let dir = std::env::temp_dir().join(format!("cpa-ws-home-interrupt-{}", uuid::Uuid::new_v4()));
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://127.0.0.1:1\n    models:\n      - name: gpt-fixture\n",
+        dir.join("auths").display()
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let mut home = cpa_core::credential::Credential::from_file(
+        std::path::Path::new("/fake"),
+        std::path::Path::new("/fake/home-interrupt-auth.json"),
+        serde_json::json!({"type": "codex"}).as_object().unwrap().clone(),
+    )
+    .unwrap();
+    home.id = "home-interrupt-auth".into();
+    for (k, v) in [
+        ("api_key", "sk-FAKE-HOME"),
+        ("base_url", &format!("http://{upstream}")),
+        ("websockets", "true"),
+    ] {
+        home.attributes.insert(k.into(), v.into());
+    }
+    rt.set_remote_dispatch(Some(Arc::new(HomeGrant(home))));
+    let proxy = serve(router(rt.clone())).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::text(
+            r#"{"type":"response.create","model":"gpt-fixture","input":[]}"#,
+        ))
+        .await
+        .unwrap();
+    let created = read_text(&mut socket).await;
+    assert_eq!(gjson::get(&created, "type").str(), "response.created", "{created}");
+    assert!(
+        rt.store().get("home-interrupt-auth").is_none(),
+        "the Home credential stays out of the store"
+    );
+    socket.send(WsMessage::text(INTERRUPT)).await.unwrap();
+    let completed = read_text(&mut socket).await;
+    assert_eq!(
+        gjson::get(&completed, "type").str(),
+        "response.completed",
+        "{completed}"
+    );
+    let frames = frames.lock().unwrap().clone();
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert_eq!(frames[1], INTERRUPT, "the interrupt reaches upstream unchanged");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The request log once it is complete: the writer streams into the `.log` file, so the
 /// file is read until its content stops changing.
 async fn written_log(dir: &std::path::Path) -> String {

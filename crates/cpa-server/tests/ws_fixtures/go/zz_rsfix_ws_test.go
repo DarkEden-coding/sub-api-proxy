@@ -333,7 +333,8 @@ type rsfixWSCred struct {
 // "close1009_spaced" (reason " oversized "), "drop" closes TCP).
 // Closes wait 300ms so the proxy forwards the events first: Go's disconnect notifier
 // otherwise races the turn and may close the client before those frames are written.
-// HTTP requests answer Status/Body, or Events as SSE when Status is 0.
+// HTTP requests answer Status/Body, or Events as SSE when Status is 0; Then "hold" keeps
+// that SSE response open until the proxy cancels the request (counted in http_canceled).
 type rsfixWSReply struct {
 	Status int      `json:"status,omitempty"`
 	Body   string   `json:"body,omitempty"`
@@ -350,6 +351,8 @@ type rsfixWSFrame struct {
 type rsfixWSStep struct {
 	// Disable marks every credential disabled (manager.Update) before Send.
 	Disable bool `json:"disable,omitempty"`
+	// Enable marks every credential enabled again before Send.
+	Enable bool `json:"enable,omitempty"`
 	// Send is written as a text frame; "{{last_response_id}}" is replaced by the id of
 	// the last completed response the client saw. Empty sends nothing.
 	Send string `json:"send,omitempty"`
@@ -376,12 +379,15 @@ type rsfixWSScenario struct {
 	// Outputs.
 	UpgradeTurnState string            `json:"upgrade_turn_state,omitempty"`
 	Upstream         []rsfixWSCaptured `json:"upstream"`
+	// HTTPCanceled counts held SSE responses whose request the proxy canceled.
+	HTTPCanceled int `json:"http_canceled,omitempty"`
 }
 
 type rsfixWSUpstream struct {
 	mu       sync.Mutex
 	script   []rsfixWSReply
 	captured []rsfixWSCaptured
+	canceled int
 }
 
 func (u *rsfixWSUpstream) next() (rsfixWSReply, bool) {
@@ -472,6 +478,12 @@ func (u *rsfixWSUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+	if reply.Then == "hold" {
+		<-r.Context().Done()
+		u.mu.Lock()
+		u.canceled++
+		u.mu.Unlock()
+	}
 }
 
 func rsfixWSScenarios() []rsfixWSScenario {
@@ -514,6 +526,21 @@ func rsfixWSScenarios() []rsfixWSScenario {
 	steer2 := `{"type":"response.steer","previous_response_id":"r1","input":"two"}`
 	accepted := func(id string) string {
 		return `{"type":"response.steer.accepted","steer":{"id":"` + id + `","previous_response_id":"r1"}}`
+	}
+	interrupt := `{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":"keep"}`
+	interruptInFlight := func() []rsfixWSStep {
+		return []rsfixWSStep{
+			{Send: `{"type":"response.interrupt"}`, Read: "one"},
+			{Send: interrupt, Read: "one"},
+			{Send: `{"type":"response.create","model":"gpt-fixture","input":[]}`, Read: "until:response.created",
+				Upstream: []rsfixWSReply{{Events: []string{created("r1")}}}},
+			{Send: `{"type":"response.interrupt","response_id":42}`, Read: "one"},
+			{Disable: true, Send: interrupt, Read: "one"},
+			{Enable: true, Send: interrupt, Read: "completed",
+				Upstream: []rsfixWSReply{{Events: []string{`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":7},"output":[]}}`}}}},
+			{Send: `{"type":"response.create","model":"gpt-fixture","previous_response_id":"r1","input":[]}`, Read: "until:response.completed",
+				Upstream: []rsfixWSReply{{Events: []string{created("r2"), completed("r2")}}}},
+		}
 	}
 	rejection := `{"type":"error","status":400,"event_id":"rejected-create","error":{"type":"invalid_request_error","message":"Correct the request"}}`
 	return []rsfixWSScenario{
@@ -891,6 +918,46 @@ func rsfixWSScenarios() []rsfixWSScenario {
 					Upstream: []rsfixWSReply{{Status: 400, Body: `{"error":{"message":"bad input","type":"invalid_request_error","code":"invalid_value"}}`}}},
 			},
 		},
+		// response.interrupt (openai_responses_interrupt_test.go, _late_interrupt_test.go):
+		// a control frame bypasses the request queue, reaches the active upstream socket
+		// unchanged, cancels an HTTP turn locally, and is a no-op for a finished response.
+		{
+			Name: "interrupt_in_flight", Config: cfg, Creds: []rsfixWSCred{ws},
+			Steps: interruptInFlight(),
+		},
+		{
+			Name: "interrupt_in_flight_steering", Config: steerCfg, Creds: []rsfixWSCred{ws},
+			Steps: interruptInFlight(),
+		},
+		{
+			Name: "interrupt_http_local", Config: cfg, Creds: []rsfixWSCred{httpCred},
+			Steps: []rsfixWSStep{
+				{Send: `{"type":"response.create","model":"gpt-fixture","input":[` + user("hi") + `]}`, Read: "until:response.output_item.done",
+					Upstream: []rsfixWSReply{{Events: []string{created("r-http"), message("partial")}, Then: "hold"}}},
+				{Send: `{"type":"response.interrupt","response_id":"r-http","mode":"discard_partial_items"}`, Read: "completed"},
+				{Send: `{"type":"response.interrupt","response_id":"r-http"}`, Read: "one"},
+				{Send: `{"type":"response.create","model":"gpt-fixture","previous_response_id":"r-http","input":[` + user("next") + `]}`, Read: "until:response.completed",
+					Upstream: []rsfixWSReply{{Events: []string{created("r2"), completed("r2")}}}},
+			},
+		},
+		{
+			Name: "interrupt_late_ws", Config: cfg, Creds: []rsfixWSCred{ws},
+			Steps: []rsfixWSStep{
+				{Send: `{"type":"response.create","model":"gpt-fixture","input":[]}`, Read: "until:response.completed",
+					Upstream: []rsfixWSReply{{Events: []string{created("r1"), completed("r1")}}}},
+				{Send: `{"type":"response.interrupt","response_id":"unknown"}`, Read: "one"},
+				{Send: `{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items"}`, Read: "none"},
+				{Send: `{"type":"response.create","model":"gpt-fixture","previous_response_id":"r1","input":[]}`, Read: "until:response.created@r2",
+					Upstream: []rsfixWSReply{{Events: []string{created("r2")}}}},
+				{Send: `{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items"}`, Read: "none"},
+				{Send: `{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items"}`, Read: "none"},
+				{Send: `{"type":"response.interrupt","response_id":"r2","mode":"discard_partial_items"}`, Read: "until:response.completed@r2",
+					Upstream: []rsfixWSReply{{Events: []string{completed("r2")}}}},
+				{Send: `{"type":"response.interrupt","response_id":"r2"}`, Read: "none"},
+				{Send: `{"type":"response.create","model":"gpt-fixture","previous_response_id":"r2","input":[]}`, Read: "until:response.completed@r3",
+					Upstream: []rsfixWSReply{{Events: []string{created("r3"), completed("r3")}}}},
+			},
+		},
 	}
 }
 
@@ -967,6 +1034,20 @@ func rsfixRunWSScenario(t *testing.T, sc *rsfixWSScenario) {
 				}
 			}
 		}
+		if step.Enable {
+			for _, cred := range sc.Creds {
+				auth, ok := manager.GetByID(cred.ID)
+				if !ok {
+					t.Fatalf("%s: no credential %s", sc.Name, cred.ID)
+				}
+				enabled := auth.Clone()
+				enabled.Disabled = false
+				enabled.Status = coreauth.StatusActive
+				if _, err := manager.Update(context.Background(), enabled); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 		if step.Send != "" {
 			send := strings.ReplaceAll(step.Send, "{{last_response_id}}", lastResponseID)
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(send)); err != nil {
@@ -1013,6 +1094,7 @@ func rsfixRunWSScenario(t *testing.T, sc *rsfixWSScenario) {
 	time.Sleep(200 * time.Millisecond)
 	upstream.mu.Lock()
 	sc.Upstream = append([]rsfixWSCaptured(nil), upstream.captured...)
+	sc.HTTPCanceled = upstream.canceled
 	upstream.mu.Unlock()
 }
 
