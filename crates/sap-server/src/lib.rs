@@ -5,3 +5,5 @@
 //! HTTP layer (`api`, workstream I). See `docs/sub-api-proxy/parallel-work.md`.
 
 pub mod control;
+
+pub mod api;
