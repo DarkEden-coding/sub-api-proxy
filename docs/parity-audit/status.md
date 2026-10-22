@@ -21,7 +21,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M3 | 424 | 197 | 209 | 18 |
 | M4 | 589 | 254 | 325 | 10 |
 | M5 | 331 | 220 | 108 | 3 |
-| M6 | 267 | 144 | 114 | 9 |
+| M6 | 267 | 143 | 114 | 10 |
 
 ### Gaps by area
 
@@ -33,7 +33,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | codex | 8 | 77 | M3-0351, M3-0355, M3-0362, M3-0363, M3-0364, M3-0367, M3-0380, M5-0323 |
 | google | 6 | 78 | M3-0058, M3-0059, M3-0353, M3-0354, M3-0360, M3-0361 |
 | translate | 5 | 122 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
-| openai-xai | 2 | 30 | M3-0356, M3-0359 |
+| openai-xai | 3 | 30 | M3-0356, M3-0359, M6-0217 |
 | device-providers | 2 | 28 | M3-0352, M3-0357 |
 | manage | 1 | 132 | M4-0526 |
 | tui | 1 | 9 | M4-0521 |
@@ -2221,7 +2221,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M6-0214 | internal/runtime/executor/home_codex_terminal_test.go | partial | crates/cliproxy/src/home.rs streamed lease accounting and dispatch; tests include terminal stream release | home | The exact Codex terminal-failure usage case is not reproduced. |
 | M6-0215 | internal/runtime/executor/kimi_home_model_capabilities_test.go | partial | crates/cliproxy/src/home.rs home_model_info_becomes_the_resolved_model; Kimi executor reads bound model capabilities | home | The exact Kimi Home thinking case is not reproduced. |
 | M6-0216 | internal/runtime/executor/openai_compat_home_options_test.go | partial | crates/cliproxy/src/home.rs credential binding and session options; cpa-exec/src/openai_compat.rs | home | Home dispatch exists; all four Go executor-option cases are not reproduced. |
-| M6-0217 | internal/runtime/executor/xai_configuration_update_plugin_test.go | covered | 1/1 cases: crates/cpa-exec/src/xai_request.rs |  |  |
+| M6-0217 | internal/runtime/executor/xai_configuration_update_plugin_test.go | missing | 0/1 cases matched; xai_configuration_update_plugin.go not cited | openai-xai |  |
 | M6-0218 | internal/tui/client_test.go | covered | crates/cliproxy/src/tui/client.rs ports all four named Go client cases (auth, errors and list extraction) |  |  |
 | M6-0219 | internal/tui/oauth_tab_test.go | partial | 1/8 cases: crates/cliproxy/src/tui/oauth.rs; not matched: TestShouldAcceptOAuthPollFiltersStaleMessages, TestShouldAcceptOAuthStartFiltersStaleMessages, TestOAuthTabUpdateIgnoresStalePollMsg, TestOAuthTabUpdateAcceptsCurrentPollMsg … | tui |  |
 | M6-0220 | sdk/api/handlers/handlers_plugin_executor_usage_test.go | missing | 0/14 cases matched; handlers_plugin_executor_usage.go not cited | plugins | Suite changed since 6fecc6e; existing fixtures do not establish every v8.0.35 assertion. See the current Go declarations in checklist.md. |
