@@ -679,10 +679,10 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
         model: &model,
         stream: false,
     };
-    let body = crate::codex_client::translate_request(req.source_format, Format::Codex, &ctx, &req.body, &client)
+    let translated = crate::codex_client::translate_request(req.source_format, Format::Codex, &ctx, &req.body, &client)
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))?;
     let body = cpa_common::thinking::apply_request_thinking(&cpa_common::thinking::RequestThinking {
-        body: &body,
+        body: &translated.body,
         payload: &req.body,
         original: &req.original_body,
         model: &req.model,
@@ -691,7 +691,7 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
         provider: "codex",
         resolved: caps.as_ref().map(Some),
         has_request_transformer: cpa_translate::pair(req.source_format, Format::Codex).is_some(),
-        updates_changed: false,
+        updates_changed: translated.configuration_updates_changed,
     })
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let mut body = String::from_utf8_lossy(&body).into_owned();

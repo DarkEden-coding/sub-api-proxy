@@ -54,7 +54,7 @@ fn replays_go_translation_and_optimization() {
                 };
                 let got = translate_request(from, to, &ctx, input, &client).unwrap();
                 assert_eq!(
-                    String::from_utf8(got).unwrap(),
+                    String::from_utf8(got.body).unwrap(),
                     want,
                     "{} -> {} compat={} target={:?} ua={}",
                     from.as_str(),

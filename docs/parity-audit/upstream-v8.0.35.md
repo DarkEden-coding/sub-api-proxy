@@ -21,7 +21,7 @@ Columns:
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
-| Codex | 19 | 12 | 7 | 0 | 0 | 0 |
+| Codex | 19 | 13 | 6 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
@@ -145,7 +145,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`2044a01f`](https://github.com/router-for-me/CLIProxyAPI/commit/2044a01f) | fix(codex): preserve web search sources in responses request include | yes | ported here | S (+22 −4) | ported: `web_search_call.action.sources` stays in `include` beside `reasoning.encrypted_content`, with Go's no-rewrite cases (`codex_responses::tests`) |
 | [`a3b77566`](https://github.com/router-for-me/CLIProxyAPI/commit/a3b77566) | fix(codex): publish main usage before image tool usage in execute | yes | to port | S (+1 −1) | main usage published before image tool usage; waits for per-model usage records (Rust publishes no image tool usage yet) |
 | [`d7914afd`](https://github.com/router-for-me/CLIProxyAPI/commit/d7914afd) | fix(codex): expand integer field normalization mappings for tools | yes | ported here | M (+107 −21) | integer field paths, aliases and named namespaces for Codex tool schemas; Go goldens in `crates/cpa-exec/tests/reference/codex_tool_schema` |
-| [`d31b61cb`](https://github.com/router-for-me/CLIProxyAPI/commit/d31b61cb) | fix(websockets): propagate upstream disconnect errors during session activation | yes | to port | S (+47 −2) | upstream disconnects during session activation (Codex and xAI) |
+| [`d31b61cb`](https://github.com/router-for-me/CLIProxyAPI/commit/d31b61cb) | fix(websockets): propagate upstream disconnect errors during session activation | yes | ported here | S (+47 −2) | upstream disconnects during session activation (Codex and xAI): Rust's reader already records the loss under the same lock a turn activates with (`codex_ws::Link`), shared by the xAI executor; `a_turn_activating_after_the_reader_stopped_gets_its_error` replays Go's test for a close and a binary message |
 | [`16d98881`](https://github.com/router-for-me/CLIProxyAPI/commit/16d98881) | feat(codex): preserve URL citations in OpenAI response translation | yes | ported here | M (+125 −9) | URL citations kept in Chat Completions responses, stream and non-stream (every output_text part now joins the content); Go goldens in `crates/cpa-translate/tests/reference/codex_chat` |
 | [`c7b4d573`](https://github.com/router-for-me/CLIProxyAPI/commit/c7b4d573) | fix(codex): record reasoning effort after applying payload overrides | yes | ported here | S (+5 −5) | usage reasoning effort read from the finalized upstream body (prompt-cache key included); replays the Execute, stream and compact override tests |
 | [`6331b38b`](https://github.com/router-for-me/CLIProxyAPI/commit/6331b38b) | feat(openai): support response.interrupt in responses websocket handling | yes | to port | M (+257 −24) | `response.interrupt` on the Responses WebSocket |

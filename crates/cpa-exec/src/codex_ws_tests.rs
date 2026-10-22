@@ -90,6 +90,8 @@ struct Upstream {
     ended: Mutex<usize>,
     /// Send a binary message right after the handshake, before any request.
     binary_first: Mutex<bool>,
+    /// Close the socket right after the handshake, before any request.
+    close_first: Mutex<bool>,
 }
 
 async fn handler(State(up): State<Arc<Upstream>>, ws: WebSocketUpgrade, headers: axum::http::HeaderMap) -> Response {
@@ -118,6 +120,11 @@ async fn handler(State(up): State<Arc<Upstream>>, ws: WebSocketUpgrade, headers:
 async fn serve_socket(up: Arc<Upstream>, mut socket: AxSocket) {
     if *up.binary_first.lock().unwrap() {
         let _ = socket.send(AxMessage::Binary(vec![1u8, 2, 3].into())).await;
+    }
+    if *up.close_first.lock().unwrap() {
+        let _ = socket.send(AxMessage::Close(None)).await;
+        *up.ended.lock().unwrap() += 1;
+        return;
     }
     while let Some(Ok(message)) = socket.recv().await {
         let AxMessage::Text(text) = message else {
@@ -237,6 +244,41 @@ async fn collect(response: ExecResponse) -> Vec<Result<String, ExecError>> {
 const CREATED: &str = r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#;
 const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
 const BODY: &str = r#"{"model":"gpt-fixture","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+
+/// Go `TestWebsocketActivationAfterUpstreamDisconnect` (d31b61cb): a turn that activates
+/// after the socket's reader stopped, on a close or a binary message, gets the reader's
+/// error at once instead of waiting forever. The xAI executor shares this reader.
+#[tokio::test]
+async fn a_turn_activating_after_the_reader_stopped_gets_its_error() {
+    for (name, binary, close) in [("close", false, true), ("binary", true, false)] {
+        let (up, url) = upstream(vec![]).await;
+        *up.binary_first.lock().unwrap() = binary;
+        *up.close_first.lock().unwrap() = close;
+        let executor = CodexExecutor::new().unwrap();
+        let session = executor.ws.session("conn-1");
+        let target = Target {
+            credential: "codex-ws.json".into(),
+            url: ws_url(&format!("{url}/responses")).unwrap(),
+            proxy: crate::proxy::Proxy::Direct,
+        };
+        let (conn, _) = executor
+            .ensure(&session, &target, &HeaderMap::new(), "gpt-fixture", false, None)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while conn.link.lock().unwrap().lost.is_none() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the disconnect was not processed"));
+        let mut reads = conn.activate();
+        let read = tokio::time::timeout(Duration::from_secs(1), reads.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{name}: activation waited"));
+        assert!(matches!(read, Some(Read::Failed(_))), "{name}");
+    }
+}
 
 #[tokio::test]
 async fn continuation_without_a_socket_requires_replay() {

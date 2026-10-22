@@ -134,8 +134,10 @@ fn not_registered(what: &str, from: Format, to: Format) -> ExecError {
 
 /// `helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent` for this executor
 /// (no target executor): Codex-client rewrites, then the pair or its compat variant.
-// ponytail: the configuration-update intent is not exposed by crate::codex_client
-// (owner: Codex), so thinking always sees `updates_changed: false`.
+// ponytail: the configuration-update intent crate::codex_client reports is not read
+// here yet, so thinking always sees `updates_changed: false`, and equal original and
+// working payloads are translated twice (Go translates once); the OpenAI-compatible
+// port reads it.
 fn translate_body(
     req: &ExecRequest,
     cfg: &Config,
@@ -147,6 +149,7 @@ fn translate_body(
 ) -> Result<Vec<u8>, ExecError> {
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", is_compat);
     crate::codex_client::translate_request(req.source_format, target, &RequestCtx { model, stream }, body, &client)
+        .map(|t| t.body)
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
 

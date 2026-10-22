@@ -381,8 +381,10 @@ fn inactive_hooks_change_nothing() {
     let with = cpa_translate::translate_request(Format::Codex, Format::Gemini, &ctx(false), body).unwrap();
     assert!(hooks::unregistered_non_stream("claude", "claude", &RESPONSE_CTX, b"{}").is_none());
     assert!(hooks::wrap_stream("claude", "claude", &RESPONSE_CTX, None).is_none());
-    drop(installed);
+    // Still serialized: another test's hooks must not see this translation.
+    hooks::set_plugin_hooks(None);
     let without = cpa_translate::translate_request(Format::Codex, Format::Gemini, &ctx(false), body).unwrap();
+    drop(installed);
     assert_eq!(with, without);
     assert_eq!(json(&with)["model"], "gemini-3.6-flash", "the fallback's model rewrite");
 }
