@@ -1147,7 +1147,7 @@ pub(crate) async fn delete(
     .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
 }
 
-fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response {
+pub(super) fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response {
     if matches!(q.first("all"), "true" | "1" | "*") {
         let dir = state.rt.config().auth_dir.clone();
         let entries = match std::fs::read_dir(&dir) {
