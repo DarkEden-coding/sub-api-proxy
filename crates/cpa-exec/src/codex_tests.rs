@@ -1457,6 +1457,14 @@ async fn split_sse_events_spend_the_bootstrap_budget() {
         "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: \"last\"]}}\n\n{SPLIT_OVERLOAD}",
         large.repeat(5)
     );
+    // An overload that precedes a long split payload in its event decides first.
+    let overload_first = format!(
+        "{SPLIT_CREATED}{}\n{open}{}data: ]}}}}\n\n",
+        SPLIT_OVERLOAD.trim_end(),
+        "data: \n".repeat(60)
+    );
+    let error = through_sse(&overload_first, true, true).await.expect_err("fails over");
+    assert_eq!(error.status, 503, "{error:?}");
     // Control: a split handshake within the budget still lets the overload fail over.
     let within = format!(
         "{SPLIT_CREATED}{open}{}data: ]}}}}\n{SPLIT_OVERLOAD}",

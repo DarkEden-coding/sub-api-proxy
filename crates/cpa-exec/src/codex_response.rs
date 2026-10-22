@@ -1060,7 +1060,10 @@ pub(crate) enum Bootstrap {
 /// Go's bootstrap budget check inside `CodexSSEScanner`: while a data line is held for an
 /// unfinished event, `frames + held lines >= 48` or `bytes + held bytes >= 1 MiB` releases
 /// the stream before the event completes. Lines of this event delivered before the held
-/// ones count toward the frames and bytes, as Go holds them first.
+/// ones count toward the frames and bytes, as Go holds them first. The scan stops at the
+/// first delivered data line that is not a handshake: processing stops or releases the
+/// stream there (a failure or a terminal event is never one), so later lines must not
+/// decide.
 // ponytail: Go adds the translated size of each held line to its byte count; this counts
 // raw bytes only, so a byte budget can fire a little later than Go's. Exact only with
 // per-line bootstrap processing.
@@ -1073,7 +1076,13 @@ fn exhausted_while_assembling(event: &[u8], frames: usize, bytes: usize) -> bool
         read_lines += 1;
         read_bytes += raw.len();
         sse.push(raw, &mut scanned);
-        scanned.clear();
+        let decided = scanned.drain(..).any(|line| {
+            line.strip_prefix(b"data:")
+                .is_some_and(|data| !bufferable(&String::from_utf8_lossy(data.trim_ascii())))
+        });
+        if decided {
+            return false;
+        }
         let (held, held_bytes) = sse.holding();
         if held > 0 && raw.starts_with(b"data:") {
             let (before, before_bytes) = (read_lines - held, read_bytes - held_bytes);
