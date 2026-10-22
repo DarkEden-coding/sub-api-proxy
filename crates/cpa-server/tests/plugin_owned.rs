@@ -2285,7 +2285,8 @@ async fn settles(env: &Env, label: &str) {
 /// the watcher reloads the auth folder on its own. Here P parsed `p.json` into two
 /// credentials and Q, another auth provider, keeps plugin auth parsing on, so a reload
 /// that only read cached answers would keep P's credentials. This is what the
-/// management delete of a plugin does before it publishes.
+/// management delete of a plugin does before it publishes (its file goes too, so a
+/// later config sync does not load it again).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
     let Some(env) = env(
@@ -2318,6 +2319,7 @@ async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
     .await;
     // Nothing changes from here: the reloads and syncs settle.
     settles(&env, "pp").await;
+    std::fs::remove_file(env.plugins.join("pp.so")).unwrap();
     assert!(env.rt.plugins().unload_plugin("pp", None).await);
     eventually("P's credentials outlived P", || {
         store.get("p1").is_none() && store.get("p2").is_none()
@@ -2326,16 +2328,38 @@ async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
     // No plugin owns the type now: the built-in synthesizer loads the file.
     eventually("the file never loaded", || store.get("p.json").is_some()).await;
     settles(&env, "qq").await;
+    assert!(store.get("p1").is_none() && store.get("p.json").is_some());
     watcher.abort();
     drop(management);
     env.finish().await;
 }
 
-/// A plugin that saves the file it is parsing on every parse (`host.auth.save` of new
-/// bytes each time): the parse's answer stands for what it wrote, so its credentials are
-/// published, as Go publishes every parse, and the file is not parsed again forever.
+/// Recorder `auth.parse` envelope answering credential `id` and saving `save` to the
+/// file it parses (`host.auth.save` from inside the parse).
+fn parse_saving(id: &str, save: Value) -> String {
+    json!({
+        "ok": true,
+        "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":id,"Metadata":{"type":"acme"}}]},
+        "host_calls": [{"method": "host.auth.save", "request": {"name": "acme.json", "json": save}}]
+    })
+    .to_string()
+}
+
+/// Starts the config watcher over `env` (its config file written first).
+fn watch(env: &Env) -> (Arc<cpa_server::management::Management>, tokio::task::JoinHandle<()>) {
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    (management, watcher)
+}
+
+/// A plugin that saves the file it parses: the parse's answer is published, and the
+/// saved bytes are parsed next, as Go parses the file again on the write's event. Here
+/// parse(B0) answers `acme-old` and saves B1, and parse(B1) answers `acme-new` and saves
+/// B1 again (unchanged), so the file ends up applied with parse(B1)'s credential.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_auth_provider_saving_its_own_file_on_every_parse_converges() {
+async fn a_plugin_that_saves_its_file_while_parsing_ends_with_the_parse_of_the_saved_bytes() {
     let Some(env) = env(
         "plugin-owned-auth-parse-own-save",
         &[("acme", "auth_provider")],
@@ -2344,31 +2368,156 @@ async fn an_auth_provider_saving_its_own_file_on_every_parse_converges() {
         |records| {
             let dir = records.join("respond").join("acme");
             std::fs::create_dir_all(&dir).unwrap();
-            let envelope = json!({
-                "ok": true,
-                "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]},
-                "host_calls": [{
-                    "method": "host.auth.save",
-                    "request": {"name": "acme.json", "json": {"type": "acme", "n": "$seq"}}
-                }]
-            });
-            std::fs::write(dir.join("auth.parse.json"), envelope.to_string()).unwrap();
+            let saved = json!({"type": "acme", "v": 1});
+            std::fs::write(
+                dir.join("auth.parse.once.json"),
+                parse_saving("acme-old", saved.clone()),
+            )
+            .unwrap();
+            std::fs::write(dir.join("auth.parse.json"), parse_saving("acme-new", saved)).unwrap();
         },
     )
     .await
     else {
         return;
     };
-    let path = env.dir.join("config.yaml");
-    std::fs::write(&path, &env.yaml).unwrap();
-    let management = cpa_server::management::Management::new(env.rt.clone(), path);
-    let watcher = cpa_server::watching::start(&management);
-    eventually("the parsed credential was never published", || {
-        env.rt.store().get("acme-a").is_some()
+    let (management, watcher) = watch(&env);
+    let store = env.rt.store().clone();
+    eventually("parse(B1) was never published", || {
+        store.get("acme-new").is_some() && store.get("acme-old").is_none()
     })
     .await;
     settles(&env, "acme").await;
-    assert!(env.rt.store().get("acme-a").is_some());
+    assert!(store.get("acme-new").is_some() && store.get("acme-old").is_none());
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// A plugin that saves new bytes to the file it parses on every parse keeps being
+/// asked again, as Go parses the file again on every write event, and the published
+/// credential follows its recent parses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_rewriting_its_file_on_every_parse_publishes_its_recent_parses() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-rewrite",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = parse_saving("acme-$seq", json!({"type": "acme", "n": "$seq"}));
+            std::fs::write(dir.join("auth.parse.json"), envelope).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    let published = || -> Option<u64> {
+        env.rt
+            .store()
+            .snapshot()
+            .iter()
+            .filter_map(|c| c.id.strip_prefix("acme-")?.parse().ok())
+            .max()
+    };
+    eventually("no parse was published", || published().is_some()).await;
+    let first = published().unwrap();
+    eventually("the published credential stopped following the parses", || {
+        published().is_some_and(|n| n > first + 1)
+    })
+    .await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// The auth identifier a plugin reports takes part in what its parses mean: one that
+/// failed (no identifier, so the plugin owns no file type) and recovers on a later sync,
+/// with the same plugin and config, makes the watcher parse the files again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auth_identifier_recovering_from_an_error_reparses_the_auth_files() {
+    let identifier = |records: &Path, envelope: Value| {
+        std::fs::write(records.join("respond/acme/auth.identifier.json"), envelope.to_string()).unwrap();
+    };
+    let Some(env) = env(
+        "plugin-owned-auth-parse-identifier",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+            identifier(
+                records,
+                json!({"ok": false, "error": {"code": "down", "message": "down"}}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    let store = env.rt.store().clone();
+    eventually("the file never loaded", || store.get("acme.json").is_some()).await;
+    settles(&env, "acme").await;
+    assert!(store.get("acme-a").is_none(), "parsed without an identifier");
+    identifier(&env.records, json!({"ok": true, "result": {"identifier": "acme"}}));
+    cpa_server::plugins::sync(&env.rt, env.rt.config()).await;
+    eventually("the recovered identifier's files were never parsed", || {
+        store.get("acme-a").is_some()
+    })
+    .await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// Every parse request carries the host config summary: a config change that only
+/// touches it (here `requests.proxy-url`) makes the watcher ask the plugins again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_config_change_reparses_the_auth_files() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-host-config",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (management, watcher) = watch(&env);
+    eventually("the file was never parsed", || env.rt.store().get("acme-a").is_some()).await;
+    settles(&env, "acme").await;
+    let proxy = "http://127.0.0.1:9";
+    std::fs::write(
+        env.dir.join("config.yaml"),
+        format!("requests:\n  proxy-url: {proxy}\n{}", env.yaml),
+    )
+    .unwrap();
+    eventually("the plugin was never asked with the new host config", || {
+        calls(&env.records, "acme", "auth.parse")
+            .iter()
+            .any(|req| req["Host"]["ProxyURL"] == proxy)
+    })
+    .await;
     watcher.abort();
     drop(management);
     env.finish().await;

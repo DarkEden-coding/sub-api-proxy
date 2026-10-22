@@ -2455,13 +2455,13 @@ mod tests {
             "upload-plugins",
             &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
         );
-        credentials::set_plugin_auth_parser(Some(Arc::new(Nothing)));
-        credentials::set_plugin_auth_providers(Some(1));
-        let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
-        assert_eq!(token(&state), "fake-0");
-        store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
-        assert_eq!(token(&state), "fake-1");
-        credentials::set_plugin_auth_parser(None);
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
+            assert_eq!(token(&state), "fake-0");
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            assert_eq!(token(&state), "fake-1");
+        });
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2480,19 +2480,19 @@ mod tests {
             "upload-refresh",
             &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
         );
-        credentials::set_plugin_auth_parser(Some(Arc::new(Nothing)));
-        credentials::set_plugin_auth_providers(Some(1));
-        let refreshing = state.clone();
-        crate::management::BEFORE_RECONCILE.lock().unwrap().push((
-            state.rt.config().auth_dir.clone(),
-            Box::new(move || refresh(&refreshing, "a.json", "fake-refreshed")),
-        ));
-        store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
-        let stored = state.rt.store().get("a.json").unwrap();
-        assert_eq!(stored.provider, "claude");
-        assert_eq!(stored.metadata["access_token"], "fake-refreshed");
-        assert_eq!(on_disk(&dir, "a.json")["access_token"], "fake-refreshed");
-        credentials::set_plugin_auth_parser(None);
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let refreshing = state.clone();
+            crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+                state.rt.config().auth_dir.clone(),
+                Box::new(move || refresh(&refreshing, "a.json", "fake-refreshed")),
+            ));
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            let stored = state.rt.store().get("a.json").unwrap();
+            assert_eq!(stored.provider, "claude");
+            assert_eq!(stored.metadata["access_token"], "fake-refreshed");
+            assert_eq!(on_disk(&dir, "a.json")["access_token"], "fake-refreshed");
+        });
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

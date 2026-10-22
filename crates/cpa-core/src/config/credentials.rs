@@ -24,6 +24,8 @@ use crate::gostr::GoStr;
 
 mod plugin_auth;
 use plugin_auth::Ask;
+#[cfg(feature = "test-support")]
+pub use plugin_auth::with_thread_plugin_auth_parser;
 pub use plugin_auth::{
     ParseRequest, Parsed, ParsedAuth, PluginAuthParser, note_plugin_auth_write, on_plugin_auth_change,
     plugin_auth_epoch, plugin_auth_parser_active, preparse_auth_dir, set_plugin_auth_parser, set_plugin_auth_providers,
@@ -1036,7 +1038,7 @@ pub fn parse_weight(value: &Json) -> Result<i64, String> {
 pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Result<Option<Credential>, String> {
     Ok(match file_credentials(None, auth_dir, path, data)? {
         Some(FileCredentials::One(c)) => Some(c),
-        Some(FileCredentials::Plugin(_) | FileCredentials::Deferred) | None => None,
+        Some(FileCredentials::Plugin(_) | FileCredentials::Unapplied(_) | FileCredentials::Deferred) | None => None,
     })
 }
 
@@ -1047,6 +1049,9 @@ enum FileCredentials {
     Plugin(Vec<Credential>),
     /// No cached plugin answer for these bytes yet ([`plugin_auth::Ask::Cached`]).
     Deferred,
+    /// The answer of the parse whose own `host.auth.save` wrote these bytes: published,
+    /// but the plugin has yet to parse them.
+    Unapplied(Vec<Credential>),
 }
 
 fn file_credentials(
@@ -1389,6 +1394,10 @@ pub struct AuthScan {
     /// file's current credentials and publishes nothing new for it; the watcher reloads
     /// the file again.
     pub deferred: HashSet<PathBuf>,
+    /// Files published from the answer of a parse that wrote their current bytes itself
+    /// (`host.auth.save` from inside `auth.parse`): plugins have yet to parse these bytes,
+    /// so the watcher does not record them as applied and parses them on its next tick.
+    pub unapplied: HashSet<PathBuf>,
 }
 
 /// [`from_auth_dir`], with the files it found incomplete and the hashes of what it read.
@@ -1437,6 +1446,10 @@ fn scan_with(cfg: &Config, parser: Option<Ask<'_>>) -> AuthScan {
         match file_credentials(parser, &cfg.auth_dir, &path, &data) {
             Ok(Some(FileCredentials::One(c))) => scan.credentials.push(c),
             Ok(Some(FileCredentials::Plugin(all))) => scan.credentials.extend(all),
+            Ok(Some(FileCredentials::Unapplied(all))) => {
+                scan.credentials.extend(all);
+                scan.unapplied.insert(path);
+            }
             Ok(Some(FileCredentials::Deferred)) => {
                 scan.read.remove(&path);
                 scan.deferred.insert(path);

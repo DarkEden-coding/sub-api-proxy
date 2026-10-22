@@ -508,6 +508,9 @@ fn reload_config(
     let mut scan = credentials::scan_auth_dir(&config);
     keep_incomplete(state, &mut scan.credentials, &scan.incomplete);
     read.auth = scan.read.clone();
+    for path in &scan.unapplied {
+        read.auth.remove(path);
+    }
     // A file neither could read stays as observed; recording it as missing would
     // reload it on every tick.
     for (path, hash) in &observed.auth {
@@ -1163,33 +1166,33 @@ mod tests {
                 }])
             }
         }
-        credentials::set_plugin_auth_parser(Some(Arc::new(Acme)));
-        credentials::set_plugin_auth_providers(Some(1));
-        let (state, dir) = state();
-        let file = dir.join("acme.json");
-        std::fs::write(&file, r#"{"type":"acme","v":1}"#).unwrap();
-        reload(&state).unwrap();
-        let store = state.rt.store().clone();
-        assert_eq!(store.get("acme-a").unwrap().metadata["token"], "old");
-        // Changed after the parse: the locked scan defers it.
-        std::fs::write(&file, r#"{"type":"acme","v":2}"#).unwrap();
-        let config = (*state.rt.config()).clone();
-        let scan = credentials::scan_auth_dir(&config);
-        assert!(scan.deferred.contains(&file));
-        let refreshed = store.clone();
-        crate::management::BEFORE_RECONCILE.lock().unwrap().push((
-            config.auth_dir.clone(),
-            Box::new(move || {
-                let current = refreshed.get("acme-a").unwrap();
-                let mut patch = cpa_core::credential::MetadataPatch::default();
-                patch.set.insert("token".into(), "refreshed".into());
-                refreshed.apply_patch("acme-a", current.revision, &patch).unwrap();
-            }),
-        ));
-        state.publish(config, Some(scan));
-        assert_eq!(store.get("acme-a").unwrap().metadata["token"], "refreshed");
-        credentials::set_plugin_auth_parser(None);
-        std::fs::remove_dir_all(dir).unwrap();
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Acme), || {
+            let (state, dir) = state();
+            let file = dir.join("acme.json");
+            std::fs::write(&file, r#"{"type":"acme","v":1}"#).unwrap();
+            reload(&state).unwrap();
+            let store = state.rt.store().clone();
+            assert_eq!(store.get("acme-a").unwrap().metadata["token"], "old");
+            // Changed after the parse: the locked scan defers it.
+            std::fs::write(&file, r#"{"type":"acme","v":2}"#).unwrap();
+            let config = (*state.rt.config()).clone();
+            let scan = credentials::scan_auth_dir(&config);
+            assert!(scan.deferred.contains(&file));
+            let refreshed = store.clone();
+            crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+                config.auth_dir.clone(),
+                Box::new(move || {
+                    let current = refreshed.get("acme-a").unwrap();
+                    let mut patch = cpa_core::credential::MetadataPatch::default();
+                    patch.set.insert("token".into(), "refreshed".into());
+                    refreshed.apply_patch("acme-a", current.revision, &patch).unwrap();
+                }),
+            ));
+            state.publish(config, Some(scan));
+            assert_eq!(store.get("acme-a").unwrap().metadata["token"], "refreshed");
+            std::fs::remove_dir_all(dir).unwrap();
+        });
     }
 
     /// A new auth-dir whose files plugins have not parsed yet publishes nothing for
@@ -1217,28 +1220,28 @@ mod tests {
                 Parsed::Handled(vec![auth("claude-a"), auth("claude-b")])
             }
         }
-        credentials::set_plugin_auth_parser(Some(Arc::new(Bundles)));
-        credentials::set_plugin_auth_providers(Some(1));
-        let (state, dir) = state();
-        reload(&state).unwrap();
-        let other = dir.join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(
-            other.join("bundle.json"),
-            r#"{"type":"claude","accounts":[{"access_token":"a"},{"access_token":"b"}]}"#,
-        )
-        .unwrap();
-        std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", other.display())).unwrap();
-        reload(&state).unwrap();
-        let ids = || -> Vec<String> {
-            let mut ids: Vec<String> = state.rt.store().snapshot().iter().map(|c| c.id.clone()).collect();
-            ids.sort();
-            ids
-        };
-        assert!(ids().is_empty(), "published before it was parsed: {:?}", ids());
-        reload(&state).unwrap();
-        assert_eq!(ids(), ["claude-a", "claude-b"]);
-        credentials::set_plugin_auth_parser(None);
-        std::fs::remove_dir_all(dir).unwrap();
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Bundles), || {
+            let (state, dir) = state();
+            reload(&state).unwrap();
+            let other = dir.join("other");
+            std::fs::create_dir_all(&other).unwrap();
+            std::fs::write(
+                other.join("bundle.json"),
+                r#"{"type":"claude","accounts":[{"access_token":"a"},{"access_token":"b"}]}"#,
+            )
+            .unwrap();
+            std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", other.display())).unwrap();
+            reload(&state).unwrap();
+            let ids = || -> Vec<String> {
+                let mut ids: Vec<String> = state.rt.store().snapshot().iter().map(|c| c.id.clone()).collect();
+                ids.sort();
+                ids
+            };
+            assert!(ids().is_empty(), "published before it was parsed: {:?}", ids());
+            reload(&state).unwrap();
+            assert_eq!(ids(), ["claude-a", "claude-b"]);
+            std::fs::remove_dir_all(dir).unwrap();
+        });
     }
 }

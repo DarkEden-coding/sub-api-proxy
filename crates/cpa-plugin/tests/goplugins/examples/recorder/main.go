@@ -20,7 +20,8 @@
 // the call.
 // <method>.once.json, when present, answers the next call instead and is then removed.
 // In an envelope's host_calls, the string "$seq" in a request becomes the number of
-// host_calls made so far, so a repeated call can send different content each time.
+// host_calls made so far, so a repeated call can send different content each time;
+// "$seq" elsewhere in the envelope then becomes the number of its last host call.
 // While <method>.hold exists, calls of that method wait (up to 10s) before answering, so a
 // test can change host state between the call's record and its answer.
 // executor.execute_stream.script.once.json, {"chunks":["..."],"error":"..."}, makes the
@@ -325,6 +326,12 @@ func handle(method string, request []byte) ([]byte, int) {
 				payload = []byte(strings.ReplaceAll(string(payload), `"$seq"`, strconv.Itoa(n)))
 				response, _ := callHost(call.Method, payload)
 				record("host_callback", response)
+			}
+			if len(callbacks.Calls) > 0 {
+				mu.Lock()
+				n := seq
+				mu.Unlock()
+				raw = []byte(strings.ReplaceAll(string(raw), "$seq", strconv.Itoa(n)))
 			}
 			return raw, rc
 		}

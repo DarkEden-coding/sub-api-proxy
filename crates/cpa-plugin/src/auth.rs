@@ -506,31 +506,35 @@ fn plugin_oauth_aliases(cfg: &cpa_core::config::Config) -> BTreeMap<String, Vec<
     out
 }
 
+/// Go `hostConfigSummary` for `cfg`.
+pub(crate) fn host_config_summary_of(cfg: &cpa_core::config::Config) -> HostConfigSummary {
+    let proxy_url = cfg
+        .document
+        .get("requests")
+        .and_then(|r| r.get("proxy-url"))
+        .map(crate::config::yaml_string)
+        .unwrap_or_default();
+    HostConfigSummary {
+        auth_dir: cfg.auth_dir.to_string_lossy().trim().to_owned(),
+        proxy_url: proxy_url.trim().to_owned(),
+        force_model_prefix: cfg.routing.force_model_prefix,
+        oauth_model_alias: plugin_oauth_aliases(cfg),
+        excluded_models: cpa_core::config::credentials::oauth_excluded(cfg)
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let k = normalize_provider(&k);
+                (!k.is_empty()).then_some((k, v))
+            })
+            .collect(),
+    }
+}
+
 impl Host {
     /// Go `hostConfigSummary`.
     pub fn host_config_summary(&self) -> HostConfigSummary {
-        let Some(cfg) = self.config() else {
-            return HostConfigSummary::default();
-        };
-        let proxy_url = cfg
-            .document
-            .get("requests")
-            .and_then(|r| r.get("proxy-url"))
-            .map(crate::config::yaml_string)
-            .unwrap_or_default();
-        HostConfigSummary {
-            auth_dir: cfg.auth_dir.to_string_lossy().trim().to_owned(),
-            proxy_url: proxy_url.trim().to_owned(),
-            force_model_prefix: cfg.routing.force_model_prefix,
-            oauth_model_alias: plugin_oauth_aliases(&cfg),
-            excluded_models: cpa_core::config::credentials::oauth_excluded(&cfg)
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let k = normalize_provider(&k);
-                    (!k.is_empty()).then_some((k, v))
-                })
-                .collect(),
-        }
+        self.config()
+            .map(|cfg| host_config_summary_of(&cfg))
+            .unwrap_or_default()
     }
 
     /// Go `AuthProviderIdentifiers`.

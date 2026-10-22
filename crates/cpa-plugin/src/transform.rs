@@ -300,8 +300,10 @@ impl Host {
             cpa_translate::hooks::set_plugin_hooks_active(offers(translator_hook));
         }
         if self.inner.auth_parser_installed.load(Ordering::Acquire) {
-            // Which plugins parse auth files, as loaded and configured: the same set
-            // publishes the same signature, so an unchanged sync keeps cached answers.
+            // What auth parsing depends on: the plugins that parse, as loaded,
+            // configured and identified, and the host config every parse request
+            // carries. The same inputs publish the same signature, so an unchanged sync
+            // keeps cached answers.
             use std::hash::{Hash, Hasher};
             let mut providers = records
                 .iter()
@@ -313,7 +315,10 @@ impl Host {
                     r.id.hash(&mut hasher);
                     (Arc::as_ptr(&r.client) as usize).hash(&mut hasher);
                     state.loaded.get(&r.id).map(|lp| &lp.config_yaml).hash(&mut hasher);
+                    crate::host::normalize_provider(&r.plugin.auth_identifier).hash(&mut hasher);
                 }
+                let summary = state.config.as_deref().map(crate::auth::host_config_summary_of);
+                summary.map(|s| crate::gojson::to_vec(&s)).hash(&mut hasher);
                 hasher.finish()
             });
             cpa_core::config::credentials::set_plugin_auth_providers(signature);

@@ -67,10 +67,12 @@ pub trait PluginAuthParser: Send + Sync {
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PARSER: RwLock<Option<Arc<dyn PluginAuthParser>>> = RwLock::new(None);
 
-/// One cached answer: for the file bytes with one of these SHA-256 (what was parsed,
-/// then what `host.auth.save` wrote to the file during the parse), asked at this epoch.
+/// One cached answer: for the file bytes with this SHA-256, asked at this epoch.
+/// `own_writes` are the SHA-256 of what `host.auth.save` wrote to the file during the
+/// parse ([`note_plugin_auth_write`]); the answer is not cached for them.
 struct Answer {
-    hashes: Vec<[u8; 32]>,
+    hash: [u8; 32],
+    own_writes: Vec<[u8; 32]>,
     epoch: u64,
     parsed: Parsed,
 }
@@ -152,9 +154,8 @@ pub fn set_plugin_auth_providers(providers: Option<u64>) {
     retire();
 }
 
-/// Paths auth providers are parsing now (by parse), with the SHA-256 of the bytes
-/// `host.auth.save` wrote to them during the parse ([`note_plugin_auth_write`]).
-/// One parse in progress: its ID, the file and the hashes of its own writes.
+/// One parse in progress: its ID, the file (see [`clean`]) and the SHA-256 of the bytes
+/// `host.auth.save` wrote to that file meanwhile ([`note_plugin_auth_write`]).
 type Parsing = (u64, PathBuf, Vec<[u8; 32]>);
 static PARSING: Mutex<Vec<Parsing>> = Mutex::new(Vec::new());
 static NEXT_PARSE: AtomicU64 = AtomicU64::new(0);
@@ -163,19 +164,32 @@ fn parsing() -> std::sync::MutexGuard<'static, Vec<Parsing>> {
     PARSING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_owned())
+/// `path` absolute and lexically cleaned (Go `filepath.Abs`), so the scan's spelling
+/// and the save's match.
+fn clean(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    let mut out = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
-/// Tells credential loading that a plugin's `host.auth.save` wrote `data` to `path`. A
-/// save to the file an auth provider is parsing counts as that parse's own write: the
-/// parse's answer stands for those bytes too, so the next scan publishes it (Go
-/// publishes every parse's answer) instead of parsing the file again forever.
+/// Tells credential loading that a plugin's `host.auth.save` wrote `data` to `path`.
+/// When an auth provider is parsing that file meanwhile, a scan that finds exactly
+/// these bytes publishes that parse's answer once (Go publishes every parse's answer)
+/// and leaves the file for the watcher to parse again. Nothing else is cached for them.
 pub fn note_plugin_auth_write(path: &Path, data: &[u8]) {
-    if !ACTIVE.load(Ordering::Acquire) {
+    if !ACTIVE.load(Ordering::Acquire) && !(cfg!(feature = "test-support") && thread_parser().is_some()) {
         return;
     }
-    let path = absolute(path);
+    let path = clean(path);
     let mut parsing = parsing();
     if parsing.is_empty() {
         return;
@@ -188,8 +202,41 @@ pub fn note_plugin_auth_write(path: &Path, data: &[u8]) {
     }
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static THREAD_PARSER: std::cell::RefCell<Option<Arc<dyn PluginAuthParser>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "test-support")]
+fn thread_parser() -> Option<Arc<dyn PluginAuthParser>> {
+    THREAD_PARSER.with(|p| p.borrow().clone())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn thread_parser() -> Option<Arc<dyn PluginAuthParser>> {
+    None
+}
+
+/// Runs `f` with `parser` installed, as if a plugin offered an auth provider, for this
+/// thread only: tests sharing a process (`cargo test`) never see it.
+#[cfg(feature = "test-support")]
+pub fn with_thread_plugin_auth_parser<R>(parser: Arc<dyn PluginAuthParser>, f: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            THREAD_PARSER.with(|p| *p.borrow_mut() = None);
+        }
+    }
+    THREAD_PARSER.with(|p| *p.borrow_mut() = Some(parser));
+    let _reset = Reset;
+    f()
+}
+
 /// Whether auth files go to the installed parser first.
 pub fn plugin_auth_parser_active() -> bool {
+    if cfg!(feature = "test-support") && thread_parser().is_some() {
+        return true;
+    }
     ACTIVE.load(Ordering::Acquire)
         && PARSER
             .read()
@@ -200,6 +247,11 @@ pub fn plugin_auth_parser_active() -> bool {
 /// The installed parser while a plugin offers an auth provider: one atomic load
 /// otherwise.
 pub(super) fn current() -> Option<Arc<dyn PluginAuthParser>> {
+    if cfg!(feature = "test-support")
+        && let Some(parser) = thread_parser()
+    {
+        return Some(parser);
+    }
     if !ACTIVE.load(Ordering::Acquire) {
         return None;
     }
@@ -220,43 +272,58 @@ pub(super) enum Ask<'a> {
 }
 
 impl Ask<'_> {
-    /// `None`: deferred.
-    fn parse(self, req: &ParseRequest<'_>) -> Option<Parsed> {
+    /// `None`: deferred. `true` with the answer of a parse that wrote these bytes itself,
+    /// to publish once without marking the file applied.
+    fn parse(self, req: &ParseRequest<'_>) -> Option<(Parsed, bool)> {
         let parser = match self {
             Ask::Fill(parser) => parser,
-            Ask::Cached => return cached(req.path, &Sha256::digest(req.raw_json).into()),
+            Ask::Cached => {
+                let hash = Sha256::digest(req.raw_json).into();
+                return cached(req.path, &hash)
+                    .map(|parsed| (parsed, false))
+                    .or_else(|| written_by_parse(req.path, &hash).map(|parsed| (parsed, true)));
+            }
             #[cfg(test)]
-            Ask::Live(parser) => return Some(parser.parse_auths(req)),
+            Ask::Live(parser) => return Some((parser.parse_auths(req), false)),
         };
         let hash = Sha256::digest(req.raw_json).into();
         if let Some(parsed) = cached(req.path, &hash) {
-            return Some(parsed);
+            return Some((parsed, false));
         }
         // The epoch before asking: a change during the call retires the answer.
         let epoch = EPOCH.load(Ordering::Acquire);
         let id = NEXT_PARSE.fetch_add(1, Ordering::Relaxed);
-        parsing().push((id, absolute(req.path), Vec::new()));
+        parsing().push((id, clean(req.path), Vec::new()));
         let parsed = parser.parse_auths(req);
-        let mut hashes = vec![hash];
         let mut parsing = parsing();
-        if let Some(at) = parsing.iter().position(|(p, ..)| *p == id) {
-            hashes.extend(parsing.swap_remove(at).2);
-        }
+        let own_writes = parsing
+            .iter()
+            .position(|(p, ..)| *p == id)
+            .map(|at| parsing.swap_remove(at).2)
+            .unwrap_or_default();
         drop(parsing);
         let answer = Answer {
-            hashes,
+            hash,
+            own_writes,
             epoch,
             parsed: parsed.clone(),
         };
         answers().get_or_insert_default().insert(req.path.to_owned(), answer);
-        Some(parsed)
+        Some((parsed, false))
     }
 }
 
 fn cached(path: &Path, hash: &[u8; 32]) -> Option<Parsed> {
     let answers = answers();
     let answer = answers.as_ref()?.get(path)?;
-    (answer.hashes.contains(hash) && answer.epoch == EPOCH.load(Ordering::Acquire)).then(|| answer.parsed.clone())
+    (answer.hash == *hash && answer.epoch == EPOCH.load(Ordering::Acquire)).then(|| answer.parsed.clone())
+}
+
+/// The current answer for `path` whose parse wrote `hash` to it.
+fn written_by_parse(path: &Path, hash: &[u8; 32]) -> Option<Parsed> {
+    let answers = answers();
+    let answer = answers.as_ref()?.get(path)?;
+    (answer.own_writes.contains(hash) && answer.epoch == EPOCH.load(Ordering::Acquire)).then(|| answer.parsed.clone())
 }
 
 /// Asks plugin auth providers about every auth file in `cfg`'s folder whose current
@@ -297,15 +364,18 @@ pub(super) fn credentials(
         file_name: &file_name,
         raw_json: data,
     });
-    let Some(parsed) = parsed else {
-        return Some(Ok(super::FileCredentials::Deferred));
-    };
-    let Parsed::Handled(auths) = parsed else {
-        return None;
+    let (auths, unapplied) = match parsed {
+        None | Some((Parsed::NotHandled, true)) => return Some(Ok(super::FileCredentials::Deferred)),
+        Some((Parsed::NotHandled, false)) => return None,
+        Some((Parsed::Handled(auths), unapplied)) => (auths, unapplied),
     };
     // Go `compactPluginAuths`: an auth with an invalid weight is dropped.
     let auths: Vec<ParsedAuth> = auths.into_iter().filter(weight_valid).collect();
-    Some(build(auths, meta, path, &file_name).map(super::FileCredentials::Plugin))
+    let built = build(auths, meta, path, &file_name);
+    Some(built.map(|all| match unapplied {
+        true => super::FileCredentials::Unapplied(all),
+        false => super::FileCredentials::Plugin(all),
+    }))
 }
 
 fn build(
@@ -664,6 +734,7 @@ mod tests {
                 Ok(Some(FileCredentials::One(c))) => format!("{c:?}"),
                 Ok(Some(FileCredentials::Plugin(all))) => format!("plugin {all:?}"),
                 Ok(Some(FileCredentials::Deferred)) => "deferred".into(),
+                Ok(Some(FileCredentials::Unapplied(all))) => format!("unapplied {all:?}"),
                 Ok(None) => "none".into(),
                 Err(e) => e,
             };
@@ -783,6 +854,52 @@ mod tests {
         let scan = scan_with(&cfg, Some(Ask::Cached));
         assert!(scan.credentials.is_empty());
         assert_eq!(scan.deferred.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bytes written to a file while a plugin parses it: what that parse's own
+    /// `host.auth.save` wrote (noted under any spelling of the path) publishes the
+    /// parse's answer once, unapplied; any other write (a native refresh) defers the
+    /// file. Neither caches the answer for the new bytes: the next fill parses them.
+    #[test]
+    fn only_a_parses_own_write_publishes_its_answer_and_neither_is_cached() {
+        let dir = std::env::temp_dir().join(format!("plugin-own-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for name in ["own.json", "native.json"] {
+            std::fs::write(dir.join(name), r#"{"type":"acme","v":0}"#).unwrap();
+        }
+        set_plugin_auth_providers(Some(7));
+        let parser = fake(|req| {
+            let v1 = br#"{"type":"acme","v":1}"#;
+            if req.raw_json != v1 {
+                std::fs::write(req.path, v1).unwrap();
+                if req.file_name == "own.json" {
+                    let spelled = req.path.parent().unwrap().join("sub/../own.json");
+                    note_plugin_auth_write(&spelled, v1);
+                }
+            }
+            let v = if req.raw_json == v1 { "v1" } else { "v0" };
+            Parsed::Handled(vec![auth(&format!("{}-{v}", req.file_name), "acme", json!({}), &[])])
+        });
+        let cfg = crate::config::Config {
+            auth_dir: dir.clone(),
+            ..Default::default()
+        };
+        scan_with(&cfg, Some(Ask::Fill(&parser)));
+        let scan = scan_with(&cfg, Some(Ask::Cached));
+        let ids: Vec<&str> = scan.credentials.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["own.json-v0"], "the parse's answer for its own write");
+        assert_eq!(scan.unapplied.iter().collect::<Vec<_>>(), [&dir.join("own.json")]);
+        assert!(scan.read.contains_key(&dir.join("own.json")));
+        assert_eq!(scan.deferred.iter().collect::<Vec<_>>(), [&dir.join("native.json")]);
+        // The next fill parses both files' current bytes.
+        scan_with(&cfg, Some(Ask::Fill(&parser)));
+        let scan = scan_with(&cfg, Some(Ask::Cached));
+        let mut ids: Vec<&str> = scan.credentials.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["native.json-v1", "own.json-v1"]);
+        assert!(scan.unapplied.is_empty() && scan.deferred.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
