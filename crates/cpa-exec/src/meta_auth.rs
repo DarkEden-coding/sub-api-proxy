@@ -583,8 +583,8 @@ pub(crate) type GoMap = BTreeMap<String, GoValue>;
 /// error). `None` when Go leaves the map nil: invalid JSON or a non-object.
 pub(crate) fn go_map_from_json(raw: &[u8]) -> Option<(GoMap, bool)> {
     check_valid(raw).ok()?;
-    match GoValue::parse(raw)? {
-        GoValue::Object(map) => {
+    match GoValue::parse(raw)?.into_object() {
+        Ok(map) => {
             // Go keeps decoding after an overflow and keeps the error even when a later
             // duplicate key overwrites the value, so every number in the document counts.
             let mut clean = all_numbers_finite(&gj::parse(raw));
@@ -610,18 +610,28 @@ fn all_numbers_finite(value: &gj::Res<'_>) -> bool {
     }
 }
 
-fn as_float64(value: GoValue, clean: &mut bool) -> GoValue {
-    match value {
-        GoValue::Number(literal) => match go_float(&literal) {
+fn as_float64(mut value: GoValue, clean: &mut bool) -> GoValue {
+    match &mut value {
+        GoValue::Number(literal) => match go_float(literal) {
             Some(number) => GoValue::Number(number),
             None => {
                 *clean = false;
                 GoValue::Null
             }
         },
-        GoValue::Array(items) => GoValue::Array(items.into_iter().map(|v| as_float64(v, clean)).collect()),
-        GoValue::Object(map) => GoValue::Object(map.into_iter().map(|(k, v)| (k, as_float64(v, clean))).collect()),
-        other => other,
+        GoValue::Array(items) => GoValue::Array(
+            std::mem::take(items)
+                .into_iter()
+                .map(|v| as_float64(v, clean))
+                .collect(),
+        ),
+        GoValue::Object(map) => GoValue::Object(
+            std::mem::take(map)
+                .into_iter()
+                .map(|(k, v)| (k, as_float64(v, clean)))
+                .collect(),
+        ),
+        _ => value,
     }
 }
 
