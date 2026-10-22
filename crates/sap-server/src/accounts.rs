@@ -13,8 +13,12 @@ pub(crate) fn identity(c: &Credential) -> Option<(AccountId, Provider)> {
         "codex" => (Provider::Codex, &["account_id"]),
         _ => return None,
     };
-    let id = keys.iter().find_map(|k| c.str(k).filter(|s| !s.trim().is_empty()))?;
-    Some((AccountId(format!("{p}:{id}")), p))
+    if let Some(id) = keys.iter().find_map(|k| c.str(k).filter(|s| !s.trim().is_empty())) {
+        return Some((AccountId(format!("{p}:{id}")), p));
+    }
+    // A key from config.yaml has no subscription identity; cliproxy's credential ID
+    // is stable for the same key, so each configured key is its own account.
+    matches!(c.source, Source::Config { .. }).then(|| (AccountId(format!("{p}:api-key:{}", c.id)), p))
 }
 impl Node {
     pub(crate) fn discover(&self) -> anyhow::Result<BTreeMap<String, AccountId>> {
