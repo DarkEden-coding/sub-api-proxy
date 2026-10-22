@@ -217,10 +217,10 @@ pub(super) fn client_for(
 
 pub(crate) async fn api_call(
     State(state): State<Arc<Management>>,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+    body: Result<crate::body_limit::FirstJson, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => body,
+        Ok(crate::body_limit::FirstJson(body)) => body,
         Err(rejection) => return fail(super::read_status(&rejection), "invalid body"),
     };
     let Some(mut req) = decode(&body) else {

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{OriginalUri, RawQuery, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -355,7 +356,7 @@ pub(crate) async fn field_route(
     State(state): State<Arc<Management>>,
     OriginalUri(uri): OriginalUri,
     method: Method,
-    body: Bytes,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
 ) -> Response {
     let Some(f) = FIELDS.iter().find(|f| f.route == route_of(&uri)) else {
         return super::access::not_found();
@@ -458,8 +459,12 @@ pub(crate) async fn api_keys(
     State(state): State<Arc<Management>>,
     method: Method,
     RawQuery(raw): RawQuery,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
+    let body = match patch_body(&method, read) {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     if method == Method::GET {
         return go_json(StatusCode::OK, &json!({"api-keys": current(&state)["api-keys"]}));
     }
@@ -541,6 +546,15 @@ pub(crate) async fn api_keys(
     .await
 }
 
+/// The body of a list route: PATCH binds it with gin `ShouldBindJSON`, the other
+/// methods read it whole (`GetRawData`).
+fn patch_body(method: &Method, read: crate::body_limit::Read) -> Result<Bytes, BytesRejection> {
+    match *method {
+        Method::PATCH => read.first_json(),
+        _ => read.body,
+    }
+}
+
 /// Live credential indexes by credential ID (Go `liveAuthIndexByID`).
 fn live_indexes(state: &Management) -> HashMap<String, String> {
     state
@@ -560,8 +574,12 @@ pub(crate) async fn list_route(
     OriginalUri(uri): OriginalUri,
     method: Method,
     RawQuery(raw): RawQuery,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
+    let body = match patch_body(&method, read) {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
     let route = route_of(&uri).to_owned();
     if method != Method::GET {
         return lists::change(state, route, method, raw, body).await;
@@ -837,14 +855,14 @@ pub(crate) async fn vertex_import(
     state: State<Arc<Management>>,
     RawQuery(raw): RawQuery,
     headers: axum::http::HeaderMap,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
     // Go routes straight to the handler: a `provider` in the query does not matter.
     let query = match raw.filter(|r| !r.is_empty()) {
         Some(raw) => format!("provider=vertex&{raw}"),
         None => "provider=vertex".to_owned(),
     };
-    super::oauth::import(state, RawQuery(Some(query)), headers, body).await
+    super::oauth::import(state, RawQuery(Some(query)), headers, read).await
 }
 
 #[cfg(test)]
@@ -897,7 +915,7 @@ mod tests {
             State(state.clone()),
             OriginalUri("/v0/management/request-retry".parse().unwrap()),
             Method::PUT,
-            Bytes::from(r#"{"value":2}"#),
+            crate::body_limit::FirstJson(Bytes::from(r#"{"value":2}"#)),
         );
         let setter = tokio::time::timeout(std::time::Duration::from_secs(10), setter);
         let watcher = tokio::task::spawn_blocking(move || {
@@ -972,7 +990,7 @@ mod tests {
             State(state.clone()),
             Method::PATCH,
             RawQuery(None),
-            Bytes::from(r#"{"old":"a","new":"a2"}"#),
+            Bytes::from(r#"{"old":"a","new":"a2"}"#).into(),
         )
         .await;
         assert_eq!(patch.status(), StatusCode::OK);
@@ -1004,7 +1022,7 @@ mod tests {
             State(state.clone()),
             Method::PATCH,
             RawQuery(None),
-            Bytes::from(r#"{"old":"b","new":"b2"}"#),
+            Bytes::from(r#"{"old":"b","new":"b2"}"#).into(),
         ));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await; // Queued on the lock.
         go_tx.send(()).unwrap();

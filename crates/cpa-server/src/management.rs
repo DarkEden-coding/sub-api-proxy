@@ -28,7 +28,7 @@ mod auth_index;
 mod iso_currency;
 pub(crate) mod legacy;
 mod logs;
-mod multipart;
+pub(crate) mod multipart;
 mod oauth;
 pub mod observability;
 mod plugin_auth;
