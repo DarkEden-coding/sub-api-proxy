@@ -226,8 +226,11 @@ pub(crate) fn seed_config(example: &Path, target: &Path) -> Result<()> {
         return write_file(target, b"");
     }
     let template = std::fs::read(example).with_context(|| format!("open {}", example.display()))?;
-    write_file(target, &template)?;
-    std::fs::File::open(target)?.sync_all()?;
+    // Go syncs the handle it wrote: Windows refuses to flush a read-only handle.
+    use std::io::Write;
+    let mut file = crate::private_fs::create_truncate(target)?;
+    file.write_all(&template)?;
+    file.sync_all()?;
     Ok(())
 }
 
