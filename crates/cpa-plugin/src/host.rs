@@ -825,7 +825,7 @@ impl Host {
             }
             remove_runtime_state(&mut state, id);
             #[cfg(test)]
-            tests::unload_hook();
+            tests::unload_hook(id);
             let snapshot = self.snapshot();
             let records = snapshot.records.iter().filter(|r| r.id != id).cloned().collect();
             self.store_snapshot(
@@ -1044,12 +1044,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     type Hook = Box<dyn Fn() + Send + Sync>;
-    static UNLOAD_HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+    /// Keyed by plugin ID, so another test's unload never fires it.
+    static UNLOAD_HOOK: Mutex<Option<(&'static str, Hook)>> = Mutex::new(None);
 
     /// Runs inside `unload_plugin` after its state change, before the snapshot is
     /// published.
-    pub(super) fn unload_hook() {
-        if let Some(hook) = lock(&UNLOAD_HOOK).as_ref() {
+    pub(super) fn unload_hook(id: &str) {
+        if let Some((_, hook)) = lock(&UNLOAD_HOOK).as_ref().filter(|(target, _)| *target == id) {
             hook();
         }
     }
@@ -1087,11 +1088,11 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         *lock(&UNLOAD_HOOK) = Some({
             let (host, seen) = (host.clone(), seen.clone());
-            Box::new(move || {
+            ("fence", Box::new(move || {
                 let stale = host.snapshot().records.iter().any(|r| r.id == "fence");
                 let lock_free = host.inner.state.try_lock().is_ok();
                 *lock(&seen) = Some((stale, lock_free));
-            })
+            }))
         });
         assert!(host.unload_plugin("fence", None).await);
         *lock(&UNLOAD_HOOK) = None;
