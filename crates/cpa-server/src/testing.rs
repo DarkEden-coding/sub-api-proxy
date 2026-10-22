@@ -11,7 +11,9 @@
 //! A non-loopback proxy (including `direct`) does not count: it could reach a
 //! provider. Stored credentials never change, so management listings, reconciliation and
 //! features that pick their own proxy (management `api-call`, `latest-version`) behave
-//! as configured.
+//! as configured. Such a runtime also starts no remote model catalog refresh
+//! (models.json, the Codex client list, Devin, the Antigravity version); the embedded
+//! catalogs stay in use.
 // ponytail: the realtime routes dial through the Codex executor's live endpoints
 // directly, outside these executor calls; their tests build those endpoints on mocks.
 
