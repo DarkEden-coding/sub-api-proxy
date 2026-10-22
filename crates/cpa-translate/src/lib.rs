@@ -87,6 +87,7 @@ mod claude_gemini;
 mod claude_interactions;
 mod claude_responses;
 mod claude_responses_response;
+mod claude_tool_args;
 mod codex_chat_request;
 mod codex_chat_response;
 mod codex_claude;
@@ -187,7 +188,7 @@ pub fn claude_to_openai_with_compat(ctx: &RequestCtx<'_>, body: &[u8]) -> Result
 /// Claude request, but unsigned reasoning history is kept for compatibility endpoints.
 pub fn responses_to_claude_with_compat(ctx: &RequestCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     deep_stack(levels(&[body]), || {
-        Ok(claude_responses::convert(ctx.model, body, ctx.stream, true))
+        claude_responses::convert(ctx.model, body, ctx.stream, true)
     })
 }
 
