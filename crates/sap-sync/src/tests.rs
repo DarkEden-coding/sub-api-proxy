@@ -13,7 +13,6 @@ use sap_core::{
 };
 use std::{
     collections::BTreeMap,
-    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -24,6 +23,8 @@ use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
 struct MemoryLog {
     node: String,
     id: Option<NodeId>,
+    acknowledgements: Mutex<BTreeMap<NodeId, SyncCursor>>,
+    fail_ack: std::sync::atomic::AtomicBool,
     changes: Mutex<BTreeMap<(NodeId, u64), Change>>,
 }
 impl MemoryLog {
@@ -38,6 +39,7 @@ impl MemoryLog {
         let mut changes = self.changes.lock().unwrap();
         let seq = changes.keys().filter(|(id, _)| id == self.node()).count() as u64 + 1;
         let change = Change {
+            context: SyncCursor::new(),
             origin: self.node().clone(),
             seq,
             hlc: Hlc {
@@ -58,7 +60,7 @@ impl MemoryLog {
     }
 }
 impl ChangeLog for MemoryLog {
-    type Error = Infallible;
+    type Error = std::io::Error;
     fn node(&self) -> &NodeId {
         self.id.as_ref().unwrap()
     }
@@ -89,6 +91,20 @@ impl ChangeLog for MemoryLog {
             changes,
             more,
         })
+    }
+    fn record_peer_ack(&self, peer: &NodeId, cursor: &SyncCursor) -> Result<(), Self::Error> {
+        if self.fail_ack.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("test ACK failure"));
+        }
+        let mut acknowledgements = self.acknowledgements.lock().unwrap();
+        let stored = acknowledgements.entry(peer.clone()).or_default();
+        for (origin, seq) in cursor {
+            stored
+                .entry(origin.clone())
+                .and_modify(|v| *v = (*v).max(*seq))
+                .or_insert(*seq);
+        }
+        Ok(())
     }
     fn apply_remote(&self, incoming: &[Change]) -> Result<ApplyReport, Self::Error> {
         let mut report = ApplyReport::default();
@@ -210,6 +226,7 @@ async fn two_nodes_converge_within_one_second_and_ack() {
                 && aa.statuses()[&NodeId("b".into())].last_success.is_some()
         })
         .await;
+        assert_eq!(a.acknowledgements.lock().unwrap()[&NodeId("b".into())].len(), 2);
         assert_eq!(aa.statuses()[&NodeId("b".into())].last_error, None);
         aa.shutdown().await;
         ba.shutdown().await;
@@ -473,6 +490,43 @@ async fn default_server_rejects_loopback_even_with_valid_signature() {
             .0,
             StatusCode::FORBIDDEN
         );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ack_failure_does_not_update_status_and_success_reaches_log() {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let log = MemoryLog::new("b");
+        let server = serve(log.clone(), "a", Arc::new(Notify::new()), None).await;
+        for fail in [true, false] {
+            log.fail_ack.store(fail, std::sync::atomic::Ordering::Relaxed);
+            let uri: http::Uri = format!("http://{}/sap/sync/ack", server.address).parse().unwrap();
+            let body = r#"{"b":1}"#;
+            let timestamp = crate::now().to_string();
+            let signature = crate::auth::sign(b"shared-test-secret", &Method::POST, &uri, &timestamp, body.as_bytes());
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("x-sap-peer", "a")
+                .header("x-sap-timestamp", timestamp)
+                .header("x-sap-signature", signature)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(body.as_bytes())))
+                .unwrap();
+            let response = client().request(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if fail {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::NO_CONTENT
+                }
+            );
+            assert_eq!(server.state.acknowledgements().is_empty(), fail);
+            assert_eq!(log.acknowledgements.lock().unwrap().is_empty(), fail);
+        }
     })
     .await
     .unwrap();

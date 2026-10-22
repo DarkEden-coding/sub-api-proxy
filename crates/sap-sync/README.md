@@ -2,7 +2,9 @@
 
 HTTP pull replication over Tailscale, generic over `sap_core::sync::ChangeLog`.
 No `sap-store` dependency. Storage merges, deduplication, and contiguous per-origin
-cursors belong to the supplied log.
+cursors belong to the supplied log. `Change::context` carries the origin's
+causal cursor for all operations, including Delete; transport preserves it and
+passes ordinary domain values without private wrappers.
 
 ## Public API
 
@@ -72,7 +74,11 @@ caller's node identity, while `Peer::node` identifies the remote node.
   causes an immediate next pull.
 - `POST /sap/sync/ack` accepts a bare JSON `SyncCursor`, such as `{"macbook":12}`,
   with `content-type: application/json`. Success is `204`. Each authenticated
-  peer's stored acknowledgement advances monotonically per origin.
+  peer's stored acknowledgement advances monotonically per origin. The handler
+  calls `ChangeLog::record_peer_ack(&peer, &cursor)` on a blocking worker before
+  returning success. Storage failures return `500` and leave the in-memory
+  status view unchanged. `sap-store` persists these cursors for retention;
+  `acknowledgements()` exposes ACKs accepted during this server process.
 
 Both requests require:
 
@@ -117,10 +123,14 @@ test has a 4 or 8 second overall timeout. Build commands were run with a 240 sec
 process timeout and `CARGO_BUILD_JOBS=4`:
 
 ```sh
-CARGO_BUILD_JOBS=4 cargo fmt -p sap-sync
-CARGO_BUILD_JOBS=4 cargo clippy -p sap-sync --all-targets -- -D warnings
-CARGO_BUILD_JOBS=4 cargo test -p sap-sync
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo fmt -p sap-sync
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo clippy -p sap-sync --all-targets -- -D warnings
+CARGO_BUILD_JOBS=4 CARGO_NET_OFFLINE=true cargo test -p sap-sync
 ```
+
+The sync suite passes all eight tests, including ACK persistence-hook failure
+handling. The five-crate follow-up passes formatting, clippy with warnings denied,
+and all 56 tests, offline with four build jobs and 240-second build/test limits.
 
 Coverage includes bidirectional convergence within one second, ACK recording,
 server partition/reconnect without lost changes, bad HMAC, timestamp skew, query
@@ -130,10 +140,6 @@ loopback denial.
 
 ## Contract requests and gaps
 
-- Add a durable `ChangeLog::set_peer_cursor(peer: &NodeId, cursor: &SyncCursor)`
-  operation or an equivalent ACK sink. ACKs currently live only in server memory;
-  `acknowledgements()` lets the integrator inspect them, but they do not drive
-  `sap-store` retention automatically.
 - Add a shared `sap_core::sync::PeerStatus` if status crosses another crate's
   public boundary. The current transport-local type fills the missing contract.
 - A remote high-water cursor/timestamp in `ChangeBatch` would support more accurate

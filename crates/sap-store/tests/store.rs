@@ -305,6 +305,7 @@ fn invalid_batches_roll_back_and_sequence_gaps_are_rejected() {
 fn receiving_future_hlc_advances_local_writes() {
     let a = store("a");
     let remote = Change {
+        context: SyncCursor::new(),
         origin: node("b"),
         seq: 1,
         hlc: Hlc {
@@ -378,10 +379,13 @@ fn durable_state_permissions_and_simultaneous_writers() {
             assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
         }
     }
+    a.record_peer_ack(&node("b"), &a.cursor().unwrap()).unwrap();
+    a.record_peer_ack(&node("b"), &SyncCursor::new()).unwrap();
     drop(a);
     drop(second);
     let reopened = Store::open(db.path(), node("a"), Limits::default()).unwrap();
     assert_eq!(reopened.events(100).unwrap().len(), 40);
+    assert_eq!(reopened.peer_cursors().unwrap()[&node("b")][&node("a")], 40);
     reopened.append_event(event("after-reopen", Utc::now())).unwrap();
     assert_eq!(reopened.cursor().unwrap()[&node("a")], 41);
     assert!(Store::open(db.path(), node("different"), Limits::default()).is_err());
@@ -397,7 +401,7 @@ fn retention_requires_all_peer_acks_and_replay_stays_deduplicated() {
     exchange(&a, &b);
     let original = a.changes_since(&SyncCursor::new(), 100).unwrap();
     let future = now + Duration::from_secs(20 * 86_400);
-    a.set_peer_cursor(node("b"), &a.cursor().unwrap()).unwrap();
+    a.record_peer_ack(&node("b"), &a.cursor().unwrap()).unwrap();
     a.set_peer_cursor(node("c"), &SyncCursor::new()).unwrap();
     let report = a.compact_at(future).unwrap();
     assert_eq!(report.append_rows_deleted, 1);
@@ -442,7 +446,7 @@ fn byte_budget_is_enforced_after_ack_and_reports_pinned_data() {
     let first = a.compact().unwrap();
     assert!(!first.budget_met);
     assert_eq!(first.op_log_rows_deleted, 0);
-    a.set_peer_cursor(node("b"), &a.cursor().unwrap()).unwrap();
+    a.record_peer_ack(&node("b"), &a.cursor().unwrap()).unwrap();
     let second = a.compact().unwrap();
     assert!(second.budget_met);
     assert!(second.retained_bytes <= 256 * 1024);
@@ -510,6 +514,7 @@ fn conflicts_relay_to_a_third_node_and_stale_creation_cannot_reopen_resolution()
     assert_eq!(a.conflicts().unwrap(), c.conflicts().unwrap());
     assert!(c.conflicts().unwrap()[0].resolved);
     let late_creation = Change {
+        context: SyncCursor::new(),
         origin: node("late"),
         seq: 1,
         hlc: Hlc {
@@ -534,6 +539,12 @@ fn conflicts_relay_to_a_third_node_and_stale_creation_cannot_reopen_resolution()
 
 #[test]
 fn configuration_tombstone_and_newer_field_converge_in_either_order() {
+    check_delete_edit(1, false);
+    check_delete_edit(-1, false);
+    check_delete_edit(1, true);
+}
+
+fn check_delete_edit(edit_offset: i64, causal: bool) {
     let seed = store("seed");
     let a = store("a");
     let b = store("b");
@@ -542,6 +553,7 @@ fn configuration_tombstone_and_newer_field_converge_in_either_order() {
     exchange(&seed, &b);
     let wall = Utc::now().timestamp_millis() + 1_000_000;
     let delete = Change {
+        context: BTreeMap::from([(node("seed"), 1)]),
         origin: node("delete"),
         seq: 1,
         hlc: Hlc {
@@ -553,11 +565,16 @@ fn configuration_tombstone_and_newer_field_converge_in_either_order() {
         key: account().id.0,
         op: ChangeOp::Delete,
     };
+    let mut edit_context = BTreeMap::from([(node("seed"), 1)]);
+    if causal {
+        edit_context.insert(node("delete"), 1);
+    }
     let edit = Change {
+        context: edit_context,
         origin: node("edit"),
         seq: 1,
         hlc: Hlc {
-            wall_ms: wall + 1,
+            wall_ms: wall + edit_offset,
             counter: 0,
             node: node("edit"),
         },
@@ -565,12 +582,83 @@ fn configuration_tombstone_and_newer_field_converge_in_either_order() {
         key: account().id.0,
         op: ChangeOp::Set {
             field: Some("label".into()),
-            value: json!({"sap_store_version": 1, "context": {"seed": 1}, "value": "revived"}),
+            value: json!("revived"),
         },
     };
     a.apply_remote(&[delete.clone(), edit.clone()]).unwrap();
     b.apply_remote(&[edit, delete]).unwrap();
     assert_eq!(a.accounts().unwrap(), b.accounts().unwrap());
-    assert_eq!(a.accounts().unwrap()[0].label, "revived");
-    assert_eq!(a.accounts().unwrap()[0].provider, Provider::Claude);
+    if edit_offset > 0 {
+        assert_eq!(a.accounts().unwrap()[0].label, "revived");
+        assert_eq!(a.accounts().unwrap()[0].provider, Provider::Claude);
+    } else {
+        assert!(a.accounts().unwrap().is_empty());
+    }
+    assert_eq!(a.conflicts().unwrap(), b.conflicts().unwrap());
+    assert_eq!(a.conflicts().unwrap().len(), usize::from(!causal));
+}
+
+#[test]
+fn every_operation_rejects_context_observing_its_own_future() {
+    for op in [
+        ChangeOp::Delete,
+        ChangeOp::Set {
+            field: Some("value".into()),
+            value: json!(1),
+        },
+        ChangeOp::Append { value: json!({}) },
+    ] {
+        let a = store("a");
+        let change = Change {
+            origin: node("b"),
+            seq: 1,
+            context: BTreeMap::from([(node("b"), 1)]),
+            hlc: Hlc::zero(node("b")),
+            table: Table::Settings,
+            key: "key".into(),
+            op,
+        };
+        assert!(
+            a.apply_remote(&[change])
+                .unwrap_err()
+                .to_string()
+                .contains("own future")
+        );
+        assert!(a.cursor().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn pages_merge_origins_in_insertion_order_without_skips() {
+    let a = store("a");
+    let b = store("b");
+    let mut expected = Vec::new();
+    for i in 0..150 {
+        a.append_event(event(&format!("a-{i}"), Utc::now())).unwrap();
+        expected.push((node("a"), i + 1));
+        b.append_event(event(&format!("b-{i}"), Utc::now())).unwrap();
+        a.apply_remote(&b.changes_since(&a.cursor().unwrap(), 1).unwrap().changes)
+            .unwrap();
+        expected.push((node("b"), i + 1));
+    }
+    let mut since = SyncCursor::new();
+    let mut actual = Vec::new();
+    loop {
+        let batch = a.changes_since(&since, 7).unwrap();
+        for change in batch.changes {
+            since.insert(change.origin.clone(), change.seq);
+            actual.push((change.origin, change.seq));
+        }
+        assert_eq!(batch.more, actual.len() < expected.len());
+        if !batch.more {
+            break;
+        }
+    }
+    assert_eq!(actual, expected);
+    assert!(a.changes_since(&since, 7).unwrap().changes.is_empty());
+    // An origin absent from a nearly current cursor must still be sent.
+    since.remove(&node("b"));
+    let batch = a.changes_since(&since, 1).unwrap();
+    assert_eq!((batch.changes[0].origin.clone(), batch.changes[0].seq), (node("b"), 1));
+    assert!(batch.more);
 }
