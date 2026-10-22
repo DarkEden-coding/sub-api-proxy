@@ -324,9 +324,14 @@ pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
 }
 
-/// `util.IsCodexResponsesLiteRequest`.
+/// `util.IsCodexResponsesLiteRequest`. The header is decoded as UTF-8 rather than through
+/// [`header`], so Go's `TrimSpace` also strips non-ASCII spaces such as U+00A0.
 pub(crate) fn is_lite(body: &str, headers: &HeaderMap) -> bool {
-    if header(headers, LITE_HEADER).trim().eq_ignore_ascii_case("true") {
+    let lite = headers
+        .get(LITE_HEADER)
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        .unwrap_or_default();
+    if lite.trim().go_eq_fold("true") {
         return true;
     }
     let v = gjson::get(
@@ -574,20 +579,27 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
 /// unavailable"). A standard request gets `{"type":"web_search"}`; a Responses Lite
 /// request, which carries no top-level hosted tools, drops the replayed items instead.
 fn ensure_web_search_for_history(body: String, headers: &HeaderMap) -> String {
+    use cpa_common::json as gj;
     if !body.contains("web_search_call") {
         return body;
     }
-    let input = gjson::get(&body, "input");
-    if input.kind() != Kind::Array {
+    let input = gj::get(body.as_bytes(), "input");
+    if !input.is_array() {
         return body;
     }
-    let items = input.array();
-    let is_call = |item: &gjson::Value| item.get("type").str().trim() == "web_search_call";
-    if !items.iter().any(is_call) {
+    let is_call = |item: &gj::Res<'_>| item.get("type").str().trim() == "web_search_call";
+    // Detection walks with ForEach and the rebuild with Array(), as Go does: on a malformed
+    // array such as `[{}{...}]`, ForEach stops after the first element.
+    let mut has_call = false;
+    input.each(|_, item| {
+        has_call = is_call(&item);
+        !has_call
+    });
+    if !has_call {
         return body;
     }
-    let tools = gjson::get(&body, "tools");
-    if tools.kind() == Kind::Array
+    let tools = gj::get(body.as_bytes(), "tools");
+    if tools.is_array()
         && tools.array().iter().any(|t| {
             matches!(
                 t.get("type").str().trim(),
@@ -598,10 +610,12 @@ fn ensure_web_search_for_history(body: String, headers: &HeaderMap) -> String {
         return body;
     }
     if is_lite(&body, headers) {
-        let kept: Vec<&str> = items.iter().filter(|i| !is_call(i)).map(|i| i.json()).collect();
-        return set_raw(&body, "input", &format!("[{}]", kept.join(",")));
+        let items = input.array();
+        let kept: Vec<&[u8]> = items.iter().filter(|i| !is_call(i)).map(|i| i.raw()).collect();
+        let joined = kept.join(&b","[..]);
+        return set_raw(&body, "input", &format!("[{}]", String::from_utf8_lossy(&joined)));
     }
-    if tools.kind() != Kind::Array {
+    if !tools.is_array() {
         return set_raw(&body, "tools", r#"[{"type":"web_search"}]"#);
     }
     set_raw(&body, "tools.-1", r#"{"type":"web_search"}"#)
@@ -1580,8 +1594,9 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
         for case in go["cases"].as_array().unwrap() {
             let mut headers = HeaderMap::new();
-            if case["lite_header"] == true {
-                headers.insert(LITE_HEADER, HeaderValue::from_static("true"));
+            if let Some(value) = case["lite_header"].as_str() {
+                // Raw bytes: a non-ASCII value such as U+00A0 reaches the Lite check as sent.
+                headers.insert(LITE_HEADER, HeaderValue::from_bytes(value.as_bytes()).unwrap());
             }
             let input = case["in"].as_str().unwrap();
             let want = case.get("out").unwrap_or(&case["in"]).as_str().unwrap();

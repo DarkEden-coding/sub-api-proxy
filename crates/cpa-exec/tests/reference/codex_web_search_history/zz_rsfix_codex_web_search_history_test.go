@@ -94,7 +94,8 @@ func rsfixWebSearchRun(t *testing.T, c rsfixWebSearchExec) rsfixWebSearchExec {
 
 type rsfixWebSearchCase struct {
 	Name string `json:"name"`
-	Lite bool   `json:"lite_header,omitempty"`
+	// Lite is the X-OpenAI-Internal-Codex-Responses-Lite header value, when set.
+	Lite string `json:"lite_header,omitempty"`
 	In   string `json:"in"`
 	// Out is omitted when Go returned the input unchanged.
 	Out string `json:"out,omitempty"`
@@ -106,16 +107,23 @@ func TestRSFixCodexWebSearchHistory(t *testing.T) {
 		t.Skip("RSFIX_OUT not set")
 	}
 	var cases []rsfixWebSearchCase
-	add := func(name string, lite bool, in string) {
+	addRaw := func(name, lite, in string) {
 		headers := make(http.Header)
-		if lite {
-			headers.Set(codexResponsesLiteHeader, "true")
+		if lite != "" {
+			headers.Set(codexResponsesLiteHeader, lite)
 		}
 		c := rsfixWebSearchCase{Name: name, Lite: lite, In: in}
 		if got := string(ensureWebSearchToolForHistory([]byte(in), headers)); got != in {
 			c.Out = got
 		}
 		cases = append(cases, c)
+	}
+	add := func(name string, lite bool, in string) {
+		value := ""
+		if lite {
+			value = "true"
+		}
+		addRaw(name, value, in)
 	}
 	call := `{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}}`
 	user := `{"type":"message","role":"user","content":[{"type":"input_text","text":"search docs"}]}`
@@ -152,6 +160,14 @@ func TestRSFixCodexWebSearchHistory(t *testing.T) {
 	add("lite_metadata_false", false, `{"input":[`+call+`],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"}}`)
 	add("lite_existing_tool", true, `{"input":[`+user+`,`+call+`],"tools":[{"type":"web_search"}]}`)
 	add("lite_only_calls", true, `{"input":[`+call+`,`+call+`]}`)
+	// Malformed arrays: ForEach stops after {} where Array() does not.
+	add("malformed_input_standard", false, `{"model":"gpt-6.1-sol","instructions":"","input":[{}{"type":"web_search_call"}]}`)
+	add("malformed_input_lite", true, `{"model":"gpt-6.1-sol","instructions":"","input":[{}{"type":"web_search_call"}]}`)
+	add("malformed_after_call_lite", true, `{"input":[{"type":"web_search_call"},{}{"type":"web_search_call"},{"type":"message"}]}`)
+	add("malformed_tools", false, `{"input":[{"type":"web_search_call"}],"tools":[{}{"type":"web_search"}]}`)
+	// Go's TrimSpace strips U+00A0 around the header value.
+	addRaw("lite_header_nbsp", "\u00a0true\u00a0", `{"input":[{"type":"web_search_call"}]}`)
+	addRaw("lite_header_upper", " TRUE ", `{"input":[{"type":"web_search_call"}]}`)
 	add("lite_pretty_input", true, "{\"input\": [\n  "+user+",\n  "+call+",\n  {\"type\": \"message\",  \"role\": \"assistant\", \"content\": []}\n],\"tools\":[]}")
 
 	emptyTools := cases[0].In
