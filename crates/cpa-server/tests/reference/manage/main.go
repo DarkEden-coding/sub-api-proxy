@@ -1459,6 +1459,18 @@ func configScenarios() []configScenario {
 		// JSON keys are quoted, so `<<` in a JSON body is a plain key until Go parses its
 		// own save, which writes it plain: a map then merges and a scalar is a 422 at any
 		// depth (a YAML upload's scalar merge is a 400 above).
+		// v8.0.35 7c41cd05: server.github-token, legacy root github-token. Go reads,
+		// migrates and writes it like any setting; v0 GET /config omits it (json:"-").
+		{Name: "server_github_token", YAML: "github-token: ' fake-legacy-token '\nremote-management:\n  secret-key: '$HASH'\n", Steps: []configStep{
+			get("/config"), get("/config/server/github-token"),
+			put("/config/routing/strategy", `"fill-first"`),
+			patch("/config/server/github-token", `"fake-patched"`), get("/config/server"),
+			put("/config/server/github-token", `5`), get("/config/server/github-token"),
+			put("/config/server/github-token", `{"a":1}`),
+			patch("/config", `{"server":{"github-token":null}}`),
+			put("/config.yaml", "config-version: 8\nmanagement:\n  secret-key: fake-secret\nserver:\n  github-token: fake-yaml-token\n"),
+			get("/config.yaml"), del("/config/server/github-token"),
+		}},
 		{Name: "merge_keys_in_json_bodies", YAML: "config-version: 8\nmanagement:\n  secret-key: '$HASH'\n", Steps: []configStep{
 			put("/config/plugins/configs/x", `{"<<":5}`),
 			put("/config/plugins/configs/x", `{"<<":{"a":1},"b":2}`),
