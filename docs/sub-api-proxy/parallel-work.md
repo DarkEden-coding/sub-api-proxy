@@ -226,3 +226,61 @@ Six workstreams run in parallel, each in its own git worktree and branch. They s
   - `npm run build` outputs `ui/sap/dist` (ignored by git). Base path `/sap/`.
   - Tests use `node --test`, as upstream does, for data shaping: grouping by client and machine, the parent and child tree, and the account greying logic.
   - Check visually with the T3 `html_preview` tool or a headless browser screenshot of `vite preview` with `?demo=1`. Include screenshots or their paths in the final report.
+
+## Workstream G: hook points in `cpa-server` (backend)
+
+**Paths:** a new `crates/cpa-server/src/sap_hooks.rs`, minimal edits at the call sites below, and `crates/cpa-server/Cargo.toml` (add `sap-core`). No other sap crate may be a dependency of `cpa-server`: the real hook implementation lives in a later `sap-server` crate and is installed at startup.
+
+**Goal:** a trait object on `Runtime` that Sub-Api-Proxy uses to identify threads, choose credentials, and observe results. With no hooks installed, behavior and bytes are identical to upstream, so the existing tests of touched modules must keep passing.
+
+**Findings to build on:**
+- `Runtime::acquire` (`runtime.rs`) already supports an external choice: `plugins::scheduler_request` / `scheduler_pick` produce `Pick::Auth(credential_id)`, `Pick::Configured`, or `AcquireError::Rejected`, and `select_picked` honors it. Reuse that path: the hook's answer becomes a `Pick`.
+- `dispatch.rs` builds the `Selection` (around the `scheduler_context` call) where the request's headers and body are available.
+- `websocket.rs` handles Codex `response.create` frames on `/backend-api/codex/responses`.
+- `usage_record.rs` parses usage from Claude (`message_start`, `message_delta`) and Codex (`response.completed`) streams.
+- The executors' quota stores (`executors.claude.quota()`, `executors.codex.quota()`) hold the passive quota snapshots.
+
+**Trait** (adjust names if the code suggests better ones, and keep it small):
+
+```rust
+pub trait SapHooks: Send + Sync {
+    /// Once per inference request: an HTTP body, or each Codex `response.create` frame.
+    /// The bytes are the original, unmodified request.
+    fn identify(&self, path: &str, headers: &http::HeaderMap, body: &[u8]) -> Option<Arc<SapRequest>>;
+    /// Choose among the ready candidates (credential id, provider, priority).
+    fn select(&self, request: &SapRequest, candidates: &[SapCandidate]) -> SapPick;
+    /// The attempt on `credential` finished; `status` and the classified error, if any.
+    fn on_outcome(&self, request: &SapRequest, credential: &str, result: &AttemptResult);
+    /// Stream observations: response or message IDs, usage, and quota signals.
+    fn on_observation(&self, request: &SapRequest, credential: &str, observation: Observation);
+    fn on_stream(&self, request: &SapRequest, open: bool);
+}
+pub enum SapPick {
+    Configured,
+    Credential(String),
+    /// Reply without calling upstream: exact status, content type and body bytes
+    /// (for example the Claude 400 that forces a full-history resend).
+    Reply { status: u16, content_type: &'static str, body: bytes::Bytes },
+    /// Codex WebSocket only: finish the current response, then close the client socket normally.
+    CloseSocket,
+}
+```
+
+`SapRequest` wraps `sap_core::thread::ThreadIdentity` plus a `Box<dyn Any + Send + Sync>` slot for the implementation.
+
+**Also:**
+- `Runtime::set_sap_hooks(Arc<dyn SapHooks>)`.
+- Strip `sap_core::health::CLIENT_HOST_HEADER` from upstream requests after `identify` has seen it.
+- Serve `GET /sap/health` only when hooks are installed, through a hook method returning `HealthReport`.
+
+**Tests:** a fake hooks implementation in `cpa-server` tests, using existing test helpers (`cpa_server::testing::runtime`, mock upstreams, private `auth-dir`). Cover:
+- identify sees the original bytes
+- `Credential` pins the choice
+- `Reply` sends exact bytes and makes no upstream call
+- outcome and observation callbacks fire with usage and the response ID for Claude and Codex
+- the client host header never reaches upstream
+- WebSocket frames are identified per frame
+- `CloseSocket` closes after the current response
+- no hooks means no behavior change
+
+**Build:** `cpa-server` is large, so use `CARGO_BUILD_JOBS=4 nice -n 19` and run only filtered tests (`cargo test -p cpa-server sap_hooks`), plus the existing tests of the modules you touch. Mark every upstream edit with a `// sub-api-proxy:` comment.
