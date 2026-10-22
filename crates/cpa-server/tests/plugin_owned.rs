@@ -1438,3 +1438,166 @@ async fn a_plugin_executor_takes_an_unconfigured_compatible_provider() {
         env.finish().await;
     }
 }
+
+/// The next `count` usage records, as JSON; a stream's record comes as it ends.
+async fn usage_records(rt: &cpa_server::Runtime, count: usize) -> Vec<Value> {
+    let mut records = Vec::new();
+    for _ in 0..200 {
+        records.extend(rt.usage_queue().pop_oldest(count - records.len()));
+        if records.len() == count {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(records.len(), count);
+    records.iter().map(|r| serde_json::from_slice(r).unwrap()).collect()
+}
+
+const USAGE_ON: &str = "observability:\n  usage:\n    usage-statistics-enabled: true\n";
+
+/// Go `TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth`: a
+/// credential-bound plugin executor's buffered answer publishes its usage, read from
+/// the plugin's Responses output (an event's `response.usage`, else the completed
+/// object's top-level usage), with the reasoning effort of the payload it was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_publishes_the_usage_of_its_own_answer() {
+    let Some(env) = env(
+        "plugin-owned-usage",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: responses\n      outputs: responses"),
+        ],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let answers = [
+        // A completed Responses object: top-level usage.
+        (
+            r#"{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}"#,
+            (34, 499, 533),
+        ),
+        // A terminal event: `response.usage`, which the client-format parser misses.
+        (
+            r#"{"type":"response.completed","response":{"id":"resp_2","usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}}"#,
+            (5, 7, 12),
+        ),
+    ];
+    for (answer, expected) in answers {
+        let payload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, answer);
+        canned(&env.records, "acme", "executor.execute", json!({"Payload": payload}));
+        let response = wreq::Client::new()
+            .post(format!("http://{}/v1/responses", env.proxy))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"acme-1","input":"Write me a poem","reasoning":{"effort":"high"}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{answer}");
+        let record = &usage_records(&env.rt, 1).await[0];
+        assert_eq!(record["provider"], "acme", "{record}");
+        assert_eq!(record["stream"], false, "{record}");
+        assert_eq!(record["failed"], false, "{record}");
+        assert_eq!(record["reasoning_effort"], "high", "{record}");
+        let tokens = &record["tokens"];
+        let got = (
+            tokens["input_tokens"].as_i64().unwrap(),
+            tokens["output_tokens"].as_i64().unwrap(),
+            tokens["total_tokens"].as_i64().unwrap(),
+        );
+        assert_eq!(got, expected, "{record}");
+    }
+    env.finish().await;
+}
+
+/// Go `TestExecutorAdapterExecuteStreamSplitAcrossBraceBoundary`,
+/// `…TwoCompleteChunksWithoutNewline` and `…ErrorChunk`: a plugin stream's usage is
+/// read from its own lines, however its chunks split them, and a stream that fails
+/// after its usage line publishes the failure with that usage
+/// (`StreamUsageBuffer.PublishFailure`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_executor_stream_publishes_its_usage_even_when_it_fails() {
+    let Some(env) = env(
+        "plugin-owned-stream-usage",
+        &[("catalog", "model_provider"), ("acme", "executor")],
+        USAGE_ON,
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    env.rt.usage_queue().configure(true, &env.rt.config());
+    let script = |chunks: Value, error: &str| {
+        let dir = env.records.join("respond").join("acme");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("executor.execute_stream.script.once.json"),
+            json!({"chunks":chunks,"error":error}).to_string(),
+        )
+        .unwrap();
+    };
+    let tokens = |record: &Value| {
+        let t = &record["tokens"];
+        (
+            t["input_tokens"].as_i64().unwrap(),
+            t["output_tokens"].as_i64().unwrap(),
+            t["total_tokens"].as_i64().unwrap(),
+        )
+    };
+    // Split just before the usage object's opening brace.
+    script(
+        json!([
+            "data: {\"choices\":[],\"usage\":",
+            "{\"prompt_tokens\":18,\"completion_tokens\":22,\"total_tokens\":40}}\n\n",
+            "data: [DONE]\n\n"
+        ]),
+        "",
+    );
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(false), (18, 22, 40)),
+        "{record}"
+    );
+    // Complete payloads without newlines, then a failure.
+    script(
+        json!([
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33}}"
+        ]),
+        "mid-stream chunk failure",
+    );
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    let record = &usage_records(&env.rt, 1).await[0];
+    assert_eq!(
+        (record["failed"].clone(), tokens(record)),
+        (json!(true), (11, 22, 33)),
+        "{record}"
+    );
+    assert_eq!(record["fail"]["body"], "mid-stream chunk failure", "{record}");
+    env.finish().await;
+}

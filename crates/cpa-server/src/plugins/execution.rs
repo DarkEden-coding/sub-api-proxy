@@ -4,7 +4,7 @@
 //! `streamWithPluginExecutor`, and internal/pluginhost/adapters_executors.go's
 //! `executorAdapter` called without an auth).
 //!
-//! ponytail: usage records for plugin executors are not published; plugin response translators (`hasResponseTranslator`) are counted
+//! ponytail: plugin response translators (`hasResponseTranslator`) are counted
 //! in negotiation but not called, and the Responses SSE validation of plugin streams is
 //! the route's own.
 
@@ -307,9 +307,15 @@ async fn run_executor(
         .executor_execute_stream(&adapter, &request, &scope.0)
         .await
         .map_err(call_failure)?;
-    let mut rest = translate_stream(negotiated, request, opened.chunks, scope, |error| {
-        ExecError::local(0, FailureScope::Request, error)
-    });
+    // Go creates no usage reporter without an auth.
+    let mut rest = translate_stream(
+        negotiated,
+        request,
+        opened.chunks,
+        scope,
+        |error| ExecError::local(0, FailureScope::Request, error),
+        None,
+    );
     let first = match rest.next().await {
         Some(Ok(event)) => Some(event),
         Some(Err(error)) => return Err(Failure::Exec(error)),
@@ -327,8 +333,8 @@ async fn run_executor(
 /// selection loop. `adapter` is the registered executor; a plugin replaced since then
 /// does not serve it (Go `pluginIdentityCurrent`). The answer is in the client's
 /// format, as built-in executors give it.
-/// ponytail: plugin executors publish no usage record here yet (Go's executor usage
-/// reporter); the server's response parsing still counts client-format usage.
+/// Usage goes through the attempt's reporter as Go's `NewExecutorUsageReporter` takes
+/// it: parsed from the plugin's own output format, not the client's.
 pub(crate) async fn execute_credential(
     rt: &Runtime,
     call: &Call,
@@ -397,6 +403,12 @@ pub(crate) async fn execute_credential(
         api_key,
         access_provider,
     });
+    // Go `SetTranslatedReasoningEffort` and `StartResponseTTFT`; counting has no
+    // reporter.
+    if !count {
+        req.usage.request_for(&negotiated.input, &request.payload);
+        req.usage.round_trip_started();
+    }
     if !stream {
         let resp = if count {
             host.executor_count_tokens(adapter, &request, &scope.0).await
@@ -404,6 +416,12 @@ pub(crate) async fn execute_credential(
             host.executor_execute(adapter, &request, &scope.0).await
         }
         .map_err(|e| attempt_error(e.status(), e.to_string()))?;
+        if !count {
+            // Go `RecordFirstPacket`, `Publish` and `EnsurePublished`.
+            req.usage.token_event(false);
+            req.usage.plugin_response_body(&negotiated.output, &resp.payload);
+            req.usage.publish();
+        }
         return Ok(cpa_core::exec::ExecResponse {
             status: 200,
             headers: header_map(&resp.headers),
@@ -424,6 +442,7 @@ pub(crate) async fn execute_credential(
             opened.chunks,
             scope,
             |error| attempt_error(0, error),
+            Some(req.usage.clone()),
         )),
     })
 }
@@ -592,6 +611,7 @@ fn translate_stream(
     chunks: BoxStream<'static, Chunk>,
     scope: Scope,
     chunk_error: fn(String) -> ExecError,
+    usage: Option<cpa_core::exec::UsageSink>,
 ) -> ExecStream {
     let translating = !n.requested.is_empty() && n.output != n.requested;
     let formats = Format::parse(&n.requested).zip(Format::parse(&n.output));
@@ -608,7 +628,14 @@ fn translate_stream(
         };
         cpa_translate::go_stream(to, from).map(|open| open(&ctx))
     });
+    let usage = usage.map(|sink| StreamUsage {
+        sink,
+        protocol: n.output.clone(),
+        buffer: Vec::new(),
+        ended: false,
+    });
     let state = StreamState {
+        usage,
         native: translator.is_some(),
         translator,
         passthrough: n.requested.is_empty()
@@ -631,6 +658,13 @@ fn translate_stream(
             }
             match s.chunks.next().await {
                 Some(chunk) => {
+                    if let Some(usage) = &mut s.usage {
+                        match &chunk.error {
+                            // Published before the error reaches the reader.
+                            Some(error) => usage.end(Some(error)),
+                            None => usage.chunk(&chunk.payload),
+                        }
+                    }
                     if !chunk.payload.is_empty() {
                         for frame in s.frames(&chunk.payload) {
                             s.push(frame);
@@ -642,6 +676,9 @@ fn translate_stream(
                     }
                 }
                 None => {
+                    if let Some(usage) = &mut s.usage {
+                        usage.end(None);
+                    }
                     // Go `emitTranslatedExecutorStreamTail`.
                     if s.openai_tail {
                         for frame in s.frames(b"data: [DONE]") {
@@ -655,7 +692,96 @@ fn translate_stream(
     }))
 }
 
+/// Go `observeAndTranslateExecutorStream`'s usage side for a credential-bound stream:
+/// usage from the plugin's output lines, published once when the stream ends, fails
+/// or is dropped (Go's canceled context).
+/// ponytail: TTFT is the first chunk (Go `RecordFirstPacket`); Go's per-protocol token
+/// detection (`Observe*TokenEvent`) is not ported, as for the built-in executors.
+struct StreamUsage {
+    sink: cpa_core::exec::UsageSink,
+    protocol: String,
+    /// The part of the last line not yet ended by a newline.
+    buffer: Vec<u8>,
+    ended: bool,
+}
+
+impl StreamUsage {
+    fn chunk(&mut self, payload: &[u8]) {
+        if payload.is_empty() || self.ended {
+            return;
+        }
+        self.sink.token_event(false);
+        let start = self.buffer.len();
+        self.buffer.extend_from_slice(payload);
+        if let Some(end) = payload.iter().rposition(|b| *b == b'\n') {
+            let rest = self.buffer.split_off(start + end + 1);
+            let lines = std::mem::replace(&mut self.buffer, rest);
+            self.lines(&lines);
+        }
+        // A complete JSON payload without its newline counts now, as Go's does. Only a
+        // remainder that can be a whole object or array is validated, so a long line
+        // arriving in many pieces is not rescanned for each one.
+        // ponytail: a bare scalar payload without its newline waits for the next line
+        // (Go flushes it); no usage line is a scalar.
+        if matches!(self.buffer.trim_ascii_end().last(), Some(b'}' | b']'))
+            && extract_stream_json(&self.buffer).is_some_and(cpa_common::json::std_valid)
+        {
+            let rest = std::mem::take(&mut self.buffer);
+            self.lines(&rest);
+        }
+    }
+
+    /// Go `IterateStreamLines`.
+    fn lines(&self, payload: &[u8]) {
+        for line in payload.split(|b| *b == b'\n') {
+            let line = line.trim_ascii();
+            if !line.is_empty() {
+                self.sink.plugin_response_line(&self.protocol, line);
+            }
+        }
+    }
+
+    /// Go `publishResult`: the stream ended, cleanly or with `error`.
+    fn end(&mut self, error: Option<&str>) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let rest = std::mem::take(&mut self.buffer);
+        self.lines(&rest);
+        match error {
+            // Go `HTTPStatusFromError` of a plugin chunk error carries no status.
+            Some(error) => self.sink.publish_failure_with_usage(0, error),
+            None => self.sink.publish(),
+        }
+    }
+}
+
+impl Drop for StreamUsage {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.ended = true;
+            let rest = std::mem::take(&mut self.buffer);
+            self.lines(&rest);
+            // Go: the request context was canceled (`StatusClientClosedRequest`).
+            self.sink.publish_failure_with_usage(499, "context canceled");
+        }
+    }
+}
+
+/// Go `ExtractStreamJSONPayload`.
+fn extract_stream_json(line: &[u8]) -> Option<&[u8]> {
+    let mut trimmed = line.trim_ascii();
+    if trimmed.is_empty() || trimmed == b"[DONE]" || trimmed.starts_with(b"event:") {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix(b"data:") {
+        trimmed = rest.trim_ascii();
+    }
+    (!trimmed.is_empty() && trimmed != b"[DONE]").then_some(trimmed)
+}
+
 struct StreamState {
+    usage: Option<StreamUsage>,
     translator: Option<Box<dyn cpa_translate::stream::GoStream>>,
     /// A built-in stream translator exists for the pair (Go
     /// `executorNativeStreamResponseTranslatorExists`).

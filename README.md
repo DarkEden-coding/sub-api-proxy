@@ -163,7 +163,7 @@ Before switching, read [MIGRATING-FROM-GO.md](docs/MIGRATING-FROM-GO.md), especi
 Not in cliproxy-rs yet:
 
 - An AUR package.
-- Plugin auth parsing of credential files (`auth.parse`), per-credential plugin model discovery (`model.for_auth`) and usage records for plugin executors; plugin request and response translators and thinking appliers. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, credential scheduling, interceptors and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
+- Plugin auth parsing of credential files (`auth.parse`) and per-credential plugin model discovery (`model.for_auth`); plugin request and response translators and thinking appliers. Existing plugins can load, serve routes and quotas, install from the store and participate in frontend auth, model routing, credential scheduling, interceptors and usage hooks. Plugin catalogs bind their models to credentials of the plugin's provider, and plugin executors serve those credentials without a model router. Unix plugins load from content-addressed shadow copies, so their source libraries remain replaceable during reload.
 - Codex requests through bound Sign in with ChatGPT tokens (`use_siwc`) and the `--siwc-bind` command.
 - The remaining parity gaps and Go test cases, listed in [PARITY.md](docs/PARITY.md).
 
