@@ -430,22 +430,13 @@ pub fn escape_json_body_if_likely(body: &[u8], content_type: &str) -> Option<Byt
     if trimmed.is_empty() {
         return None;
     }
-    let value = GoValue::parse(trimmed)?;
-    Some(Bytes::from(escape_strings(value).marshal_no_html()))
-}
-
-fn escape_strings(mut v: GoValue) -> GoValue {
-    match &mut v {
-        GoValue::String(s) => GoValue::String(html_escape(s)),
-        GoValue::Array(items) => GoValue::Array(std::mem::take(items).into_iter().map(escape_strings).collect()),
-        GoValue::Object(map) => GoValue::Object(
-            std::mem::take(map)
-                .into_iter()
-                .map(|(k, v)| (k, escape_strings(v)))
-                .collect(),
-        ),
-        _ => v,
-    }
+    let mut value = GoValue::parse(trimmed)?;
+    value.visit_mut(|v| {
+        if let GoValue::String(s) = v {
+            *s = html_escape(s);
+        }
+    });
+    Some(Bytes::from(value.marshal_no_html()))
 }
 
 /// Go `html.EscapeString`.
@@ -544,5 +535,20 @@ mod tests {
             escape_json_body_if_likely(br#""<b>""#, header_get(&lower, "Content-Type")),
             None
         );
+    }
+
+    /// A legacy response at encoding/json's depth limit escapes on a 2 MiB stack.
+    #[test]
+    fn legacy_json_escaping_handles_the_depth_limit() {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                let deep = |leaf: &str| format!("{}[\"{leaf}\"]{}", r#"[{"s":"#.repeat(4_999), "}]".repeat(4_999));
+                let got = escape_json_body_if_likely(deep("<b>").as_bytes(), "application/json").unwrap();
+                assert_eq!(&got[..], deep("&lt;b&gt;").as_bytes());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
