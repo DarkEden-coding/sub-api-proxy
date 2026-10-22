@@ -13,6 +13,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 
+mod binary;
 pub mod credentials;
 mod document;
 pub mod go_url;
@@ -368,20 +369,8 @@ fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     expand_merges(&mut tree).context("failed to parse config file")?;
     let mut secret = effective_secret(&tree).into_bytes();
     if !secret.is_empty() && binary_secret(text, &tree)? {
-        // yaml.v3 decodes a `!!binary` scalar into a string field, any bytes, with Go's
-        // StdEncoding: padding required, unused bits ignored, line breaks skipped.
-        use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-        use base64::{Engine as _, alphabet};
-        let engine = GeneralPurpose::new(
-            &alphabet::STANDARD,
-            GeneralPurposeConfig::new()
-                .with_decode_allow_trailing_bits(true)
-                .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
-        );
-        let payload: Vec<u8> = secret.into_iter().filter(|b| !matches!(b, b'\r' | b'\n')).collect();
-        secret = engine
-            .decode(payload)
-            .ok()
+        // yaml.v3 decodes a `!!binary` scalar into a string field, any bytes.
+        secret = binary::go_base64(&secret)
             .context("failed to parse config file: yaml: !!binary value contains invalid base64 data")?;
     }
     let mut prepared = text.to_owned();
@@ -579,6 +568,7 @@ fn scalar_exists(node: &Value, value: &str) -> bool {
 /// before the validators. Its errors name settings, not their values.
 fn decode(text: &str) -> anyhow::Result<(Mapping, ConfigDocument)> {
     let mut parsed = serde_yaml_ng::from_str::<Value>(text)?;
+    binary::decode(text, &mut parsed)?;
     // Before any migration, as Go expands aliases first.
     expand_merges(&mut parsed)?;
     let root = match parsed {
