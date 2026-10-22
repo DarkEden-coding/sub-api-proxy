@@ -50,6 +50,44 @@ class ProtocolTests(unittest.TestCase):
         response, body = self.post('/v1/responses', dict(model='local', input=[]), 'fake-codex-a')
         self.assertEqual(response.status, 200)
         self.assertIn(b'event: response.completed', body)
+        self.mock.exhausted.add('fake-codex-a')
+        response, body = self.post('/v1/responses', dict(model='local', input=[]), 'fake-codex-a')
+        self.assertEqual(response.status, 429)
+        self.assertEqual(response.getheader('x-codex-limit-reached'), 'true')
+        self.assertEqual(response.getheader('x-codex-primary-used-percent'), '100')
+        self.assertEqual(json.loads(body)['error']['type'], 'usage_limit_reached')
+        with socket.create_connection(('127.0.0.1', self.mock.server_port), timeout=2) as sock:
+            stream = sock.makefile('rb')
+            self.addCleanup(stream.close)
+            key = base64.b64encode(b'local-fake-nonce!').decode()
+            sock.sendall(('GET /v1/responses HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
+                          'Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n'
+                          f'Sec-WebSocket-Key: {key}\r\nAuthorization: Bearer fake-codex-a\r\n\r\n').encode())
+            self.assertIn(b'101', stream.readline())
+            while stream.readline() != b'\r\n':
+                pass
+            def receive():
+                head = stream.read(2)
+                size = head[1] & 127
+                if size == 126:
+                    size = struct.unpack('!H', stream.read(2))[0]
+                return head[0] & 15, stream.read(size)
+            data = b'{"type":"response.create","input":[]}'
+            mask = b'abcd'
+            sock.sendall(bytes([0x81, 0x80 | len(data)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+            opcode, payload = receive()
+            quota = json.loads(payload)
+            self.assertEqual(opcode, 1)
+            self.assertEqual(quota['type'], 'codex.rate_limits')
+            self.assertTrue(quota['rate_limits']['limit_reached'])
+            opcode, payload = receive()
+            error = json.loads(payload)
+            self.assertEqual(error['status'], 429)
+            self.assertEqual(error['error']['type'], 'usage_limit_reached')
+            self.assertEqual(receive(), (8, struct.pack('!H', 1000)))
+        self.assertEqual(self.mock.records[-1]['action'], 'rate_limits+error+close')
+
+    def test_websocket_normal_close(self):
         with socket.create_connection(('127.0.0.1', self.mock.server_port), timeout=2) as sock:
             stream = sock.makefile('rb')
             self.addCleanup(stream.close)

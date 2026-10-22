@@ -906,6 +906,12 @@ impl Connection {
             Ok(started) => self.forward(socket, started, &cfg, &mut ctx).await,
             Err(error) => {
                 let failure = Failure::from_dispatch(&error);
+                // sub-api-proxy: hook replies are client errors, including retryable 429s.
+                // Deliver them before upstream replay/loss rules can hide their payload.
+                if crate::sap_hooks::current().is_some_and(|s| s.has_reply()) {
+                    send_text(socket, error_payload(failure.status, &failure.text, None)).await;
+                    return Flow::End;
+                }
                 // A pinned continuation's credential failure also lost the session's
                 // socket; the client still needs the replay signal, not the loss close.
                 if ctx.suppress(failure.status) {
@@ -1241,6 +1247,11 @@ impl Connection {
                 }
                 Some(Err(error)) => {
                     let failure = Failure::from_exec(&error);
+                    // sub-api-proxy: preserve a late hook reply in the native error frame.
+                    if crate::sap_hooks::current().is_some_and(|s| s.has_reply()) {
+                        send_text(socket, error_payload(failure.status, &failure.text, None)).await;
+                        return Forwarded::End;
+                    }
                     // Replay before the session-loss close, as at the turn's start.
                     if ctx.suppress(failure.status) {
                         return Forwarded::Suppressed;

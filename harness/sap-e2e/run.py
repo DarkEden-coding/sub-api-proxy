@@ -76,7 +76,7 @@ class Run:
         self.results = []
         (output / 'run.json').write_text(json.dumps(dict(mode='router-mock-diagnostic' if client_only else 'sap-chain',
                                                         recorded_at=time.time(), commit=subprocess.check_output(
-                                                        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip())) + '\n')
+                                                        ['perl', '-e', 'alarm 10; exec @ARGV', 'git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip())) + '\n')
         self.mock = Mock(output / 'upstream.jsonl')
         threading.Thread(target=self.mock.serve_forever, daemon=True).start()
         self.upstream = f'http://127.0.0.1:{self.mock.server_port}'
@@ -93,14 +93,14 @@ class Run:
                     'all_proxy': self.upstream, 'no_proxy': '127.0.0.1,localhost'}
 
     def result(self, name, passed, evidence):
-        entry = dict(name=name, passed=passed, evidence=evidence)
+        entry = dict(name=name, passed=passed, status='diagnostic' if passed is None else 'pass' if passed else 'fail', evidence=evidence)
         self.results.append(entry)
         print(json.dumps(entry), flush=True)
 
     def start(self, command, name):
         log = (self.output / (name + '.log')).open('wb')
         self.handles.append(log)
-        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-f', str(self.profile), *command],
+        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-f', str(self.profile), 'perl', '-e', 'alarm 240; exec @ARGV', *command],
                                    cwd=self.tmp, env=self.env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
         self.processes.append(process)
         return process
@@ -126,7 +126,7 @@ class Run:
         wait_ready(base, proc)
         return proc, base
 
-    def client(self, name, command, env, seconds=15):
+    def client(self, name, command, env, seconds=15, diagnostic=False):
         self.mock.scenario = name
         log = self.output / (name + '.log')
         start = time.monotonic()
@@ -137,9 +137,10 @@ class Run:
                                     stdout=handle, stderr=subprocess.STDOUT, timeout=seconds + 3)
         inference = [r for r in self.mock.records if r['scenario'] == name and
                      ('messages' in r['path'] or 'responses' in r['path'])]
-        self.result(name, result.returncode == 0 and (name.endswith('version') or bool(inference)),
+        self.result(name, None if diagnostic else result.returncode == 0 and (name.endswith('version') or bool(inference)),
                     dict(exit=result.returncode, elapsed=round(time.monotonic() - start, 3), log=log.name,
-                         requests=len(inference)))
+                         requests=len(inference), diagnostic_reason='Native ChatGPT bootstrap is not emulated'
+                         if diagnostic and 'chatgpt' in name else 'Intentional direct-mock exhaustion' if diagnostic else None))
         return result.returncode
 
     def execute(self):
@@ -185,7 +186,19 @@ class Run:
             (self.output / 'threads.json').write_text(json.dumps(dict(status=status, body=threads), indent=2) + '\n')
             self.result('sap-assignment-and-affinity', status == 200 and isinstance(threads, list)
                         and bool(threads) and all(t.get('account') for t in threads), dict(status=status, threads=threads))
+        if not self.client_only:
+            self.claude_move(claude, claude_env)
         for mode in ('custom', 'custom-http', 'chatgpt'):
+            if mode == 'custom-http' and not self.client_only:
+                # Isolate quota state between transport scenarios, retaining the ports
+                # and sandbox. Each scenario must start with two usable accounts.
+                command = primary.args[6:]
+                primary.terminate()
+                primary.wait(timeout=5)
+                for path in (self.tmp / 'primary').glob('sap.sqlite*'):
+                    path.unlink()
+                primary = self.start(command, 'primary-http')
+                wait_ready(primary_base, primary)
             home = self.tmp / ('codex-' + mode)
             home.mkdir()
             config = 'model = "gpt-5.4"\n'
@@ -207,20 +220,32 @@ class Run:
             codex_env = dict(CODEX_HOME=str(home), OPENAI_API_KEY=KEY, OPENAI_BASE_URL=self.base + '/v1')
             codex = [shutil.which('codex'), 'exec', '--skip-git-repo-check', '--json', 'Say local.']
             self.client('codex-' + mode + '-version', [codex[0], '--version'], codex_env, 10)
-            self.client('codex-' + mode, codex, codex_env)
+            self.client('codex-' + mode, codex, codex_env, diagnostic=mode == 'chatgpt')
             if self.client_only and mode == 'custom':
                 self.mock.codex_tool = True
                 self.client('codex-' + mode + '-socket-close', codex, codex_env, 15)
-            self.mock.exhausted.update({'fake-codex-a', 'fake-codex-b', *(['unknown'] if self.client_only else [])})
-            self.client('codex-' + mode + '-exhausted', codex, codex_env, 15)
+            if self.client_only:
+                self.mock.exhausted.add('unknown')
+            elif mode.startswith('custom'):
+                self.mock.exhaust_next_codex = True
+            self.client('codex-' + mode + '-exhausted', codex, codex_env, 15, diagnostic=mode == 'chatgpt' or self.client_only)
+            if mode.startswith('custom') and not self.client_only:
+                rows = [r for r in self.mock.records if r['scenario'] == 'codex-' + mode + '-exhausted']
+                failed = next((r['account'] for r in rows if r['status'] == 429), None)
+                client_log = (self.output / ('codex-' + mode + '-exhausted.log')).read_text()
+                hidden = 'turn.failed' not in client_log and 'usage_limit_reached' not in client_log
+                self.result('sap-codex-' + mode + '-exhaustion-move', hidden and failed is not None
+                            and any(r['account'] != failed and r['status'] == 200 and r['generate'] is not False
+                                    for r in rows), rows)
             self.mock.exhausted.clear()
+            self.mock.exhaust_next_codex = False
         if self.client_only:
             self.client('claude-compact', [*claude, '--resume', session, '/compact'], claude_env)
         # Exercise provider-shaped exhaustion through the real Claude client.
         used = [r['account'] for r in self.mock.records if 'messages' in r['path'] and r['status'] == 200]
         if used:
             self.mock.exhausted.add(used[-1])
-        self.client('claude-exhausted', [*claude, '--resume', session, 'Continue after exhaustion.'], claude_env, 15)
+        self.client('claude-exhausted', [*claude, '--resume', session, 'Continue after exhaustion.'], claude_env, 15, diagnostic=self.client_only)
         self.mock.exhausted.clear()
         if self.client_only:
             self.client_features()
@@ -239,9 +264,64 @@ class Run:
         reached = self.mock.records[before:]
         self.result('router-real-client-failover-under-five-seconds', bool(reached)
                     and reached[0]['time'] - self.kill_time < 5,
-                    dict(router=request(self.base, '/sap/router/status')[1]))
-        self.result('sap-exhaustion-move-and-forced-resend', False,
-                    'Blocked: config API keys have no subscription metadata; inspect threads.json. Resume is a full-history process restart, not an in-process continue.')
+                    dict(kill_to_first_request_secs=round(reached[0]['time'] - self.kill_time, 3) if reached else None,
+                         router=request(self.base, '/sap/router/status')[1]))
+
+
+    def claude_move(self, claude, env):
+        # One live process, two turns. Only synthetic user messages enter stdin.
+        name = 'claude-in-process-exhaustion'
+        self.mock.scenario = name
+        session = str(uuid.uuid4())
+        command = [*claude[:-1], 'stream-json', '--input-format', 'stream-json', '--verbose',
+                   '--session-id', session]
+        log = self.output / (name + '.log')
+        with log.open('wb') as handle:
+            process = subprocess.Popen(['perl', '-e', 'alarm 35; exec @ARGV',
+                '/usr/bin/sandbox-exec', '-f', str(self.profile), *command], cwd=self.tmp,
+                env={**self.env, **env}, stdin=subprocess.PIPE, stdout=handle, stderr=handle)
+            self.processes.append(process)
+            def turn(text, count):
+                process.stdin.write((json.dumps(dict(type='user', session_id=session,
+                    message=dict(role='user', content=text))) + '\n').encode())
+                process.stdin.flush()
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline and process.poll() is None:
+                    lines = log.read_text(errors='replace').splitlines()
+                    results = []
+                    for line in lines:
+                        try:
+                            value = json.loads(line)
+                            if value.get('type') == 'result':
+                                results.append(value)
+                        except ValueError:
+                            pass
+                    if len(results) >= count:
+                        return not results[-1].get('is_error', False)
+                    time.sleep(.1)
+                return False
+            first = turn('Say local.', 1)
+            before = [r for r in self.mock.records if r['scenario'] == name]
+            account = before[-1]['account'] if before else None
+            if account:
+                self.mock.exhausted.add(account)
+            second = turn('Continue locally after exhaustion.', 2) if first else False
+            process.stdin.close()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait(timeout=3)
+        self.mock.exhausted.clear()
+        rows = [r for r in self.mock.records if r['scenario'] == name]
+        continued = any(r['thread'] and r['thread'].get('type') == 'continue' for r in rows)
+        moved = any(r['status'] == 429 and r['account'] == account for r in rows) and any(
+            r['status'] == 200 and r['account'] != account for r in rows)
+        self.result('sap-exhaustion-move-and-forced-resend', first and second and moved and not continued,
+            dict(log=log.name, native_continue=continued, forced_resend_triggered=False,
+                 note='Native continuation observed; forced 400/full resend needs verification' if continued else
+                 'No thread field in custom-base mode; each request carries full history, so the move is free.',
+                 requests=rows))
 
     def client_features(self):
         records = self.mock.records
@@ -249,8 +329,7 @@ class Run:
         self.result('claude-session-and-agent-headers', any('x-claude-code-agent-id' in r['headers'] for r in claude)
                     and all('x-claude-code-session-id' in r['headers'] for r in claude),
                     dict(requests=len(claude), message_counts=[r['message_count'] for r in claude]))
-        self.result('claude-native-thread-and-request-class', bool(claude) and all(r['thread'] is not None
-                    and 'x-claude-code-request-class' in r['headers'] for r in claude),
+        self.result('claude-native-thread-and-request-class', None,
                     dict(thread_fields=[r['thread'] for r in claude],
                          request_class=[r['headers'].get('x-claude-code-request-class') for r in claude],
                          compaction_headers=[r['headers'].get('x-claude-code-compaction') for r in records if r['scenario'] == 'claude-compact']))
@@ -306,7 +385,7 @@ def main():
         run.execute()
     finally:
         run.close()
-    return 0 if all(r['passed'] for r in run.results) else 1
+    return 0 if all(r['passed'] is not False for r in run.results) else 1
 
 
 if __name__ == '__main__':

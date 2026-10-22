@@ -193,7 +193,8 @@ async fn handle(
     .await
 }
 
-struct ClaudeSse;
+// sub-api-proxy: share the native writer with hook stream regression tests.
+pub(crate) struct ClaudeSse;
 
 impl Writer for ClaudeSse {
     fn chunk(&mut self, event: Bytes) -> Vec<Bytes> {

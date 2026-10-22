@@ -2,56 +2,232 @@
   {
     "name": "claude-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.02,
+      "elapsed": 0.039,
       "log": "claude-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "claude-new-tool-child",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": -14,
-      "elapsed": 15.049,
+      "exit": 0,
+      "elapsed": 0.343,
       "log": "claude-new-tool-child.log",
-      "requests": 0
+      "requests": 4,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "claude-resume",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": -14,
-      "elapsed": 15.083,
+      "exit": 0,
+      "elapsed": 0.235,
       "log": "claude-resume.log",
-      "requests": 0
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "sap-assignment-and-affinity",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
       "status": 200,
       "threads": [
         {
-          "key": "claude:5a058031-2518-441e-9270-c522cab3dcf2",
+          "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
           "client": "claude_code",
           "machine": "sap-e2e",
           "title": null,
           "lineage": "root",
           "parent": null,
           "agent_label": null,
-          "account": null,
-          "reason": null,
+          "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+          "reason": "kept",
           "serving_node": "primary",
           "streaming": false,
-          "cache_hit_percent": null,
+          "cache_hit_percent": 0.0,
           "compactions": 0,
-          "requests": 0,
-          "first_seen": "2026-10-22T22:21:32.733900Z",
-          "last_seen": "2026-10-22T22:21:56.718920Z"
+          "requests": 4,
+          "first_seen": "2026-10-22T22:38:58.685996Z",
+          "last_seen": "2026-10-22T22:38:59.031567Z"
+        },
+        {
+          "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba/acdc944f348f5daf9",
+          "client": "claude_code",
+          "machine": "sap-e2e",
+          "title": null,
+          "lineage": "subagent",
+          "parent": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
+          "agent_label": null,
+          "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+          "reason": "parent affinity",
+          "serving_node": "primary",
+          "streaming": false,
+          "cache_hit_percent": 0.0,
+          "compactions": 0,
+          "requests": 1,
+          "first_seen": "2026-10-22T22:38:58.745411Z",
+          "last_seen": "2026-10-22T22:38:58.745411Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "sap-exhaustion-move-and-forced-resend",
+    "passed": true,
+    "status": "pass",
+    "evidence": {
+      "log": "claude-in-process-exhaustion.log",
+      "native_continue": false,
+      "forced_resend_triggered": false,
+      "note": "No thread field in custom-base mode; each request carries full history, so the move is free.",
+      "requests": [
+        {
+          "scenario": "claude-in-process-exhaustion",
+          "transport": "http",
+          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
+          "action": "reply",
+          "connection": null,
+          "account": "fake-claude-a",
+          "status": 200,
+          "headers": {
+            "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
+            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
+          },
+          "fields": [
+            "context_management",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "thread": null,
+          "previous_response_id": null,
+          "generate": null,
+          "message_count": 1,
+          "input_count": 0,
+          "tools": [
+            "Agent",
+            "Bash",
+            "Edit",
+            "ListAgents",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "Skill",
+            "ToolSearch",
+            "Workflow",
+            "DeferredToolPlaceholder",
+            "Write"
+          ],
+          "time": 1792708739.428185
+        },
+        {
+          "scenario": "claude-in-process-exhaustion",
+          "transport": "http",
+          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
+          "action": "reply",
+          "connection": null,
+          "account": "fake-claude-a",
+          "status": 429,
+          "headers": {
+            "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
+            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
+          },
+          "fields": [
+            "context_management",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "thread": null,
+          "previous_response_id": null,
+          "generate": null,
+          "message_count": 3,
+          "input_count": 0,
+          "tools": [
+            "Agent",
+            "Bash",
+            "Edit",
+            "ListAgents",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "Skill",
+            "ToolSearch",
+            "Workflow",
+            "DeferredToolPlaceholder",
+            "Write"
+          ],
+          "time": 1792708739.522558
+        },
+        {
+          "scenario": "claude-in-process-exhaustion",
+          "transport": "http",
+          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
+          "action": "reply",
+          "connection": null,
+          "account": "fake-claude-b",
+          "status": 200,
+          "headers": {
+            "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
+            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
+          },
+          "fields": [
+            "context_management",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "thread": null,
+          "previous_response_id": null,
+          "generate": null,
+          "message_count": 3,
+          "input_count": 0,
+          "tools": [
+            "Agent",
+            "Bash",
+            "Edit",
+            "ListAgents",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "Skill",
+            "ToolSearch",
+            "Workflow",
+            "DeferredToolPlaceholder",
+            "Write"
+          ],
+          "time": 1792708739.553005
         }
       ]
     }
@@ -59,132 +235,414 @@
   {
     "name": "codex-custom-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
       "elapsed": 0.02,
       "log": "codex-custom-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": 1,
-      "elapsed": 0.241,
+      "exit": 0,
+      "elapsed": 0.178,
       "log": "codex-custom.log",
-      "requests": 0
+      "requests": 2,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-exhausted",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": 1,
-      "elapsed": 0.24,
+      "exit": 0,
+      "elapsed": 0.51,
       "log": "codex-custom-exhausted.log",
-      "requests": 0
+      "requests": 3,
+      "diagnostic_reason": null
     }
+  },
+  {
+    "name": "sap-codex-custom-exhaustion-move",
+    "passed": true,
+    "status": "pass",
+    "evidence": [
+      {
+        "scenario": "codex-custom-exhausted",
+        "transport": "ws",
+        "path": "http://127.0.0.1:60737/v1/responses",
+        "action": "reply",
+        "connection": 10,
+        "account": "fake-codex-b",
+        "status": 200,
+        "headers": {
+          "x-codex-beta-features": "remote_compaction_v2",
+          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
+          "openai-beta": "responses_websockets=2026-02-06"
+        },
+        "fields": [
+          "client_metadata",
+          "generate",
+          "include",
+          "input",
+          "instructions",
+          "model",
+          "parallel_tool_calls",
+          "prompt_cache_key",
+          "reasoning",
+          "store",
+          "stream",
+          "tool_choice",
+          "tools",
+          "type"
+        ],
+        "thread": null,
+        "previous_response_id": null,
+        "generate": false,
+        "message_count": 0,
+        "input_count": 1,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null,
+          null
+        ],
+        "time": 1792708739.943887
+      },
+      {
+        "scenario": "codex-custom-exhausted",
+        "transport": "ws",
+        "path": "http://127.0.0.1:60737/v1/responses",
+        "action": "rate_limits+error+close",
+        "connection": 10,
+        "account": "fake-codex-b",
+        "status": 429,
+        "headers": {
+          "x-codex-beta-features": "remote_compaction_v2",
+          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
+          "openai-beta": "responses_websockets=2026-02-06"
+        },
+        "fields": [
+          "client_metadata",
+          "include",
+          "input",
+          "instructions",
+          "model",
+          "parallel_tool_calls",
+          "prompt_cache_key",
+          "reasoning",
+          "store",
+          "stream",
+          "tool_choice",
+          "tools",
+          "type"
+        ],
+        "thread": null,
+        "previous_response_id": null,
+        "generate": null,
+        "message_count": 0,
+        "input_count": 4,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null,
+          null
+        ],
+        "time": 1792708739.9625149
+      },
+      {
+        "scenario": "codex-custom-exhausted",
+        "transport": "ws",
+        "path": "http://127.0.0.1:60737/v1/responses",
+        "action": "reply",
+        "connection": 12,
+        "account": "fake-codex-a",
+        "status": 200,
+        "headers": {
+          "x-codex-beta-features": "remote_compaction_v2",
+          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-830a-7b71-8b23-97b4b2d5f39f\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-830a-7b71-8b23-97b4b2d5f39f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708739851,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
+          "openai-beta": "responses_websockets=2026-02-06"
+        },
+        "fields": [
+          "client_metadata",
+          "include",
+          "input",
+          "instructions",
+          "model",
+          "parallel_tool_calls",
+          "prompt_cache_key",
+          "reasoning",
+          "store",
+          "stream",
+          "tool_choice",
+          "tools",
+          "type"
+        ],
+        "thread": null,
+        "previous_response_id": null,
+        "generate": null,
+        "message_count": 0,
+        "input_count": 4,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null,
+          null
+        ],
+        "time": 1792708740.281704
+      }
+    ]
   },
   {
     "name": "codex-custom-http-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.02,
+      "elapsed": 0.039,
       "log": "codex-custom-http-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-http",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": 1,
-      "elapsed": 0.077,
+      "exit": 0,
+      "elapsed": 0.126,
       "log": "codex-custom-http.log",
-      "requests": 0
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-http-exhausted",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": 1,
-      "elapsed": 0.074,
+      "exit": 0,
+      "elapsed": 0.131,
       "log": "codex-custom-http-exhausted.log",
-      "requests": 0
+      "requests": 2,
+      "diagnostic_reason": null
     }
+  },
+  {
+    "name": "sap-codex-custom-http-exhaustion-move",
+    "passed": true,
+    "status": "pass",
+    "evidence": [
+      {
+        "scenario": "codex-custom-http-exhausted",
+        "transport": "http",
+        "path": "http://127.0.0.1:60737/v1/responses",
+        "action": "reply",
+        "connection": null,
+        "account": "fake-codex-b",
+        "status": 429,
+        "headers": {
+          "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
+          "session-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "thread-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "x-codex-beta-features": "remote_compaction_v2",
+          "x-codex-turn-metadata": "{\"installation_id\":\"9d77ad54-70e7-4ec7-a6e4-e0a38c465552\",\"session_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"thread_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"window_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-85fb-7580-a4ad-a7ed6d3f46d0\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708740633,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-window-id": "01a165c4-85fa-7d73-a273-bcf214181b7c:0"
+        },
+        "fields": [
+          "client_metadata",
+          "include",
+          "input",
+          "instructions",
+          "model",
+          "parallel_tool_calls",
+          "prompt_cache_key",
+          "reasoning",
+          "store",
+          "stream",
+          "tool_choice",
+          "tools"
+        ],
+        "thread": null,
+        "previous_response_id": null,
+        "generate": null,
+        "message_count": 0,
+        "input_count": 4,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null,
+          null
+        ],
+        "time": 1792708740.653013
+      },
+      {
+        "scenario": "codex-custom-http-exhausted",
+        "transport": "http",
+        "path": "http://127.0.0.1:60737/v1/responses",
+        "action": "reply",
+        "connection": null,
+        "account": "fake-codex-a",
+        "status": 200,
+        "headers": {
+          "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
+          "session-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "thread-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "x-codex-beta-features": "remote_compaction_v2",
+          "x-codex-turn-metadata": "{\"installation_id\":\"9d77ad54-70e7-4ec7-a6e4-e0a38c465552\",\"session_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"thread_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"window_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-85fb-7580-a4ad-a7ed6d3f46d0\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708740633,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-window-id": "01a165c4-85fa-7d73-a273-bcf214181b7c:0"
+        },
+        "fields": [
+          "client_metadata",
+          "include",
+          "input",
+          "instructions",
+          "model",
+          "parallel_tool_calls",
+          "prompt_cache_key",
+          "reasoning",
+          "store",
+          "stream",
+          "tool_choice",
+          "tools"
+        ],
+        "thread": null,
+        "previous_response_id": null,
+        "generate": null,
+        "message_count": 0,
+        "input_count": 4,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null,
+          null
+        ],
+        "time": 1792708740.665332
+      }
+    ]
   },
   {
     "name": "codex-chatgpt-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
       "elapsed": 0.02,
       "log": "codex-chatgpt-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-chatgpt",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.074,
+      "elapsed": 15.073,
       "log": "codex-chatgpt.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
     }
   },
   {
     "name": "codex-chatgpt-exhausted",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.075,
+      "elapsed": 15.031,
       "log": "codex-chatgpt-exhausted.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
     }
   },
   {
     "name": "claude-exhausted",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": -14,
-      "elapsed": 15.041,
+      "exit": 0,
+      "elapsed": 0.343,
       "log": "claude-exhausted.log",
-      "requests": 0
+      "requests": 2,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "router-untracked-transport-probe",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "status": 200,
-      "kill_to_response_secs": 0.025
+      "kill_to_response_secs": 0.005
     }
   },
   {
     "name": "claude-backup",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
-      "exit": -14,
-      "elapsed": 15.068,
+      "exit": 0,
+      "elapsed": 0.239,
       "log": "claude-backup.log",
-      "requests": 0
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "router-real-client-failover-under-five-seconds",
-    "passed": false,
+    "passed": true,
+    "status": "pass",
     "evidence": {
+      "kill_to_first_request_secs": 0.178,
       "router": {
         "preferred": "backup",
         "servers": [
           {
             "name": "primary",
             "state": "down",
-            "consecutive_failures": 16
+            "consecutive_failures": 2
           },
           {
             "name": "backup",
@@ -194,10 +652,5 @@
         ]
       }
     }
-  },
-  {
-    "name": "sap-exhaustion-move-and-forced-resend",
-    "passed": false,
-    "evidence": "Blocked: config API keys have no subscription metadata; inspect threads.json. Resume is a full-history process restart, not an in-process continue."
   }
 ]

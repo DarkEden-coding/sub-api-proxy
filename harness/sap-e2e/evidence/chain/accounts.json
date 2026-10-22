@@ -1,4 +1,73 @@
 {
   "status": 200,
-  "body": []
+  "body": [
+    {
+      "id": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+      "provider": "claude",
+      "label": "claude-apikey",
+      "email": null,
+      "plan": null,
+      "capacity_multiplier": 1.0,
+      "capacity_source": "default",
+      "priority": 0,
+      "state": "idle",
+      "weight_percent": 50.0,
+      "windows": [],
+      "active_threads": 0,
+      "available_at": null,
+      "login_needed_on": [],
+      "stale": true
+    },
+    {
+      "id": "claude:api-key:claude:apikey:ea57a9428d53",
+      "provider": "claude",
+      "label": "claude-apikey",
+      "email": null,
+      "plan": null,
+      "capacity_multiplier": 1.0,
+      "capacity_source": "default",
+      "priority": 0,
+      "state": "idle",
+      "weight_percent": 50.0,
+      "windows": [],
+      "active_threads": 0,
+      "available_at": null,
+      "login_needed_on": [],
+      "stale": true
+    },
+    {
+      "id": "codex:api-key:codex:apikey:78a1fb1903d9",
+      "provider": "codex",
+      "label": "codex-apikey",
+      "email": null,
+      "plan": null,
+      "capacity_multiplier": 1.0,
+      "capacity_source": "default",
+      "priority": 0,
+      "state": "idle",
+      "weight_percent": 50.0,
+      "windows": [],
+      "active_threads": 0,
+      "available_at": null,
+      "login_needed_on": [],
+      "stale": true
+    },
+    {
+      "id": "codex:api-key:codex:apikey:8f25c62e5d70",
+      "provider": "codex",
+      "label": "codex-apikey",
+      "email": null,
+      "plan": null,
+      "capacity_multiplier": 1.0,
+      "capacity_source": "default",
+      "priority": 0,
+      "state": "idle",
+      "weight_percent": 50.0,
+      "windows": [],
+      "active_threads": 0,
+      "available_at": null,
+      "login_needed_on": [],
+      "stale": true
+    }
+  ]
 }

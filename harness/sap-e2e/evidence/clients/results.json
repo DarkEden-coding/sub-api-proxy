@@ -2,156 +2,187 @@
   {
     "name": "claude-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.185,
+      "elapsed": 0.041,
       "log": "claude-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "claude-new-tool-child",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.453,
+      "elapsed": 0.238,
       "log": "claude-new-tool-child.log",
-      "requests": 4
+      "requests": 4,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "claude-resume",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.188,
+      "elapsed": 0.183,
       "log": "claude-resume.log",
-      "requests": 1
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.019,
+      "elapsed": 0.02,
       "log": "codex-custom-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.181,
+      "elapsed": 0.177,
       "log": "codex-custom.log",
-      "requests": 2
+      "requests": 2,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-socket-close",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.512,
+      "elapsed": 0.506,
       "log": "codex-custom-socket-close.log",
-      "requests": 4
+      "requests": 4,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-exhausted",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": 1,
-      "elapsed": 0.237,
+      "elapsed": 0.181,
       "log": "codex-custom-exhausted.log",
-      "requests": 2
+      "requests": 2,
+      "diagnostic_reason": "Intentional direct-mock exhaustion"
     }
   },
   {
     "name": "codex-custom-http-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.02,
+      "elapsed": 0.019,
       "log": "codex-custom-http-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-http",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
       "elapsed": 0.077,
       "log": "codex-custom-http.log",
-      "requests": 1
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-custom-http-exhausted",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": 1,
-      "elapsed": 0.077,
+      "elapsed": 0.131,
       "log": "codex-custom-http-exhausted.log",
-      "requests": 1
+      "requests": 1,
+      "diagnostic_reason": "Intentional direct-mock exhaustion"
     }
   },
   {
     "name": "codex-chatgpt-version",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.02,
+      "elapsed": 0.021,
       "log": "codex-chatgpt-version.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "codex-chatgpt",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.074,
+      "elapsed": 15.028,
       "log": "codex-chatgpt.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
     }
   },
   {
     "name": "codex-chatgpt-exhausted",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.043,
+      "elapsed": 15.053,
       "log": "codex-chatgpt-exhausted.log",
-      "requests": 0
+      "requests": 0,
+      "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
     }
   },
   {
     "name": "claude-compact",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.568,
+      "elapsed": 0.18,
       "log": "claude-compact.log",
-      "requests": 1
+      "requests": 1,
+      "diagnostic_reason": null
     }
   },
   {
     "name": "claude-exhausted",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.041,
+      "elapsed": 15.032,
       "log": "claude-exhausted.log",
-      "requests": 5
+      "requests": 5,
+      "diagnostic_reason": "Intentional direct-mock exhaustion"
     }
   },
   {
     "name": "claude-session-and-agent-headers",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "requests": 4,
       "message_counts": [
@@ -164,7 +195,8 @@
   },
   {
     "name": "claude-native-thread-and-request-class",
-    "passed": false,
+    "passed": null,
+    "status": "diagnostic",
     "evidence": {
       "thread_fields": [
         null,
@@ -186,40 +218,42 @@
   {
     "name": "codex-full-input-after-normal-close",
     "passed": true,
+    "status": "pass",
     "evidence": [
       {
         "action": "reply",
         "connection": 7,
         "input_count": 1,
         "previous_response_id": null,
-        "time": 1792707900.54896
+        "time": 1792708743.72298
       },
       {
         "action": "reply",
         "connection": 7,
         "input_count": 4,
         "previous_response_id": null,
-        "time": 1792707900.555396
+        "time": 1792708743.72941
       },
       {
         "action": "close",
         "connection": 7,
         "input_count": 1,
         "previous_response_id": "resp_local_9",
-        "time": 1792707900.590869
+        "time": 1792708743.7655392
       },
       {
         "action": "reply",
         "connection": 10,
         "input_count": 6,
         "previous_response_id": null,
-        "time": 1792707900.8899179
+        "time": 1792708744.063071
       }
     ]
   },
   {
     "name": "codex-custom-native-metadata",
     "passed": true,
+    "status": "pass",
     "evidence": {
       "prewarm": true,
       "remote_compaction_advertised": true
