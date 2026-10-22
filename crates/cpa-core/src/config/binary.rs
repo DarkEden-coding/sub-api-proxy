@@ -158,7 +158,13 @@ fn events(text: &str) -> anyhow::Result<Vec<Event>> {
                     unsafe_libyaml::YAML_DOCUMENT_START_EVENT => true,
                     _ => false,
                 };
-                let span = text.get(event.start_mark.index as usize..event.end_mark.index as usize);
+                // libyaml skips a leading BOM without counting it in its marks.
+                let bom = if text.starts_with('\u{feff}') { 3 } else { 0 };
+                let (start, end) = (
+                    event.start_mark.index as usize + bom,
+                    event.end_mark.index as usize + bom,
+                );
+                let span = text.get(start..end);
                 if tagged && span.is_none_or(|s| s.contains("%00")) {
                     unsafe_libyaml::yaml_event_delete(event);
                     bail!(UNSUPPORTED_TAG);

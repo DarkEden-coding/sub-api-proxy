@@ -22,6 +22,7 @@ const REFUSED: &[(&str, &str)] = &[
     ("NUL in a binary tag", TAG),
     ("NUL in a tag directive", TAG),
     ("NUL in a tag after a block scalar holding a quote", TAG),
+    ("NUL in a tag after a BOM", TAG),
     ("canonically tagged merge key", KEY),
     ("canonically tagged port key", KEY),
     ("non-specific document marker secret", TAG),

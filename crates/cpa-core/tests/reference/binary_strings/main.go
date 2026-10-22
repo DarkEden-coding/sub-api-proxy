@@ -77,6 +77,8 @@ func main() {
 		{"NUL in a tag directive", "%TAG !e! tag:yaml.org,2002:bin%00\n---\nmanagement:\n  secret-key: !e!ary c2VjcmV0\n"},
 		{"NUL in a tag after a block scalar holding a quote", "note: |\n  \"\nmanagement:\n  secret-key: !%21binary%00x c2VjcmV0\n"},
 		{"NUL escape in an untagged value", "management:\n  secret-key: secret%00\n"},
+		{"NUL in a tag after a BOM", "\ufeffmanagement:\n  secret-key: !%00 ~\n"},
+		{"secret after a BOM", "\ufeffmanagement:\n  secret-key: secret\n"},
 		// Tagged keys, merge keys among them.
 		{"merge key", "<<:\n  management:\n    secret-key: secret\n"},
 		{"canonically tagged merge key", "!!str <<:\n  management:\n    secret-key: secret\n"},

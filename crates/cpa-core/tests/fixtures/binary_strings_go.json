@@ -308,6 +308,24 @@
     "api_keys": null
   },
   {
+    "name": "NUL in a tag after a BOM",
+    "yaml": "﻿management:\n  secret-key: !%00 ~\n",
+    "error": "",
+    "secret_key": "~",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "secret after a BOM",
+    "yaml": "﻿management:\n  secret-key: secret\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
     "name": "merge key",
     "yaml": "\u003c\u003c:\n  management:\n    secret-key: secret\n",
     "error": "",
