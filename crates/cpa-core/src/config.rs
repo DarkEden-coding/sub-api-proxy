@@ -357,6 +357,13 @@ pub fn prepare_for_upload(path: &Path) -> anyhow::Result<()> {
 
 fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     decode(text).context("failed to parse config file")?;
+    // yaml.v3 and libyaml end a line at NEL, LS and PS too; yaml-edit, which places
+    // the edits and reads the secret's tag, does not, so a comment would hide what
+    // follows it. Refuse rather than misread the file.
+    anyhow::ensure!(
+        !text.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+        "the config file contains a Unicode line separator yaml-edit cannot read"
+    );
     let mut tree = scalar_texts(text).context("failed to parse config file")?;
     expand_merges(&mut tree).context("failed to parse config file")?;
     let mut secret = effective_secret(&tree).into_bytes();

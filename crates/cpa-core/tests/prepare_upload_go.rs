@@ -3,10 +3,11 @@
 //! the file was left alone, the prepared file's content (bcrypt hashes masked) and
 //! whether its secret is the hash of the expected plaintext.
 //!
-//! Rust refuses two kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
+//! Rust refuses three kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
 //! where re-emitting the alias-expanded tree would change another setting, and where
 //! the secret's tag depends on a `%TAG` directive or the secret is reached through an
-//! alias or merge in a file with a tag that could be binary. Those cases expect Rust's refusal.
+//! alias or merge in a file with a tag that could be binary, and any file with a
+//! Unicode line separator. Those cases expect Rust's refusal.
 use serde_json::Value as Json;
 use serde_yaml_ng::Value;
 
@@ -42,6 +43,12 @@ const TAG_REFUSED: &[&str] = &[
     "binary secret through a merge beside a copy",
 ];
 const TAG_REFUSAL: &str = "the management key's YAML tag cannot be resolved for upload";
+const LINE_REFUSED: &[&str] = &[
+    "binary anchor after a NEL-ended comment",
+    "binary anchor after a NEL-ended comment beside a copy",
+    "line separator in a string",
+];
+const LINE_REFUSAL: &str = "the config file contains a Unicode line separator yaml-edit cannot read";
 
 #[test]
 fn prepare_for_upload_matches_go() {
@@ -71,6 +78,8 @@ fn prepare_for_upload_matches_go() {
             Some(REWRITE_REFUSAL)
         } else if TAG_REFUSED.contains(&name) {
             Some(TAG_REFUSAL)
+        } else if LINE_REFUSED.contains(&name) {
+            Some(LINE_REFUSAL)
         } else {
             None
         };
