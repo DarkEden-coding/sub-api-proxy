@@ -183,7 +183,11 @@ async fn status_command_uses_local_http_and_management_auth() {
 fn codex_updates_existing_provider_without_losing_comments() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.toml");
-    let original = "model_provider = \"old\" # selected provider\n[model_providers.sub-api-proxy]\nbase_url = \"http://127.0.0.1:9/v1\" # endpoint\ncustom = true\n";
+    let original = r#"model_provider = "old" # selected provider
+[model_providers.sub-api-proxy]
+base_url = "http://127.0.0.1:9/v1" # endpoint
+custom = true
+"#;
     fs::write(&path, original).unwrap();
     setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:8317", None, false).unwrap();
     let changed = fs::read_to_string(&path).unwrap();
