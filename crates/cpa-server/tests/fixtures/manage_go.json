@@ -30157,6 +30157,273 @@
    ]
   },
   {
+   "name": "server_github_token",
+   "yaml": "github-token: ' fake-legacy-token '\nremote-management:\n  secret-key: '$HASH'\n",
+   "steps": [
+    {
+     "method": "GET",
+     "path": "/config",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "server": {
+       "github-token": " fake-legacy-token "
+      }
+     },
+     "raw_json": "{\"config-version\":8,\"management\":{\"secret-key\":\"$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy\"},\"server\":{\"github-token\":\" fake-legacy-token \"}}",
+     "file": {
+      "github-token": " fake-legacy-token ",
+      "remote-management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config/server/github-token",
+     "status": 200,
+     "response": " fake-legacy-token ",
+     "raw_json": "\" fake-legacy-token \"",
+     "file": {
+      "github-token": " fake-legacy-token ",
+      "remote-management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config/routing/strategy",
+     "body": "\"fill-first\"",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": " fake-legacy-token "
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config/server/github-token",
+     "body": "\"fake-patched\"",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": "fake-patched"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config/server",
+     "status": 200,
+     "response": {
+      "github-token": "fake-patched"
+     },
+     "raw_json": "{\"github-token\":\"fake-patched\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": "fake-patched"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config/server/github-token",
+     "body": "5",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": 5
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config/server/github-token",
+     "status": 200,
+     "response": 5,
+     "raw_json": "5",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": 5
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config/server/github-token",
+     "body": "{\"a\":1}",
+     "status": 422,
+     "response": {
+      "error": "invalid_config",
+      "message": "parse config payload: yaml: unmarshal errors:\n  line 3: cannot unmarshal !!map into string"
+     },
+     "raw_json": "{\"error\":\"invalid_config\",\"message\":\"parse config payload: yaml: unmarshal errors:\\n  line 3: cannot unmarshal !!map into string\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": 5
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PATCH",
+     "path": "/config",
+     "body": "{\"server\":{\"github-token\":null}}",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "$2a$04$DkafNiD0pin0jEPiBfRIQu673X07ncxkn8Xr.p7bWjMJz.wfsvDzy"
+      },
+      "routing": {
+       "strategy": "fill-first"
+      },
+      "server": {
+       "github-token": null
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "PUT",
+     "path": "/config.yaml",
+     "body": "config-version: 8\nmanagement:\n  secret-key: fake-secret\nserver:\n  github-token: fake-yaml-token\n",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "github-token": "fake-yaml-token"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "GET",
+     "path": "/config.yaml",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "github-token": "fake-yaml-token"
+      }
+     },
+     "raw_response": "config-version: 8\nmanagement:\n    secret-key: fake-secret\nserver:\n    github-token: fake-yaml-token\n",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      },
+      "server": {
+       "github-token": "fake-yaml-token"
+      }
+     },
+     "file_has_archive": false
+    },
+    {
+     "method": "DELETE",
+     "path": "/config/server/github-token",
+     "status": 200,
+     "response": {
+      "config-version": 8,
+      "status": "ok"
+     },
+     "raw_json": "{\"config-version\":8,\"status\":\"ok\"}",
+     "file": {
+      "config-version": 8,
+      "management": {
+       "secret-key": "fake-secret"
+      }
+     },
+     "file_has_archive": false
+    }
+   ]
+  },
+  {
    "name": "merge_keys_in_json_bodies",
    "yaml": "config-version: 8\nmanagement:\n  secret-key: '$HASH'\n",
    "steps": [

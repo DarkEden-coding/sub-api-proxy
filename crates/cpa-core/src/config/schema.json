@@ -118,7 +118,8 @@
             "advertise-management": "bool"
           }
         },
-        "max-request-body-bytes": "int"
+        "max-request-body-bytes": "int",
+        "github-token": "string"
       }
     },
     "management": {
