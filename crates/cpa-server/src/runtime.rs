@@ -1314,12 +1314,15 @@ impl CredentialStore {
         let Source::File(path) = &credential.source else {
             return;
         };
-        if credential.disabled
-            || credential
+        // Go also skips runtime-only credentials and the credentials a plugin expanded
+        // one auth file into (`IsPluginVirtualAuth`), which share that file.
+        let marked = |key: &str| {
+            credential
                 .attributes
-                .get("runtime_only")
+                .get(key)
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-        {
+        };
+        if credential.disabled || marked("runtime_only") || marked("plugin_virtual") {
             return;
         }
         {

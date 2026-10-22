@@ -121,7 +121,22 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     // Go `sdktranslator.SetPluginHooks(s.pluginHost)`: the hooks are skipped while no
     // plugin offers one.
     cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+    // Go `registerPluginAuthParser`: auth files go to plugin auth providers first; the
+    // next auth-folder reload picks up what a newly loaded plugin parses.
+    cpa_core::config::credentials::set_plugin_auth_parser(Some(host.auth_parser()));
     sync_models(rt).await;
+}
+
+/// Go loads plugins while it builds the service, so its first auth-folder load already
+/// asks plugin auth providers (sdk/cliproxy/builder.go `ApplyConfig`, then
+/// `coreManager.Load` in `Service.Run`). Credentials load before plugins start here, so
+/// the binary calls this once they have: while a plugin offers an auth provider, the
+/// auth folder and config credentials load again, before serving. Not in Home mode,
+/// whose credentials come from Home.
+pub fn reload_plugin_auth_files(rt: &Runtime) {
+    if cpa_core::config::credentials::plugin_auth_parser_active() {
+        rt.store().reconcile(cpa_core::config::credentials::load(&rt.config()));
+    }
 }
 
 /// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim

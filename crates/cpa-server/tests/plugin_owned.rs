@@ -1939,3 +1939,95 @@ async fn plugin_response_hooks_run_once_per_openai_compatible_stream_frame() {
     );
     env.finish().await;
 }
+
+/// Go's file synthesizer asks the plugin auth provider whose identifier is the file's
+/// type before the built-in path. Credentials load before plugins start, so they load
+/// again once plugins are up, before serving: here two credentials from one file,
+/// served by the plugin executor. Of two auth providers with the same identifier,
+/// only the first in priority order is asked; a type no plugin owns stays built-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_parsed_auth_files_load_through_the_first_matching_auth_provider() {
+    let parsed = |id: &str, token: &str| json!({"Provider":"acme","ID":id,"Metadata":{"type":"acme","token":token}});
+    let Some(env) = env(
+        "plugin-owned-auth-parse",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "auth_provider,executor"),
+            ("other", "auth_provider"),
+        ],
+        "",
+        &[
+            ("acme.json", r#"{"type":"acme","wrapped":"material","priority":4}"#),
+            ("claude.json", r#"{"type":"claude","access_token":"fake"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            );
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("acme-a", "tok-a"), parsed("acme-b", "tok-b")]}),
+            );
+            canned(records, "other", "auth.identifier", json!({"identifier":"acme"}));
+            canned(
+                records,
+                "other",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("other-a", "tok-o")]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let ids = |rt: &cpa_server::Runtime| {
+        let mut ids: Vec<String> = rt.store().snapshot().iter().map(|c| c.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(&env.rt),
+        ["acme.json", "claude.json"],
+        "loaded before plugins start"
+    );
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt);
+    assert_eq!(ids(&env.rt), ["acme-a", "acme-b", "claude.json"]);
+    let asked = calls(&env.records, "acme", "auth.parse");
+    assert!(!asked.is_empty());
+    for req in &asked {
+        assert_eq!(req["Provider"], "acme", "only the file whose type it owns: {req}");
+        assert!(req["Path"].as_str().unwrap().ends_with("acme.json"), "{req}");
+    }
+    assert!(
+        calls(&env.records, "other", "auth.parse").is_empty(),
+        "the second provider with the same identifier is never asked"
+    );
+    let store = env.rt.store();
+    let a = store.get("acme-a").unwrap();
+    assert_eq!(a.provider, "acme");
+    assert_eq!(a.attributes["plugin_virtual"], "true");
+    assert_eq!(a.attributes["priority"], "4", "the file's priority");
+    assert_eq!(a.metadata["token"], "tok-a");
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    let executed = calls(&env.records, "acme", "executor.execute");
+    assert_eq!(executed.len(), 1);
+    let auth = executed[0]["AuthID"].as_str().unwrap();
+    let token = if auth == "acme-a" { "tok-a" } else { "tok-b" };
+    assert!(["acme-a", "acme-b"].contains(&auth), "{auth}");
+    assert_eq!(executed[0]["AuthMetadata"]["token"], token);
+    // Go `Manager.persist` skips plugin-virtual auths: the result never rewrites the
+    // shared source file with one credential's document.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(env.rt.config().auth_dir.join("acme.json")).unwrap(),
+        r#"{"type":"acme","wrapped":"material","priority":4}"#
+    );
+    env.finish().await;
+}

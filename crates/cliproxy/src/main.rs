@@ -1362,6 +1362,9 @@ async fn serve(
     }
     // Go applies the plugin config before serving; later publishes resync the host.
     cpa_server::plugins::start(&rt).await;
+    if home.is_none() {
+        cpa_server::plugins::reload_plugin_auth_files(&rt);
+    }
     let pprof = cpa_server::pprof::Server::start(&rt);
     // Home mode: the config comes from Home, and management answers 404 (Go
     // `managementAvailable`).
