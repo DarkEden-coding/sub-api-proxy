@@ -324,9 +324,14 @@ pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
 }
 
-/// `util.IsCodexResponsesLiteRequest`.
+/// `util.IsCodexResponsesLiteRequest`. The header is decoded as UTF-8 rather than through
+/// [`header`], so Go's `TrimSpace` also strips non-ASCII spaces such as U+00A0.
 pub(crate) fn is_lite(body: &str, headers: &HeaderMap) -> bool {
-    if header(headers, LITE_HEADER).trim().eq_ignore_ascii_case("true") {
+    let lite = headers
+        .get(LITE_HEADER)
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        .unwrap_or_default();
+    if lite.trim().go_eq_fold("true") {
         return true;
     }
     let v = gjson::get(
@@ -525,11 +530,19 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
             body = delete(&body, "stream");
         }
     }
+    // Go runs this before the instructions default, except on compact: an appended
+    // `tools` key lands before or after an appended `instructions` key accordingly.
+    if call != Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
+    }
     if !is_native(req) {
         let instructions = gjson::get(&body, "instructions");
         if !instructions.exists() || instructions.kind() == Kind::Null {
             body = set_str(&body, "instructions", "");
         }
+    }
+    if call == Call::Compact {
+        body = ensure_web_search_for_history(body, &req.headers);
     }
     if call != Call::Compact && settings.image_generation {
         body = ensure_image_tool(body, model, view, &req.headers);
@@ -559,6 +572,53 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
         optimized,
         conflict,
     })
+}
+
+/// `ensureWebSearchToolForHistory` (e7d4c731): upstream rejects replayed
+/// `web_search_call` input items without a web search tool ("response protection is
+/// unavailable"). A standard request gets `{"type":"web_search"}`; a Responses Lite
+/// request, which carries no top-level hosted tools, drops the replayed items instead.
+fn ensure_web_search_for_history(body: String, headers: &HeaderMap) -> String {
+    use cpa_common::json as gj;
+    if !body.contains("web_search_call") {
+        return body;
+    }
+    let input = gj::get(body.as_bytes(), "input");
+    if !input.is_array() {
+        return body;
+    }
+    let is_call = |item: &gj::Res<'_>| item.get("type").str().trim() == "web_search_call";
+    // Detection walks with ForEach and the rebuild with Array(), as Go does: on a malformed
+    // array such as `[{}{...}]`, ForEach stops after the first element.
+    let mut has_call = false;
+    input.each(|_, item| {
+        has_call = is_call(&item);
+        !has_call
+    });
+    if !has_call {
+        return body;
+    }
+    let tools = gj::get(body.as_bytes(), "tools");
+    if tools.is_array()
+        && tools.array().iter().any(|t| {
+            matches!(
+                t.get("type").str().trim(),
+                "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"
+            )
+        })
+    {
+        return body;
+    }
+    if is_lite(&body, headers) {
+        let items = input.array();
+        let kept: Vec<&[u8]> = items.iter().filter(|i| !is_call(i)).map(|i| i.raw()).collect();
+        let joined = kept.join(&b","[..]);
+        return set_raw(&body, "input", &format!("[{}]", String::from_utf8_lossy(&joined)));
+    }
+    if !tools.is_array() {
+        return set_raw(&body, "tools", r#"[{"type":"web_search"}]"#);
+    }
+    set_raw(&body, "tools.-1", r#"{"type":"web_search"}"#)
 }
 
 fn ensure_image_tool(body: String, model: &str, view: &View<'_>, headers: &HeaderMap) -> String {
@@ -1523,6 +1583,29 @@ mod tests {
             // Go's tests also require a second pass to leave the output alone.
             let again = cpa_common::payload::normalize_codex_tool_integer_types(&out, &headers);
             assert_eq!(again, out, "{} is not idempotent", case["name"]);
+        }
+    }
+
+    /// Go v8.0.35's `ensureWebSearchToolForHistory` (e7d4c731), byte for byte; see
+    /// tests/reference/codex_web_search_history.
+    #[test]
+    fn web_search_history_matches_go() {
+        let go: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
+        for case in go["cases"].as_array().unwrap() {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = case["lite_header"].as_str() {
+                // Raw bytes: a non-ASCII value such as U+00A0 reaches the Lite check as sent.
+                headers.insert(LITE_HEADER, HeaderValue::from_bytes(value.as_bytes()).unwrap());
+            }
+            let input = case["in"].as_str().unwrap();
+            let want = case.get("out").unwrap_or(&case["in"]).as_str().unwrap();
+            assert_eq!(
+                ensure_web_search_for_history(input.to_owned(), &headers),
+                want,
+                "{}",
+                case["name"]
+            );
         }
     }
 

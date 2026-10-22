@@ -1335,3 +1335,85 @@ async fn direct_images_return_the_read_error_of_a_broken_error_body() {
         );
     }
 }
+
+/// Go `TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770`
+/// (e7d4c731) through the executor: the bodies sent on the stream, non-stream and compact
+/// paths, and the shaped WebSocket body, match Go's byte for byte, which pins where the
+/// web search tool lands beside the image tool and the `instructions` default.
+#[tokio::test]
+async fn replayed_web_search_history_matches_go() {
+    let go: Value = serde_json::from_str(include_str!("../tests/fixtures/codex_web_search_history_go.json")).unwrap();
+    let executor = executor();
+    for case in go["executor"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let call = case["call"].as_str().unwrap();
+        let mut attributes = serde_json::json!({"api_key": "test"});
+        if let Some(plan) = case["plan"].as_str() {
+            attributes["plan_type"] = plan.into();
+        }
+        let mut headers = serde_json::json!({});
+        if case["lite_header"] == true {
+            headers["x-openai-internal-codex-responses-lite"] = "true".into();
+        }
+        let synthetic = serde_json::json!({
+            "source": "openai-response",
+            "model": "gpt-6.1-sol",
+            "payload": case["payload"],
+            "stream": call != "non_stream" && call != "compact",
+            "alt": if call == "compact" { Value::from("responses/compact") } else { Value::Null },
+            "headers": headers,
+            "attributes": attributes,
+        });
+        let cfg = Config::parse(if case["no_image"] == true {
+            "disable-image-generation: true\n"
+        } else {
+            "{}"
+        })
+        .unwrap();
+        let sent = if call == "websocket" {
+            let credential = credential(&synthetic, "http://127.0.0.1:1");
+            request::shape(
+                &request(&synthetic),
+                &View::new(&credential),
+                &Settings::from(&cfg),
+                Call::Websocket,
+            )
+            .unwrap()
+            .body
+        } else {
+            let mock = Mock::start().await;
+            let (path, content_type, body) = if call == "compact" {
+                (
+                    "/responses/compact",
+                    "application/json",
+                    r#"{"id":"resp_compact_1","object":"response.compaction","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}"#,
+                )
+            } else {
+                (
+                    "/responses",
+                    "text/event-stream",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n",
+                )
+            };
+            mock.script(
+                path,
+                vec![Reply {
+                    status: 200,
+                    headers: vec![("content-type".into(), content_type.into())],
+                    body: body.into(),
+                }],
+            );
+            let credential = credential(&synthetic, &mock.url);
+            if let ResponseBody::Stream(mut stream) = executor
+                .execute(&credential, request(&synthetic), &cfg)
+                .await
+                .unwrap()
+                .body
+            {
+                while stream.next().await.is_some() {}
+            }
+            String::from_utf8(mock.take().pop().unwrap().body.to_vec()).unwrap()
+        };
+        assert_eq!(sent, case["sent"].as_str().unwrap(), "{name}");
+    }
+}

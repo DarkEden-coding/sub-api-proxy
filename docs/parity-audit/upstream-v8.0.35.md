@@ -21,7 +21,7 @@ Columns:
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
-| Codex | 19 | 10 | 9 | 0 | 0 | 0 |
+| Codex | 19 | 11 | 8 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **59** | **163** | **0** | **63** | **3** |
+| **All** | **288** | **60** | **162** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -134,7 +134,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go. Until this lands, Codex tool schema normalization and the pattern and int64-bound strip run after payload rules, so they can remove a bound or pattern a payload rule configured |
+| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go. Until this lands, Codex tool schema normalization and the pattern and int64-bound strip run after payload rules, so they can remove a bound or pattern a payload rule configured, and e7d4c731's `web_search` injection runs after payload rules, so a payload filter on `tools` does not remove it |
 
 ## Codex
 
@@ -158,7 +158,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`7795de19`](https://github.com/router-for-me/CLIProxyAPI/commit/7795de19) | feat(sse): implement CodexSSEScanner for improved event data handling | yes | to port | L (+379 −24) | Codex SSE event assembly, error events and terminal markers; Rust has a scanner, but needs these new cases |
 | [`57d005fe`](https://github.com/router-for-me/CLIProxyAPI/commit/57d005fe) | fix(codex): strip out-of-range int64 numeric bounds from tool schemas | yes | ported here | M (+111 −6) | out-of-range int64 bounds stripped, with the unsupported-regex `pattern` strip it extends (previously unported); Go goldens in `crates/cpa-exec/tests/reference/codex_tool_schema` |
 | [`8df4e42a`](https://github.com/router-for-me/CLIProxyAPI/commit/8df4e42a) | fix(codex): advertise direct tool mode and disable responses lite for non-codex routes | yes | ported here | S (+16 −0) | ported: non-template and non-Codex catalog entries get `tool_mode: direct`, `use_responses_lite: false` and `supports_reasoning_effort_updates: false` (`fetch_codex_models` is a Go tool, not applicable) |
-| [`e7d4c731`](https://github.com/router-for-me/CLIProxyAPI/commit/e7d4c731) | fix(codex): reconcile replayed web_search_call history with tool declarations | yes | to port | M (+80 −0) | reconcile replayed web_search_call history with tool declarations |
+| [`e7d4c731`](https://github.com/router-for-me/CLIProxyAPI/commit/e7d4c731) | fix(codex): reconcile replayed web_search_call history with tool declarations | yes | ported here | M (+80 −0) | replayed `web_search_call` input gets a `web_search` tool, or is dropped for Responses Lite, on the stream, non-stream, compact and WebSocket paths; Go goldens in `crates/cpa-exec/tests/reference/codex_web_search_history` (the payload-filter subtest waits for 868e137) |
 
 ## Gemini, Vertex and AI Studio
 
