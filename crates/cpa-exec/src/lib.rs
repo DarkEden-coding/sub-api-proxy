@@ -44,6 +44,7 @@ mod codex_replay;
 mod codex_request;
 mod codex_response;
 pub mod codex_siwc;
+mod codex_sse;
 #[cfg(test)]
 mod codex_testkit;
 mod codex_tls;
