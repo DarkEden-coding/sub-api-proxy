@@ -25,6 +25,7 @@ export const subscribe = (handlers: StreamHandlers): (() => void) =>
   demoMode ? demoStream(handlers) : openStream(handlers);
 
 export const fetchAccounts = () => backend.accounts();
+export const refreshAccounts = () => backend.refreshAccounts();
 export const patchAccount = (id: string, patch: AccountPatch) => backend.patchAccount(id, patch);
 export const startLogin = (req: LoginRequest) => backend.startLogin(req);
 export const fetchHistory = (id: string, hours = 24) => backend.history(id, hours);

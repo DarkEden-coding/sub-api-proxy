@@ -21,6 +21,7 @@ pub fn router(control: Arc<dyn Control>, auth: ManagementAuth) -> Router {
         .route("/sap/api/accounts", get(routes::accounts))
         .route("/sap/api/accounts/{id}", patch(routes::patch_account))
         .route("/sap/api/accounts/login", post(routes::login))
+        .route("/sap/api/accounts/refresh", post(routes::refresh))
         .route("/sap/api/accounts/{id}/history", get(routes::account_history))
         .route("/sap/api/threads", get(routes::threads))
         .route("/sap/api/threads/{key}/assign", post(routes::assign))

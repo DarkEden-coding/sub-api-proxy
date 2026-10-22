@@ -51,6 +51,7 @@ export const demo: Backend = {
       return structuredClone(a);
     }),
   startLogin: async () => ({ url: "about:blank#demo-login", login_id: "demo-login" }),
+  refreshAccounts: async () => ({ accounts: [] }),
   history: async (id, hours): Promise<AccountHistory> => {
     const s = await load();
     const a = find(s, id);

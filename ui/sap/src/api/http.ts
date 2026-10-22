@@ -99,6 +99,7 @@ const enc = encodeURIComponent;
 export const http = {
   flow: () => request<FlowSnapshot>("GET", "/flow"),
   accounts: () => request<AccountView[]>("GET", "/accounts"),
+  refreshAccounts: () => request<{ accounts: { last_poll_error: string | null }[] }>("POST", "/accounts/refresh"),
   patchAccount: (id: string, patch: AccountPatch) => request<AccountView>("PATCH", `/accounts/${enc(id)}`, patch),
   startLogin: (req: LoginRequest) => request<LoginStart>("POST", "/accounts/login", req),
   history: (id: string, hours: number) => request<AccountHistory>("GET", `/accounts/${enc(id)}/history?hours=${hours}`),

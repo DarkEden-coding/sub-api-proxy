@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { startLogin } from "../api/client.ts";
+  import { refreshAccounts, startLogin } from "../api/client.ts";
   import type { Provider } from "../api/types.ts";
   import AccountDetail from "../components/AccountDetail.svelte";
   import QuotaBars from "../components/QuotaBars.svelte";
@@ -11,6 +11,21 @@
   let open = $state<string | null>(null);
   let message = $state("");
   let provider = $state<Provider>("claude");
+  let refreshing = $state(false);
+
+  async function refresh() {
+    refreshing = true;
+    message = "";
+    try {
+      const result = await refreshAccounts();
+      const failures = result.accounts.filter((a) => a.last_poll_error).length;
+      message = failures ? `Quota refresh failed for ${failures} account(s). Check login status and try again.` : "Quota refresh complete.";
+    } catch (e) {
+      message = (e as Error).message;
+    } finally {
+      refreshing = false;
+    }
+  }
 
   async function addAccount() {
     message = "";
@@ -28,6 +43,7 @@
   <div class="head">
     <div><h2>Accounts</h2><div class="lede">subscriptions the proxy can route to</div></div>
     <div class="add">
+      <button class="btn" onclick={refresh} disabled={refreshing}>{refreshing ? "Refreshing…" : "Refresh quotas"}</button>
       <select class="field" bind:value={provider}><option value="claude">Claude</option><option value="codex">OpenAI</option></select>
       <button class="btn primary" onclick={addAccount}>Add account</button>
     </div>

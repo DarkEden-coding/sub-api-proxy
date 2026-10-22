@@ -213,6 +213,12 @@ async fn api_routes_follow_control_shapes_and_arguments() {
             json!(null),
             json!(fake.reset_aware_status()),
         ),
+        (
+            "POST",
+            "/sap/api/accounts/refresh".into(),
+            json!(null),
+            json!(fake.reset_aware_status()),
+        ),
     ];
     for (method, path, body, expected) in cases {
         let denied = request(app.clone(), method, &path, body.clone(), false).await;
