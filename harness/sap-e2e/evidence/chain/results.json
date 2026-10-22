@@ -1,0 +1,203 @@
+[
+  {
+    "name": "claude-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "claude-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "claude-new-tool-child",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.049,
+      "log": "claude-new-tool-child.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "claude-resume",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.083,
+      "log": "claude-resume.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "sap-assignment-and-affinity",
+    "passed": false,
+    "evidence": {
+      "status": 200,
+      "threads": [
+        {
+          "key": "claude:5a058031-2518-441e-9270-c522cab3dcf2",
+          "client": "claude_code",
+          "machine": "sap-e2e",
+          "title": null,
+          "lineage": "root",
+          "parent": null,
+          "agent_label": null,
+          "account": null,
+          "reason": null,
+          "serving_node": "primary",
+          "streaming": false,
+          "cache_hit_percent": null,
+          "compactions": 0,
+          "requests": 0,
+          "first_seen": "2026-10-22T22:21:32.733900Z",
+          "last_seen": "2026-10-22T22:21:56.718920Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "codex-custom-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "codex-custom-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.241,
+      "log": "codex-custom.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.24,
+      "log": "codex-custom-exhausted.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom-http-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "codex-custom-http-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom-http",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.077,
+      "log": "codex-custom-http.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-custom-http-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": 1,
+      "elapsed": 0.074,
+      "log": "codex-custom-http-exhausted.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-chatgpt-version",
+    "passed": true,
+    "evidence": {
+      "exit": 0,
+      "elapsed": 0.02,
+      "log": "codex-chatgpt-version.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-chatgpt",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.074,
+      "log": "codex-chatgpt.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "codex-chatgpt-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.075,
+      "log": "codex-chatgpt-exhausted.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "claude-exhausted",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.041,
+      "log": "claude-exhausted.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "router-untracked-transport-probe",
+    "passed": true,
+    "evidence": {
+      "status": 200,
+      "kill_to_response_secs": 0.025
+    }
+  },
+  {
+    "name": "claude-backup",
+    "passed": false,
+    "evidence": {
+      "exit": -14,
+      "elapsed": 15.068,
+      "log": "claude-backup.log",
+      "requests": 0
+    }
+  },
+  {
+    "name": "router-real-client-failover-under-five-seconds",
+    "passed": false,
+    "evidence": {
+      "router": {
+        "preferred": "backup",
+        "servers": [
+          {
+            "name": "primary",
+            "state": "down",
+            "consecutive_failures": 16
+          },
+          {
+            "name": "backup",
+            "state": "healthy",
+            "consecutive_failures": 0
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "sap-exhaustion-move-and-forced-resend",
+    "passed": false,
+    "evidence": "Blocked: config API keys have no subscription metadata; inspect threads.json. Resume is a full-history process restart, not an in-process continue."
+  }
+]
