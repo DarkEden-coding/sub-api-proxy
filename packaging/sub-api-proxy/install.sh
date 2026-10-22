@@ -81,7 +81,11 @@ os.replace(target + '.tmp', target)
 PY
         fi
         run launchctl bootout "gui/$(id -u)/$label" || true
-        run launchctl bootstrap "gui/$(id -u)" "$target"
+        # launchd can briefly retain a service after bootout while it exits.
+        run launchctl bootstrap "gui/$(id -u)" "$target" || {
+            run sleep 1
+            run launchctl bootstrap "gui/$(id -u)" "$target"
+        }
     done
 else
     run mkdir -p "$HOME/.config/systemd/user"
