@@ -23,7 +23,7 @@ fn write_files(base: &Path, files: &Value, expand: &dyn Fn(&str) -> String) -> b
             std::os::unix::fs::symlink(expand(target), &path).unwrap();
             #[cfg(not(unix))]
             {
-                let _ = target;
+                let _ = (target, expand);
                 return false;
             }
         } else if content == "/" {
