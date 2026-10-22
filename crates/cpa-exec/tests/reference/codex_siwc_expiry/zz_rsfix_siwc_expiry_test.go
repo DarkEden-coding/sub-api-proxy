@@ -9,15 +9,26 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestRSFixSIWCExpiry(t *testing.T) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
 	jwt := func(payload string) string {
-		enc := base64.RawURLEncoding.EncodeToString
-		return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(payload)) + ".sig"
+		return header + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
 	}
+	// The access token as a JSON string member.
+	token := func(t string) string {
+		b, _ := json.Marshal(t)
+		return `{"access_token":` + string(b) + `}`
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	exp := `{"exp": 1792666800}` // 19 bytes: the last character carries 4 unused bits
+	raw := base64.RawURLEncoding.EncodeToString([]byte(exp))
+	trailing := raw[:len(raw)-1] + string(alphabet[strings.IndexByte(alphabet, raw[len(raw)-1])|1])
+	padded := base64.URLEncoding.EncodeToString([]byte(exp)) // ends in "=="
 	// Each extra is merged over a partition that can refresh and has an opaque token.
 	cases := []struct{ Name, Extra string }{
 		{"relative i64::MAX seconds wraps", `{"expires_in":"9223372036854775807","timestamp":"2026-10-22T10:00:00Z"}`},
@@ -49,6 +60,16 @@ func TestRSFixSIWCExpiry(t *testing.T) {
 		{"last refresh", `{"last_refresh":"2026-10-22T09:58:00Z"}`},
 		{"jwt exp", `{"access_token":"` + jwt(`{"exp":1792666800}`) + `"}`},
 		{"jwt far-future string exp", `{"access_token":"` + jwt(`{"exp":"9223372036854775807"}`) + `"}`},
+		{"float at the unit threshold", `{"expired":1000000000000.9999}`},
+		{"jwt case variant replaces exp", token(jwt(`{"exp":1792666800,"Exp":1}`))},
+		{"jwt later null clears exp", token(jwt(`{"exp":1792666800,"EXP":null}`))},
+		{"jwt skips an out-of-range member", token(jwt(`{"exp":1792666800,"junk":1e400}`))},
+		{"jwt out-of-range exp fails", token(jwt(`{"Exp":1e400,"exp":1792666800}`))},
+		{"jwt non-object payload", token(jwt(`[1792666800]`))},
+		{"jwt CR and LF in the payload", token(header + "." + raw[:10] + "\r\n" + raw[10:] + ".sig")},
+		{"jwt non-zero trailing bits", token(header + "." + trailing + ".sig")},
+		{"jwt padded payload", token(header + "." + padded + ".sig")},
+		{"jwt short padding with LF", token(header + "." + padded[:len(padded)-1] + "\n.sig")},
 	}
 	clocks := []time.Time{time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC), time.Date(2026, 10, 22, 10, 56, 0, 0, time.UTC)}
 	type record struct {

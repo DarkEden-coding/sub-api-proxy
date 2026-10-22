@@ -269,9 +269,96 @@ fn expiration_from_map(map: &Map<String, Value>) -> Option<GoTime> {
     })
 }
 
+/// Go `parseJWTExp`'s payload decoding: the middle of exactly three `.`-separated
+/// segments, through `base64.URLEncoding` with the padding its length implies and then
+/// `RawURLEncoding`. Both skip CR and LF and accept non-zero trailing bits.
+fn jwt_payload(token: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    let parts: Vec<&str> = token.trim().split('.').collect();
+    let [_, segment, _] = parts[..] else {
+        return None;
+    };
+    let engine = |mode| {
+        let config = GeneralPurposeConfig::new()
+            .with_decode_padding_mode(mode)
+            .with_decode_allow_trailing_bits(true);
+        GeneralPurpose::new(&base64::alphabet::URL_SAFE, config)
+    };
+    let strip = |s: &str| s.bytes().filter(|b| !matches!(b, b'\r' | b'\n')).collect::<Vec<u8>>();
+    // The padding comes from the length before CR and LF are skipped, as in Go.
+    let pad = ["", "", "==", "="][segment.len() % 4];
+    engine(DecodePaddingMode::RequireCanonical)
+        .decode(strip(&format!("{segment}{pad}")))
+        .or_else(|_| engine(DecodePaddingMode::RequireNone).decode(strip(segment)))
+        .ok()
+}
+
+/// Go `json.Unmarshal` of a JWT payload into `struct{ Exp any }`: every member whose
+/// name folds to `exp` (ASCII case; nothing else folds into those letters) replaces the
+/// field in input order, null clearing it; other members are skipped unconverted. `None`
+/// when the payload is not one JSON object or null, or a value fails to decode.
+// ponytail: an `exp` value holding invalid UTF-8 or a lone surrogate fails here, where Go
+// substitutes U+FFFD; such a value is never a number, so only a later `exp` in the same
+// payload could read differently.
+fn jwt_exp_claim(payload: &[u8]) -> Option<Value> {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct IsExp(bool);
+    impl<'de> serde::Deserialize<'de> for IsExp {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Key;
+            impl Visitor<'_> for Key {
+                type Value = IsExp;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a member name")
+                }
+                fn visit_bytes<E>(self, v: &[u8]) -> Result<IsExp, E> {
+                    Ok(IsExp(v.eq_ignore_ascii_case(b"exp")))
+                }
+                fn visit_str<E>(self, v: &str) -> Result<IsExp, E> {
+                    Ok(IsExp(v.eq_ignore_ascii_case("exp")))
+                }
+            }
+            // Raw bytes: a name that is not UTF-8 is skipped, not an error.
+            d.deserialize_bytes(Key)
+        }
+    }
+    struct Claims;
+    impl<'de> DeserializeSeed<'de> for Claims {
+        type Value = Value;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Claims {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object or null")
+        }
+        fn visit_unit<E>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+            let mut exp = Value::Null;
+            while let Some(IsExp(is_exp)) = map.next_key()? {
+                if is_exp {
+                    exp = map.next_value()?;
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(exp)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_slice(payload);
+    let exp = Claims.deserialize(&mut de).ok()?;
+    de.end().ok()?;
+    Some(exp)
+}
+
 /// Go `parseJWTExp`: a positive number or decimal string, through `normaliseUnix`.
 fn jwt_exp(token: &str) -> Option<GoTime> {
-    match crate::codex_oauth::jwt_claim(token, "exp")? {
+    match jwt_exp_claim(&jwt_payload(token)?)? {
         Value::Number(n) => n.as_f64().filter(|f| *f > 0.0).map(|f| go_unix(go_float_to_int(f))),
         Value::String(s) => s.trim().parse::<i64>().ok().filter(|s| *s > 0).map(go_unix),
         _ => None,

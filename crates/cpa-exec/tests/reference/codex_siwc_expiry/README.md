@@ -5,10 +5,12 @@
 cases cover Go's `time.Parse` grammar for the layouts `parseTimeValue` tries,
 `normaliseUnix` (milliseconds, far-future values, an out-of-range float, which the recording linux/amd64 converts to `math.MinInt64`),
 `expires_in` after an issue time with Go's wrapping `Duration` product, nested token
-maps, the JWT `exp` fallback and Go's zero time. Each `siwc` is the partition as JSON,
+maps, the JWT `exp` fallback (Go's base64 decoding and its decode into `struct{ Exp any }`)
+and Go's zero time. Each `siwc` is the partition as JSON,
 decoded like a credential file.
 
-`src/codex_siwc_tests.rs` `refresh_due_matches_go_expiry_parsing` replays every case.
+`src/codex_siwc_tests.rs` `refresh_due_matches_go_expiry_parsing` replays every case; `float at the unit threshold` expects the
+result listed in docs/DIFFERENCES-FROM-GO.md.
 
 Regenerate with Go 1.26.4:
 

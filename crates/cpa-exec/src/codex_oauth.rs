@@ -134,20 +134,15 @@ fn jwt_engine() -> GeneralPurpose {
     )
 }
 
-/// One claim of an unverified JWT (`parseJWTExp`'s decoding).
-pub(crate) fn jwt_claim(token: &str, claim: &str) -> Option<Value> {
+/// The `exp` claim of a JWT access token (`parseJWTExp`).
+pub(crate) fn jwt_exp(token: &str) -> Option<DateTime<Utc>> {
     let parts: Vec<&str> = token.trim().split('.').collect();
     if parts.len() != 3 {
         return None;
     }
     let payload = jwt_engine().decode(parts[1]).ok()?;
-    let mut claims: Value = serde_json::from_slice(&payload).ok()?;
-    claims.get_mut(claim).map(Value::take)
-}
-
-/// The `exp` claim of a JWT access token (`parseJWTExp`).
-pub(crate) fn jwt_exp(token: &str) -> Option<DateTime<Utc>> {
-    let exp = match &jwt_claim(token, "exp")? {
+    let claims: Value = serde_json::from_slice(&payload).ok()?;
+    let exp = match &claims["exp"] {
         Value::Number(n) => n.as_f64().map(|f| f as i64)?,
         Value::String(s) => s.trim().parse().ok()?,
         _ => return None,

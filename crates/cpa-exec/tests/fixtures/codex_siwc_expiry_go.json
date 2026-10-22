@@ -235,6 +235,86 @@
         false,
         false
       ]
+    },
+    {
+      "name": "float at the unit threshold",
+      "siwc": "{\"access_token\":\"opaque\",\"client_id\":\"c\",\"expired\":1000000000000.9999,\"refresh_token\":\"rt\"}",
+      "due": [
+        false,
+        false
+      ]
+    },
+    {
+      "name": "jwt case variant replaces exp",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOjE3OTI2NjY4MDAsIkV4cCI6MX0.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        true,
+        true
+      ]
+    },
+    {
+      "name": "jwt later null clears exp",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOjE3OTI2NjY4MDAsIkVYUCI6bnVsbH0.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        true,
+        true
+      ]
+    },
+    {
+      "name": "jwt skips an out-of-range member",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOjE3OTI2NjY4MDAsImp1bmsiOjFlNDAwfQ.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        false,
+        true
+      ]
+    },
+    {
+      "name": "jwt out-of-range exp fails",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJFeHAiOjFlNDAwLCJleHAiOjE3OTI2NjY4MDB9.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        true,
+        true
+      ]
+    },
+    {
+      "name": "jwt non-object payload",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.WzE3OTI2NjY4MDBd.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        true,
+        true
+      ]
+    },
+    {
+      "name": "jwt CR and LF in the payload",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOi\\r\\nAxNzkyNjY2ODAwfQ.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        false,
+        true
+      ]
+    },
+    {
+      "name": "jwt non-zero trailing bits",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOiAxNzkyNjY2ODAwfR.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        false,
+        true
+      ]
+    },
+    {
+      "name": "jwt padded payload",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOiAxNzkyNjY2ODAwfQ==.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        false,
+        true
+      ]
+    },
+    {
+      "name": "jwt short padding with LF",
+      "siwc": "{\"access_token\":\"eyJhbGciOiJub25lIn0.eyJleHAiOiAxNzkyNjY2ODAwfQ=\\n.sig\",\"client_id\":\"c\",\"refresh_token\":\"rt\"}",
+      "due": [
+        true,
+        true
+      ]
     }
   ]
 }
