@@ -989,6 +989,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-btls",
+ "tokio-tungstenite",
  "tower",
  "tower-service",
  "tracing",

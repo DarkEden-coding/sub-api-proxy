@@ -70,3 +70,4 @@ cpa-plugin = { workspace = true, features = ["test-support"] }
 url = "2"
 tokio = { workspace = true, features = ["test-util"] }
 wreq = { workspace = true, features = ["ws"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }

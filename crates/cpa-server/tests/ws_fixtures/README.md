@@ -9,7 +9,7 @@ nothing reaches OpenAI.
   exposure, completion output restoration, pending tool calls, tool-call repair against
   the shared caches, close-reason truncation). Recorded from `6fecc6e`. Replayed by
   `src/websocket_requests_tests.rs`.
-- `ws_e2e.json`: forty-two scenarios through Go's real `ResponsesWebsocket` handler, auth
+- `ws_e2e.json`: forty-seven scenarios through Go's real `ResponsesWebsocket` handler, auth
   manager, built-in translators and `CodexAutoExecutor`, against a scripted upstream that
   speaks both WebSocket and HTTP SSE. It records the frames and close codes the client
   saw, what upstream received (WebSocket dials and frames, HTTP requests) and the upgrade
@@ -19,6 +19,8 @@ nothing reaches OpenAI.
   `upstream.codex` steering scenarios (`steer_historical_oauth_path_steers_api_key`,
   `steer_idle_upstream_close_upstream_*`, Go 52d5507d) come from that run; the others keep
   their `6fecc6e` bytes.
+
+The upstream mock reads WebSocket frames itself, as gorilla does, so a text frame need not be UTF-8; a frame that is not UTF-8 is recorded with its exact bytes as `body_hex`.
 
 Scripted upstream closes wait 300 ms after their events. Without that pause Go's
 disconnect notifier races the turn and can close the client before the events are
