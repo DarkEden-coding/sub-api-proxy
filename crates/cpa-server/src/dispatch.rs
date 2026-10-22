@@ -1025,13 +1025,17 @@ async fn run_routed(
     // `WithPinnedAuthID`: every other credential is excluded in every round.
     // A remote dispatcher receives the pinned ID itself.
     let mut pinned_exclusion: Vec<String> = match call.pinned() {
-        Some(pinned) if !pinned.is_empty() && rt.remote_dispatch().is_none() => rt
-            .store()
-            .snapshot()
-            .iter()
-            .filter(|c| c.id != pinned)
-            .map(|c| c.id.clone())
-            .collect(),
+        // sub-api-proxy: SAP owns account affinity and may move an exhausted pin.
+        Some(pinned)
+            if !pinned.is_empty() && rt.remote_dispatch().is_none() && crate::sap_hooks::current().is_none() =>
+        {
+            rt.store()
+                .snapshot()
+                .iter()
+                .filter(|c| c.id != pinned)
+                .map(|c| c.id.clone())
+                .collect()
+        }
         _ => Vec::new(),
     };
     // `WithDisallowFreeAuth`: free-plan Codex credentials are ineligible in every round.

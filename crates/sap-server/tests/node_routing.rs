@@ -255,6 +255,39 @@ async fn node_exhaustion_requires_full_history_until_resent() {
 }
 
 #[tokio::test]
+async fn node_codex_confirmed_quota_moves_within_full_history_request() {
+    for websocket in [false, true] {
+        let f = Fixture::new(Provider::Codex);
+        let req = f.request("thread", false, false, websocket);
+        let first = f.pick(&req);
+        f.node.on_observation(
+            &req,
+            &first,
+            Observation::Quota {
+                observed_at: std::time::SystemTime::now(),
+                signals: [
+                    ("X-Codex-Limit-Reached".into(), "true".into()),
+                    ("X-Codex-Primary-Used-Percent".into(), "100".into()),
+                    ("X-Codex-Primary-Window-Minutes".into(), "300".into()),
+                    ("X-Codex-Primary-Reset-After-Seconds".into(), "3600".into()),
+                ]
+                .into(),
+            },
+        );
+        f.node.on_outcome(
+            &req,
+            &first,
+            &AttemptResult {
+                status: Some(429),
+                error: Some(cpa_server::sap_hooks::AttemptError::RateLimited),
+            },
+        );
+        // Exhaustion moves immediately; a generic rate limit would keep/retry A.
+        assert_ne!(f.pick(&req), first);
+    }
+}
+
+#[tokio::test]
 async fn node_codex_move_closes_websocket_and_http_rejects() {
     let f = Fixture::new(Provider::Codex);
     let req = f.request("thread", false, false, true);

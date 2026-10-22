@@ -753,7 +753,8 @@ fn stream_error_frame(codex: bool, status: u16, text: &str, seq: i64, lead: bool
 }
 
 /// Go `responsesSSEFramer`: join executor chunks at the HTTP boundary, after interceptors.
-struct ResponsesSse {
+// sub-api-proxy: share native framing with hook stream regression tests.
+pub(crate) struct ResponsesSse {
     framer: cpa_translate::stream::ResponsesFramer,
     codex: bool,
     data_frames: i64,
@@ -765,7 +766,8 @@ struct ResponsesSse {
 }
 
 impl ResponsesSse {
-    fn new(codex: bool) -> Self {
+    // sub-api-proxy: construct the native writer in hook stream tests.
+    pub(crate) fn new(codex: bool) -> Self {
         Self {
             framer: Default::default(),
             codex,

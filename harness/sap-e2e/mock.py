@@ -12,6 +12,18 @@ def events(items):
     return ''.join(f'event: {x["type"]}\ndata: {json.dumps(x)}\n\n' for x in items).encode()
 
 
+def codex_quota():
+    reset = int(time.time()) + 3600
+    return {'x-codex-allowed': 'false', 'x-codex-limit-reached': 'true',
+            'x-codex-primary-used-percent': '100', 'x-codex-primary-window-minutes': '300',
+            'x-codex-primary-reset-at': str(reset), 'x-codex-primary-reset-after-seconds': '3600'}
+
+
+def codex_error():
+    return dict(type='usage_limit_reached', message='Local scripted usage limit reached',
+                plan_type='plus', resets_at=int(time.time()) + 3600, resets_in_seconds=3600)
+
+
 class Mock(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -22,6 +34,7 @@ class Mock(ThreadingHTTPServer):
         self.records = []
         self.scenario = 'startup'
         self.exhausted = set()
+        self.exhaust_next_codex = False
         self.tool_sent = False
         self.force_continue_400 = False
         self.close_next = False
@@ -92,6 +105,9 @@ class Handler(BaseHTTPRequestHandler):
         size = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(size) or b'{}')
         key = self.headers.get('x-api-key', self.headers.get('Authorization', '').removeprefix('Bearer '))
+        if self.server.exhaust_next_codex and 'responses' in self.path:
+            self.server.exhausted.add(key)
+            self.server.exhaust_next_codex = False
         status = 429 if key in self.server.exhausted or 'unknown' in self.server.exhausted else 200
         if self.server.force_continue_400 and body.get('thread', {}).get('type') == 'continue':
             status = 400
@@ -107,6 +123,9 @@ class Handler(BaseHTTPRequestHandler):
                                 'anthropic-ratelimit-unified-5h-status': 'rejected',
                                 'anthropic-ratelimit-unified-5h-reset': str(int(time.time()) + 3600),
                                 'anthropic-ratelimit-unified-representative-claim': 'five_hour'})
+            elif status == 429:
+                headers.update(codex_quota())
+                error = codex_error()
             return self.reply(status, json.dumps({'type': 'error', 'error': error}).encode(), headers)
         if 'count_tokens' in self.path:
             return self.reply(200, b'{"input_tokens":10}', {'Content-Type': 'application/json'})
@@ -220,13 +239,20 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(pending)
                 pending.clear()
                 key = self.headers.get('Authorization', '').removeprefix('Bearer ')
-                exhausted = key in self.server.exhausted or 'unknown' in self.server.exhausted
+                if self.server.exhaust_next_codex and body.get('generate') is not False:
+                    self.server.exhausted.add(key)
+                    self.server.exhaust_next_codex = False
+                exhausted = body.get('generate') is not False and (key in self.server.exhausted or 'unknown' in self.server.exhausted)
                 close = self.server.close_next and body.get('generate') is not False
                 self.server.record(self, body, 'ws', 429 if exhausted else 200,
-                                   'limit_reached+close' if exhausted else 'close' if close else 'reply')
+                                   'rate_limits+error+close' if exhausted else 'close' if close else 'reply')
                 if exhausted:
+                    self.frame(1, json.dumps(dict(type='codex.rate_limits', plan_type='plus',
+                        rate_limits=dict(allowed=False, limit_reached=True, primary=dict(used_percent=100,
+                            window_minutes=300, reset_at=int(time.time()) + 3600,
+                            reset_after_seconds=3600)))).encode())
                     self.frame(1, json.dumps(dict(type='error', status=429,
-                               error=dict(type='usage_limit_reached', code='limit_reached', message='Local exhausted'))).encode())
+                               headers=codex_quota(), error=codex_error())).encode())
                     self.frame(8, struct.pack('!H', 1000))
                     break
                 if self.server.close_next and body.get('generate') is not False:

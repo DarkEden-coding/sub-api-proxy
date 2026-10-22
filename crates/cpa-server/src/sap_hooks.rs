@@ -162,12 +162,12 @@ impl Context {
                 content_type,
                 body,
             } => {
+                // sub-api-proxy: carry the native error through late stream/WS rendering,
+                // where replacing the HTTP response with take_reply is no longer possible.
+                let mut error = ExecError::local(status, FailureScope::Request, "");
+                error.body = body.clone();
                 *self.reply.lock().unwrap_or_else(PoisonError::into_inner) = Some((status, content_type, body));
-                Err(AcquireError::Scheduler(ExecError::local(
-                    400,
-                    FailureScope::Request,
-                    "request rejected by routing hook",
-                )))
+                Err(AcquireError::Scheduler(error))
             }
             SapPick::CloseSocket => {
                 self.close.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -464,6 +464,8 @@ mod tests {
         identified: Mutex<Vec<(String, HeaderMap, Vec<u8>)>>,
         candidates: Mutex<Vec<SapCandidate>>,
         pick: Mutex<Option<SapPick>>,
+        // sub-api-proxy: inject a routing answer on an in-request retry.
+        after_failure: Mutex<Option<SapPick>>,
         outcomes: Mutex<Vec<(String, AttemptResult)>>,
         observations: Mutex<Vec<Observation>>,
         streams: Mutex<Vec<bool>>,
@@ -502,6 +504,12 @@ mod tests {
         }
         fn on_outcome(&self, _: &SapRequest, credential: &str, result: &AttemptResult) {
             self.outcomes.lock().unwrap().push((credential.into(), result.clone()));
+            // sub-api-proxy: simulate a node decision after an upstream failure.
+            if result.status == Some(429)
+                && let Some(pick) = self.after_failure.lock().unwrap().take()
+            {
+                *self.pick.lock().unwrap() = Some(pick);
+            }
         }
         fn on_observation(&self, _: &SapRequest, _: &str, observation: Observation) {
             self.observations.lock().unwrap().push(observation);
@@ -691,6 +699,57 @@ mod tests {
         assert!(observed.iter().any(|o| matches!(o, Observation::Usage(u) if u.input_tokens == 9 && u.cache_read_tokens == 4 && u.cache_write_tokens == 2 && u.output_tokens == 3)));
     }
 
+    // sub-api-proxy: exercise a hook reply after an SSE response has committed.
+    #[tokio::test]
+    async fn sap_hooks_late_reply_uses_native_stream_errors() {
+        async fn check(writer: impl crate::respond::Writer, first: &'static [u8], event: &str) {
+            let fixture = runtime("http://127.0.0.1:9", false);
+            let hooks = Arc::new(Fake::default());
+            fixture.rt.set_sap_hooks(hooks.clone());
+            let context = identify(&fixture.rt, "/v1/messages", &HeaderMap::new(), BODY).unwrap();
+            let reply =
+                br#"{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"retry later"}}"#;
+            let tail = futures_util::stream::once(async move {
+                *hooks.pick.lock().unwrap() = Some(SapPick::Reply {
+                    status: 429,
+                    content_type: "application/json",
+                    body: Bytes::from_static(reply),
+                });
+                let Err(AcquireError::Scheduler(error)) = context.select(Ok(Vec::new())) else {
+                    panic!("expected hook rejection");
+                };
+                assert_eq!(error.status, 429);
+                assert_eq!(error.body, reply.as_slice());
+                Err(error)
+            })
+            .boxed();
+            let response = crate::respond::sse(crate::respond::stream(
+                Some(Bytes::from_static(first)),
+                tail,
+                writer,
+                None,
+            ));
+            assert_eq!(response.status(), 200);
+            let body = to_bytes(response.into_body(), 8192).await.unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(text.contains(event), "{text}");
+            assert!(text.contains("rate_limit_error"), "{text}");
+            assert!(text.contains("retry later"), "{text}");
+            assert!(!text.contains("request rejected by routing hook"));
+        }
+        check(
+            crate::claude::ClaudeSse,
+            b"event: message_start\ndata: {}\n\n",
+            "event: error",
+        )
+        .await;
+        for codex in [false, true] {
+            check(crate::openai::ResponsesSse::new(codex),
+                b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+                if codex { "event: response.failed" } else { "event: error" }).await;
+        }
+    }
+
     #[tokio::test]
     async fn sap_hooks_health_is_opt_in() {
         let fixture = runtime("http://127.0.0.1:9", false);
@@ -720,6 +779,46 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), "node-owned");
+    }
+
+    // sub-api-proxy: the HTTP upgrade already committed, so a reply needs a WS event.
+    #[tokio::test]
+    async fn sap_hooks_websocket_reply_preserves_retryable_status_and_type() {
+        let upstream = serve(axum::Router::new().fallback(|| async {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("content-type", "application/json")],
+                r#"{"error":{"type":"usage_limit_reached","message":"local exhausted"}}"#,
+            )
+        }))
+        .await;
+        let fixture = runtime(&upstream.url, true);
+        let hooks = Arc::new(Fake::default());
+        *hooks.after_failure.lock().unwrap() = Some(SapPick::Reply {
+            status: 429,
+            content_type: "application/json",
+            body: Bytes::from_static(br#"{"error":{"type":"usage_limit_reached","message":"retry later"}}"#),
+        });
+        fixture.rt.set_sap_hooks(hooks);
+        let proxy = serve(crate::router(fixture.rt.clone())).await;
+        let url = proxy.url.replacen("http:", "ws:", 1) + "/backend-api/codex/responses";
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"response.create","model":"gpt-5.5","input":[]}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["status"], 429);
+        assert_eq!(payload["error"]["type"], "usage_limit_reached");
+        assert_eq!(payload["error"]["message"], "retry later");
     }
 
     #[tokio::test]
