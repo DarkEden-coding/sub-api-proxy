@@ -303,7 +303,7 @@ fn with_secret_hash(text: &str, hash: &str) -> anyhow::Result<String> {
             // any other scalar whose text would change.
             fn plain_keys(v: &Value) -> bool {
                 match v {
-                    Value::Mapping(m) => m.iter().all(|(k, v)| k.is_string() && plain_keys(v)),
+                    Value::Mapping(m) => m.iter().all(|(k, v)| matches!(k, Value::String(_)) && plain_keys(v)),
                     Value::Sequence(items) => items.iter().all(plain_keys),
                     Value::Tagged(_) => false,
                     _ => true,
@@ -360,7 +360,7 @@ fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
     let mut tree = scalar_texts(text).context("failed to parse config file")?;
     expand_merges(&mut tree).context("failed to parse config file")?;
     let mut secret = effective_secret(&tree).into_bytes();
-    if binary_secret(text, &tree) {
+    if !secret.is_empty() && binary_secret(text, &tree)? {
         // yaml.v3 decodes a `!!binary` scalar into a string field, any bytes, with Go's
         // StdEncoding: padding required, unused bits ignored, line breaks skipped.
         use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
@@ -422,21 +422,56 @@ fn effective_secret(tree: &Value) -> String {
     }
 }
 
-/// Whether the effective `secret-key` of a [`scalar_texts`] tree is written with the
-/// `!!binary` tag. ponytail: only a literal key is checked, not one reached through an
-/// alias or merge.
-fn binary_secret(text: &str, tree: &Value) -> bool {
+/// Whether the effective `secret-key` of a [`scalar_texts`] tree carries yaml.v3's
+/// binary tag, resolved as its scanner does: `!!` expands to `tag:yaml.org,2002:`
+/// and `%XX` escapes are decoded, so `!!bin%61ry` and `!<tag:yaml.org,2002:binary>`
+/// are binary too. Fails closed where that resolution is not followed: a `%TAG`
+/// directive beside a tagged secret, a named handle, a malformed escape, or a file
+/// the syntax tree cannot read. ponytail: only a literal key is checked; a binary
+/// scalar reached through an alias or merge keeps its base64 source in the file, so
+/// the plaintext scan refuses it.
+fn binary_secret(text: &str, tree: &Value) -> anyhow::Result<bool> {
     let v8 = tree
         .as_mapping()
         .and_then(|m| lookup(m, "management.secret-key"))
         .is_some();
     let parent = if v8 { "management" } else { "remote-management" };
-    let Ok(file) = text.parse::<yaml_edit::YamlFile>() else {
-        return false;
-    };
+    let unresolved = || anyhow::anyhow!("the management key's YAML tag cannot be resolved for upload");
+    let file: yaml_edit::YamlFile = text.parse().map_err(|_| unresolved())?;
     let node = file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key"));
-    matches!(node, Some(yaml_edit::YamlNode::TaggedNode(t))
-        if matches!(t.tag().as_deref(), Some("!!binary" | "!<tag:yaml.org,2002:binary>")))
+    let Some(yaml_edit::YamlNode::TaggedNode(node)) = node else {
+        return Ok(false);
+    };
+    let directives = yaml_edit::lex(text)
+        .into_iter()
+        .any(|(kind, token)| kind == yaml_edit::SyntaxKind::DIRECTIVE && token.starts_with("%TAG"));
+    anyhow::ensure!(!directives, unresolved());
+    let raw = node.tag().ok_or_else(unresolved)?;
+    let tag = if let Some(uri) = raw.strip_prefix("!<").and_then(|t| t.strip_suffix('>')) {
+        uri.to_owned()
+    } else if let Some(suffix) = raw.strip_prefix("!!") {
+        format!("tag:yaml.org,2002:{suffix}")
+    } else if raw[1..].contains('!') {
+        anyhow::bail!(unresolved());
+    } else {
+        raw
+    };
+    let mut bytes = Vec::with_capacity(tag.len());
+    let mut rest = tag.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        if b == b'%' {
+            let hex = tail.get(..2).and_then(|h| std::str::from_utf8(h).ok());
+            bytes.push(
+                hex.and_then(|h| u8::from_str_radix(h, 16).ok())
+                    .ok_or_else(unresolved)?,
+            );
+            rest = &tail[2..];
+        } else {
+            bytes.push(b);
+            rest = tail;
+        }
+    }
+    Ok(bytes == b"tag:yaml.org,2002:binary")
 }
 
 /// `text` as a tree whose scalars are their decoded text, as yaml.v3's `Node.Value`

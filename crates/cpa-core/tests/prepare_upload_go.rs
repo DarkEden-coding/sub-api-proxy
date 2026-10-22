@@ -3,9 +3,9 @@
 //! the file was left alone, the prepared file's content (bcrypt hashes masked) and
 //! whether its secret is the hash of the expected plaintext.
 //!
-//! Where re-emitting the alias-expanded tree would change another scalar's text, Rust
-//! refuses and Go re-encodes (docs/DIFFERENCES-FROM-GO.md); those cases expect Rust's
-//! refusal.
+//! Rust refuses two kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
+//! where re-emitting the alias-expanded tree would change another setting, and where
+//! the secret's tag depends on a `%TAG` directive. Those cases expect Rust's refusal.
 use serde_json::Value as Json;
 use serde_yaml_ng::Value;
 
@@ -26,6 +26,13 @@ const REWRITE_REFUSED: &[&str] = &[
 ];
 const REWRITE_REFUSAL: &str =
     "failed to update remote management key: rewriting the config file would change the text of another setting";
+const TAG_REFUSED: &[&str] = &[
+    "named handle binary secret",
+    "named handle binary secret beside a copy",
+    "redefined secondary handle secret",
+    "redefined secondary handle secret beside a copy",
+];
+const TAG_REFUSAL: &str = "the management key's YAML tag cannot be resolved for upload";
 
 #[test]
 fn prepare_for_upload_matches_go() {
@@ -51,10 +58,17 @@ fn prepare_for_upload_matches_go() {
         let result = cpa_core::config::prepare_for_upload(&path);
         let saved = std::fs::read_to_string(&path).unwrap();
         let mut fail = |what: String| failures.push(format!("{name}: {what}"));
-        if REWRITE_REFUSED.contains(&name) {
+        let refusal = if REWRITE_REFUSED.contains(&name) {
+            Some(REWRITE_REFUSAL)
+        } else if TAG_REFUSED.contains(&name) {
+            Some(TAG_REFUSAL)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
             match &result {
-                Err(e) if format!("{e:#}") == REWRITE_REFUSAL => {}
-                other => fail(format!("{other:?}, expected the rewrite refusal")),
+                Err(e) if format!("{e:#}") == refusal => {}
+                other => fail(format!("{other:?}, expected {refusal:?}")),
             }
             if saved != yaml {
                 fail("changed".into());
