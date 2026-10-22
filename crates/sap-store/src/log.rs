@@ -424,15 +424,8 @@ impl ChangeLog for Store {
                 candidates.push(row?);
             }
         }
-        // Fixed-width integer keys make this merge linear in the candidate count.
-        // Eight stable byte passes preserve insertion order without comparison sorting.
-        for shift in (0..64).step_by(8) {
-            let mut buckets: [_; 256] = std::array::from_fn(|_| Vec::new());
-            for row in candidates {
-                buckets[((row.0 as u64 >> shift) & 255) as usize].push(row);
-            }
-            candidates = buckets.into_iter().flatten().collect();
-        }
+        // Ids are unique and increase with insertion, so sorting by id restores log order.
+        candidates.sort_unstable_by_key(|row| row.0);
         let more = candidates.len() > limit;
         let changes = candidates
             .into_iter()
