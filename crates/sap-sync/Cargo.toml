@@ -1,0 +1,23 @@
+[package]
+name = "sap-sync"
+description = "Sub-Api-Proxy peer sync: change feed transport, authentication and scheduling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sap-core = { path = "../sap-core" }
+axum.workspace = true
+bytes.workspace = true
+hmac = "0.12"
+http.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio.workspace = true
+tracing.workspace = true
+

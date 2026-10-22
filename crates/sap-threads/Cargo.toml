@@ -1,0 +1,13 @@
+[package]
+name = "sap-threads"
+description = "Sub-Api-Proxy thread identity extraction and the in-memory thread registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sap-core = { path = "../sap-core" }
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true

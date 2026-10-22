@@ -1,0 +1,344 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sub-Api-Proxy · Flow</title>
+<style>
+  :root {
+    --bg: #171513; --panel: #1e1b18; --panel-2: #24201c; --rule: #37312a; --rule-soft: #2a2520;
+    --ink: #ece5d8; --ink-2: #c9c0b1; --muted: #9a9083; --faint: #6c645a;
+    --claude: #cf8a66; --openai: #a9b27c; --ok: #8fa36a; --warn: #d0a24b; --bad: #c4664f;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: -apple-system, "Inter", "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  html, body { background: transparent; margin: 0; }
+  #fit { width: 100%; overflow: hidden; }
+  #app {
+    width: 1280px; transform-origin: 0 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 13px; border-radius: 10px; padding: 28px 32px 32px; box-sizing: border-box;
+  }
+  /* header */
+  header { display: flex; align-items: flex-end; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
+  .brand { display: flex; align-items: baseline; gap: 16px; }
+  .brand h1 { font-family: var(--serif); font-weight: 500; font-size: 30px; margin: 0; letter-spacing: -0.2px; }
+  .brand .sub { color: var(--muted); font-family: var(--serif); font-style: italic; font-size: 15px; }
+  .status { display: flex; gap: 22px; color: var(--muted); font-size: 12px; }
+  .status b { color: var(--ink-2); font-weight: 500; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  nav { display: flex; gap: 26px; padding: 12px 0 0; margin-bottom: 26px; }
+  nav a { color: var(--muted); text-decoration: none; font-size: 11.5px; letter-spacing: 1.2px; text-transform: uppercase; padding-bottom: 8px; }
+  nav a.on { color: var(--ink); border-bottom: 1px solid var(--claude); }
+  /* flow */
+  .flow { position: relative; display: grid; grid-template-columns: 400px 1fr 230px 1fr 380px; align-items: start; }
+  .col h2, .panel h2 { font-family: var(--serif); font-weight: 500; font-size: 19px; margin: 0 0 2px; }
+  .col .lede, .panel .lede { color: var(--faint); font-size: 12px; margin-bottom: 14px; font-family: var(--serif); font-style: italic; }
+  svg#wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  /* threads */
+  .group { border-top: 1px solid var(--rule); }
+  .group:last-child { border-bottom: 1px solid var(--rule); }
+  .ghead { display: flex; align-items: center; gap: 10px; padding: 11px 4px; cursor: pointer; user-select: none; }
+  .ghead .chev { color: var(--faint); width: 10px; transition: transform .15s; font-size: 10px; }
+  .group.open .ghead .chev { transform: rotate(90deg); }
+  .ghead .gname { font-family: var(--serif); font-size: 16px; }
+  .ghead .gmeta { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .glyph { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--bg); }
+  .gbody { display: none; padding: 0 0 8px; }
+  .group.open .gbody { display: block; }
+  .thread { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 7px 8px 7px 26px; border-radius: 6px; cursor: pointer; }
+  .thread:hover { background: var(--panel); }
+  .thread.sel { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--claude); }
+  .thread.codex.sel { box-shadow: inset 2px 0 0 var(--openai); }
+  .thread .title { color: var(--ink); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread .tid { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .thread .acct { text-align: right; font-size: 12px; color: var(--ink-2); }
+  .thread .why { text-align: right; font-size: 11px; color: var(--faint); font-style: italic; font-family: var(--serif); }
+  .thread.child { margin-left: 22px; padding-left: 22px; }
+  .thread.child::before { content: ""; position: absolute; left: 6px; top: -4px; bottom: 50%; width: 10px; border-left: 1px solid var(--rule); border-bottom: 1px solid var(--rule); border-bottom-left-radius: 6px; }
+  .kind { font-size: 10px; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule); border-radius: 3px; padding: 0 4px; margin-right: 6px; vertical-align: 1px; }
+  .live { color: var(--ok); }
+  .anchor { position: absolute; right: -2px; top: 50%; width: 1px; height: 1px; }
+  /* servers */
+  .servers { display: flex; flex-direction: column; gap: 18px; padding-top: 38px; }
+  .server { border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; background: var(--panel); position: relative; }
+  .server.primary { border-color: #4a4136; }
+  .server.standby { opacity: .78; }
+  .server .sname { font-family: var(--serif); font-size: 17px; }
+  .server .role { color: var(--muted); font-size: 11.5px; margin: 2px 0 10px; }
+  .server dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+  .server dt { color: var(--faint); }
+  .server dd { margin: 0; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  /* accounts */
+  .prov { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); margin: 4px 0 6px; display: flex; justify-content: space-between; }
+  .acct-row { position: relative; padding: 9px 4px 10px 14px; border-top: 1px solid var(--rule-soft); }
+  .acct-row .top { display: flex; align-items: baseline; gap: 8px; }
+  .acct-row .aname { font-family: var(--serif); font-size: 15px; }
+  .acct-row .plan { color: var(--muted); font-size: 11.5px; }
+  .acct-row .weight { margin-left: auto; font-family: var(--serif); font-size: 16px; font-variant-numeric: tabular-nums; }
+  .acct-row .weight small { color: var(--faint); font-family: var(--sans); font-size: 10.5px; margin-left: 3px; }
+  .bars { display: grid; grid-template-columns: 26px 1fr 34px 92px; gap: 3px 8px; align-items: center; margin-top: 6px; font-size: 11px; color: var(--faint); }
+  .bar { height: 4px; background: var(--rule-soft); border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 2px; }
+  .bars .pct { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .bars .reset { color: var(--faint); }
+  .acct-row.out { opacity: .55; }
+  .acct-row .flag { font-size: 11px; color: var(--warn); font-style: italic; font-family: var(--serif); }
+  .acct-row .in { position: absolute; left: 0; top: 50%; width: 1px; height: 1px; }
+  /* lower panels */
+  .lower { display: grid; grid-template-columns: 400px 1fr 380px; gap: 28px; margin-top: 34px; padding-top: 24px; border-top: 1px solid var(--rule); }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 7px 12px; font-size: 12.5px; }
+  .kv dt { color: var(--faint); }
+  .kv dd { margin: 0; color: var(--ink-2); }
+  .kv dd.mono { font-family: var(--mono); font-size: 11.5px; }
+  .stats { display: flex; gap: 34px; margin-top: 14px; }
+  .stat .n { font-family: var(--serif); font-size: 26px; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--faint); font-size: 11px; letter-spacing: .6px; text-transform: uppercase; }
+  .events { list-style: none; margin: 0; padding: 0; }
+  .events li { display: grid; grid-template-columns: 44px 1fr; gap: 10px; padding: 7px 0; border-top: 1px solid var(--rule-soft); font-size: 12.5px; color: var(--ink-2); }
+  .events li time { color: var(--faint); font-family: var(--mono); font-size: 11px; padding-top: 1px; }
+  .events em { font-family: var(--serif); color: var(--ink); }
+  .legend { display: flex; gap: 16px; color: var(--faint); font-size: 11.5px; margin-bottom: 6px; }
+  .legend span::before { content: ""; display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: 3px; background: currentColor; }
+</style>
+</head>
+<body>
+<div id="fit"><div id="app">
+  <header>
+    <div class="brand"><h1>Sub-Api-Proxy</h1><span class="sub">subscription routing for coding agents</span></div>
+    <div class="status">
+      <span><span class="dot" style="background:var(--ok)"></span>serving from <b>power-server</b></span>
+      <span>sync lag <b>0.4 s</b></span>
+      <span>failovers today <b>1</b></span>
+      <span><b>Thu 22 Oct</b>, 16:24</span>
+    </div>
+  </header>
+  <nav><a class="on" href="#">Flow</a><a href="#">Accounts</a><a href="#">Threads</a><a href="#">Nodes</a><a href="#">Events</a><a href="#">Settings</a></nav>
+
+  <section class="flow" id="flow">
+    <svg id="wires"></svg>
+    <div class="col" id="threads">
+      <h2>Threads</h2><div class="lede">grouped by client · children nested under their parent</div>
+    </div>
+    <div></div>
+    <div class="col">
+      <h2 style="text-align:center">Servers</h2><div class="lede" style="text-align:center">Tailscale · local router on each client</div>
+      <div class="servers" id="servers"></div>
+    </div>
+    <div></div>
+    <div class="col" id="accounts">
+      <h2>Accounts</h2><div class="lede">weights follow quota left, reset time and plan size</div>
+    </div>
+  </section>
+
+  <section class="lower">
+    <div class="panel" id="detail"></div>
+    <div class="panel">
+      <h2>Requests &amp; cache reads</h2><div class="lede">last three hours, all accounts</div>
+      <div class="legend"><span style="color:var(--ink-2)">requests</span><span style="color:var(--claude)">cache-read tokens (scaled)</span></div>
+      <svg id="chart" width="100%" height="150" viewBox="0 0 400 150" preserveAspectRatio="none"></svg>
+      <div class="stats">
+        <div class="stat"><div class="n">3,482</div><div class="l">requests</div></div>
+        <div class="stat"><div class="n">81%</div><div class="l">cache hit</div></div>
+        <div class="stat"><div class="n">4 ms</div><div class="l">p50 added</div></div>
+        <div class="stat"><div class="n">46 MB</div><div class="l">rss</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Recent events</h2><div class="lede">routing, failover and sync</div>
+      <ul class="events">
+        <li><time>16:21</time><div><em>wiring tests</em> compacted (auto); kept <em>Claude Max · work</em>, still the best fit</div></li>
+        <li><time>16:02</time><div><em>quota refactor</em> moved to <em>ChatGPT Pro · main</em>: <em>Plus · alt</em> hit its weekly limit</div></li>
+        <li><time>14:47</time><div>power-server back after 6 min; healthy for 2 min, new requests returned to it</div></li>
+        <li><time>14:41</time><div>power-server unreachable; failover to <em>macbook</em> in 2.1 s, one stream retried by the client</div></li>
+        <li><time>14:40</time><div>sync conflict on <em>Claude Pro · alt</em> weight, resolved by you on macbook</div></li>
+      </ul>
+    </div>
+  </section>
+</div></div>
+
+<script>
+const ACCOUNTS = [
+  { id: "c-max", prov: "claude", name: "Claude Max · work", plan: "Max 20×", h5: 38, wk: 41, r5: "2 h 14 m", rw: "Mon 09:00", weight: 46 },
+  { id: "c-pro", prov: "claude", name: "Claude Pro · personal", plan: "Pro", h5: 71, wk: 52, r5: "48 m", rw: "Sat 13:00", weight: 22 },
+  { id: "c-alt", prov: "claude", name: "Claude Pro · alt", plan: "Pro", h5: 12, wk: 30, r5: "4 h 05 m", rw: "Tue 18:00", weight: 32 },
+  { id: "o-pro", prov: "openai", name: "ChatGPT Pro · main", plan: "Pro", h5: 27, wk: 19, r5: "3 h 37 m", rw: "Wed 08:00", weight: 71 },
+  { id: "o-plus", prov: "openai", name: "ChatGPT Plus · alt", plan: "Plus", h5: 100, wk: 100, r5: "—", rw: "Fri 09:00", weight: 0, out: "weekly limit reached · resets Fri 09:00" },
+  { id: "o-team", prov: "openai", name: "ChatGPT Plus · side", plan: "Plus", h5: 44, wk: 63, r5: "1 h 22 m", rw: "Sun 21:00", weight: 29 },
+];
+const GROUPS = [
+  { client: "claude", name: "Claude Code", glyph: "✳", color: "var(--claude)", threads: [
+    { id: "7fe0·2bbb", title: "Rust fork: peer sync module", acct: "c-max", why: "least loaded at start", cache: 92, live: true, kids: [
+      { id: "agent 6b98", kind: "subagent", title: "Explore: storage crates", acct: "c-max", why: "parent affinity", cache: 88, live: true },
+      { id: "agent 1797", kind: "subagent", title: "Review: sync conflict tests", acct: "c-max", why: "parent affinity", cache: 85 },
+    ]},
+    { id: "1aac·c89c", title: "Fork: alternate failover design", acct: "c-max", why: "fork of 7fe0 · parent affinity", cache: 64, kind: "fork" },
+    { id: "c631·ab4a", title: "wiring tests", acct: "c-max", why: "compacted ×2 · kept", cache: 71 },
+    { id: "fc8d·2f25", title: "Dashboard flow layout", acct: "c-alt", why: "most headroom", cache: 79, live: true },
+  ]},
+  { client: "codex", name: "Codex CLI", glyph: "›_", color: "var(--openai)", threads: [
+    { id: "4be0·e8", title: "quota refactor", acct: "o-pro", why: "moved: weekly limit on Plus · alt", cache: 22, live: true, kids: [
+      { id: "/root/reader", kind: "subagent", title: "read notes.txt", acct: "o-pro", why: "parent affinity", cache: 90 },
+    ]},
+    { id: "2804·4aed", title: "Fork: websocket retry", acct: "o-team", why: "fork · parent account full", cache: 58, kind: "fork" },
+    { id: "a111·b3", title: "visualizer contract check", acct: "o-team", why: "least loaded at start", cache: 83 },
+  ]},
+];
+const SERVERS = [
+  { id: "power", name: "power-server", role: "Linux · primary · serving", cls: "primary", kv: [["requests/min", "38"], ["open streams", "7"], ["added p50", "4 ms"], ["rss", "46 MB"]] },
+  { id: "mac", name: "macbook", role: "macOS · fallback · standby", cls: "standby", kv: [["requests/min", "0"], ["sync lag", "0.4 s"], ["last failover", "14:41"], ["rss", "31 MB"]] },
+];
+const acctById = Object.fromEntries(ACCOUNTS.map(a => [a.id, a]));
+const provColor = p => p === "claude" ? "var(--claude)" : "var(--openai)";
+let selected = "7fe0·2bbb";
+const open = { claude: true, codex: true };
+
+function threadRow(t, client, child) {
+  const a = acctById[t.acct];
+  const kind = t.kind ? `<span class="kind">${t.kind}</span>` : "";
+  return `<div class="thread ${client} ${child ? "child" : ""} ${t.id === selected ? "sel" : ""}" data-id="${t.id}" data-acct="${t.acct}" data-client="${client}">
+    <div class="title">${kind}${t.title}</div><div class="acct">${a.name.split(" · ")[0].replace("ChatGPT ", "")} · ${a.name.split(" · ")[1]}</div>
+    <div class="tid">${t.id}${t.live ? ' <span class="live">● streaming</span>' : ""}</div><div class="why">${t.why} · cache ${t.cache}%</div>
+    <span class="anchor"></span></div>`;
+}
+
+function render() {
+  const th = document.getElementById("threads");
+  th.querySelectorAll(".group").forEach(n => n.remove());
+  for (const g of GROUPS) {
+    const n = g.threads.reduce((s, t) => s + 1 + (t.kids || []).length, 0);
+    const live = g.threads.reduce((s, t) => s + (t.live ? 1 : 0) + (t.kids || []).filter(k => k.live).length, 0);
+    const el = document.createElement("div");
+    el.className = "group" + (open[g.client] ? " open" : "");
+    el.dataset.client = g.client;
+    el.innerHTML = `<div class="ghead"><span class="chev">▶</span><span class="glyph" style="background:${g.color}">${g.glyph}</span>
+      <span class="gname">${g.name}</span><span class="gmeta">${n} threads · ${live} streaming</span><span class="anchor"></span></div>
+      <div class="gbody">${g.threads.map(t => threadRow(t, g.client, false) + (t.kids || []).map(k => threadRow(k, g.client, true)).join("")).join("")}</div>`;
+    el.querySelector(".ghead").onclick = () => { open[g.client] = !open[g.client]; render(); };
+    th.appendChild(el);
+  }
+  th.querySelectorAll(".thread").forEach(r => r.onclick = () => { selected = r.dataset.id; render(); });
+
+  const sv = document.getElementById("servers");
+  sv.innerHTML = SERVERS.map(s => `<div class="server ${s.cls}" data-id="${s.id}"><div class="sname"><span class="dot" style="background:${s.cls === "primary" ? "var(--ok)" : "var(--faint)"}"></span>${s.name}</div>
+    <div class="role">${s.role}</div><dl>${s.kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></div>`).join("");
+
+  const ac = document.getElementById("accounts");
+  ac.querySelectorAll(".provblock").forEach(n => n.remove());
+  for (const prov of ["claude", "openai"]) {
+    const blk = document.createElement("div");
+    blk.className = "provblock";
+    blk.style.marginBottom = "16px";
+    const list = ACCOUNTS.filter(a => a.prov === prov);
+    blk.innerHTML = `<div class="prov"><span>${prov === "claude" ? "Claude" : "OpenAI"}</span><span>weight</span></div>` + list.map(a => `
+      <div class="acct-row ${a.out ? "out" : ""}" data-id="${a.id}">
+        <span class="in"></span>
+        <div class="top"><span class="aname">${a.name}</span><span class="plan">${a.plan}</span><span class="weight">${a.weight}<small>%</small></span></div>
+        ${a.out ? `<div class="flag">${a.out}</div>` : ""}
+        <div class="bars">
+          <span>5 h</span><div class="bar"><i style="width:${a.h5}%;background:${a.h5 >= 90 ? "var(--bad)" : a.h5 >= 70 ? "var(--warn)" : provColor(a.prov)}"></i></div><span class="pct">${a.h5}%</span><span class="reset">${a.r5 === "—" ? "" : "resets " + a.r5}</span>
+          <span>week</span><div class="bar"><i style="width:${a.wk}%;background:${a.wk >= 90 ? "var(--bad)" : a.wk >= 70 ? "var(--warn)" : provColor(a.prov)}; opacity:.7"></i></div><span class="pct">${a.wk}%</span><span class="reset">${a.rw}</span>
+        </div>
+      </div>`).join("");
+    ac.appendChild(blk);
+  }
+  renderDetail();
+  requestAnimationFrame(drawWires);
+}
+
+function findThread(id) {
+  for (const g of GROUPS) for (const t of g.threads) {
+    if (t.id === id) return { t, g, parent: null };
+    for (const k of t.kids || []) if (k.id === id) return { t: k, g, parent: t };
+  }
+}
+
+function renderDetail() {
+  const { t, g, parent } = findThread(selected);
+  const a = acctById[t.acct];
+  document.getElementById("detail").innerHTML = `<h2>${t.title}</h2><div class="lede">${g.name} · ${t.kind || "thread"} ${t.live ? "· streaming now" : "· idle"}</div>
+    <dl class="kv">
+      <dt>thread</dt><dd class="mono">${t.id}</dd>
+      ${parent ? `<dt>parent</dt><dd>${parent.title} <span class="mono" style="color:var(--faint)">${parent.id}</span></dd>` : ""}
+      <dt>account</dt><dd>${a.name}</dd>
+      <dt>routing reason</dt><dd>${t.why}</dd>
+      <dt>served by</dt><dd>power-server</dd>
+      <dt>prompt cache</dt><dd>${t.cache}% of input read from cache this hour</dd>
+      <dt>compactions</dt><dd>${t.why.includes("compacted") ? "2 · last 16:21, auto" : "none"}</dd>
+    </dl>`;
+}
+
+function drawWires() {
+  const svg = document.getElementById("wires");
+  const box = document.getElementById("flow").getBoundingClientRect();
+  const scale = box.width / document.getElementById("flow").offsetWidth || 1;
+  const pt = (el, side) => {
+    const r = el.getBoundingClientRect();
+    return { x: ((side === "r" ? r.right : r.left) - box.left) / scale, y: (r.top + r.height / 2 - box.top) / scale };
+  };
+  const power = document.querySelector('.server[data-id="power"]');
+  const pIn = pt(power, "l"), pOut = pt(power, "r");
+  const curve = (a, b) => { const mx = (a.x + b.x) / 2; return `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`; };
+  let paths = "";
+  const selAcct = findThread(selected).t.acct;
+  const perAcct = {};
+  document.querySelectorAll(".group").forEach(gEl => {
+    const client = gEl.dataset.client;
+    const color = client === "claude" ? "var(--claude)" : "var(--openai)";
+    const rows = gEl.classList.contains("open") ? [...gEl.querySelectorAll(".thread")] : [];
+    if (!rows.length) {
+      const g = GROUPS.find(x => x.client === client);
+      const n = g.threads.reduce((s, t) => s + 1 + (t.kids || []).length, 0);
+      const a = pt(gEl.querySelector(".ghead"), "r"); a.x += 8;
+      paths += `<path d="${curve(a, { x: pIn.x, y: pIn.y + (client === "claude" ? -10 : 10) })}" stroke="${color}" stroke-width="${1 + n}" stroke-opacity=".35" fill="none"/>`;
+      g.threads.forEach(t => [t, ...(t.kids || [])].forEach(k => perAcct[k.acct] = (perAcct[k.acct] || 0) + 1));
+      return;
+    }
+    rows.forEach(r => {
+      const sel = r.dataset.id === selected;
+      const a = pt(r, "r"); a.x += 8;
+      paths += `<path d="${curve(a, { x: pIn.x, y: pIn.y + (client === "claude" ? -10 : 10) })}" stroke="${color}" stroke-width="${sel ? 2.4 : 1.4}" stroke-opacity="${sel ? .95 : .32}" fill="none"/>`;
+      perAcct[r.dataset.acct] = (perAcct[r.dataset.acct] || 0) + 1;
+    });
+  });
+  document.querySelectorAll(".acct-row").forEach(row => {
+    const id = row.dataset.id, n = perAcct[id] || 0;
+    const a = acctById[id];
+    const b = pt(row, "l"); b.x -= 6;
+    const sel = id === selAcct;
+    if (n) paths += `<path d="${curve({ x: pOut.x, y: pOut.y + (a.prov === "claude" ? -10 : 10) }, b)}" stroke="${provColor(a.prov)}" stroke-width="${sel ? 1.5 + n * 1.2 : 1 + n * 1.2}" stroke-opacity="${sel ? .9 : .3}" fill="none"/>`;
+    else paths += `<path d="${curve({ x: pOut.x, y: pOut.y }, b)}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="2 4" stroke-opacity=".45" fill="none"/>`;
+    paths += `<circle cx="${b.x}" cy="${b.y}" r="2.5" fill="${n ? provColor(a.prov) : "var(--faint)"}"/>`;
+  });
+  // standby server: thin dashed link showing it is ready
+  const mac = document.querySelector('.server[data-id="mac"]');
+  const mIn = pt(mac, "l");
+  paths += `<path d="M${mIn.x - 40},${mIn.y} L${mIn.x},${mIn.y}" stroke="var(--faint)" stroke-dasharray="2 4" stroke-opacity=".6"/>`;
+  svg.innerHTML = paths;
+}
+
+function chart() {
+  const svg = document.getElementById("chart");
+  const N = 36; let req = [], cache = [], r = 60, c = 40;
+  for (let i = 0; i < N; i++) { r += Math.sin(i * .7) * 9 + (i % 5 - 2) * 3; c = r * (.62 + .18 * Math.sin(i * .35)); req.push(r); cache.push(c); }
+  const x = i => i / (N - 1) * 400, y = v => 140 - v / 110 * 130;
+  const line = arr => arr.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  let g = "";
+  for (let i = 0; i <= 3; i++) g += `<line x1="0" x2="400" y1="${10 + i * 43}" y2="${10 + i * 43}" stroke="#2a2520" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+  g += `<path d="${line(cache)} L400,140 L0,140 Z" fill="#cf8a66" fill-opacity=".08"/>`;
+  g += `<path d="${line(cache)}" stroke="#cf8a66" stroke-width="1.5" fill="none" vector-effect="non-scaling-stroke"/>`;
+  g += `<path d="${line(req)}" stroke="#c9c0b1" stroke-width="1.5" fill="none" vector-effect="non-scaling-stroke"/>`;
+  svg.innerHTML = g;
+}
+
+function fit() {
+  const app = document.getElementById("app"), wrap = document.getElementById("fit");
+  const s = Math.min(1, wrap.clientWidth / 1280);
+  app.style.transform = `scale(${s})`;
+  wrap.style.height = app.offsetHeight * s + "px";
+}
+render(); chart(); fit();
+window.addEventListener("resize", () => { fit(); drawWires(); });
+new ResizeObserver(() => { fit(); }).observe(document.getElementById("app"));
+</script>
+</body>
+</html>

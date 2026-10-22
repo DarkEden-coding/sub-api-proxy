@@ -1,0 +1,12 @@
+[package]
+name = "sap-routing"
+description = "Sub-Api-Proxy routing policy: eligibility, scoring, capacity learning and the per-thread decision table"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sap-core = { path = "../sap-core" }
+serde.workspace = true
+serde_json.workspace = true

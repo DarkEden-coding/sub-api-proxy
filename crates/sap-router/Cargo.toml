@@ -1,0 +1,25 @@
+[package]
+name = "sap-router"
+description = "Sub-Api-Proxy local router: one localhost address for coding clients, server health and failover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sap-core = { path = "../sap-core" }
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server", "http1", "http2"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake", "connect"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

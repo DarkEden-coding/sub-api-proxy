@@ -1,0 +1,13 @@
+[package]
+name = "sap-store"
+description = "Sub-Api-Proxy embedded state: SQLite schema, op log, merge rules and retention"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sap-core = { path = "../sap-core" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true

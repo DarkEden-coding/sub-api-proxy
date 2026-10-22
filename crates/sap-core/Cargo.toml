@@ -1,0 +1,12 @@
+[package]
+name = "sap-core"
+description = "Sub-Api-Proxy shared contracts: threads, accounts, quota, routing, sync, health and the dashboard API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+serde.workspace = true
+serde_json.workspace = true

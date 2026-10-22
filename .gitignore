@@ -1,3 +1,7 @@
 /target
 ui/node_modules/
 ui/.amp/
+
+# sub-api-proxy: private local data
+/research/
+/design-private/
