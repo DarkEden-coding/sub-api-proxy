@@ -356,10 +356,28 @@ async fn node_two_loopback_nodes_replicate_assignment() {
         impl Drop for Stop {fn drop(&mut self) {self.0.abort();self.1.abort();}}
         let _stop = Stop(ta,tb);
         let mut headers = http::HeaderMap::new(); headers.insert("x-claude-code-session-id","replicated".parse().unwrap()); headers.insert("x-claude-code-request-class","main".parse().unwrap());
-        let req = na.identify("/v1/messages",&headers,br#"{"model":"test"}"#).unwrap();
-        assert!(matches!(na.select(&req,&a.candidates),SapPick::Credential(_)));
+        let hooks = a.rt.sap_hooks().unwrap();
+        let req = hooks.identify("/v1/messages",&headers,br#"{"model":"test"}"#).unwrap();
+        assert!(matches!(hooks.select(&req,&a.candidates),SapPick::Credential(_)));
+        hooks.on_stream(&req, true);
         let expected = na.threads(false).into_iter().find(|t|t.key.id == "replicated").unwrap().account;
         loop { if nb.threads(false).iter().any(|t|t.key.id == "replicated" && t.account == expected) {break;} tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        loop {
+            let remote = nb.nodes().into_iter().find(|n| n.id.0 == "a").unwrap();
+            if remote.open_streams == Some(1) && remote.requests_per_minute == Some(1.0) {
+                assert_eq!(remote.role, Some(sap_core::health::NodeRole::Primary));
+                assert_eq!(remote.state, Some(sap_core::health::NodeState::Serving));
+                assert!(remote.added_latency_p50_ms.unwrap() > 0.0);
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                assert!(remote.rss_bytes.unwrap() > 0);
+                assert!(remote.telemetry_observed_at.is_some());
+                assert!(remote.telemetry_received_at.is_some());
+                assert!(!remote.telemetry_stale);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        hooks.on_stream(&req, false);
     }).await.unwrap();
 }
 

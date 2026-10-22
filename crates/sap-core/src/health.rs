@@ -52,3 +52,19 @@ pub struct UpstreamHealth {
     pub claude: bool,
     pub codex: bool,
 }
+
+/// Authenticated peer-only process telemetry. Never added to public health.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerTelemetry {
+    pub node: NodeId,
+    pub role: NodeRole,
+    pub state: NodeState,
+    pub version: String,
+    pub observed_at: DateTime<Utc>,
+    /// Inference requests identified in the trailing 60 seconds, including failures.
+    pub requests_per_minute: f64,
+    pub open_streams: u32,
+    /// Median SAP selection callback duration, excluding upstream time.
+    pub added_latency_p50_ms: Option<f64>,
+    pub rss_bytes: Option<u64>,
+}

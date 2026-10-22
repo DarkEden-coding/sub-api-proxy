@@ -531,3 +531,112 @@ async fn ack_failure_does_not_update_status_and_success_reaches_log() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn telemetry_is_authenticated_optional_bounded_and_independent_of_sync() {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        use sap_core::health::{NodeRole, NodeState, PeerTelemetry};
+        let log = MemoryLog::new("b");
+        let source = Arc::new(Mutex::new(None::<PeerTelemetry>));
+        let copy = source.clone();
+        let state = Arc::new(
+            ServerState::new(
+                log.clone(),
+                BTreeMap::from([(NodeId("a".into()), b"shared-test-secret".to_vec())]),
+                Arc::new(Notify::new()),
+            )
+            .allow_loopback()
+            .with_telemetry(move || copy.lock().unwrap().clone()),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = router(state.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        });
+        let server = Server { address, task, state };
+        let path = "/sap/sync/telemetry";
+        assert_eq!(
+            get(address, path, b"wrong", crate::now(), "", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(address, path, b"shared-test-secret", crate::now(), "", None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let agent = SyncAgent::spawn(MemoryLog::new("a"), vec![peer("b", address)], Arc::new(Notify::new()));
+        log.write(&Notify::new());
+        until(|| {
+            let statuses = agent.statuses();
+            let status = &statuses[&NodeId("b".into())];
+            status.last_success.is_some() && status.telemetry_error.is_some()
+        })
+        .await;
+        let missing = agent.statuses().remove(&NodeId("b".into())).unwrap();
+        assert!(missing.telemetry.is_none());
+        assert!(missing.last_error.is_none());
+        let sample = PeerTelemetry {
+            node: NodeId("b".into()),
+            role: NodeRole::Primary,
+            state: NodeState::Serving,
+            version: "test".into(),
+            observed_at: sap_core::Utc::now(),
+            requests_per_minute: 7.0,
+            open_streams: 3,
+            added_latency_p50_ms: Some(1.25),
+            rss_bytes: Some(123456),
+        };
+        *source.lock().unwrap() = Some(sample.clone());
+        assert_eq!(
+            crate::telemetry::fetch(&client(), &NodeId("a".into()), &peer("b", address))
+                .await
+                .unwrap(),
+            sample
+        );
+        until(|| agent.statuses()[&NodeId("b".into())].telemetry.is_some()).await;
+        let status = agent.statuses().remove(&NodeId("b".into())).unwrap();
+        assert!(status.telemetry_received_at.is_some());
+        assert!(status.last_error.is_none());
+        source.lock().unwrap().as_mut().unwrap().node = NodeId("impostor".into());
+        assert!(
+            crate::telemetry::fetch(&client(), &NodeId("a".into()), &peer("b", address))
+                .await
+                .is_err()
+        );
+        source.lock().unwrap().as_mut().unwrap().version = "x".repeat(crate::MAX_TELEMETRY_BODY);
+        assert_eq!(
+            get(address, path, b"shared-test-secret", crate::now(), "", None)
+                .await
+                .0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        agent.shutdown().await;
+        drop(server);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn telemetry_client_rejects_oversized_mock_response() {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/sap/sync/telemetry",
+            axum::routing::get(|| async { "x".repeat(crate::MAX_TELEMETRY_BODY + 1) }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let result = crate::telemetry::fetch(&client(), &NodeId("a".into()), &peer("b", address)).await;
+        task.abort();
+        assert_eq!(result.unwrap_err(), "invalid or oversized response");
+    })
+    .await
+    .unwrap();
+}

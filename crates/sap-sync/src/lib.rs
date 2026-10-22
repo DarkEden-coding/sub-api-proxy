@@ -2,6 +2,7 @@
 mod agent;
 mod auth;
 mod server;
+mod telemetry;
 
 pub use agent::{Peer, PeerStatus, SyncAgent};
 pub use server::{ServerState, router};
@@ -23,3 +24,5 @@ pub(crate) const MAX_WAIT_MS: u64 = 25_000;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) const MAX_TELEMETRY_BODY: usize = 4096;

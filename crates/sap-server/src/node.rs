@@ -38,6 +38,7 @@ pub(crate) struct State {
 }
 pub struct Node {
     pub(crate) config: Config,
+    pub(crate) telemetry: Mutex<crate::telemetry::Metrics>,
     pub(crate) management: Mutex<Option<(Weak<cpa_server::management::Management>, String)>>,
     pub(crate) runtime: Weak<Runtime>,
     pub(crate) store: Arc<sap_store::Store>,
@@ -187,7 +188,10 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
         peers.push(sap_sync::Peer::new(p.id.clone(), &p.url, secret.clone()).map_err(anyhow::Error::msg)?);
         secrets.insert(p.id.clone(), secret);
     }
-    let server = sap_sync::ServerState::new(store.clone(), secrets, notify.clone());
+    let telemetry_node = Arc::new(std::sync::OnceLock::<Weak<Node>>::new());
+    let source = telemetry_node.clone();
+    let server = sap_sync::ServerState::new(store.clone(), secrets, notify.clone())
+        .with_telemetry(move || source.get()?.upgrade().map(|node| node.telemetry()));
     let server = if config.allow_loopback_peers {
         server.allow_loopback()
     } else {
@@ -205,6 +209,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
     }
     let node = Arc::new(Node {
         config,
+        telemetry: Mutex::default(),
         management: Mutex::new(None),
         runtime: Arc::downgrade(rt),
         store,
@@ -228,16 +233,23 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
         changes: tokio::sync::broadcast::channel(256).0,
         started: Utc::now(),
     });
+    let _ = telemetry_node.set(Arc::downgrade(&node));
+    node.sample_rss();
     node.discover()?;
-    rt.set_sap_hooks(node.clone());
+    rt.set_sap_hooks(Arc::new(crate::telemetry::Instrumented(node.clone())));
     let weak = Arc::downgrade(&node);
     let wake = node.notify.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         let mut compact_at = std::time::Instant::now() + Duration::from_secs(60);
+        let mut rss_at = std::time::Instant::now() + Duration::from_secs(1);
         loop {
             tokio::select! { _ = interval.tick() => {}, _ = wake.notified() => {} }
             let Some(node) = weak.upgrade() else { break };
+            if std::time::Instant::now() >= rss_at {
+                node.sample_rss();
+                rss_at = std::time::Instant::now() + Duration::from_secs(1);
+            }
             if node.reconcile().is_err() {
                 tracing::warn!("SAP state reconciliation failed");
             }

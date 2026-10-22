@@ -16,5 +16,6 @@ mod persistence;
 mod quota;
 mod reset_aware;
 mod selection;
+mod telemetry;
 mod views;
 pub use node::{Node, install};

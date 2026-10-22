@@ -168,10 +168,9 @@ No real provider endpoint or LLM was contacted.
 - The hook has no attempt ID. Usage deduplication is per request/credential;
   multiple cumulative counters restarted for the same credential within one
   request cannot be distinguished reliably. An attempt ID is needed for that case.
-- Peer roles/remote stream counts and request rates are not provided by sync;
-  peer roles display as fallback, remote streams/rates as zero. Latency and RSS
-  remain absent. Health upstream flags use successful traffic from the last five
-  minutes, without synthetic probes.
+- Peer telemetry is available through authenticated sync, as described below.
+  Health upstream flags still use successful traffic from the last five minutes,
+  without synthetic probes.
 - Learner parameters are fixed starting values pending replay calibration.
   Additional Codex quota families are not parsed beyond primary/secondary.
 - OAuth URL generation reuses management, but browser completion was not tested.
@@ -191,3 +190,63 @@ status/type in SSE and WebSocket frames. No public API or sap-core change was
 needed. The custom-base Claude client sends full history without `thread`, so
 its in-process move succeeds without triggering forced 400 recovery. Native
 ChatGPT bootstrap and native Claude server-thread recovery remain unverified.
+
+## Peer telemetry, October 22, 2026
+
+`GET /sap/sync/telemetry` uses the sync endpoint's connection-address checks,
+configured peer identity, timestamp window and HMAC over method, path and body.
+The public, unauthenticated `/sap/health` response is unchanged. The telemetry
+response contains only node ID, configured role, serving state, build version,
+`observed_at`, request rate, open streams, selection latency and process RSS.
+It contains no accounts, credentials, headers, thread IDs or request bodies.
+
+Each configured peer is sampled every five seconds in a separate task. Requests
+have a three-second deadline and two-second connect timeout. Both the server's
+serialized response and the client's collected body are capped at 4 KiB. The
+telemetry request body is also capped at 4 KiB. Unsupported endpoints, failed
+samples and malformed responses never change replication's cursor, success,
+error or retry schedule. A server without a telemetry source returns 404.
+Responses must match the configured node identity, have finite nonnegative
+rates/latency, a version no longer than 128 bytes, and a sample time within 60
+seconds of the local clock. Peers need reasonably synchronized clocks.
+
+Node views now return nullable `role`, `state`, `requests_per_minute` and
+`open_streams`. Existing numeric/enum values keep their JSON representation.
+New `telemetry_observed_at`, `telemetry_received_at` and `telemetry_stale` fields
+separate the peer's sample time from this node's receipt time. A sample is fresh
+for 15 seconds by both clocks. Missing or expired samples produce null metrics,
+role, state and version; their last timestamps remain visible. Clients must
+render null as unknown, including for peers running older versions, rather than
+coercing it to zero or fallback. Replication reachability and sync lag remain
+separate from telemetry availability.
+
+Request rate is the number of runtime inference identifications in the trailing
+60 seconds, including failed requests and WebSocket response.create frames.
+Retries selected within the same request do not increment it. Startup reports
+the observed count without extrapolation. Open streams reuse the live hook
+counter. `added_latency_p50_ms` is the median SAP selection callback duration,
+excluding upstream time. It is not a measurement of total proxy overhead. It
+uses the latest 1024 selections within 60 seconds and is null before a selection
+or after the samples expire. Aggregate stats expose the local selection latency
+and RSS, while their existing request/usage series retain their current scope.
+
+RSS is current resident memory, sampled by the node maintenance task once per
+second, using `/proc/self/status` on Linux and `proc_pidinfo` on macOS. Failed or
+unsupported reads return null. No subprocess or new dependency is needed.
+The telemetry callback reads in-memory counters; RSS I/O happens outside it.
+Direct calls to `Node` hooks bypass runtime instrumentation; embedding callers
+should use the hooks installed on `Runtime` to collect rates and latency.
+
+Validation uses local mocks and private auth directories. The sync tests cover
+authentication, an older peer without samples, independent replication, node
+identity rejection and response size limits. Node tests cover freshness expiry,
+unknown versus measured zero, and telemetry across two loopback nodes with a
+live stream and measured selection latency/RSS. No provider call or deployment
+is part of this check.
+
+Peer telemetry checks passed with `CARGO_BUILD_JOBS=2 nice -n 19` and subprocess
+alarms of 300 seconds for tests/clippy and 60 seconds for formatting:
+
+- `cargo test -p sap-sync -p sap-core -p sap-server`: 30 tests passed.
+- `cargo clippy -p sap-sync -p sap-core -p sap-server --all-targets -- -D warnings`.
+- `cargo fmt -p sap-core -p sap-sync -p sap-server --check`.

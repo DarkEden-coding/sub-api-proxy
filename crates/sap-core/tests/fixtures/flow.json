@@ -14,7 +14,10 @@
       "rss_bytes": 48234496,
       "sync_lag_secs": 0.0,
       "last_failover_at": null,
-      "last_seen": "2026-10-22T16:24:00Z"
+      "last_seen": "2026-10-22T16:24:00Z",
+      "telemetry_observed_at": "2026-10-22T16:24:00Z",
+      "telemetry_received_at": "2026-10-22T16:24:00Z",
+      "telemetry_stale": false
     },
     {
       "id": "macbook",
@@ -28,7 +31,10 @@
       "rss_bytes": 32505856,
       "sync_lag_secs": 0.4,
       "last_failover_at": "2026-10-22T14:41:00Z",
-      "last_seen": "2026-10-22T16:24:00Z"
+      "last_seen": "2026-10-22T16:24:00Z",
+      "telemetry_observed_at": "2026-10-22T16:24:00Z",
+      "telemetry_received_at": "2026-10-22T16:24:00Z",
+      "telemetry_stale": false
     }
   ],
   "accounts": [

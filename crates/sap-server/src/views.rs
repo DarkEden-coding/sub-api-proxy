@@ -245,38 +245,27 @@ impl Control for Node {
         Ok(thread(state.registry.get(key).unwrap().clone()))
     }
     fn nodes(&self) -> Vec<NodeView> {
+        let local = self.telemetry();
         let mut nodes = vec![NodeView {
-            id: self.config.node.clone(),
-            role: self.config.role,
-            state: sap_core::health::NodeState::Serving,
+            id: local.node,
+            role: Some(local.role),
+            state: Some(local.state),
             reachable: true,
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            requests_per_minute: 0.0,
-            open_streams: self.lock().streams.values().copied().sum(),
-            added_latency_p50_ms: None,
-            rss_bytes: None,
+            version: Some(local.version),
+            requests_per_minute: Some(local.requests_per_minute),
+            open_streams: Some(local.open_streams),
+            added_latency_p50_ms: local.added_latency_p50_ms,
+            rss_bytes: local.rss_bytes,
             sync_lag_secs: Some(0.0),
             last_failover_at: None,
-            last_seen: Some(Utc::now()),
+            last_seen: Some(local.observed_at),
+            telemetry_observed_at: Some(local.observed_at),
+            telemetry_received_at: Some(local.observed_at),
+            telemetry_stale: false,
         }];
-        // ponytail: sync supplies cursors only; extend peer health for real roles, stream counts and rates.
+        let now = Utc::now();
         for (id, status) in self.agent.statuses() {
-            nodes.push(NodeView {
-                id,
-                role: sap_core::health::NodeRole::Fallback,
-                state: sap_core::health::NodeState::Starting,
-                reachable: status.last_error.is_none() && status.last_success.is_some(),
-                version: None,
-                requests_per_minute: 0.0,
-                open_streams: 0,
-                added_latency_p50_ms: None,
-                rss_bytes: None,
-                sync_lag_secs: status.lag_secs.map(|s| s as f64),
-                last_failover_at: None,
-                last_seen: status
-                    .last_success
-                    .and_then(|t| sap_core::DateTime::from_timestamp(t as i64, 0)),
-            });
+            nodes.push(crate::telemetry::peer_view(id, status, now));
         }
         nodes
     }
@@ -336,11 +325,12 @@ impl Node {
         let series: Vec<_> = series.into_values().collect();
         let reads: u64 = series.iter().map(|s| s.cache_read_tokens).sum();
         let total = reads + series.iter().map(|s| s.input_tokens).sum::<u64>();
+        let telemetry = self.telemetry();
         StatsView {
             requests_3h: series.iter().map(|s| s.requests).sum(),
             cache_hit_percent_3h: (total > 0).then(|| reads as f64 * 100.0 / total as f64),
-            added_latency_p50_ms: None,
-            rss_bytes: None,
+            added_latency_p50_ms: telemetry.added_latency_p50_ms,
+            rss_bytes: telemetry.rss_bytes,
             series,
         }
     }

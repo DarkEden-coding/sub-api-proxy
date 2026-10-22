@@ -120,20 +120,27 @@ pub struct ThreadView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeView {
     pub id: NodeId,
-    pub role: NodeRole,
-    pub state: NodeState,
+    pub role: Option<NodeRole>,
+    pub state: Option<NodeState>,
     /// Reachable from the node producing the snapshot.
     pub reachable: bool,
     pub version: Option<String>,
-    pub requests_per_minute: f64,
-    pub open_streams: u32,
-    /// Proxy-added latency, median, in milliseconds.
+    pub requests_per_minute: Option<f64>,
+    pub open_streams: Option<u32>,
+    /// Median SAP selection callback duration in milliseconds, excluding upstream time.
     pub added_latency_p50_ms: Option<f64>,
     pub rss_bytes: Option<u64>,
     /// How far this node's replicated state trails the snapshot node, in seconds.
     pub sync_lag_secs: Option<f64>,
     pub last_failover_at: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
+    /// Peer clock sample time and local receipt time; absent for older peers.
+    #[serde(default)]
+    pub telemetry_observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub telemetry_received_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub telemetry_stale: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

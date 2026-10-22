@@ -69,9 +69,12 @@ pub struct PeerStatus {
     pub last_error: Option<String>,
     pub lag_secs: Option<u64>,
     pub cursor: SyncCursor,
+    pub telemetry: Option<sap_core::health::PeerTelemetry>,
+    pub telemetry_received_at: Option<u64>,
+    pub telemetry_error: Option<String>,
 }
 
-/// One pull task per peer. Dropping the agent aborts its tasks.
+/// Independent replication and telemetry tasks per peer. Dropping the agent aborts both.
 pub struct SyncAgent {
     tasks: Vec<JoinHandle<()>>,
     statuses: Arc<Mutex<BTreeMap<NodeId, PeerStatus>>>,
@@ -89,6 +92,11 @@ impl SyncAgent {
             }
             entries.insert(peer.node.clone(), PeerStatus::default());
             drop(entries);
+            tasks.push(tokio::spawn(crate::telemetry::poll_loop(
+                log.node().clone(),
+                peer.clone(),
+                statuses.clone(),
+            )));
             tasks.push(tokio::spawn(pull_loop(
                 log.clone(),
                 peer,
@@ -121,9 +129,9 @@ impl Drop for SyncAgent {
     }
 }
 
-type HttpClient = Client<HttpConnector, Full<Bytes>>;
+pub(crate) type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
-async fn request(
+pub(crate) async fn request(
     client: &HttpClient,
     local: &NodeId,
     peer: &Peer,
@@ -145,7 +153,14 @@ async fn request(
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body)))
         .map_err(|_| "invalid request")?;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let telemetry = path == "/sap/sync/telemetry";
+    let timeout = if telemetry { 3 } else { 30 };
+    let cap = if telemetry {
+        crate::MAX_TELEMETRY_BODY
+    } else {
+        crate::MAX_BODY
+    };
+    tokio::time::timeout(Duration::from_secs(timeout), async {
         let response = client
             .request(request)
             .await
@@ -153,7 +168,7 @@ async fn request(
         if !response.status().is_success() {
             return Err(format!("peer returned HTTP {}", response.status().as_u16()));
         }
-        Limited::new(response.into_body(), crate::MAX_BODY)
+        Limited::new(response.into_body(), cap)
             .collect()
             .await
             .map(|body| body.to_bytes().to_vec())
@@ -240,16 +255,14 @@ async fn pull_loop<C: ChangeLog + 'static>(
     loop {
         match exchange(&client, log.clone(), &peer, &notify).await {
             Ok((cursor, lag_secs, more)) => {
-                *statuses
-                    .lock()
-                    .expect("status lock poisoned")
-                    .get_mut(&peer.node)
-                    .expect("configured peer") = PeerStatus {
-                    last_success: Some(crate::now()),
-                    last_error: None,
-                    lag_secs,
-                    cursor,
-                };
+                {
+                    let mut entries = statuses.lock().expect("status lock poisoned");
+                    let status = entries.get_mut(&peer.node).expect("configured peer");
+                    status.last_success = Some(crate::now());
+                    status.last_error = None;
+                    status.lag_secs = lag_secs;
+                    status.cursor = cursor;
+                }
                 backoff = Duration::from_millis(100);
                 // Bound retries even when a peer incorrectly returns immediate empty polls.
                 if !more {

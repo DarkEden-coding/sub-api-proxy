@@ -28,6 +28,7 @@ pub struct ServerState<C> {
     secrets: BTreeMap<NodeId, Vec<u8>>,
     acknowledgements: Mutex<BTreeMap<NodeId, SyncCursor>>,
     allow_loopback: bool,
+    telemetry: Option<Arc<dyn Fn() -> Option<sap_core::health::PeerTelemetry> + Send + Sync>>,
 }
 
 impl<C: ChangeLog + 'static> ServerState<C> {
@@ -38,7 +39,17 @@ impl<C: ChangeLog + 'static> ServerState<C> {
             notify,
             acknowledgements: Mutex::new(BTreeMap::new()),
             allow_loopback: false,
+            telemetry: None,
         }
+    }
+
+    /// Supply a bounded, in-memory snapshot. The callback must not block on I/O.
+    pub fn with_telemetry(
+        mut self,
+        source: impl Fn() -> Option<sap_core::health::PeerTelemetry> + Send + Sync + 'static,
+    ) -> Self {
+        self.telemetry = Some(Arc::new(source));
+        self
     }
 
     /// Explicit opt-in for local deployments and localhost tests.
@@ -59,9 +70,22 @@ pub fn router<C: ChangeLog + 'static>(state: Arc<ServerState<C>>) -> Router {
     Router::new()
         .route("/sap/sync/changes", get(changes::<C>))
         .route("/sap/sync/ack", post(ack::<C>))
+        .route("/sap/sync/telemetry", get(telemetry::<C>))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate::<C>))
         .layer(DefaultBodyLimit::max(crate::MAX_BODY))
         .with_state(state)
+}
+
+async fn telemetry<C: ChangeLog + 'static>(State(state): State<Arc<ServerState<C>>>) -> Response {
+    let Some(sample) = state.telemetry.as_ref().and_then(|source| source()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match serde_json::to_vec(&sample) {
+        Ok(body) if body.len() <= crate::MAX_TELEMETRY_BODY => {
+            ([("content-type", "application/json")], body).into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 pub(crate) fn permitted(ip: IpAddr, loopback: bool) -> bool {
@@ -105,7 +129,12 @@ async fn authenticate<C: ChangeLog + 'static>(
     if secret.is_empty() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let body = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, crate::MAX_BODY)).await {
+    let cap = if parts.uri.path() == "/sap/sync/telemetry" {
+        crate::MAX_TELEMETRY_BODY
+    } else {
+        crate::MAX_BODY
+    };
+    let body = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, cap)).await {
         Ok(Ok(body)) => body,
         Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
