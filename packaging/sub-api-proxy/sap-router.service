@@ -1,0 +1,14 @@
+[Unit]
+Description=Sub-Api-Proxy local router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/sap-router --config %h/.config/sub-api-proxy/router.yaml
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

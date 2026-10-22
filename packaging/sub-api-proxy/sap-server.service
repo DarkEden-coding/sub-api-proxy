@@ -1,0 +1,14 @@
+[Unit]
+Description=Sub-Api-Proxy server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/cliproxy --config %h/.config/sub-api-proxy/config.yaml --sap-config %h/.config/sub-api-proxy/sap.yaml
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
