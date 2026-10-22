@@ -572,15 +572,15 @@ fn invalid_config(e: String) -> Response {
 pub(crate) async fn patch_enabled(
     State(state): State<Arc<Management>>,
     UrlPath(raw): UrlPath<String>,
-    body: Bytes,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
 ) -> Response {
     let id = match plugin_id(&raw) {
         Ok(id) => id,
         Err(r) => return *r,
     };
-    // gin ShouldBindJSON into `struct{ Enabled *bool }`.
-    let enabled = match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(map)) => match map.get("enabled") {
+    // gin ShouldBindJSON into `struct{ Enabled *bool }`: the first JSON value.
+    let enabled = match serde_json::Deserializer::from_slice(&body).into_iter::<Value>().next() {
+        Some(Ok(Value::Object(map))) => match map.get("enabled") {
             Some(Value::Bool(b)) => Some(*b),
             _ => None,
         },
@@ -606,7 +606,7 @@ pub(super) fn set_key(node: &mut Mapping, key: &str, value: Yaml) {
 pub(crate) async fn put_config(
     State(state): State<Arc<Management>>,
     UrlPath(raw): UrlPath<String>,
-    body: Bytes,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
 ) -> Response {
     let id = match plugin_id(&raw) {
         Ok(id) => id,
@@ -630,7 +630,7 @@ pub(crate) async fn put_config(
 pub(crate) async fn patch_config(
     State(state): State<Arc<Management>>,
     UrlPath(raw): UrlPath<String>,
-    body: Bytes,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
 ) -> Response {
     let id = match plugin_id(&raw) {
         Ok(id) => id,

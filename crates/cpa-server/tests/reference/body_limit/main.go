@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -238,11 +239,45 @@ func scenarios() []scenario {
 	add(scenario{Name: "management_chunked GET /v8/management/config", YAML: mgmtYAML, Method: "GET", Path: "/v8/management/config", Headers: mgmt, Body: strings.Repeat(" ", 33), Chunked: true})
 	add(scenario{Name: "management_chunked DELETE /v8/management/config/server/max-request-body-bytes", YAML: mgmtYAML, Method: "DELETE",
 		Path: "/v8/management/config/server/max-request-body-bytes", Headers: mgmt, Body: strings.Repeat(" ", 33), Chunked: true})
-	// Known differences (docs/DIFFERENCES-FROM-GO.md): Go's JSON binder decodes the first
-	// value from the permitted prefix, and Go's multipart reader reports either the limit
-	// or a parse error depending on where the limit falls.
+	// Where the limit falls inside a body: Go's JSON binders (ShouldBindJSON,
+	// json.Decoder.Decode) decode the first value from the permitted prefix, and Go's
+	// multipart reader reports either the limit or a parse error depending on where the
+	// limit falls in the form.
 	add(scenario{Name: "json_first_value_within_limit /v0/management/plugins/demo/quota", YAML: mgmtYAML, Method: "POST", Path: "/v0/management/plugins/demo/quota",
 		Headers: mgmt, Body: "{}" + strings.Repeat(" ", 64), Chunked: true})
+	// A top-level scalar ends one byte after its last byte; a syntax error in the prefix
+	// wins over the limit.
+	quota := []struct{ name, body string }{
+		{"scalar_at_limit", `"` + strings.Repeat("x", 30) + `"` + strings.Repeat(" ", 32)},
+		{"scalar_before_limit", `"` + strings.Repeat("x", 29) + `"` + strings.Repeat(" ", 33)},
+		{"syntax_error_before_limit", `{"auth_index":x` + strings.Repeat(" ", 64)},
+		{"value_then_data", "{}" + strings.Repeat("x", 64)},
+		{"cut_inside_value", `{"auth_index":"` + strings.Repeat("1", 64) + `"}`},
+	}
+	for _, c := range quota {
+		add(scenario{Name: "json_first_value " + c.name, YAML: mgmtYAML, Method: "POST", Path: "/v0/management/plugins/demo/quota",
+			Headers: mgmt, Body: c.body, Chunked: true})
+	}
+	pad := strings.Repeat(" ", 48)
+	for _, c := range []struct{ method, path, body string }{
+		{"PUT", "/v0/management/debug", `{"value":true}`},
+		{"PATCH", "/v0/management/api-keys", `{"old":"a","new":"b"}`},
+		{"PATCH", "/v0/management/gemini-api-key", `{"index":0}`},
+		{"PATCH", "/v0/management/auth-files/status", `{"name":"x.json"}`},
+		{"PATCH", "/v8/management/credentials/fields", `{"name":"x.json"}`},
+		{"POST", "/v0/management/auth-files/refresh", `{"name":"x.json"}`},
+		{"POST", "/v8/management/oauth/siwc/bind", `{"name":"x.json"}`},
+		{"POST", "/v0/management/api-call", `{}`},
+		{"POST", "/v0/management/oauth-callback", `{}`},
+		{"POST", "/v0/management/reset-quota", `{}`},
+		{"POST", "/v0/management/quota/fetch", `{}`},
+		{"PATCH", "/v0/management/plugins/demo/enabled", `{"enabled":true}`},
+		{"PUT", "/v0/management/plugins/demo/config", `{}`},
+		{"DELETE", "/v0/management/plugins/demo/quota", `{"auth_index":"1"}`},
+	} {
+		add(scenario{Name: "json_first_value_within_limit " + c.method + " " + c.path, YAML: mgmtYAML, Method: c.method, Path: c.path,
+			Headers: mgmt, Body: c.body + pad, Chunked: true})
+	}
 	fileForm, fileType := form(nil, `{"type":"claude","access_token":"`+strings.Repeat("t", 2048)+`"}`)
 	kiB := strings.Replace(mgmtYAML, "max-request-body-bytes: 32", "max-request-body-bytes: 1024", 1)
 	for _, path := range []string{"/v0/management/auth-files", "/v8/management/credentials", "/v0/management/vertex/import", "/v8/management/oauth/import?provider=vertex"} {
@@ -253,6 +288,37 @@ func scenarios() []scenario {
 	for _, path := range []string{"/v1/images/edits", "/openai/v1/videos"} {
 		add(scenario{Name: "multipart_headers_over_limit " + path, YAML: exactYAML, Method: "POST", Path: path,
 			Headers: map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}, Body: imageForm, Chunked: true})
+	}
+	// The form ends before the limit (Go never reads the epilogue), the limit falls in
+	// the final boundary line, or inside a part's header value after its colon.
+	smallForm, _ := form(nil, `{"type":"claude","access_token":"t"}`)
+	limited := func(base string, n int) string {
+		return strings.Replace(base, "max-request-body-bytes: 32", fmt.Sprintf("max-request-body-bytes: %d", n), 1)
+	}
+	apiLimited := func(n int) string {
+		return strings.Replace(exactYAML, "max-request-body-bytes: 30", fmt.Sprintf("max-request-body-bytes: %d", n), 1)
+	}
+	headerCut := len("--BOUNDARY0123456789\r\nContent-Disposition: form-data; na")
+	for _, path := range []string{"/v0/management/auth-files", "/v0/management/vertex/import"} {
+		upload := map[string]string{"Authorization": "Bearer mgmt-secret", "Content-Type": fileType}
+		// The upload's file is not named .json, so the answer shows the form was read.
+		ends := smallForm
+		if path == "/v0/management/auth-files" {
+			ends = strings.Replace(smallForm, `filename="upload.json"`, `filename="upload.txt"`, 1)
+		}
+		add(scenario{Name: "multipart_form_ends_within_limit " + path, YAML: limited(mgmtYAML, 1024), Method: "POST", Path: path,
+			Headers: upload, Body: ends + strings.Repeat("e", 2048), Chunked: true})
+		add(scenario{Name: "multipart_limit_in_final_boundary " + path, YAML: limited(mgmtYAML, len(smallForm)-2), Method: "POST", Path: path,
+			Headers: upload, Body: smallForm, Chunked: true})
+		add(scenario{Name: "multipart_limit_in_header_value " + path, YAML: limited(mgmtYAML, headerCut), Method: "POST", Path: path,
+			Headers: upload, Body: smallForm, Chunked: true})
+	}
+	for _, path := range []string{"/v1/images/edits", "/openai/v1/videos"} {
+		images := map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}
+		add(scenario{Name: "multipart_form_ends_within_limit " + path, YAML: apiLimited(1024), Method: "POST", Path: path,
+			Headers: images, Body: imageForm + strings.Repeat("e", 2048), Chunked: true})
+		add(scenario{Name: "multipart_limit_in_final_boundary " + path, YAML: apiLimited(len(imageForm) - 2), Method: "POST", Path: path,
+			Headers: images, Body: imageForm, Chunked: true})
 	}
 	add(scenario{Name: "management_content_length_over_limit", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config", Headers: mgmt, Body: oversized})
 	add(scenario{Name: "management_unauthenticated_chunked", YAML: mgmtYAML, Method: "PUT", Path: "/v8/management/config",

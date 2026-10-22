@@ -5,7 +5,11 @@
 //! ponytail: no quoted-printable part decoding, no header count or size limits, and
 //! `%q` quoting is exact for ASCII only.
 
+use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use cpa_core::gostr::GoStr;
+
+use crate::body_limit::Read;
 use std::collections::{BTreeMap, HashMap};
 
 /// A file field of the form.
@@ -36,6 +40,42 @@ pub(super) fn form_files(content_type: &str, body: &[u8]) -> Result<Vec<FilePart
 /// `Request.ParseMultipartForm`: file parts and value parts by field name, each in body
 /// order.
 pub(super) fn form(content_type: &str, body: &[u8]) -> Result<(Files, HashMap<String, Vec<String>>), String> {
+    let mut hit_limit = false;
+    read_form(content_type, body, &mut hit_limit, false)
+}
+
+/// A multipart body that could not be used: the read failed before the limit, or Go's
+/// `ParseMultipartForm` error with its status (`413` for the limit error).
+pub(crate) enum Failed {
+    Read(BytesRejection),
+    Form(u16, String),
+}
+
+/// The body for `ParseMultipartForm`. When `server.max-request-body-bytes` stopped the
+/// read, Go has parsed the bytes before the limit: the form is those bytes when it ends
+/// within them, else the limit error inside file data and, inside a part's headers,
+/// usually the parse error of the truncated line.
+pub(crate) fn body(read: Read, content_type: &str) -> Result<Bytes, Failed> {
+    match read.body {
+        Err(rejection) if crate::body_limit::is_too_large(&rejection) => {
+            let mut hit_limit = false;
+            match read_form(content_type, &read.prefix, &mut hit_limit, true) {
+                Ok(_) => Ok(read.prefix),
+                Err(e) => Err(Failed::Form(if hit_limit { 413 } else { 400 }, e)),
+            }
+        }
+        body => body.map_err(Failed::Read),
+    }
+}
+
+/// `limited`: the body ends in `http.MaxBytesError` rather than EOF; `hit_limit` is set
+/// when the reader runs into it.
+fn read_form(
+    content_type: &str,
+    body: &[u8],
+    hit_limit: &mut bool,
+    limited: bool,
+) -> Result<(Files, HashMap<String, Vec<String>>), String> {
     let (media, params) = parse_media_type(content_type).map_err(|_| NOT_MULTIPART.to_owned())?;
     if media != "multipart/form-data" {
         return Err(NOT_MULTIPART.into());
@@ -47,6 +87,8 @@ pub(super) fn form(content_type: &str, body: &[u8]) -> Result<(Files, HashMap<St
         nl: b"\r\n",
         dash_boundary: format!("--{boundary}").into_bytes(),
         parts_read: 0,
+        limited,
+        hit_limit,
     };
     let mut files: Files = BTreeMap::new();
     let mut values: HashMap<String, Vec<String>> = HashMap::new();
@@ -101,12 +143,14 @@ pub(super) fn go_base(path: &str) -> &str {
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
-struct Reader<'a> {
+struct Reader<'a, 'h> {
     buf: &'a [u8],
     pos: usize,
     nl: &'static [u8],
     dash_boundary: Vec<u8>,
     parts_read: usize,
+    limited: bool,
+    hit_limit: &'h mut bool,
 }
 
 enum Scan {
@@ -115,7 +159,7 @@ enum Scan {
     UnexpectedEof,
 }
 
-impl<'a> Reader<'a> {
+impl<'a> Reader<'a, '_> {
     /// `bufio.Reader.ReadSlice('\n')`: the line with its newline, and whether the
     /// body ended before one.
     fn read_slice(&mut self) -> (&'a [u8], bool) {
@@ -159,11 +203,11 @@ impl<'a> Reader<'a> {
         let mut expect_new_part = false;
         loop {
             let (line, eof) = self.read_slice();
-            if eof && self.is_final_boundary(line) {
+            if eof && !self.limited && self.is_final_boundary(line) {
                 return Ok(None);
             }
             if eof {
-                return Err("multipart: NextPart: EOF".into());
+                return Err(format!("multipart: NextPart: {}", self.end("EOF")));
             }
             if self.is_boundary_delimiter_line(line) {
                 self.parts_read += 1;
@@ -186,6 +230,15 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The read error at the end of the body: `eof`, or the limit error.
+    fn end(&mut self, eof: &str) -> String {
+        if !self.limited {
+            return eof.to_owned();
+        }
+        *self.hit_limit = true;
+        crate::body_limit::MESSAGE.to_owned()
+    }
+
     /// `textproto.Reader.readLineSlice`: one line without its "\n" or "\r\n";
     /// `None` at the end of the body.
     fn read_line(&mut self) -> Option<&'a [u8]> {
@@ -200,12 +253,13 @@ impl<'a> Reader<'a> {
     }
 
     /// Go `readMIMEHeader`, keyed by lowercased name; the first value wins for
-    /// `Header.Get`. EOF inside the headers ends the form cleanly, as in Go.
+    /// `Header.Get`. EOF inside the headers ends the form cleanly, as in Go; the limit
+    /// error fails it.
     fn headers(&mut self) -> Result<Option<HashMap<String, String>>, String> {
         let mut headers = HashMap::new();
         if matches!(self.buf.get(self.pos), Some(b' ' | b'\t')) {
             let Some(line) = self.read_line() else {
-                return Ok(None);
+                return self.ended();
             };
             if line.len() > 80 {
                 return Err(TOO_LARGE.into());
@@ -217,7 +271,7 @@ impl<'a> Reader<'a> {
         }
         loop {
             let Some(first) = self.read_line() else {
-                return Ok(None);
+                return self.ended();
             };
             if first.is_empty() {
                 return Ok(Some(headers));
@@ -260,6 +314,14 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The headers ended with the body: a clean end of the form at EOF.
+    fn ended(&mut self) -> Result<Option<HashMap<String, String>>, String> {
+        match self.limited {
+            false => Ok(None),
+            true => Err(self.end("EOF")),
+        }
+    }
+
     /// The current part's body, up to its closing boundary (Go `partReader`).
     fn body(&mut self) -> Result<Vec<u8>, String> {
         let mut nl_dash = self.nl.to_vec();
@@ -275,7 +337,7 @@ impl<'a> Reader<'a> {
             match scan {
                 Scan::Data => {}
                 Scan::End => return Ok(data),
-                Scan::UnexpectedEof => return Err("unexpected EOF".into()),
+                Scan::UnexpectedEof => return Err(self.end("unexpected EOF")),
             }
         }
     }

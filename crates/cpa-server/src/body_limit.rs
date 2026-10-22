@@ -4,11 +4,12 @@
 //! as it passes the limit, so whoever reads it (request capture, client auth plugins,
 //! handlers) answers Go's 413 for its route.
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, ready};
 
 use axum::body::{Body, Bytes, HttpBody};
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -125,6 +126,161 @@ impl HttpBody for Capped {
 
     fn is_end_stream(&self) -> bool {
         !self.over && self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// A body read the way Go handlers read it under the limit: the bytes, or the read error
+/// together with the bytes that arrived before it, which Go's JSON and multipart decoders
+/// scan before they report the error.
+pub(crate) struct Read {
+    pub(crate) body: Result<Bytes, BytesRejection>,
+    /// The permitted prefix when the limit stopped the read, else empty.
+    pub(crate) prefix: Bytes,
+}
+
+impl<S: Send + Sync> FromRequest<S> for Read {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        // Without a limit there is no prefix to keep.
+        if request.extensions().get::<Limit>().is_none_or(|l| l.0.is_none()) {
+            let body = Bytes::from_request(request, state).await;
+            return Ok(Read {
+                body,
+                prefix: Bytes::new(),
+            });
+        }
+        let (parts, body) = request.into_parts();
+        let (body, seen) = Tee::wrap(body);
+        let body = Bytes::from_request(Request::from_parts(parts, body), state).await;
+        let prefix = match &body {
+            Err(rejection) if is_too_large(rejection) => seen.prefix(),
+            _ => Bytes::new(),
+        };
+        Ok(Read { body, prefix })
+    }
+}
+
+/// [`Read::first_json`] over `axum::body::to_bytes(body, usize::MAX)`.
+pub(crate) async fn first_json_body(body: Body) -> Result<Bytes, axum::Error> {
+    let (body, seen) = Tee::wrap(body);
+    match axum::body::to_bytes(body, usize::MAX).await {
+        Err(error) if is_too_large(&error) => {
+            let prefix = seen.prefix();
+            if first_value_complete(&prefix) {
+                Ok(prefix)
+            } else {
+                Err(error)
+            }
+        }
+        body => body,
+    }
+}
+
+impl Read {
+    /// gin `ShouldBindJSON` and `json.Decoder.Decode`: a first JSON value complete
+    /// before the limit binds as if the body ended there.
+    pub(crate) fn first_json(self) -> Result<Bytes, BytesRejection> {
+        match self.body {
+            Err(_) if first_value_complete(&self.prefix) => Ok(self.prefix),
+            body => body,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<Bytes> for Read {
+    fn from(body: Bytes) -> Self {
+        Read {
+            body: Ok(body),
+            prefix: Bytes::new(),
+        }
+    }
+}
+
+/// [`Read::first_json`] as an extractor.
+pub(crate) struct FirstJson(pub(crate) Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for FirstJson {
+    type Rejection = BytesRejection;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Ok(read) = Read::from_request(request, state).await;
+        read.first_json().map(FirstJson)
+    }
+}
+
+/// Whether Go's `json.Decoder` finishes its first value within `prefix` when the read
+/// error follows it: a syntax error inside the prefix also ends the scan, a value cut
+/// off does not. A top-level object or array ends at its closing bracket; a scalar needs
+/// one more byte to end.
+fn first_value_complete(prefix: &[u8]) -> bool {
+    let mut values = serde_json::Deserializer::from_slice(prefix).into_iter::<serde::de::IgnoredAny>();
+    match values.next() {
+        Some(Ok(_)) => {
+            let end = values.byte_offset();
+            end < prefix.len() || matches!(prefix[end - 1], b'}' | b']')
+        }
+        Some(Err(e)) => !e.is_eof(),
+        None => false,
+    }
+}
+
+/// Keeps a handle on each data frame that passes (no copy).
+struct Tee {
+    body: Body,
+    seen: Seen,
+}
+
+#[derive(Clone, Default)]
+struct Seen(Arc<Mutex<Vec<Bytes>>>);
+
+impl Seen {
+    fn prefix(&self) -> Bytes {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+            .concat()
+            .into()
+    }
+}
+
+impl Tee {
+    /// `body`, wrapped, and the handle on what passes.
+    fn wrap(body: Body) -> (Body, Seen) {
+        let seen = Seen::default();
+        (
+            Body::new(Tee {
+                body,
+                seen: seen.clone(),
+            }),
+            seen,
+        )
+    }
+}
+
+impl HttpBody for Tee {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+        let frame = ready!(Pin::new(&mut self.body).poll_frame(cx));
+        if let Some(Ok(frame)) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.seen
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(data.clone());
+        }
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {

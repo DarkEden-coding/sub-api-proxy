@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -218,7 +217,10 @@ fn resolve(auth_dir: &Path, path: &Path) -> Option<(PathBuf, Map<String, Value>)
 }
 
 /// Go `StartSIWCBind`: `POST /v8/management/oauth/siwc/bind {"name": ...}`.
-pub(crate) async fn bind(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn bind(
+    State(state): State<Arc<Management>>,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
+) -> Response {
     // gin `ShouldBindJSON` into `struct{ Name string }`: the first JSON value; members
     // apply in order, the name matched case-insensitively; null leaves it empty.
     let members = serde_json::Deserializer::from_slice(&body)
@@ -618,6 +620,7 @@ pub(super) fn summary(c: &Credential, entry: &mut std::collections::BTreeMap<&'s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body_limit::FirstJson;
 
     /// Go `StartSIWCBind` holds its commit gate from the lookup through registration: a
     /// bind waiting on `disk` has read nothing yet, so a replacement made under the lock
@@ -639,7 +642,10 @@ mod tests {
             }
         });
         locked.await.unwrap();
-        let started = tokio::spawn(bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)));
+        let started = tokio::spawn(bind(
+            State(state.clone()),
+            FirstJson(axum::body::Bytes::from(r#"{"name":"codex.json"}"#)),
+        ));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !started.is_finished(),
@@ -680,7 +686,11 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (dir, _file, state) = fixture(Some(base));
-        let response = bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)).await;
+        let response = bind(
+            State(state.clone()),
+            FirstJson(axum::body::Bytes::from(r#"{"name":"codex.json"}"#)),
+        )
+        .await;
         let sid = started_state(response).await;
         // Hold `disk` so the commit pauses at its start, holding the preparation lock.
         let (held_tx, held) = std::sync::mpsc::channel();
@@ -758,7 +768,14 @@ mod tests {
         ] {
             let (dir, file, state) = fixture(Some(base.clone()));
             std::fs::write(dir.join("other.json"), codex_file("other")).unwrap();
-            let sid = started_state(bind(State(state.clone()), Bytes::from(r#"{"name":"codex.json"}"#)).await).await;
+            let sid = started_state(
+                bind(
+                    State(state.clone()),
+                    FirstJson(axum::body::Bytes::from(r#"{"name":"codex.json"}"#)),
+                )
+                .await,
+            )
+            .await;
             let reupload = codex_file("reuploaded");
             let (held_tx, held) = std::sync::mpsc::channel();
             let (go, go_rx) = std::sync::mpsc::channel::<()>();
