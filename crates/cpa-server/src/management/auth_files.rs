@@ -1433,24 +1433,40 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<Fi
         Ok(FirstJson(body)) => body,
         Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
     };
-    #[derive(serde::Deserialize, Default)]
-    #[serde(default)]
-    struct Req {
-        name: String,
-        auth_index: String,
-        disabled: Option<bool>,
-    }
-    let Ok(req) = serde_json::from_slice::<Req>(&body) else {
+    // gin `ShouldBindJSON` into `struct{ Name, AuthIndex string; Disabled *bool }`:
+    // every member in order; any type mismatch fails the bind, even one a later
+    // duplicate would fix.
+    let Some(members) = super::api_call::bind_struct(&body, &["name", "auth_index", "disabled"]) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
-    let name = req.name.trim().to_owned();
+    let (mut name, mut auth_index, mut disabled) = (String::new(), String::new(), None);
+    for (field, value) in members {
+        let slot = match field {
+            0 => &mut name,
+            1 => &mut auth_index,
+            _ => {
+                match value {
+                    Value::Bool(b) => disabled = Some(b),
+                    Value::Null => disabled = None,
+                    _ => return fail(StatusCode::BAD_REQUEST, "invalid request body"),
+                }
+                continue;
+            }
+        };
+        match value {
+            Value::String(s) => *slot = s,
+            Value::Null => {}
+            _ => return fail(StatusCode::BAD_REQUEST, "invalid request body"),
+        }
+    }
+    let name = name.trim().to_owned();
     if name.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "name is required");
     }
-    let Some(disabled) = req.disabled else {
+    let Some(disabled) = disabled else {
         return fail(StatusCode::BAD_REQUEST, "disabled is required");
     };
-    let Some(target) = lookup(&state, &name, &req.auth_index) else {
+    let Some(target) = lookup(&state, &name, &auth_index) else {
         return fail(StatusCode::NOT_FOUND, "auth file not found");
     };
     if runtime_only(&target) {
@@ -1643,9 +1659,12 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Result<Fi
         Ok(FirstJson(body)) => body,
         Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
     };
-    let Ok(req) = serde_json::from_slice::<Map<String, Value>>(&body) else {
+    // `json.Decoder.Decode` into `map[string]json.RawMessage`: the first JSON value,
+    // a later duplicate key replacing an earlier one; null is an empty map.
+    let Some(members) = super::api_call::first_map(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
+    let req: Map<String, Value> = members.into_iter().collect();
     let name = req
         .get("name")
         .and_then(Value::as_str)

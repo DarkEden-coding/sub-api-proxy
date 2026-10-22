@@ -222,18 +222,12 @@ pub(crate) async fn bind(
     crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
 ) -> Response {
     // gin `ShouldBindJSON` into `struct{ Name string }`: the first JSON value; members
-    // apply in order, the name matched case-insensitively; null leaves it empty.
-    let members = serde_json::Deserializer::from_slice(&body)
-        .into_iter::<super::api_call::Members>()
-        .next();
-    let Some(Ok(super::api_call::Members(members))) = members else {
+    // apply in order, the name matched under case folding; null leaves it empty.
+    let Some(members) = super::api_call::bind_struct(&body, &["name"]) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
     let mut name = String::new();
-    for (key, value) in members.unwrap_or_default() {
-        if !key.eq_ignore_ascii_case("name") {
-            continue;
-        }
+    for (_, value) in members {
         match value {
             Value::String(s) => name = s,
             Value::Null => {}
