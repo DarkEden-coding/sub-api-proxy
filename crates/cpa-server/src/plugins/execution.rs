@@ -545,14 +545,9 @@ pub(crate) fn execution_metadata(call: &Call, model: &str) -> Metadata {
 /// Go `sdktranslator.TranslateRequestEnvelope` between two executor format names
 /// (`prepareExecutorCall`). A refusal, such as an unsupported content part, is a
 /// request-scoped 400 and nothing is sent, as on the built-in path.
-/// ponytail: a format outside the built-in set passes the body through; Go would still
-/// rewrite a differing top-level `model`.
 fn translate_request(from: &str, to: &str, model: &str, body: &Bytes, stream: bool) -> Result<Bytes, ExecError> {
-    let (Some(from), Some(to)) = (Format::parse(from), Format::parse(to)) else {
-        return Ok(body.clone());
-    };
     let ctx = cpa_translate::RequestCtx { model, stream };
-    cpa_translate::translate_request(from, to, &ctx, body)
+    cpa_translate::translate_request_named(from, to, &ctx, body)
         .map(Bytes::from)
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
@@ -590,10 +585,6 @@ fn translate_response(n: &Negotiated, req: &ExecutorRequest, payload: Bytes) -> 
     let pair = Format::parse(&n.requested)
         .zip(Format::parse(&n.output))
         .and_then(|(to, from)| cpa_translate::pair(to, from));
-    let Some(pair) = pair else {
-        // Go's registry returns an unregistered pair's body unchanged.
-        return ensure_usage(responses, payload);
-    };
     let original = if req.original_request.is_empty() {
         &req.payload
     } else {
@@ -604,7 +595,13 @@ fn translate_response(n: &Negotiated, req: &ExecutorRequest, payload: Bytes) -> 
         original_request: original,
         translated_request: &req.payload,
     };
-    let out = (pair.non_stream)(&ctx, &payload).map(Bytes::from).unwrap_or(payload);
+    let out = match pair {
+        Some(pair) => (pair.non_stream)(&ctx, &payload).map(Bytes::from).unwrap_or(payload),
+        // Go's registry returns an unregistered pair's body unchanged, after the plugin
+        // response hooks.
+        None => cpa_translate::hooks::unregistered_non_stream(&n.output, &n.requested, &ctx, &payload)
+            .map_or(payload, Bytes::from),
+    };
     ensure_usage(responses, out)
 }
 
@@ -619,20 +616,25 @@ fn translate_stream(
     usage: Option<cpa_core::exec::UsageSink>,
 ) -> ExecStream {
     let translating = !n.requested.is_empty() && n.output != n.requested;
-    let formats = Format::parse(&n.requested).zip(Format::parse(&n.output));
-    let translator = formats.filter(|_| translating).and_then(|(to, from)| {
-        let original = if req.original_request.is_empty() {
-            &req.payload
-        } else {
-            &req.original_request
-        };
-        let ctx = cpa_translate::ResponseCtx {
-            model: &req.model,
-            original_request: original,
-            translated_request: &req.payload,
-        };
-        cpa_translate::go_stream(to, from).map(|open| open(&ctx))
-    });
+    let native = translating
+        && Format::parse(&n.requested)
+            .zip(Format::parse(&n.output))
+            .is_some_and(|(to, from)| cpa_translate::go_stream(to, from).is_some());
+    let translator = translating
+        .then(|| {
+            let original = if req.original_request.is_empty() {
+                &req.payload
+            } else {
+                &req.original_request
+            };
+            let ctx = cpa_translate::ResponseCtx {
+                model: &req.model,
+                original_request: original,
+                translated_request: &req.payload,
+            };
+            cpa_translate::hooked_go_stream(&n.requested, &n.output, &ctx)
+        })
+        .flatten();
     let usage = usage.map(|sink| StreamUsage {
         sink,
         protocol: n.output.clone(),
@@ -642,7 +644,7 @@ fn translate_stream(
     });
     let state = StreamState {
         usage,
-        native: translator.is_some(),
+        native,
         translator,
         passthrough: n.requested.is_empty()
             || (n.output == n.requested && n.requested != Format::OpenAIResponse.as_str()),
