@@ -2269,11 +2269,15 @@ async fn a_plugin_save_applies_the_files_settings_and_persists_as_go_does() {
     );
     let p = store.get("p").unwrap();
     assert_eq!(
-        (p.attributes["priority"].as_str(), &p.metadata["priority"]),
-        ("10", &json!(10))
+        (p.attributes["priority"].as_str(), p.metadata["priority"].as_f64()),
+        ("10", Some(10.0))
     );
-    let written: Value = serde_json::from_slice(&on_disk("p.json")).unwrap();
-    assert_eq!(written["priority"], 10);
+    // Go's encoder writes the decoded float 10 as `10`.
+    let written = String::from_utf8(on_disk("p.json")).unwrap();
+    assert!(
+        written.contains(r#""priority":10"#) && !written.contains("10.0"),
+        "{written}"
+    );
 
     // Runtime-only and plugin-virtual auths are registered, and the file keeps the
     // saved bytes; so does one whose storage JSON is not an object ("[]").

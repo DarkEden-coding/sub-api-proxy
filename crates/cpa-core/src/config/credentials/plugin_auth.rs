@@ -457,17 +457,8 @@ fn apply_save_rules(
         _ => None,
     };
     if let Some(priority) = priority {
-        // A save's metadata is decoded as Go decodes it (numbers as floats); a whole
-        // number keeps the integer form Go's encoder writes.
-        let value = match &meta["priority"] {
-            Json::Number(n)
-                if n.as_i64().is_none() && n.as_f64().is_some_and(|f| f.fract() == 0.0 && f.abs() < 9e15) =>
-            {
-                Json::from(n.as_f64().unwrap_or_default() as i64)
-            }
-            other => other.clone(),
-        };
-        auth.metadata.insert("priority".into(), value);
+        // Go keeps the decoded number in the metadata; only the attribute is an integer.
+        auth.metadata.insert("priority".into(), meta["priority"].clone());
         attrs.insert("priority".into(), priority);
         attrs.insert("file_priority".into(), "true".into());
     }
@@ -691,6 +682,24 @@ mod tests {
                 assert_eq!(a.attributes["file_priority"], "true", "{raw}");
                 assert_eq!(a.metadata["priority"], want_meta, "{raw}");
             }
+        }
+    }
+
+    /// Go `ApplyAuthPriorityMetadata` makes only the attribute an integer: the metadata
+    /// keeps the number as the file wrote it, a float stays a float (`-0.0` included).
+    #[test]
+    fn keeps_a_float_priority_in_the_metadata() {
+        for (raw, want, want_meta) in [
+            (r#"{"type":"plugin","priority":7.0}"#, "7", "7.0"),
+            (r#"{"type":"plugin","priority":7e0}"#, "7", "7.0"),
+            (r#"{"type":"plugin","priority":-0.0}"#, "0", "-0.0"),
+        ] {
+            let parser = fake(|_| Parsed::Handled(vec![auth("a", "plugin", json!({}), &[])]));
+            let auths = plugin_creds(&parser, "plugin.json", raw);
+            assert_eq!(auths[0].attributes["priority"], want, "{raw}");
+            let meta = &auths[0].metadata["priority"];
+            assert!(meta.is_f64(), "{raw}: {meta}");
+            assert_eq!(serde_json::to_string(meta).unwrap(), want_meta, "{raw}");
         }
     }
 
