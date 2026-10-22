@@ -28,7 +28,7 @@ Columns:
 | Devin and Meta | 8 | 0 | 8 | 0 | 0 | 0 |
 | Credentials, selection and cooldowns | 22 | 9 | 11 | 0 | 2 | 0 |
 | Model registry and catalogs | 11 | 0 | 10 | 0 | 1 | 0 |
-| Config and Management API | 15 | 10 | 5 | 0 | 0 | 0 |
+| Config and Management API | 15 | 11 | 4 | 0 | 0 | 0 |
 | Plugins | 12 | 0 | 12 | 0 | 0 | 0 |
 | Server, handlers and streaming | 12 | 2 | 10 | 0 | 0 | 0 |
 | Usage and logging | 3 | 2 | 1 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **56** | **166** | **0** | **63** | **3** |
+| **All** | **288** | **57** | **165** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -134,7 +134,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 
 | Commit | Subject | User-visible | This PR | Size | Notes |
 |---|---|---|---|---|---|
-| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go |
+| [`868e137f`](https://github.com/router-for-me/CLIProxyAPI/commit/868e137f) | feat(payload): introduce payload finalizer for protobuf and multipart requests | yes | to port | L (+585 −222) | payload rules move to a final barrier for every executor; Claude's post-rule repairs go. |
 
 ## Codex
 
@@ -278,7 +278,7 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`3d61c954`](https://github.com/router-for-me/CLIProxyAPI/commit/3d61c954) | fix(management): conditionally expose quota_plugin_id for v8 auth files | yes | ported here | S (+3 −1) | `quota_plugin_id` only on v8 credential lists |
 | [`b3dc6c3f`](https://github.com/router-for-me/CLIProxyAPI/commit/b3dc6c3f) | refactor(config): move tls-handshake-timeout-seconds to root request configuration | yes | ported here | M (+48 −43) | root `requests.tls-handshake-timeout-seconds` with the flat legacy spelling |
 | [`9db0729f`](https://github.com/router-for-me/CLIProxyAPI/commit/9db0729f) | feat(config): add operator overrides for Claude header defaults and client request ID modes | yes | to port | M (+125 −16) | add operator overrides for Claude header defaults and client request ID modes |
-| [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | to port | M (+167 −24) | add PreapareConfigFileForUpload and seed remote storage with hashed secrets |
+| [`f9437700`](https://github.com/router-for-me/CLIProxyAPI/commit/f9437700) | feat(config): add PreapareConfigFileForUpload and seed remote storage with hashed secrets | yes | ported here | M (+167 −24) | `cpa_core::config::prepare_for_upload` hashes the effective plaintext management secret, drops legacy fields a v8 field overrides and refuses a file that would still hold the plaintext; the object, PostgreSQL and git seed paths call it first (a refused git template copy is removed); replays its Go tests. The startup load's own conflicting-field cleanup stays with M4-0280 |
 | [`fa68946a`](https://github.com/router-for-me/CLIProxyAPI/commit/fa68946a) | feat(management): add optimistic concurrency control with ETag and If-Match to v8 config endpoints | yes | ported here | M (+74 −3) | ETag/If-Match on v8 config writes and the exposed ETag header (M5-0309, M5-0315, tests/management.rs config_writes_honour_if_match_against_the_file_etag); `?value=` masked in access logs (observability.rs go_access_and_redaction_goldens) |
 | [`d69962e4`](https://github.com/router-for-me/CLIProxyAPI/commit/d69962e4) | feat(management): add safe Modify method for auth records with epoch validation and locking | yes | to port | M (+112 −53) | add safe Modify method for auth records with epoch validation and locking. Partly ported: Modify applies an edit to the record as it is now; a fields patch on a config credential answers 404 (with 3e309fb4). The registration-epoch check is not ported |
 | [`50cfd238`](https://github.com/router-for-me/CLIProxyAPI/commit/50cfd238) | feat(management): add support for static and plugin model definitions retrieval by channel | yes | ported here | S (+33 −1) | channel-selectable static and plugin model definitions, all four Go cases (M5-0311) |
