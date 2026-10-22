@@ -340,9 +340,15 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
                 // Codex rejects call_id values longer than 64 bytes (b0debb35).
                 let mut shortened = shorten_call_id(&call_id);
                 if shortened != call_id {
+                    // Go shortens `call_id + "_N"` until the result is unused. Every candidate
+                    // keeps the same first bytes, so `call_id` is hashed once and each attempt
+                    // only feeds its `_N`: linear however many candidates a client occupies.
+                    use sha2::Digest;
+                    let prefix = sha2::Sha256::new_with_prefix(&call_id);
                     let mut attempt = 1;
                     while used.contains(&shortened) {
-                        shortened = shorten_call_id(&[&call_id[..], format!("_{attempt}").as_bytes()].concat());
+                        let sum = prefix.clone().chain_update(format!("_{attempt}")).finalize();
+                        shortened = with_hash_suffix(&call_id, &sum);
                         attempt += 1;
                     }
                     used.insert(shortened.clone());
@@ -486,7 +492,6 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     out
 }
 
-/// setToolCallOutputContent.
 /// `shortenCodexCallIDIfNeeded`: an ID over 64 bytes keeps its first bytes (cut without
 /// regard to UTF-8, as Go slices the string) and ends in `_` plus 8 bytes of its SHA-256.
 fn shorten_call_id(id: &[u8]) -> Vec<u8> {
@@ -495,13 +500,18 @@ fn shorten_call_id(id: &[u8]) -> Vec<u8> {
         return id.to_vec();
     }
     use sha2::{Digest, Sha256};
-    let sum = Sha256::digest(id);
+    with_hash_suffix(id, &Sha256::digest(id))
+}
+
+/// The first 47 bytes of `id` (over 64 bytes), `_` and the first 8 bytes of `sum` in hex.
+fn with_hash_suffix(id: &[u8], sum: &[u8]) -> Vec<u8> {
     let suffix: String = std::iter::once("_".to_owned())
         .chain(sum[..8].iter().map(|b| format!("{b:02x}")))
         .collect();
-    [&id[..LIMIT - suffix.len()], suffix.as_bytes()].concat()
+    [&id[..64 - suffix.len()], suffix.as_bytes()].concat()
 }
 
+/// setToolCallOutputContent.
 fn set_tool_output(output: &mut Vec<u8>, content: &Res<'_>) {
     if content.kind == Kind::String {
         let structured = gj::parse(&content.s).into_owned();

@@ -484,7 +484,13 @@ fn annotation_results<'a>(value: Res<'a>) -> Vec<Res<'a>> {
     if !value.exists() {
         vec![]
     } else if value.is_array() {
-        value.array()
+        // Go collects with ForEach, which stops at a malformed element where Array() would not.
+        let mut out = vec![];
+        value.each(|_, item| {
+            out.push(item);
+            true
+        });
+        out
     } else {
         vec![value]
     }

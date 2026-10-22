@@ -102,6 +102,8 @@ func TestRSFixCodexChat(t *testing.T) {
 		`data: {"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","url":"https://y","id":"cite_1","start_index":7,"end_index":8}}`,
 		`data: {"type":"response.output_text.annotation.added","annotations":[{"type":"url_citation","url":"https://z","title":"<z&>","start_index":0,"end_index":0},{"type":"url_citation","url":"https://z","start_index":0,"end_index":3}]}`,
 		`data: {"type":"response.output_item.done","item":{"type":"message","annotations":{"type":"url_citation","url":"https://w","start_index":1,"end_index":1},"content":[]}}`,
+		// A missing comma: ForEach stops after the first element, Array() would not.
+		`data: {"type":"response.output_text.done","annotations":[{}{"type":"url_citation","url":"https://m","start_index":0,"end_index":1}]}`,
 		`data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"x"}]}}`,
 		`data: {"type":"response.content_part.done","part":{"type":"output_text","text":"x"}}`,
 		`data: {"type":"response.output_text.done","text":"x"}`)
