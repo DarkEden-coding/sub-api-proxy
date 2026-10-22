@@ -3989,6 +3989,96 @@ async fn siwc_binding_flows_follow_go() {
     .await;
     assert_eq!(status, 200);
 
+    // A binding whose exchange is in flight, by its state.
+    let pending = || async {
+        let sid = start().await;
+        assert_eq!(callback(json!({"redirect_url": redirect(&sid, "hang")})).await.0, 200);
+        tokio::time::timeout(Duration::from_secs(5), exchanging.notified())
+            .await
+            .unwrap();
+        sid
+    };
+    let changed = json!({"status": "error", "error": "SIWC binding target changed; start a new binding"});
+    let other = f.dir.join("auth").join("other.json");
+
+    // Go `TestSIWCFileMutationScopeAndValidation`: a refused v8 upload, a v8 upload of
+    // another file and a v0 upload keep the binding pending; a v8 reupload fails it.
+    let sid = pending().await;
+    let before = bound_file();
+    for (path, body, want) in [
+        (
+            "/v8/management/credentials?name=codex.json",
+            r#"{"type":"codex","excluded_models":123}"#.to_owned(),
+            400,
+        ),
+        ("/v8/management/credentials?name=other.json", before.clone(), 200),
+        ("/v0/management/auth-files?name=codex.json", before.clone(), 200),
+    ] {
+        let (status, text) = send(wreq::Method::POST, path.into(), body).await;
+        assert_eq!(status, want, "{path}: {text}");
+        assert_eq!(
+            oauth_get(&base, &format!("/oauth/status?state={sid}")).await,
+            json!({"status": "wait"}),
+            "{path}"
+        );
+    }
+    assert_eq!(upload("v8").await.0, 200);
+    assert_eq!(final_status(&base, &sid, 5).await, changed);
+
+    // Go `TestSIWCFileMutationRejectsLateExchange`, by route: each v8 mutation of the
+    // file fails a binding whose exchange is in flight, and stops that exchange. A
+    // result that returns while the mutation runs is
+    // `management::siwc::tests::a_late_exchange_lands_nothing_after_a_v8_mutation`.
+    for operation in ["upload", "delete", "delete-all", "delete-batch"] {
+        let sid = pending().await;
+        let before = bound_file();
+        if operation.starts_with("delete-") {
+            std::fs::write(&other, &before).unwrap();
+        }
+        let (method, path, body) = match operation {
+            "upload" => (
+                wreq::Method::POST,
+                "/v8/management/credentials?name=codex.json",
+                before.clone(),
+            ),
+            "delete" => (
+                wreq::Method::DELETE,
+                "/v8/management/credentials?name=codex.json",
+                String::new(),
+            ),
+            "delete-all" => (
+                wreq::Method::DELETE,
+                "/v8/management/credentials?all=true",
+                String::new(),
+            ),
+            _ => (
+                wreq::Method::DELETE,
+                "/v8/management/credentials",
+                r#"["codex.json","other.json"]"#.to_owned(),
+            ),
+        };
+        let (status, text) = send(method, path.into(), body).await;
+        assert_eq!(status, 200, "{operation}: {text}");
+        assert_eq!(final_status(&base, &sid, 5).await, changed, "{operation}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if operation == "upload" {
+            assert_eq!(bound_file(), before, "{operation}");
+            continue;
+        }
+        assert!(!file.exists(), "{operation}: file resurrected");
+        assert!(
+            f.rt.store().get("codex.json").is_none(),
+            "{operation}: registration resurrected"
+        );
+        let (status, _) = send(
+            wreq::Method::POST,
+            "/v8/management/credentials?name=codex.json".into(),
+            original.into(),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+
     // The credential file itself may not be a symlink.
     #[cfg(unix)]
     {
