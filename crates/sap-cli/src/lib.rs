@@ -5,7 +5,7 @@ pub mod table;
 use anyhow::Result;
 use std::{fs::OpenOptions, io::Write, path::Path};
 
-pub const ROUTER_CONFIG: &str = "listen: 127.0.0.1:8317\nclient_host: workstation\nservers:\n  - name: primary\n    base_url: http://127.0.0.1:8318\n  - name: backup\n    base_url: http://127.0.0.1:8319\n";
+pub const ROUTER_CONFIG: &str = "listen: 127.0.0.1:8317\nclient_host: workstation\n# The proxy client key, sent on inference requests in place of the coding\n# client's own login.\nclient_key_file: client-key\nservers:\n  - name: primary\n    base_url: http://127.0.0.1:8318\n  - name: backup\n    base_url: http://127.0.0.1:8319\n";
 pub const SERVER_CONFIG: &str = "node: power-server\nrole: primary\nstore_path: state.db\npeers: []\nrouting:\n  retry_deadline_secs: 60\n  compaction_move_margin: 0.25\n";
 
 /// Creates a starter config without replacing an existing file.

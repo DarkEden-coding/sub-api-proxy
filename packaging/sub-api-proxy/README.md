@@ -114,10 +114,15 @@ The installer never runs sudo or changes that policy itself.
    Login prints a URL to open manually. Complete each server's provider login
    separately using that server's management endpoint when needed.
 
-Claude setup changes only `env.ANTHROPIC_BASE_URL` and
-`env.ANTHROPIC_AUTH_TOKEN`. Codex setup selects `sub-api-proxy` and adds the
-provider with `/v1`, `wire_api = "responses"`, and `env_key = "SAP_CLIENT_KEY"`.
-This Codex configuration is provisional pending client compatibility validation.
+Claude setup sets `env.ANTHROPIC_BASE_URL` to the router and
+`env.CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, and removes `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_API_KEY`. Claude Code keeps its own subscription login, which keeps the
+subscription betas (including the 1-hour prompt cache). The router replaces that
+login with the client key from `client_key_file` on inference paths, so the token
+never leaves the machine. Codex setup selects `sub-api-proxy` and adds the provider
+with `/v1`, `wire_api = "responses"`, `supports_websockets = true` and
+`env_key = "SAP_CLIENT_KEY"`; export `SAP_CLIENT_KEY` with the same client key.
+See `docs/sub-api-proxy/client-config.md` for why.
 Existing TOML comments and unrelated values remain. Backups sit next to the
 settings file and have mode 0600. Setup makes a timestamped backup before every
 write; undo restores and consumes the latest backup, or removes a file that did

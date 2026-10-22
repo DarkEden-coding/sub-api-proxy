@@ -65,8 +65,6 @@ enum Command {
         undo: bool,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
-        client_key: Option<String>,
         /// Explicit settings path; useful for isolated configuration and tests.
         #[arg(long)]
         path: Option<PathBuf>,
@@ -138,7 +136,6 @@ async fn run(cli: Cli) -> Result<()> {
             client,
             undo,
             dry_run,
-            client_key,
             path,
         } => {
             let path = path.unwrap_or_else(|| setup::settings_path(&home, client));
@@ -147,13 +144,7 @@ async fn run(cli: Cli) -> Result<()> {
             let backup = if undo {
                 Some(setup::undo(&path, dry_run)?)
             } else {
-                setup::setup(
-                    &path,
-                    client,
-                    &cli.router,
-                    client_key.or_else(|| std::env::var("SAP_CLIENT_KEY").ok()).as_deref(),
-                    dry_run,
-                )?
+                setup::setup(&path, client, &cli.router, dry_run)?
             };
             output(
                 &serde_json::json!({"path": path, "backup": backup, "dry_run": dry_run, "action": if undo {"restore"} else {"configure"}}),

@@ -22,9 +22,27 @@ pub fn settings_path(home: &Path, client: CodingClient) -> PathBuf {
     })
 }
 
-/// The provisional Codex provider configuration. Keep phase-0 changes here.
-// ponytail: custom-provider semantics await phase-0 validation; replace this function
-// with the validated ChatGPT-mode configuration when that workstream finishes.
+/// Credential variables that switch Claude Code from its subscription login to key
+/// mode, which drops the subscription betas, including the 1-hour prompt cache.
+const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
+/// Claude Code keeps its own subscription login and only changes endpoint; the local
+/// router swaps in the client key. Hint headers label request classes and compaction
+/// (`docs/sub-api-proxy/validation.md`).
+fn configure_claude(doc: &mut Value, router: &str) {
+    let env = &mut doc["env"];
+    env["ANTHROPIC_BASE_URL"] = router.trim_end_matches('/').into();
+    env["CLAUDE_CODE_GATEWAY_HINT_HEADERS"] = "1".into();
+    if let Some(env) = env.as_object_mut() {
+        for var in CLAUDE_CREDENTIAL_VARS {
+            env.remove(var);
+        }
+    }
+}
+
+/// The Codex provider configuration. The end-to-end harness showed that a custom
+/// Responses provider with WebSockets keeps prewarm, `thread-id`, `session-id`, turn
+/// metadata and the window ID (`docs/sub-api-proxy/validation.md`).
 pub fn configure_codex(document: &mut DocumentMut, router: &str) -> Result<()> {
     if let Some(providers) = document.get("model_providers") {
         ensure!(providers.is_table_like(), "model_providers must be a TOML table");
@@ -41,6 +59,7 @@ pub fn configure_codex(document: &mut DocumentMut, router: &str) -> Result<()> {
     );
     set_string(&mut provider["wire_api"], "responses");
     set_string(&mut provider["env_key"], "SAP_CLIENT_KEY");
+    provider["supports_websockets"] = value(true);
     Ok(())
 }
 
@@ -53,13 +72,7 @@ fn set_string(item: &mut Item, text: impl Into<String>) {
 }
 
 /// Edits explicit paths only. Dry runs validate input without creating any files.
-pub fn setup(
-    path: &Path,
-    client: CodingClient,
-    router: &str,
-    token: Option<&str>,
-    dry_run: bool,
-) -> Result<Option<PathBuf>> {
+pub fn setup(path: &Path, client: CodingClient, router: &str, dry_run: bool) -> Result<Option<PathBuf>> {
     let original = match fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -67,16 +80,13 @@ pub fn setup(
     };
     let updated = match client {
         CodingClient::Claude => {
-            let token = token.context("Claude setup needs --client-key or SAP_CLIENT_KEY")?;
-            ensure!(!token.is_empty(), "client key is empty");
             let mut doc: Value = serde_json::from_str(original.as_deref().unwrap_or("{}"))?;
             ensure!(doc.is_object(), "Claude settings must be a JSON object");
             if doc.get("env").is_none() {
                 doc["env"] = serde_json::json!({});
             }
             ensure!(doc["env"].is_object(), "Claude env must be a JSON object");
-            doc["env"]["ANTHROPIC_BASE_URL"] = router.trim_end_matches('/').into();
-            doc["env"]["ANTHROPIC_AUTH_TOKEN"] = token.into();
+            configure_claude(&mut doc, router);
             format!("{}\n", serde_json::to_string_pretty(&doc)?)
         }
         CodingClient::Codex => {
@@ -166,10 +176,12 @@ pub fn points_at_router(path: &Path, client: CodingClient, router: &str) -> Resu
                 "Claude base URL differs"
             );
             ensure!(
-                doc["env"]["ANTHROPIC_AUTH_TOKEN"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty()),
-                "Claude client key missing"
+                doc["env"]["CLAUDE_CODE_GATEWAY_HINT_HEADERS"] == "1",
+                "Claude gateway hint headers are off"
+            );
+            ensure!(
+                CLAUDE_CREDENTIAL_VARS.iter().all(|v| doc["env"].get(v).is_none()),
+                "a Claude credential variable is set; it replaces the subscription login"
             );
         }
         CodingClient::Codex => {
@@ -191,6 +203,7 @@ pub fn points_at_router(path: &Path, client: CodingClient, router: &str) -> Resu
             );
             ensure!(
                 provider.get("wire_api").and_then(|v| v.as_str()) == Some("responses")
+                    && provider.get("supports_websockets").and_then(|v| v.as_bool()) == Some(true)
                     && provider.get("env_key").and_then(|v| v.as_str()) == Some("SAP_CLIENT_KEY"),
                 "Codex provider settings differ"
             );

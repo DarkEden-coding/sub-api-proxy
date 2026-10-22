@@ -24,6 +24,14 @@ pub struct Config {
     pub down_after_failures: u32,
     pub stable_secs: u64,
     pub connect_timeout_ms: u64,
+    /// File holding the proxy's client key. When set, inference requests (`/v1/...`
+    /// and `/backend-api/...`) carry this key instead of whatever credential the
+    /// client sent, so a coding client can keep its own subscription login without
+    /// that token leaving this machine. Management paths pass through unchanged.
+    pub client_key_file: Option<PathBuf>,
+    /// `Authorization: Bearer <key>` loaded from `client_key_file`.
+    #[serde(skip)]
+    pub client_auth: Option<HeaderValue>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -44,6 +52,8 @@ impl Default for Config {
             down_after_failures: 2,
             stable_secs: 30,
             connect_timeout_ms: 1000,
+            client_key_file: None,
+            client_auth: None,
         }
     }
 }
@@ -59,6 +69,17 @@ fn hostname() -> String {
         .unwrap_or_else(|| "localhost".into())
 }
 
+/// A sensitive `Authorization: Bearer` value for the client key.
+pub fn bearer(key: &str) -> Result<HeaderValue> {
+    if key.is_empty() {
+        bail!("client key file is empty");
+    }
+    let mut value =
+        HeaderValue::from_str(&format!("Bearer {key}")).context("client key is not a valid header value")?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 impl Config {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let path = match path {
@@ -66,8 +87,13 @@ impl Config {
             None => PathBuf::from(std::env::var_os("HOME").context("HOME is unset; use --config")?)
                 .join(".config/sub-api-proxy/router.yaml"),
         };
-        let config: Self =
+        let mut config: Self =
             serde_yaml_ng::from_slice(&std::fs::read(&path).with_context(|| format!("read {}", path.display()))?)?;
+        if let Some(file) = &config.client_key_file {
+            let file = path.parent().map_or_else(|| file.clone(), |dir| dir.join(file));
+            let key = std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+            config.client_auth = Some(bearer(key.trim())?);
+        }
         config.validate()?;
         Ok(config)
     }

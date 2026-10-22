@@ -177,7 +177,11 @@ impl Drop for Local {
 }
 impl Local {
     async fn start(servers: &[&Fake], defaults: bool) -> Self {
+        Self::start_with(servers, defaults, None).await
+    }
+    async fn start_with(servers: &[&Fake], defaults: bool, client_key: Option<&str>) -> Self {
         let config = Config {
+            client_auth: client_key.map(|key| sap_router::config::bearer(key).unwrap()),
             servers: servers
                 .iter()
                 .enumerate()
@@ -453,6 +457,27 @@ async fn websocket_frames_and_down_close() {
             .unwrap();
         socket.send(Message::Text("backup".into())).await.unwrap();
         assert_eq!(socket.next().await.unwrap().unwrap(), Message::Text("backup".into()));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn client_key_replaces_credentials_on_inference_paths_only() {
+    timeout(Duration::from_secs(5), async {
+        let primary = Fake::start().await;
+        let local = Local::start_with(&[&primary], false, Some("client-key")).await;
+        local.request("/v1/messages?beta=true", full("{}")).await;
+        local.request("/sap/api/flow", full("{}")).await;
+        let captured = primary.behavior.captured.lock().unwrap();
+        assert_eq!(
+            captured[0].0["authorization"], "Bearer client-key",
+            "inference uses the client key"
+        );
+        assert_eq!(
+            captured[1].0["authorization"], "Bearer test-key",
+            "management keeps its own key"
+        );
     })
     .await
     .unwrap();

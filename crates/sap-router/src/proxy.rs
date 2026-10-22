@@ -57,6 +57,11 @@ pub async fn connect(server: &Server, timeout_ms: u64) -> anyhow::Result<Connect
     .await?
 }
 
+/// Paths whose client credential the router replaces with the client key.
+fn is_inference(path: &str) -> bool {
+    path.starts_with("/v1/") || path.starts_with("/backend-api/")
+}
+
 fn strip_hop_headers(headers: &mut HeaderMap) {
     let nominated: Vec<_> = headers
         .get_all(header::CONNECTION)
@@ -122,6 +127,12 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
             sap_core::health::CLIENT_HOST_HEADER,
             proxy.config.client_host.parse().unwrap(),
         );
+        if let Some(auth) = &proxy.config.client_auth
+            && is_inference(request.uri().path())
+        {
+            request.headers_mut().remove("x-api-key");
+            request.headers_mut().insert(header::AUTHORIZATION, auth.clone());
+        }
         // Preserve the raw path/query, including percent escapes and ordering.
         *request.uri_mut() = request
             .uri()

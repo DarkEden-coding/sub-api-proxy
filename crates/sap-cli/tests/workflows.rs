@@ -23,13 +23,13 @@ fn setup_preserves_settings_and_undo_restores_exact_bytes() {
         let path = temp.path().join(filename);
         fs::write(&path, original).unwrap();
         assert!(
-            setup::setup(&path, client, "http://127.0.0.1:8317", Some("client-test"), true)
+            setup::setup(&path, client, "http://127.0.0.1:8317", true)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
-        let backup = setup::setup(&path, client, "http://127.0.0.1:8317", Some("client-test"), false)
+        let backup = setup::setup(&path, client, "http://127.0.0.1:8317", false)
             .unwrap()
             .unwrap();
         assert_eq!(fs::read_to_string(&backup).unwrap(), original);
@@ -40,7 +40,11 @@ fn setup_preserves_settings_and_undo_restores_exact_bytes() {
                 let value: serde_json::Value = serde_json::from_str(&changed).unwrap();
                 assert_eq!(value["theme"], "dark");
                 assert_eq!(value["env"]["KEEP"], "yes");
-                assert_eq!(value["env"]["ANTHROPIC_AUTH_TOKEN"], "client-test");
+                assert_eq!(value["env"]["CLAUDE_CODE_GATEWAY_HINT_HEADERS"], "1");
+                assert!(
+                    value["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(),
+                    "key mode is removed"
+                );
             }
             CodingClient::Codex => {
                 for retained in [
@@ -65,9 +69,9 @@ fn setup_preserves_settings_and_undo_restores_exact_bytes() {
 fn undo_uses_latest_backup_and_remembers_absent_files() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("nested/config.toml");
-    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:8317", None, false).unwrap();
+    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:8317", false).unwrap();
     let first = fs::read_to_string(&path).unwrap();
-    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:9000", None, false).unwrap();
+    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:9000", false).unwrap();
     setup::undo(&path, false).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), first);
     setup::undo(&path, false).unwrap();
@@ -83,7 +87,7 @@ fn invalid_settings_are_left_untouched() {
     ] {
         let path = temp.path().join("settings");
         fs::write(&path, original).unwrap();
-        assert!(setup::setup(&path, client, "http://127.0.0.1:8317", Some("test"), false).is_err());
+        assert!(setup::setup(&path, client, "http://127.0.0.1:8317", false).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), original);
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
@@ -189,7 +193,7 @@ base_url = "http://127.0.0.1:9/v1" # endpoint
 custom = true
 "#;
     fs::write(&path, original).unwrap();
-    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:8317", None, false).unwrap();
+    setup::setup(&path, CodingClient::Codex, "http://127.0.0.1:8317", false).unwrap();
     let changed = fs::read_to_string(&path).unwrap();
     for text in ["# selected provider", "# endpoint", "custom = true"] {
         assert!(changed.contains(text));
