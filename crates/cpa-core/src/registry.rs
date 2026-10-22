@@ -140,6 +140,54 @@ impl Catalog {
     }
 }
 
+/// How Go's `ModelInfo` and `ThinkingSupport` fields decode.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Text,
+    Int,
+    Flag,
+    List,
+    Thinking,
+    Config,
+    Native,
+}
+use Kind::*;
+/// `ModelInfo`'s JSON fields: name, kind, `omitempty`.
+const MODEL: [(&str, Kind, bool); 22] = [
+    ("id", Text, false),
+    ("object", Text, false),
+    ("created", Int, false),
+    ("owned_by", Text, false),
+    ("type", Text, false),
+    ("display_name", Text, true),
+    ("name", Text, true),
+    ("version", Text, true),
+    ("description", Text, true),
+    ("inputTokenLimit", Int, true),
+    ("outputTokenLimit", Int, true),
+    ("supportedGenerationMethods", List, true),
+    ("context_length", Int, true),
+    ("max_completion_tokens", Int, true),
+    ("supported_parameters", List, true),
+    ("supportedInputModalities", List, true),
+    ("supportedOutputModalities", List, true),
+    ("supports_web_search", Flag, true),
+    ("thinking", Thinking, true),
+    ("config", Config, true),
+    // Decoded (and type-checked) only.
+    ("native_capabilities", Native, true),
+    ("support_configuration_update", Flag, true),
+];
+/// `ThinkingSupport`'s JSON fields.
+const THINKING: [(&str, Kind, bool); 6] = [
+    ("min", Int, true),
+    ("max", Int, true),
+    ("zero_allowed", Flag, true),
+    ("dynamic_allowed", Flag, true),
+    ("disable_type", Text, true),
+    ("levels", List, true),
+];
+
 /// A catalog model as Go's typed decode reads it into `registry.ModelInfo` and
 /// `json.Marshal` writes it back (model_registry.go): members match fields exactly, else
 /// case-insensitively; null leaves a field at its zero value (and is `""` inside string
@@ -148,50 +196,6 @@ impl Catalog {
 /// that makes Go refuse the whole catalog. `raw` itself is left as it is.
 pub fn go_model_json(raw: &Map<String, Value>) -> Result<Value, String> {
     use crate::gostr::GoStr;
-    #[derive(Clone, Copy, PartialEq)]
-    enum Kind {
-        Text,
-        Int,
-        Flag,
-        List,
-        Thinking,
-        Config,
-        Native,
-    }
-    use Kind::*;
-    const MODEL: [(&str, Kind, bool); 22] = [
-        ("id", Text, false),
-        ("object", Text, false),
-        ("created", Int, false),
-        ("owned_by", Text, false),
-        ("type", Text, false),
-        ("display_name", Text, true),
-        ("name", Text, true),
-        ("version", Text, true),
-        ("description", Text, true),
-        ("inputTokenLimit", Int, true),
-        ("outputTokenLimit", Int, true),
-        ("supportedGenerationMethods", List, true),
-        ("context_length", Int, true),
-        ("max_completion_tokens", Int, true),
-        ("supported_parameters", List, true),
-        ("supportedInputModalities", List, true),
-        ("supportedOutputModalities", List, true),
-        ("supports_web_search", Flag, true),
-        ("thinking", Thinking, true),
-        ("config", Config, true),
-        // Decoded (and type-checked) only.
-        ("native_capabilities", Native, true),
-        ("support_configuration_update", Flag, true),
-    ];
-    const THINKING: [(&str, Kind, bool); 6] = [
-        ("min", Int, true),
-        ("max", Int, true),
-        ("zero_allowed", Flag, true),
-        ("dynamic_allowed", Flag, true),
-        ("disable_type", Text, true),
-        ("levels", List, true),
-    ];
     fn field(fields: &[(&'static str, Kind, bool)], key: &str) -> Option<usize> {
         fields
             .iter()
@@ -228,9 +232,10 @@ pub fn go_model_json(raw: &Map<String, Value>) -> Result<Value, String> {
                 Text => Value::String(string(name, v)?),
                 Int => match v {
                     Value::Number(n) if n.is_i64() => Value::from(n.as_i64().unwrap_or_default()),
-                    // serde reads `-0` as a float.
-                    // ponytail: so `-0.0` is accepted too, where Go refuses a fraction.
-                    Value::Number(n) if n.as_f64() == Some(0.0) => Value::from(0),
+                    // `-0`, an integer literal, which serde reads as a float. A refresh
+                    // refuses `-0.0` and other fractions by their text before this runs
+                    // (`check_catalog_members`).
+                    Value::Number(n) if n.as_f64().is_some_and(|f| f == 0.0 && f.is_sign_negative()) => Value::from(0),
                     _ => return Err(err(name, v)),
                 },
                 Flag => match v {
@@ -341,23 +346,128 @@ pub fn go_model_json(raw: &Map<String, Value>) -> Result<Value, String> {
     Ok(Value::Object(encode(&MODEL[..MODEL.len() - 1], vals)))
 }
 
+/// `staticModelsJSON`'s sections.
+const SECTIONS: [&str; 13] = [
+    "claude",
+    "gemini",
+    "vertex",
+    "aistudio",
+    "codex-free",
+    "codex-team",
+    "codex-plus",
+    "codex-pro",
+    "kimi",
+    "antigravity",
+    "xai",
+    "devin",
+    "meta",
+];
+
+/// An object's members in order, repeats included, each value as its JSON text.
+struct Members<'a>(Vec<(String, &'a serde_json::value::RawValue)>);
+
+impl<'de> Deserialize<'de> for Members<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Members<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some(member) = map.next_entry()? {
+                    out.push(member);
+                }
+                Ok(Members(out))
+            }
+        }
+        d.deserialize_map(Visit)
+    }
+}
+
+/// Where Go's typed decode of a catalog would differ from the decoded `Map` the refresh
+/// keeps (docs/DIFFERENCES-FROM-GO.md, remote model catalogs): a known section or field
+/// named in another case (Go matches it case-insensitively) or repeated (Go decodes each
+/// occurrence in turn into the same field), and an integer field holding anything but an
+/// integer literal (serde reads `-0.0` and `1e-400` as zero).
+fn check_catalog_members(json: &str) -> Result<(), String> {
+    use crate::gostr::GoStr;
+    use serde_json::value::RawValue;
+    fn known<'a>(names: &[&'static str], obj: &Members<'a>, at: &str) -> Result<Vec<(usize, &'a RawValue)>, String> {
+        let mut seen = vec![false; names.len()];
+        let mut out = Vec::new();
+        for (key, v) in &obj.0 {
+            let Some(i) = names.iter().position(|n| n.go_eq_fold(key)) else {
+                continue;
+            };
+            if key != names[i] {
+                return Err(format!("{at}: member {key:?} is {:?} in another case", names[i]));
+            }
+            if std::mem::replace(&mut seen[i], true) {
+                return Err(format!("{at}: member {key:?} is repeated"));
+            }
+            out.push((i, *v));
+        }
+        Ok(out)
+    }
+    fn object(v: &RawValue) -> Option<Result<Members<'_>, String>> {
+        v.get()
+            .starts_with('{')
+            .then(|| serde_json::from_str(v.get()).map_err(|e| e.to_string()))
+    }
+    fn integer(v: &RawValue) -> bool {
+        let text = v.get();
+        let digits = text.strip_prefix('-').unwrap_or(text);
+        text == "null"
+            || (!digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && (digits == "0" || !digits.starts_with('0')))
+    }
+    fn fields(table: &[(&'static str, Kind, bool)], obj: &Members, at: &str) -> Result<(), String> {
+        let names: Vec<&'static str> = table.iter().map(|f| f.0).collect();
+        for (i, v) in known(&names, obj, at)? {
+            let (name, kind, _) = table[i];
+            let at = format!("{at}.{name}");
+            match kind {
+                Int if !integer(v) => return Err(format!("{at}: {} is not an integer", v.get())),
+                Thinking => {
+                    if let Some(t) = object(v) {
+                        fields(&THINKING, &t?, &at)?;
+                    }
+                }
+                Config => {
+                    if let Some(c) = object(v) {
+                        known(&["override_header"], &c?, &at)?;
+                    }
+                }
+                Native => {
+                    if let Some(n) = object(v) {
+                        known(&["web_search", "tool_search"], &n?, &at)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let root: Members = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    for (i, models) in known(&SECTIONS, &root, "catalog")? {
+        let section = SECTIONS[i];
+        let Ok(models) = serde_json::from_str::<Vec<&RawValue>>(models.get()) else {
+            continue;
+        };
+        for (n, model) in models.into_iter().enumerate() {
+            if let Some(model) = object(model) {
+                fields(&MODEL, &model?, &format!("{section}[{n}]"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Go `json.Unmarshal` into `staticModelsJSON`: every model of its sections decodes.
 fn decode_catalog(root: &Map<String, Value>) -> Result<(), String> {
-    const SECTIONS: [&str; 13] = [
-        "claude",
-        "gemini",
-        "vertex",
-        "aistudio",
-        "codex-free",
-        "codex-team",
-        "codex-plus",
-        "codex-pro",
-        "kimi",
-        "antigravity",
-        "xai",
-        "devin",
-        "meta",
-    ];
     for section in SECTIONS {
         match root.get(section) {
             None | Some(Value::Null) => {}
@@ -430,7 +540,9 @@ fn validate_catalog(root: &Map<String, Value>) -> Result<(), String> {
             let Some(model) = model.as_object() else {
                 return Err(format!("{section}[{i}] is null"));
             };
-            let id = model.get("id").and_then(Value::as_str).unwrap_or_default().trim();
+            // The ID Go's typed decode reads.
+            let decoded = go_model_json(model).map_err(|e| format!("{section}[{i}]: {e}"))?;
+            let id = decoded.get("id").and_then(Value::as_str).unwrap_or_default().trim();
             if id.is_empty() {
                 return Err(format!("{section}[{i}] has empty id"));
             }
@@ -482,6 +594,7 @@ fn changed_providers(old: &Catalog, new: &Catalog) -> Vec<String> {
 /// it differs. Returns the changed providers (Go's refresh callback argument).
 pub fn refresh_catalog(json: &str) -> Result<Vec<String>, String> {
     let mut root: Map<String, Value> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    check_catalog_members(json)?;
     decode_catalog(&root)?;
     validate_catalog(&root)?;
     let old = pinned();
@@ -675,6 +788,7 @@ mod tests {
         }
         // The embedded catalog decodes as Go's does.
         decode_catalog(&serde_json::from_str(MODELS_JSON).unwrap()).unwrap();
+        check_catalog_members(MODELS_JSON).unwrap();
     }
 
     #[test]
