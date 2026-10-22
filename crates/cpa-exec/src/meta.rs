@@ -386,6 +386,7 @@ fn prepare(req: &ExecRequest, cfg: &Config, stream: bool) -> Result<Prepared, Ex
             body,
             &client,
         )
+        .map(|t| t.body)
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.0))
     };
     let mut body = translate(&req.body)?;

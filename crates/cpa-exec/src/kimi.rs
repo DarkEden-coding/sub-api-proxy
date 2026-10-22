@@ -425,6 +425,7 @@ async fn execute_chat(
             body,
             &codex_client,
         )
+        .map(|t| t.body)
         .map_err(|e| request_error(e.to_string()))
     };
     let translated = translate(&req.body, req.stream)?;

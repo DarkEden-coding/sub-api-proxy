@@ -71,7 +71,7 @@ fn translate_body(
         is_compat,
     };
     crate::codex_client::translate_request(req.source_format, Format::Claude, &ctx, body, &client)
-        .map(Bytes::from)
+        .map(|t| Bytes::from(t.body))
         .map_err(error)
 }
 

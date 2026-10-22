@@ -150,7 +150,7 @@ pub(crate) fn translate(
     let ctx = RequestCtx { model, stream };
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", compat);
     deep_stack(body, || {
-        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
+        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client).map(|t| t.body)
     })
     .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
