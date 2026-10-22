@@ -1,11 +1,12 @@
-// Records what Go's mime/multipart Reader.ReadForm returns for header and line edge
-// cases, as the images paths call it (multipart.NewReader(bytes.NewReader(body), "b")
-// .ReadForm(32 << 20)). Standard library only; it opens no files or sockets.
+// Records what Go's mime/multipart Reader.ReadForm returns for header, line and
+// boundary edge cases, as the images paths call it (multipart.NewReader(bytes.NewReader(
+// body), boundary).ReadForm(32 << 20); the boundary is "b" unless a case names one). Standard library only; it opens no files or sockets.
 package main
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
@@ -20,11 +21,12 @@ type file struct {
 }
 
 type result struct {
-	Name   string              `json:"name"`
-	Body   []byte              `json:"body"`
-	Error  *string             `json:"error,omitempty"`
-	Values map[string][][]byte `json:"values,omitempty"`
-	Files  map[string][]file   `json:"files,omitempty"`
+	Name     string              `json:"name"`
+	Boundary string              `json:"boundary,omitempty"`
+	Body     []byte              `json:"body"`
+	Error    *string             `json:"error,omitempty"`
+	Values   map[string][][]byte `json:"values,omitempty"`
+	Files    map[string][]file   `json:"files,omitempty"`
 }
 
 const cd = "Content-Disposition: form-data; name=\"p\"\r\n"
@@ -67,13 +69,53 @@ var cases = []struct{ name, body string }{
 	// A nameless part's body is drained; a named part's is read.
 	{"nameless_part_without_boundary", "--b\r\nX-A: y\r\n\r\nabc\r\n--"},
 	{"named_part_without_boundary", "--b\r\n" + cd + "\r\nabc\r\n--"},
+	// textproto drops a header line without a newline whose last ReadLine fragment
+	// (4096 bytes, or 4095 when it would end in CR) ends the body: io.EOF ends the form.
+	{"header_fragment_4095_bytes_at_eof", "--b\r\n" + strings.Repeat("x", 4095)},
+	{"header_fragment_4096_bytes_at_eof", "--b\r\n" + strings.Repeat("x", 4096)},
+	{"header_fragment_8192_bytes_at_eof", "--b\r\n" + strings.Repeat("x", 8192)},
+	{"header_fragment_cr_rewind_kept", "--b\r\n" + strings.Repeat("x", 4095) + "\r"},
+	{"header_fragment_cr_rewind_dropped", "--b\r\n" + strings.Repeat("x", 4095) + "\r" + strings.Repeat("x", 4095)},
+	{"continuation_fragment_4096_bytes_at_eof", "--b\r\n" + cd + "\r\nv\r\n--b\r\nX-A: v\r\n " + strings.Repeat("y", 4096)},
+	{"named_part_then_header_fragment_at_eof", "--b\r\n" + cd + "\r\nv\r\n--b\r\n" + strings.Repeat("x", 4096)},
+	// The invalid-value diagnostic quotes the line with its key canonicalized.
+	{"lowercase_key_continuation_value_checked", "--b\r\nx-a: ok\r\n \x01\r\n\r\nv\r\n--b--\r\n"},
+	{"spaced_key_continuation_value_checked", "--b\r\nx a: ok\r\n \x01\r\n\r\nv\r\n--b--\r\n"},
+}
+
+// Long boundaries: partReader decides a delimiter from at most the 4096 bytes its
+// bufio buffer holds from the delimiter on.
+var longBoundaries = []struct{ name, boundary, body string }{}
+
+func init() {
+	for _, n := range []int{4089, 4090, 4091, 4092} {
+		b := strings.Repeat("a", n)
+		named := "Content-Disposition: form-data; name=\"p\"\r\n\r\nx\r\n--" + b + "--"
+		longBoundaries = append(longBoundaries,
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_final_at_eof", n), b, "--" + b + "\r\n" + named},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_final_crlf", n), b, "--" + b + "\r\n" + named + "\r\n"},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_file_then_part", n), b, "--" + b + "\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a\"\r\n\r\nx\r\n--" + b + "\r\n" + named + "\r\n"},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_nameless_then_part", n), b, "--" + b + "\r\nX-A: y\r\n\r\nx\r\n--" + b + "\r\n" + named + "\r\n"},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_nameless_closed_by_final", n), b, "--" + b + "\r\nX-A: y\r\n\r\nx\r\n--" + b + "--\r\n"},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_nameless_closed_by_final_at_eof", n), b, "--" + b + "\r\nX-A: y\r\n\r\nx\r\n--" + b + "--"},
+			struct{ name, boundary, body string }{fmt.Sprintf("boundary_%d_lf", n), b, "--" + b + "\nContent-Disposition: form-data; name=\"p\"\n\nx\n--" + b + "--\n"},
+		)
+	}
 }
 
 func main() {
 	var out []result
+	all := longBoundaries[:0:0]
 	for _, c := range cases {
+		all = append(all, struct{ name, boundary, body string }{c.name, "b", c.body})
+	}
+	all = append(all, longBoundaries...)
+	for _, c := range all {
 		r := result{Name: c.name, Body: []byte(c.body)}
-		form, err := multipart.NewReader(bytes.NewReader([]byte(c.body)), "b").ReadForm(32 << 20)
+		if c.boundary != "b" {
+			r.Boundary = c.boundary
+		}
+		form, err := multipart.NewReader(bytes.NewReader([]byte(c.body)), c.boundary).ReadForm(32 << 20)
 		if err != nil {
 			msg := err.Error()
 			r.Error = &msg

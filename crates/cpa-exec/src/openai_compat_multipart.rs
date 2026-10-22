@@ -281,13 +281,35 @@ fn skip_lwsp(b: &[u8]) -> &[u8] {
     &b[n..]
 }
 
-/// `matchAfterPrefix` with the whole body available (a read error always follows).
-fn match_after_prefix(buf: &[u8], prefix_len: usize) -> bool {
-    match buf.get(prefix_len) {
-        None | Some(b' ' | b'\t' | b'\r' | b'\n') => true,
-        Some(b'-') => buf.get(prefix_len + 1) == Some(&b'-'),
-        Some(_) => false,
+/// What `partReader` makes of a delimiter prefix at the start of `rest`.
+enum Delimiter {
+    Match,
+    Data,
+    /// The part fails with `ErrBufferFull` once the bytes before this one are read.
+    BufferFull,
+}
+
+/// `matchAfterPrefix` as `partReader` reaches it: from the prefix on it sees at most
+/// the 4096-byte bufio buffer. When the buffer is full and still undecided, `Peek`
+/// fails with `ErrBufferFull`, which counts as the end of input and then fails the part.
+fn delimiter(rest: &[u8], prefix_len: usize) -> Delimiter {
+    let window = &rest[..rest.len().min(PEEK_BUFFER_SIZE)];
+    match window.get(prefix_len) {
+        None | Some(b' ' | b'\t' | b'\r' | b'\n') => Delimiter::Match,
+        Some(b'-') => match window.get(prefix_len + 1) {
+            Some(b'-') => Delimiter::Match,
+            None if window.len() == PEEK_BUFFER_SIZE => Delimiter::BufferFull,
+            _ => Delimiter::Data,
+        },
+        Some(_) => Delimiter::Data,
     }
+}
+
+/// Why a part's body has no end.
+enum BodyError {
+    UnexpectedEof,
+    /// `ErrBufferFull`, with where draining the part stops.
+    BufferFull(usize),
 }
 
 /// `multipart.peekBufferSize`: `NextPart` reads its lines with a bufio buffer this size.
@@ -337,7 +359,14 @@ impl<'a> Reader<'a> {
         }
         let Some(i) = rest.iter().position(|b| *b == b'\n') else {
             self.pos = body.len();
-            return Some(rest);
+            // ReadLine hands an unterminated line out in buffer-sized fragments, one
+            // byte shorter when the fragment would end in CR. When the last fragment
+            // ends the body, the next ReadLine's io.EOF drops the whole line.
+            let mut at = 0;
+            while rest.len() - at >= PEEK_BUFFER_SIZE {
+                at += PEEK_BUFFER_SIZE - usize::from(rest[at + PEEK_BUFFER_SIZE - 1] == b'\r');
+            }
+            return (at < rest.len()).then_some(rest);
         };
         self.pos += i + 1;
         let line = &rest[..i];
@@ -400,7 +429,10 @@ impl<'a> Reader<'a> {
     fn headers(&mut self) -> Result<Option<Headers>, String> {
         // Go 1.26.4, v8.0.35's release toolchain, quotes these lines with %q.
         if matches!(self.body.get(self.pos), Some(b' ' | b'\t')) {
-            let line = self.text_line().unwrap_or_default();
+            let body: &'a [u8] = self.body;
+            let start = self.pos;
+            // A dropped line is at least 4095 bytes, so the limit refuses it first.
+            let line = self.text_line().unwrap_or(&body[start..]);
             // readLineSlice(80): the diagnostic reads at most 80 bytes of the line.
             if line.len() > 80 {
                 return Err("multipart: message too large".into());
@@ -449,7 +481,9 @@ impl<'a> Reader<'a> {
                 crate::proxy::canonical_header(&String::from_utf8_lossy(key))
             };
             if !value.iter().all(|c| header_value_byte(*c)) {
-                return Err(malformed());
+                // canonicalMIMEHeaderKey rewrote the key inside kv before this check.
+                let line = [key.as_bytes(), b":", value].concat();
+                return Err(format!("malformed MIME header line: {}", quote(line)));
             }
             headers.push((key, skip_lwsp(value).to_vec()));
         }
@@ -479,8 +513,15 @@ impl<'a> Reader<'a> {
         // ReadForm skips a nameless part; the next NextPart drains it, ignoring the
         // missing boundary, and then reads only what is left of a partial "\r\n--b".
         let body = match body {
-            Err(_) if name.is_empty() => return Err("multipart: NextPart: EOF".into()),
-            body => body?,
+            Ok(body) => body,
+            Err(BodyError::UnexpectedEof) if name.is_empty() => return Err("multipart: NextPart: EOF".into()),
+            Err(BodyError::UnexpectedEof) => return Err("unexpected EOF".into()),
+            // Draining a nameless part stops at the error; NextPart reads on from there.
+            Err(BodyError::BufferFull(end)) if name.is_empty() => {
+                self.pos = end;
+                Vec::new()
+            }
+            Err(BodyError::BufferFull(_)) => return Err("bufio: buffer full".into()),
         };
         let filename = params
             .get("filename")
@@ -497,10 +538,14 @@ impl<'a> Reader<'a> {
 
     /// `partReader` with `scanUntilBoundary`: the body ends before `nl--boundary`
     /// followed by `--`, whitespace or the end of input.
-    fn part_body(&mut self) -> Result<Vec<u8>, String> {
+    fn part_body(&mut self) -> Result<Vec<u8>, BodyError> {
         let buf = &self.body[self.pos..];
-        if buf.starts_with(&self.dash_boundary) && match_after_prefix(buf, self.dash_boundary.len()) {
-            return Ok(Vec::new());
+        if buf.starts_with(&self.dash_boundary) {
+            match delimiter(buf, self.dash_boundary.len()) {
+                Delimiter::Match => return Ok(Vec::new()),
+                Delimiter::Data => {}
+                Delimiter::BufferFull => return Err(BodyError::BufferFull(self.pos + PEEK_BUFFER_SIZE)),
+            }
         }
         let mut nl_dash = self.nl.to_vec();
         nl_dash.extend_from_slice(&self.dash_boundary);
@@ -510,14 +555,17 @@ impl<'a> Reader<'a> {
             .and_then(|b| b.windows(nl_dash.len()).position(|w| w == nl_dash.as_slice()))
             .map(|i| i + from)
         {
-            if match_after_prefix(&buf[i..], nl_dash.len()) {
-                let body = buf[..i].to_vec();
-                self.pos += i;
-                return Ok(body);
+            match delimiter(&buf[i..], nl_dash.len()) {
+                Delimiter::Match => {
+                    let body = buf[..i].to_vec();
+                    self.pos += i;
+                    return Ok(body);
+                }
+                Delimiter::Data => from = i + nl_dash.len(),
+                Delimiter::BufferFull => return Err(BodyError::BufferFull(self.pos + i + PEEK_BUFFER_SIZE)),
             }
-            from = i + nl_dash.len();
         }
-        Err("unexpected EOF".into())
+        Err(BodyError::UnexpectedEof)
     }
 }
 
@@ -762,8 +810,8 @@ mod tests {
         }
     }
 
-    /// `tests/fixtures/multipart_form_go.json`: Go 1.26.4 `ReadForm` on header and line
-    /// edge cases (`tests/reference/multipart_form`).
+    /// `tests/fixtures/multipart_form_go.json`: Go 1.26.4 `ReadForm` on header, line and
+    /// boundary edge cases (`tests/reference/multipart_form`).
     #[test]
     fn reads_forms_as_go_does() {
         use base64::Engine;
@@ -776,7 +824,8 @@ mod tests {
             let body = base64::engine::general_purpose::STANDARD
                 .decode(case["body"].as_str().unwrap())
                 .unwrap();
-            let got = match form(&body) {
+            let boundary = case.get("boundary").and_then(Value::as_str).unwrap_or("b");
+            let got = match read_form(&body, boundary) {
                 Err(e) => json!({ "error": e }),
                 Ok(form) => {
                     let values: Map<String, Value> = form
@@ -813,7 +862,7 @@ mod tests {
             assert_eq!(got, want, "{name}");
             checked += 1;
         }
-        assert_eq!(checked, 28);
+        assert_eq!(checked, 65);
     }
 
     #[test]
