@@ -569,17 +569,22 @@ impl Host {
     /// every auth provider in order until one handles the material or fails. Blocking:
     /// credential loading is synchronous, as Go's synthesizer is.
     pub fn parse_auths(&self, req: AuthParseRequest) -> ParseAuthsResult {
+        self.parse_auths_for(req, false)
+    }
+
+    /// [`Self::parse_auths`]; `save`: for a `host.auth.save` (see [`SaveParse`]).
+    pub(crate) fn parse_auths_for(&self, req: AuthParseRequest, save: bool) -> ParseAuthsResult {
         if !req.provider.trim().is_empty() {
             let Some(record) = self.auth_provider_record(&req.provider) else {
                 return ParseAuthsResult::default();
             };
-            return self.call_parse_auths(&record, req);
+            return self.call_parse_auths(&record, req, save);
         }
         for record in self.active_records() {
             if !record.plugin.caps.auth_provider || self.is_fused(&record.id) {
                 continue;
             }
-            let result = self.call_parse_auths(&record, req.clone());
+            let result = self.call_parse_auths(&record, req.clone(), save);
             if result.error.is_some() || result.handled {
                 return result;
             }
@@ -589,7 +594,7 @@ impl Host {
 
     /// Go `callParseAuths`: an RPC failure is not handled; invalid auth data in a handled
     /// answer is.
-    fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest) -> ParseAuthsResult {
+    fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest, save: bool) -> ParseAuthsResult {
         if self.is_fused(&record.id) || !self.record_current(record) {
             return ParseAuthsResult::default();
         }
@@ -601,7 +606,7 @@ impl Host {
         if req.provider.is_empty() {
             req.provider = identifier.clone();
         }
-        let parsing = Parsing::new(self, record, &req.path);
+        let parsing = Parsing::new(self, record, &req.path, save);
         let resp = self.call_blocking(record, method::AUTH_PARSE, &req);
         drop(parsing);
         let resp: AuthParseResponse = match resp {
@@ -800,46 +805,96 @@ pub struct ParseAuthsResult {
     pub error: Option<CallError>,
 }
 
-/// An `auth.parse` call in flight, so a `host.auth.save` the plugin makes to that file
-/// from inside it is not parsed again ([`Host::parsing_auth_file`]).
+std::thread_local! {
+    /// The `auth.parse` calls this thread is blocked in: the plugin instance and the auth
+    /// file's cleaned absolute path. A native plugin's synchronous host callbacks arrive
+    /// on the thread blocked in the plugin call (cgo runs an exported Go function locked
+    /// to the calling C thread, and its C calls back on that thread).
+    static PARSING_HERE: std::cell::RefCell<Vec<(std::sync::Arc<crate::client::CallbackInstance>, std::path::PathBuf)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// An `auth.parse` call in flight, for [`Host::save_parse`]. Dropped, unwinding included,
+/// when the call returns.
 struct Parsing<'a> {
     host: &'a Host,
     instance: std::sync::Arc<crate::client::CallbackInstance>,
     path: std::path::PathBuf,
+    save: bool,
 }
 
 impl<'a> Parsing<'a> {
-    fn new(host: &'a Host, record: &Record, path: &str) -> Self {
+    fn new(host: &'a Host, record: &Record, path: &str, save: bool) -> Self {
         let instance = record.client.instance().clone();
         let path = cpa_core::config::credentials::absolute_clean_path(std::path::Path::new(path));
-        crate::host::lock(&host.inner.auth_parses).push((instance.clone(), path.clone()));
-        Self { host, instance, path }
+        crate::host::lock(&host.inner.auth_parses).push((instance.clone(), path.clone(), save));
+        PARSING_HERE.with_borrow_mut(|here| here.push((instance.clone(), path.clone())));
+        Self {
+            host,
+            instance,
+            path,
+            save,
+        }
+    }
+
+    fn is(&self, instance: &std::sync::Arc<crate::client::CallbackInstance>, path: &std::path::Path) -> bool {
+        std::sync::Arc::ptr_eq(instance, &self.instance) && path == self.path
     }
 }
 
 impl Drop for Parsing<'_> {
     fn drop(&mut self) {
+        PARSING_HERE.with_borrow_mut(|here| {
+            if let Some(at) = here.iter().rposition(|(i, p)| self.is(i, p)) {
+                here.remove(at);
+            }
+        });
         let mut parses = crate::host::lock(&self.host.inner.auth_parses);
         if let Some(at) = parses
             .iter()
-            .position(|(i, p)| std::sync::Arc::ptr_eq(i, &self.instance) && *p == self.path)
+            .position(|(i, p, save)| self.is(i, p) && *save == self.save)
         {
             parses.swap_remove(at);
         }
     }
 }
 
+/// How a plugin's `host.auth.save` to an auth file treats the parse Go makes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveParse {
+    /// Parse the saved file first, as Go does.
+    Parse,
+    /// The save comes from inside this plugin's `auth.parse` of the file, on the
+    /// parsing thread: write without parsing again (Go recurses without bound). The
+    /// parse's answer is published, and the watcher parses the saved bytes next.
+    Nested,
+    /// The save comes from another thread while a save of the file by this plugin is
+    /// being parsed: refused, as it may be that parse recursing from a thread it
+    /// spawned.
+    Refused,
+}
+
 impl Host {
-    /// Whether plugin `instance` is answering `auth.parse` for the auth file at `path`.
-    pub(crate) fn parsing_auth_file(
+    /// How a `host.auth.save` from plugin `instance` to the auth file at `path` is parsed.
+    pub(crate) fn save_parse(
         &self,
         instance: &std::sync::Arc<crate::client::CallbackInstance>,
         path: &std::path::Path,
-    ) -> bool {
+    ) -> SaveParse {
         let path = cpa_core::config::credentials::absolute_clean_path(path);
-        crate::host::lock(&self.inner.auth_parses)
+        let same = |i: &std::sync::Arc<crate::client::CallbackInstance>, p: &std::path::PathBuf| {
+            std::sync::Arc::ptr_eq(i, instance) && *p == path
+        };
+        if PARSING_HERE.with_borrow(|here| here.iter().any(|(i, p)| same(i, p))) {
+            return SaveParse::Nested;
+        }
+        if crate::host::lock(&self.inner.auth_parses)
             .iter()
-            .any(|(i, p)| std::sync::Arc::ptr_eq(i, instance) && *p == path)
+            .any(|(i, p, save)| *save && same(i, p))
+        {
+            return SaveParse::Refused;
+        }
+        SaveParse::Parse
     }
 }
 

@@ -98,19 +98,21 @@ impl AuthManager for PluginAuthManager {
                 }
                 (path, vec![credential])
             }
-            SavedAuths::Plugin { path, mut auths } => {
-                // Go persists each registered auth, its metadata taking `disabled`; a
-                // file's several auths are virtual, and the file store skips those.
-                let bytes = match auths.as_mut_slice() {
-                    [one] => {
+            SavedAuths::Plugin {
+                path,
+                mut credentials,
+                persist: rewrite,
+            } => {
+                // Go persists the one auth, its metadata taking `disabled`; otherwise the
+                // file keeps what the plugin saved.
+                let bytes = match (rewrite, credentials.as_mut_slice()) {
+                    (true, [one]) => {
                         one.metadata.insert("disabled".into(), one.disabled.into());
                         persist(&path, &one.metadata, one.disabled)?
                     }
                     _ => std::fs::read(&path).map_err(|e| format!("auth filestore: read existing failed: {e}"))?,
                 };
                 credentials::note_plugin_auth_write(&path, &bytes);
-                let credentials = credentials::plugin_file_credentials(&path, &bytes, auths)
-                    .map_err(|e| format!("register auth: {e}"))?;
                 fallbacks().remove(&path);
                 (path, credentials)
             }

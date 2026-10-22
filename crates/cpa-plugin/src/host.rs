@@ -173,9 +173,9 @@ pub(crate) struct Inner {
     pub(crate) auth_parser_installed: std::sync::atomic::AtomicBool,
     /// What `auth_parser` hands out.
     pub(crate) auth_parser: std::sync::OnceLock<Arc<dyn cpa_core::config::credentials::PluginAuthParser>>,
-    /// The `auth.parse` calls in flight: the plugin instance asked and the auth file's
-    /// cleaned absolute path (`auth::Parsing`).
-    pub(crate) auth_parses: Mutex<Vec<(Arc<CallbackInstance>, PathBuf)>>,
+    /// The `auth.parse` calls in flight: the plugin instance asked, the auth file's
+    /// cleaned absolute path, and whether a `host.auth.save` asked (`auth::Parsing`).
+    pub(crate) auth_parses: Mutex<Vec<(Arc<CallbackInstance>, PathBuf, bool)>>,
 }
 
 /// The plugin host. Cheap to clone.

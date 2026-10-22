@@ -59,11 +59,14 @@ pub struct HostAuth {
 pub enum SavedAuths {
     /// No plugin auth provider took the file: its built-in credential.
     BuiltIn(Box<HostAuth>),
-    /// What the plugin auth provider for the file's type parsed. Possibly none: the
-    /// file then has no credential.
+    /// The credentials the plugin auth provider for the file's type parsed, the file's
+    /// settings applied. Possibly none: the file then has no credential. `persist`: the
+    /// one credential's metadata replaces the file (Go `Manager.persist` with its token
+    /// storage); otherwise the file keeps the saved bytes.
     Plugin {
         path: PathBuf,
-        auths: Vec<cpa_core::config::credentials::ParsedAuth>,
+        credentials: Vec<cpa_core::credential::Credential>,
+        persist: bool,
     },
     /// Nothing yet: the saving plugin is parsing this file, and the file's credentials
     /// come from that parse. `data` is what the save writes.
@@ -322,17 +325,21 @@ impl Host {
             .resolved_auth_dir()
             .ok_or_else(|| err("auth directory is unavailable"))?;
         let dst = absolute(&dir.join(name));
-        // A plugin saving the file it is parsing, from inside that parse: Go would parse
-        // the data again first, recursing through the plugin without bound. The file is
-        // written as is; the parse's answer is published and the watcher parses the
-        // saved bytes next (`credentials::note_plugin_auth_write`).
-        let auths = if self.parsing_auth_file(&caller.instance, &dst) {
-            SavedAuths::Written {
+        // Go parses the saved data first, which recurses through a plugin saving the file
+        // it is parsing (`auth::SaveParse`).
+        let auths = match self.save_parse(&caller.instance, &dst) {
+            crate::auth::SaveParse::Parse => self.build_auths_from_file_data(&dst, &data)?,
+            // The file is written as is; the parse's answer is published and the watcher
+            // parses the saved bytes next (`credentials::note_plugin_auth_write`).
+            crate::auth::SaveParse::Nested => SavedAuths::Written {
                 path: dst.clone(),
                 data: data.clone(),
+            },
+            crate::auth::SaveParse::Refused => {
+                return Err(err(format!(
+                    "auth file {name} is being parsed for another save by this plugin"
+                )));
             }
-        } else {
-            self.build_auths_from_file_data(&dst, &data)?
         };
         let mut write = || write_auth_file(&dst, &data).map_err(|e| format!("failed to write auth file: {e}"));
         match self.auth_manager() {
@@ -368,16 +375,19 @@ impl Host {
             id if id.is_empty() => path_text.clone(),
             id => id,
         };
-        let parsed = self.parse_auths(crate::api::AuthParseRequest {
-            provider: match metadata.get("type") {
-                Some(Value::String(p)) => p.trim().to_owned(),
-                _ => String::new(),
+        let parsed = self.parse_auths_for(
+            crate::api::AuthParseRequest {
+                provider: match metadata.get("type") {
+                    Some(Value::String(p)) => p.trim().to_owned(),
+                    _ => String::new(),
+                },
+                path: path_text.clone(),
+                file_name: default_id.clone(),
+                raw_json: Bytes::copy_from_slice(data),
+                ..Default::default()
             },
-            path: path_text.clone(),
-            file_name: default_id.clone(),
-            raw_json: Bytes::copy_from_slice(data),
-            ..Default::default()
-        });
+            true,
+        );
         if let Some(e) = parsed.error {
             return Err(err(format!("invalid auth file: {e}")));
         }
@@ -394,9 +404,19 @@ impl Host {
         }
         let single = parsed.auths.len() == 1;
         let file_disabled = metadata.get("disabled").and_then(parse_bool_value) == Some(true);
+        let base = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut persist = single;
         let mut auths = Vec::with_capacity(parsed.auths.len());
         for mut auth in parsed.auths {
             validate_parsed_weight(&auth)?;
+            // Normalized before the one auth inherits the file's other fields, so the
+            // plugin's own fields win in either spelling.
+            let mut own: Map<String, Value> = std::mem::take(&mut auth.metadata).into_iter().collect();
+            crate::auth::normalize_credential_metadata(&mut own);
+            auth.metadata = own.into_iter().collect();
             if single {
                 // The one auth inherits the file's other fields and, without storage of
                 // its own, the file itself.
@@ -408,10 +428,16 @@ impl Host {
                 }
             }
             if auth.file_name.trim().is_empty() {
-                auth.file_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                auth.file_name = base.clone();
+            }
+            // ponytail: a credential lists under its file's name (see
+            // DIFFERENCES-FROM-GO.md); a save whose auth names another file is refused
+            // before the write. Upgrade: keep the parsed file name on the credential.
+            if auth.file_name.trim() != base {
+                return Err(err(format!(
+                    "auth provider returned file name {} for auth file {base}, which is not supported",
+                    auth.file_name.trim()
+                )));
             }
             // One auth under the file's own ID takes over the credential the file has.
             if single
@@ -428,11 +454,26 @@ impl Host {
                 auth.disabled = true;
                 auth.metadata.insert("disabled".into(), true.into());
             }
+            if single {
+                // Go `Manager.persist` skips runtime-only and plugin-virtual auths, and a
+                // token storage that cannot build its document fails, leaving the file
+                // with the saved bytes; the auth is registered either way.
+                let marked = |key: &str| auth.attributes.get(key).is_some_and(|v| v.trim().go_eq_fold("true"));
+                persist = !marked("runtime_only") && !marked("plugin_virtual");
+                if persist && let Err(error) = auth.storage_payload() {
+                    tracing::warn!(id = %auth.id, provider = %auth.provider, %error, "failed to persist registered auth");
+                    persist = false;
+                }
+            }
             auths.push(auth.into_parsed());
         }
+        // The original file's settings (priority, weight, prefix, proxy URL, ...) apply
+        // to the parsed auths, as Go applies them before registering.
+        let credentials = cpa_core::config::credentials::plugin_file_credentials(path, data, auths).map_err(err)?;
         Ok(SavedAuths::Plugin {
             path: path.to_owned(),
-            auths,
+            credentials,
+            persist,
         })
     }
 
@@ -457,7 +498,7 @@ impl Host {
         };
         let mut matched: Option<HostAuth> = None;
         for candidate in manager.list() {
-            let marked = |key| attribute(&candidate, key).trim().eq_ignore_ascii_case("true");
+            let marked = |key| attribute(&candidate, key).trim().go_eq_fold("true");
             if marked("runtime_only") || marked("plugin_virtual") || !same_file(&candidate) {
                 continue;
             }
