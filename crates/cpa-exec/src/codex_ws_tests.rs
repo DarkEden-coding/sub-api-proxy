@@ -1138,5 +1138,186 @@ async fn an_abandoned_turn_keeps_its_session_until_its_observation_returns() {
     );
 }
 
+/// A pooled socket on session "conn-1" to the mock at `url`, its reader running.
+async fn pooled(executor: &CodexExecutor, url: &str) -> Arc<super::Upstream> {
+    let session = executor.ws.session("conn-1");
+    let target = Target {
+        credential: "codex-ws.json".into(),
+        url: ws_url(&format!("{url}/responses")).unwrap(),
+        proxy: crate::proxy::Proxy::Direct,
+    };
+    executor
+        .ensure(&session, &target, &HeaderMap::new(), "gpt-fixture", false, None)
+        .await
+        .unwrap()
+        .0
+}
+
+async fn read_text(reads: &mut mpsc::Receiver<Read>) -> String {
+    match tokio::time::timeout(Duration::from_secs(5), reads.recv()).await {
+        Ok(Some(Read::Text(text))) => text,
+        Ok(Some(Read::Failed(error))) => panic!("read failed: {error}"),
+        other => panic!("no upstream event: {}", other.is_ok()),
+    }
+}
+
+/// What the mock upstream received, once `count` frames arrived.
+async fn received(up: &Upstream, count: usize) -> Vec<String> {
+    for _ in 0..250 {
+        if up.frames.lock().unwrap().len() >= count {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    up.frames.lock().unwrap().clone()
+}
+
+const INTERRUPT_R1: &str = r#"{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items"}"#;
+
+/// Go `TestInterruptExecutionSessionRequiresActiveRead`: a socket kept between turns is
+/// not the current upstream (the HTTP fallback may cancel locally); once a turn reads,
+/// the interrupt reaches the socket byte for byte.
+#[tokio::test]
+async fn interrupt_needs_a_turn_reading_on_the_socket() {
+    let (up, url) = upstream(vec![]).await;
+    let executor = CodexExecutor::new().unwrap();
+    assert_eq!(
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
+            .await,
+        Err(InterruptError::NoActive),
+        "no session"
+    );
+    let conn = pooled(&executor, &url).await;
+    assert_eq!(
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
+            .await,
+        Err(InterruptError::NoActive),
+        "idle socket"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(up.frames.lock().unwrap().is_empty(), "the idle socket was written");
+
+    let _reads = conn.activate();
+    let mut checked = Vec::new();
+    let check = |id: &str| {
+        checked.push(id.to_owned());
+        false
+    };
+    assert_eq!(
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), check)
+            .await,
+        Err(InterruptError::Rejected(
+            "websocket credential is no longer enabled".into()
+        )),
+        "disabled credential"
+    );
+    assert_eq!(checked, ["codex-ws.json"], "the check gets the socket's credential");
+    executor
+        .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
+        .await
+        .unwrap();
+    assert_eq!(received(&up, 1).await, [INTERRUPT_R1]);
+}
+
+/// Go `TestInterruptExecutionSessionCompletesDuringAuthCheck`: the response finishes
+/// while the account check runs. The interrupt is then done, not forwarded: the socket's
+/// state is read after the check.
+#[tokio::test]
+async fn interrupt_for_a_response_finished_during_the_auth_check_is_done() {
+    let (up, url) = upstream(vec![Act::Send(vec![CREATED, COMPLETED])]).await;
+    let executor = CodexExecutor::new().unwrap();
+    let conn = pooled(&executor, &url).await;
+    let mut reads = conn.activate();
+    conn.send(r#"{"type":"response.create"}"#.into()).await.unwrap();
+    read_text(&mut reads).await;
+    read_text(&mut reads).await;
+    // The turn is still reading when the check starts and done when it returns.
+    let finish = || {
+        conn.deactivate();
+        true
+    };
+    executor
+        .interrupt_session("conn-1", br#"{"type":"response.interrupt","response_id":"r1"}"#, |_| {
+            finish()
+        })
+        .await
+        .unwrap();
+    conn.send("barrier".into()).await.unwrap();
+    assert_eq!(received(&up, 2).await, [r#"{"type":"response.create"}"#, "barrier"]);
+}
+
+/// Go `TestInterruptExecutionSessionAfterTerminal`: a late interrupt for a finished
+/// response is done, also while the next response runs, and never reaches upstream; an
+/// unknown ID on an idle socket falls through to the HTTP fallback; after the socket is
+/// lost there is no active upstream.
+#[tokio::test]
+async fn late_interrupts_for_finished_responses_are_done() {
+    for terminal in [
+        "response.completed",
+        "response.done",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let finished: &'static str =
+            Box::leak(format!(r#"{{"type":"{terminal}","response":{{"id":"r1","output":[]}}}}"#).into_boxed_str());
+        let (up, url) = upstream(vec![
+            Act::Send(vec![CREATED, finished]),
+            Act::Send(vec![r#"{"type":"response.incomplete","response":{"id":"r2"}}"#]),
+            Act::SendClose(vec![], 1000),
+        ])
+        .await;
+        let executor = CodexExecutor::new().unwrap();
+        let conn = pooled(&executor, &url).await;
+        let interrupt = |id: &str| format!(r#"{{"type":"response.interrupt","response_id":"{id}"}}"#);
+        let send = |id: &'static str| {
+            let executor = &executor;
+            async move {
+                executor
+                    .interrupt_session("conn-1", interrupt(id).as_bytes(), |_| true)
+                    .await
+            }
+        };
+        let mut reads = conn.activate();
+        conn.send(r#"{"type":"response.create"}"#.into()).await.unwrap();
+        read_text(&mut reads).await;
+        read_text(&mut reads).await;
+        conn.deactivate();
+        for _ in 0..2 {
+            assert_eq!(send("r1").await, Ok(()), "{terminal}: finished r1");
+        }
+        assert_eq!(
+            send("unknown").await,
+            Err(InterruptError::NoActive),
+            "{terminal}: unknown"
+        );
+
+        let mut reads = conn.activate();
+        assert_eq!(send("r1").await, Ok(()), "{terminal}: r1 while r2 runs");
+        assert_eq!(send("r2").await, Ok(()), "{terminal}: active r2");
+        read_text(&mut reads).await;
+        conn.deactivate();
+        for id in ["r1", "r2"] {
+            assert_eq!(send(id).await, Ok(()), "{terminal}: finished {id}");
+        }
+        assert_eq!(
+            received(&up, 2).await,
+            [r#"{"type":"response.create"}"#.to_owned(), interrupt("r2")],
+            "{terminal}: only the active response's interrupt reached upstream"
+        );
+        conn.send("bye".into()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), executor.ws.closed("conn-1"))
+            .await
+            .unwrap_or_else(|_| panic!("{terminal}: the disconnect was not reported"));
+        assert_eq!(
+            send("r2").await,
+            Err(InterruptError::NoActive),
+            "{terminal}: lost socket"
+        );
+    }
+}
+
 #[path = "codex_duplex_tests.rs"]
 mod duplex;
