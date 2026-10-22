@@ -1339,6 +1339,55 @@ async fn excluded_models_writes_are_validated() {
 /// `/credentials/models` reports what the credential registers in the dynamic
 /// registry (Go `GetModelsForClient`): config aliases here, nothing once disabled.
 #[tokio::test]
+async fn fields_refuses_values_its_auth_loader_cannot_read() {
+    // Go writes these values (DIFFERENCES-FROM-GO.md): serde holds the file, so a
+    // number past f64 or nesting past its 127 levels, counted from the file's root
+    // object, is refused before anything is written.
+    let f = Fixture::from_yaml("fields-limits", |auth, hash| {
+        std::fs::write(auth.join("credential.json"), r#"{"type":"claude"}"#).unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let auth = f.dir.join("auth");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    for (fields, want) in [
+        (format!(r#""x":{}"#, nested(126)), None),
+        (format!(r#""x":{}"#, nested(127)), Some("invalid field x")),
+        (format!(r#""a.b":{}"#, nested(125)), None),
+        (format!(r#""a.b":{}"#, nested(126)), Some("invalid field a.b")),
+        (r#""note":1e400"#.to_owned(), Some("invalid field note")),
+        (r#""note":1e308"#.to_owned(), None),
+    ] {
+        let before = std::fs::read(auth.join("credential.json")).unwrap();
+        let r = client
+            .patch(format!("{base}/v8/management/credentials/fields"))
+            .bearer_auth("fake-management-only")
+            .body(format!(r#"{{"name":"credential.json",{fields}}}"#))
+            .send()
+            .await
+            .unwrap();
+        let status = r.status().as_u16();
+        let body: Value = r.json().await.unwrap();
+        let label = &fields[..fields.len().min(12)];
+        match want {
+            Some(message) => {
+                assert_eq!((status, body), (400, json!({ "error": message })), "{label}");
+                assert_eq!(std::fs::read(auth.join("credential.json")).unwrap(), before, "{label}");
+            }
+            None => {
+                assert_eq!((status, body), (200, json!({ "status": "ok" })), "{label}");
+                assert!(f.rt.store().get("credential.json").is_some(), "{label}: reloads");
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn credential_models_come_from_registrations() {
     let f = Fixture::from_yaml("models", |auth, hash| {
         format!(
