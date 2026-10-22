@@ -25,7 +25,7 @@ use crate::codex_request::{self as request, Call, Settings, View};
 use crate::codex_response::{self as response, Bootstrap, Processor};
 
 pub use crate::codex_request::DEFAULT_BASE_URL;
-pub use crate::codex_ws::{ClientFrames, SteeringInput};
+pub use crate::codex_ws::{ClientFrames, InterruptError, NO_ACTIVE_UPSTREAM, SteeringInput};
 
 pub struct CodexExecutor {
     /// Chrome profile for chatgpt.com, Go's standard transport elsewhere, per proxy.
@@ -134,6 +134,17 @@ impl CodexExecutor {
     /// reads them after its first `response.created`; [`Self::close_session`] releases them.
     pub fn attach_steering(&self, session: &str, input: SteeringInput) {
         self.ws.attach_steering(session, input);
+    }
+
+    /// Go `InterruptExecutionSession`: forwards a client's `response.interrupt` to the
+    /// session's upstream socket while a turn reads on it (see `codex_ws::Pool::interrupt`).
+    pub async fn interrupt_session(
+        &self,
+        session: &str,
+        payload: &str,
+        enabled: impl FnOnce(&str) -> bool,
+    ) -> Result<(), InterruptError> {
+        self.ws.interrupt(session, payload, enabled).await
     }
 
     /// The error that lost the session's upstream socket, once it is lost (what Go's

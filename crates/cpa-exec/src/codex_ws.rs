@@ -96,6 +96,47 @@ pub(crate) struct Link {
     active: Option<mpsc::Sender<Read>>,
     /// Why the reader stopped (`upstreamDisconnectError`); set once when it exits.
     pub(crate) lost: Option<ExecError>,
+    /// Response IDs this socket already finished (`terminalResponseIDs`): a late
+    /// `response.interrupt` for one is done, not an error and not forwarded.
+    // ponytail: grows by one ID per finished response for the socket's life, as Go's
+    // does; bound it if sockets ever outlive thousands of turns.
+    terminal: std::collections::HashSet<String>,
+}
+
+/// `response.completed`, `.done`, `.incomplete` and `.failed` (Go `isTerminalEvent`
+/// without `error`) with a non-empty string `response.id`.
+fn terminal_response_id(payload: &str) -> Option<String> {
+    let kind = gjson::get(payload, "type");
+    if !matches!(
+        kind.str(),
+        "response.completed" | "response.done" | "response.incomplete" | "response.failed"
+    ) {
+        return None;
+    }
+    let id = gjson::get(payload, "response.id");
+    (id.kind() == Kind::String && !id.str().is_empty()).then(|| id.str().to_owned())
+}
+
+/// Go `ErrNoActiveUpstreamWebsocket`.
+pub const NO_ACTIVE_UPSTREAM: &str = "no active upstream websocket for response.interrupt";
+
+/// Why [`CodexExecutor::interrupt`] did not deliver a `response.interrupt`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InterruptError {
+    /// No turn is reading on the session's current socket ([`NO_ACTIVE_UPSTREAM`]): an
+    /// HTTP turn may still cancel locally.
+    NoActive,
+    /// The socket was lost, the credential is disabled, or the write failed.
+    Rejected(String),
+}
+
+impl std::fmt::Display for InterruptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActive => f.write_str(NO_ACTIVE_UPSTREAM),
+            Self::Rejected(text) => f.write_str(text),
+        }
+    }
 }
 
 pub(crate) struct Upstream {
@@ -347,6 +388,11 @@ impl Pool {
             .clone()
     }
 
+    /// The session, without creating one.
+    fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions.lock().expect("sessions").get(id).cloned()
+    }
+
     /// `WithWebsocketInput`: binds the downstream connection's frames to its session.
     pub fn attach_steering(&self, id: &str, input: SteeringInput) {
         *self.session(id).steering.lock().expect("session steering") = Some(Arc::new(input));
@@ -362,8 +408,62 @@ impl Pool {
 
     /// The error that lost the session's upstream socket, if it was lost.
     pub fn loss(&self, id: &str) -> Option<ExecError> {
-        let session = self.sessions.lock().expect("sessions").get(id).cloned()?;
+        let session = self.get(id)?;
         session.closed.borrow().clone()
+    }
+
+    /// `InterruptExecutionSession`: writes the client's `response.interrupt` unchanged
+    /// to the socket of the session's turn in progress. It never dials, replays or
+    /// selects another credential. `enabled(credential_id)` is the live account check,
+    /// called without holding a session lock.
+    pub async fn interrupt(
+        &self,
+        id: &str,
+        payload: &str,
+        enabled: impl FnOnce(&str) -> bool,
+    ) -> Result<(), InterruptError> {
+        let session = Some(id.trim())
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.get(id))
+            .ok_or(InterruptError::NoActive)?;
+        let conn = session.current().ok_or(InterruptError::NoActive)?;
+        let auth_enabled = enabled(&conn.target.credential);
+        let response_id = gjson::get(payload, "response_id");
+        {
+            // One snapshot of the socket's state: a completion landing between the
+            // checks would otherwise turn a late interrupt into a stale error.
+            let current = session.conn.lock().expect("session conn");
+            if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
+                return Err(InterruptError::NoActive);
+            }
+            let link = conn.link.lock().expect("link");
+            if let Some(lost) = &link.lost {
+                return Err(InterruptError::Rejected(
+                    String::from_utf8_lossy(&lost.body).into_owned(),
+                ));
+            }
+            if link.terminal.contains(response_id.str()) {
+                return Ok(());
+            }
+            // A socket kept from an earlier turn is not the current upstream.
+            if link.active.is_none() {
+                return Err(InterruptError::NoActive);
+            }
+        }
+        if !auth_enabled {
+            return Err(InterruptError::Rejected(
+                "websocket credential is no longer enabled".into(),
+            ));
+        }
+        // A failed or timed-out write may leave a partial frame: the socket is dropped
+        // like after any failed turn write (Go leaves that to its reader).
+        if let Err(error) = conn.send(payload.to_owned()).await {
+            session.invalidate(&conn, &error, true);
+            return Err(InterruptError::Rejected(
+                String::from_utf8_lossy(&error.body).into_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Resolves with the error that lost the session's upstream socket.
@@ -1212,7 +1312,16 @@ pub(crate) async fn read_loop(
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
             }
         };
-        let active = conn.link.lock().expect("link").active.clone();
+        // Terminal IDs are recorded before delivery: the handler may still be forwarding
+        // the turn after its read channel was released.
+        let terminal = terminal_response_id(text.trim());
+        let active = {
+            let mut link = conn.link.lock().expect("link");
+            if let Some(id) = terminal {
+                link.terminal.insert(id);
+            }
+            link.active.clone()
+        };
         if let Some(tx) = active {
             // Waits while the turn is busy: backpressure instead of unbounded queueing.
             let _ = tx.send(Read::Text(text)).await;
