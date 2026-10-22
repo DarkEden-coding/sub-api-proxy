@@ -1174,6 +1174,15 @@ pub struct CredentialStore {
     unauthorized_noted: tokio::sync::watch::Sender<()>,
 }
 
+/// Whether `key` is set to `true` on `credential` (Go `IsPluginVirtualAuth`,
+/// `isRuntimeOnlyAuth`).
+fn marked(credential: &Credential, key: &str) -> bool {
+    credential
+        .attributes
+        .get(key)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+}
+
 impl CredentialStore {
     pub fn new(credentials: Vec<Credential>) -> Arc<Self> {
         let mut inner = Inner {
@@ -1314,12 +1323,8 @@ impl CredentialStore {
         let Source::File(path) = &credential.source else {
             return;
         };
-        if credential.disabled
-            || credential
-                .attributes
-                .get("runtime_only")
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-        {
+        // Go also skips runtime-only credentials and plugin-virtual ones.
+        if credential.disabled || marked(credential, "runtime_only") || marked(credential, "plugin_virtual") {
             return;
         }
         {
@@ -1886,7 +1891,12 @@ impl CredentialStore {
         let Some((path, bytes, value)) = prepare(&current)? else {
             return Ok(None);
         };
-        write_bytes_atomic(&path, &bytes).map_err(|e| PatchError::Io(e.to_string()))?;
+        // Go `Manager.persist` never writes a plugin-virtual credential (one of several a
+        // plugin parsed from one file): its document is not the file's. A refresh or
+        // patch of one is kept in memory.
+        if !marked(&current, "plugin_virtual") {
+            write_bytes_atomic(&path, &bytes).map_err(|e| PatchError::Io(e.to_string()))?;
+        }
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         // Every other change to this credential waits on the locks held here.
         let index = inner
@@ -3633,6 +3643,32 @@ mod tests {
         store.persist_credential(&stale);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), refreshed);
         assert!(refreshed.contains("\"new\"") && refreshed.contains("\"disabled\":false"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Go `Manager.persist` skips plugin-virtual auths: a refresh of one of the
+    /// credentials a plugin parsed from one file commits in memory and leaves the shared
+    /// file alone.
+    #[test]
+    fn a_plugin_virtual_refresh_never_rewrites_the_shared_source_file() {
+        let dir = std::env::temp_dir().join(format!("virtual-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("multi.json");
+        let source = r#"{"type":"claude","accounts":[{"access_token":"a"},{"access_token":"b"}]}"#;
+        std::fs::write(&path, source).unwrap();
+        let metadata: Map<String, Value> = serde_json::from_str(r#"{"type":"claude","access_token":"a"}"#).unwrap();
+        let mut credential = Credential::from_file(&dir, &path, metadata).unwrap();
+        credential.id = "multi-a".into();
+        credential.attributes.insert("plugin_virtual".into(), "true".into());
+        let store = CredentialStore::new(vec![credential]);
+        let current = store.get("multi-a").unwrap();
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("access_token".into(), "refreshed".into());
+        let committed = store.apply_patch("multi-a", current.revision, &patch).unwrap();
+        assert_eq!(committed.metadata["access_token"], "refreshed");
+        assert_eq!(store.get("multi-a").unwrap().metadata["access_token"], "refreshed");
+        store.persist_credential(&committed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

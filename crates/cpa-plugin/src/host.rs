@@ -169,6 +169,10 @@ pub(crate) struct Inner {
     /// Set once this host's translator hooks are handed out (`translator_hooks`): from
     /// then on its lifecycle keeps cpa-translate's hook flag current.
     pub(crate) hooks_installed: std::sync::atomic::AtomicBool,
+    /// The same for the auth parser (`auth_parser`) and cpa-core's auth-parser flag.
+    pub(crate) auth_parser_installed: std::sync::atomic::AtomicBool,
+    /// Plugins answering `auth.parse` for an auth-folder scan (`auth::ParsingForScan`).
+    pub(crate) parsing_for_scan: std::sync::Mutex<Vec<String>>,
 }
 
 /// The plugin host. Cheap to clone.
@@ -218,6 +222,8 @@ impl Host {
             loader,
             callbacks: Callbacks::new(me.clone()),
             hooks_installed: Default::default(),
+            auth_parser_installed: Default::default(),
+            parsing_for_scan: Default::default(),
         });
         Self { inner }
     }

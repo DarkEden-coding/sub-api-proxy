@@ -1069,7 +1069,12 @@ mod creds {
                     let got: Value = serde_json::from_str(&body).unwrap();
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
-                        if got == step["response"] {
+                        // `recent_requests` labels are the last twenty 10-minute windows of
+                        // the wall clock, so a response carrying them equals Go's recording
+                        // only when the test runs in the window it was recorded in
+                        // (api_call_and_usage[28], GET /observability/usage/api-keys, at
+                        // 06:18 UTC). They are compared normalized below, never as bytes.
+                        if got == step["response"] && !raw.contains(r#""recent_requests":"#) {
                             assert_eq!(body, raw, "{at}: bytes");
                             bytes_compared += 1;
                         }

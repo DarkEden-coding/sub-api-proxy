@@ -562,19 +562,26 @@ impl Host {
     }
 
     /// Go `ParseAuths`. With a provider, only that provider's plugin is asked; otherwise
-    /// every auth provider in order until one handles the material or fails.
-    pub async fn parse_auths(&self, req: AuthParseRequest) -> ParseAuthsResult {
+    /// every auth provider in order until one handles the material or fails. Blocking:
+    /// credential loading is synchronous, as Go's synthesizer is.
+    pub fn parse_auths(&self, req: AuthParseRequest) -> ParseAuthsResult {
+        self.parse_auths_with(req, false)
+    }
+
+    /// [`Host::parse_auths`]; `scan` marks each asked plugin as parsing for an
+    /// auth-folder scan while its call runs (see [`Host::parsing_for_scan`]).
+    fn parse_auths_with(&self, req: AuthParseRequest, scan: bool) -> ParseAuthsResult {
         if !req.provider.trim().is_empty() {
             let Some(record) = self.auth_provider_record(&req.provider) else {
                 return ParseAuthsResult::default();
             };
-            return self.call_parse_auths(&record, req).await;
+            return self.call_parse_auths(&record, req, scan);
         }
         for record in self.active_records() {
             if !record.plugin.caps.auth_provider || self.is_fused(&record.id) {
                 continue;
             }
-            let result = self.call_parse_auths(&record, req.clone()).await;
+            let result = self.call_parse_auths(&record, req.clone(), scan);
             if result.error.is_some() || result.handled {
                 return result;
             }
@@ -584,7 +591,7 @@ impl Host {
 
     /// Go `callParseAuths`: an RPC failure is not handled; invalid auth data in a handled
     /// answer is.
-    async fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest) -> ParseAuthsResult {
+    fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest, scan: bool) -> ParseAuthsResult {
         if self.is_fused(&record.id) || !self.record_current(record) {
             return ParseAuthsResult::default();
         }
@@ -596,7 +603,10 @@ impl Host {
         if req.provider.is_empty() {
             req.provider = identifier.clone();
         }
-        let resp: AuthParseResponse = match self.call(record, method::AUTH_PARSE, &req).await {
+        let parsing = scan.then(|| ParsingForScan::new(self, &record.id));
+        let resp = self.call_blocking::<AuthParseResponse, _>(record, method::AUTH_PARSE, &req);
+        drop(parsing);
+        let resp: AuthParseResponse = match resp {
             Ok(resp) => resp,
             Err(e) => return ParseAuthsResult::failed(false, e),
         };
@@ -799,6 +809,113 @@ impl ParseAuthsResult {
             handled,
             error: Some(error),
         }
+    }
+}
+
+/// Marks a plugin as parsing an auth file for an auth-folder scan while it lives.
+struct ParsingForScan<'a> {
+    host: &'a Host,
+    id: String,
+}
+
+impl<'a> ParsingForScan<'a> {
+    fn new(host: &'a Host, id: &str) -> Self {
+        lock(&host.inner.parsing_for_scan).push(id.to_owned());
+        Self {
+            host,
+            id: id.to_owned(),
+        }
+    }
+}
+
+impl Drop for ParsingForScan<'_> {
+    fn drop(&mut self) {
+        let mut parsing = lock(&self.host.inner.parsing_for_scan);
+        if let Some(at) = parsing.iter().position(|id| *id == self.id) {
+            parsing.swap_remove(at);
+        }
+    }
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Host {
+    /// Whether plugin `id` is answering `auth.parse` for an auth-folder scan right now.
+    /// Scans run under the management disk lock, which `host.auth.save` takes, and wait
+    /// for the plugin: a save it makes meanwhile would wait for its own scan.
+    pub(crate) fn parsing_for_scan(&self, id: &str) -> bool {
+        lock(&self.inner.parsing_for_scan).iter().any(|p| p == id)
+    }
+
+    /// This host as Go's `PluginAuthParser` for credential loading
+    /// (`RegisterPluginAuthParser(pluginHost)`), held weakly. From then on, this host
+    /// keeps cpa-core's auth-parser flag current, so without an auth provider loading
+    /// skips the parser after one atomic load.
+    pub fn auth_parser(&self) -> std::sync::Arc<dyn cpa_core::config::credentials::PluginAuthParser> {
+        self.inner
+            .auth_parser_installed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let state = self.state();
+        self.publish_hook_activity(&state, &self.snapshot().records);
+        drop(state);
+        std::sync::Arc::new(AuthParser(std::sync::Arc::downgrade(&self.inner)))
+    }
+}
+
+struct AuthParser(std::sync::Weak<crate::host::Inner>);
+
+impl cpa_core::config::credentials::PluginAuthParser for AuthParser {
+    fn parse_auths(
+        &self,
+        req: &cpa_core::config::credentials::ParseRequest<'_>,
+    ) -> cpa_core::config::credentials::Parsed {
+        use cpa_core::config::credentials::{Parsed, ParsedAuth};
+        let Some(inner) = self.0.upgrade() else {
+            return Parsed::NotHandled;
+        };
+        let result = Host::from_inner(inner).parse_auths_with(
+            AuthParseRequest {
+                provider: req.provider.to_owned(),
+                path: req.path.display().to_string(),
+                file_name: req.file_name.to_owned(),
+                raw_json: Bytes::copy_from_slice(req.raw_json),
+                ..Default::default()
+            },
+            true,
+        );
+        // Go falls back to the built-in synthesizer on any parse error.
+        if result.error.is_some() || !result.handled {
+            return Parsed::NotHandled;
+        }
+        Parsed::Handled(
+            result
+                .auths
+                .into_iter()
+                .map(|auth| {
+                    // The credential keeps one JSON document, the one Go saves for it
+                    // (`pluginTokenStorage`): the plugin's storage overlaid with its
+                    // metadata.
+                    let metadata = auth
+                        .storage_payload()
+                        .ok()
+                        .and_then(|payload| serde_json::from_slice(&payload).ok())
+                        .unwrap_or_else(|| auth.metadata.clone().into_iter().collect());
+                    ParsedAuth {
+                        provider: auth.provider,
+                        id: auth.id,
+                        file_name: auth.file_name,
+                        label: auth.label,
+                        prefix: auth.prefix,
+                        proxy_url: auth.proxy_url,
+                        disabled: auth.disabled,
+                        metadata,
+                        attributes: auth.attributes,
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
