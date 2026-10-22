@@ -55,9 +55,14 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static HOOKS: RwLock<Option<Arc<dyn Hooks>>> = RwLock::new(None);
 
 /// Go `translator.SetPluginHooks`.
+/// Clearing the slot also clears the activity flag, so the entry points go back to
+/// their one-load path.
 pub fn set_plugin_hooks(hooks: Option<Arc<dyn Hooks>>) {
     let mut slot = HOOKS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     INSTALLED.store(hooks.is_some(), Ordering::Release);
+    if hooks.is_none() {
+        ACTIVE.store(false, Ordering::Release);
+    }
     *slot = hooks;
 }
 
@@ -67,7 +72,8 @@ pub fn has_plugin_hooks() -> bool {
 }
 
 /// Set by the owner of the installed hooks whenever the set of plugins offering one
-/// changes.
+/// changes. One plugin host owns the flag: with two hosts installing hooks, whichever
+/// published last would win. The server runs one host.
 pub fn set_plugin_hooks_active(active: bool) {
     ACTIVE.store(active, Ordering::Release);
 }

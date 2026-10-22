@@ -494,6 +494,9 @@ impl Host {
                         state.retired.entry(file.id.clone()).or_default().push(old);
                         state.fused.remove(&file.id);
                         remove_runtime_state(&mut state, &file.id);
+                        // The unfused plugin is eligible now, not once the remaining
+                        // plugins have registered and the snapshot is published.
+                        self.publish_hook_activity(&state, &self.snapshot().records);
                     }
                     state.loaded.insert(file.id.clone(), lp);
                 }
@@ -1285,6 +1288,116 @@ mod tests {
             loader.opens.load(Ordering::SeqCst),
             1,
             "the abandoned load was reused, not repeated"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Registers with `caps`; while `gate` is closed, registration blocks.
+    struct CapsClient {
+        caps: &'static str,
+        gate: Option<Arc<(Mutex<bool>, std::sync::Condvar)>>,
+    }
+
+    impl PluginClient for CapsClient {
+        fn call(&self, method: &str, _: &[u8]) -> Result<Bytes, String> {
+            if method != method::PLUGIN_REGISTER && method != method::PLUGIN_RECONFIGURE {
+                return Ok(Bytes::from_static(br#"{"ok":true,"result":{}}"#));
+            }
+            if let Some((open, cv)) = self.gate.as_deref() {
+                let mut open = lock(open);
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+            }
+            Ok(Bytes::from(format!(
+                r#"{{"ok":true,"result":{{"schema_version":6,"metadata":{{"Name":"n","Version":"1","Author":"a","GitHubRepository":"r"}},"capabilities":{{{}}}}}}}"#,
+                self.caps
+            )))
+        }
+        fn shutdown(&self) {}
+    }
+
+    /// Plugin `a` offers a request normalizer; `b` registers behind `gate`.
+    struct HookLoader(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl Loader for HookLoader {
+        fn open(
+            &self,
+            file: &PluginFile,
+            _: Arc<dyn CallbackHandler>,
+            _: Arc<CallbackInstance>,
+        ) -> Result<Arc<dyn PluginClient>, String> {
+            Ok(Arc::new(match file.id.as_str() {
+                "a" => CapsClient {
+                    caps: r#""request_normalizer":true"#,
+                    gate: None,
+                },
+                _ => CapsClient {
+                    caps: r#""usage_plugin":true"#,
+                    gate: Some(self.0.clone()),
+                },
+            }))
+        }
+    }
+
+    /// A hot reload that unfuses a translator plugin turns cpa-translate's hook flag
+    /// on at once, while later plugins are still registering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hot_reload_unfusing_a_hook_plugin_activates_the_hooks_at_once() {
+        let dir = std::env::temp_dir().join(format!("cpa-plugin-unfuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ext = platform::extension(platform::goos());
+        std::fs::write(dir.join(format!("a-v1{ext}")), b"").unwrap();
+        std::fs::write(dir.join(format!("b{ext}")), b"").unwrap();
+        let gate = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+        let host = Host::with_loader(Arc::new(HookLoader(gate.clone())));
+        let yaml = format!(
+            "plugins:\n  enabled: true\n  dir: {}\n  configs:\n    a:\n      enabled: true\n    b:\n      enabled: true\n",
+            dir.display()
+        );
+        let cfg = Arc::new(Config::parse(&yaml).unwrap());
+        host.apply_config(cfg.clone()).await;
+        cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+        assert!(cpa_translate::hooks::plugin_hooks_active());
+        host.fuse("a", "RequestNormalizer.NormalizeRequest", "test");
+        assert!(!cpa_translate::hooks::plugin_hooks_active());
+
+        *lock(&gate.0) = false;
+        // Reopens the gate even when an assertion fails, so the runtime can shut down.
+        struct Reopen(Arc<(Mutex<bool>, std::sync::Condvar)>);
+        impl Drop for Reopen {
+            fn drop(&mut self) {
+                *lock(&self.0.0) = true;
+                self.0.1.notify_all();
+            }
+        }
+        let reopen = Reopen(gate.clone());
+        std::fs::write(dir.join(format!("a-v2{ext}")), b"").unwrap();
+        let apply = tokio::spawn({
+            let host = host.clone();
+            async move { host.apply_config(cfg).await }
+        });
+        let unfused = async {
+            while host.is_fused("a") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), unfused)
+            .await
+            .expect("a reloads");
+        assert!(!apply.is_finished(), "b's registration is still blocked");
+        assert!(
+            cpa_translate::hooks::plugin_hooks_active(),
+            "a is eligible before b registers"
+        );
+
+        drop(reopen);
+        apply.await.unwrap();
+        assert!(cpa_translate::hooks::plugin_hooks_active());
+        cpa_translate::hooks::set_plugin_hooks(None);
+        assert!(
+            !cpa_translate::hooks::plugin_hooks_active(),
+            "an empty slot clears the flag"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
