@@ -929,6 +929,12 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
         Ok(m) => m,
         Err(e) => return Err((true, format!("invalid auth file: {e}"))),
     };
+    // An upload is a fresh load: Go's metadata holds the file's numbers as float64.
+    state
+        .saved
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|p, _| p.file_name() != dst.file_name());
     // Loading tolerates invalid exclusion rules, so they are rejected here (Go 1a28c61e),
     // after Go's `NormalizeCredentialMetadata`, so an error names the canonical key.
     let mut canonical = meta.clone();
@@ -1662,10 +1668,11 @@ struct Field {
     raw: GoValue,
 }
 
-/// `raw` as serde holds it, refused when a number is past f64 or the value, at `depth`
-/// objects below the file's root, would nest past serde's 128 levels.
+/// `raw` as serde holds it, refused when a number is past f64 or the file would nest
+/// past serde's 128 levels: `depth` is the objects its path puts around it, the file's
+/// root included, so a scalar alone can reach the limit.
 fn serde_value(raw: &GoValue, depth: usize) -> Option<Value> {
-    let mut deepest = 0;
+    let mut deepest = depth;
     let mut stack = vec![(raw, depth)];
     while let Some((v, d)) = stack.pop() {
         match v {
@@ -1845,7 +1852,10 @@ fn apply_fields(state: &Management, name: &str, fields: &[Field], retry: Option<
         } else if root(path) == "weight" {
             return Some(fail(StatusCode::BAD_REQUEST, "weight does not support nested fields"));
         } else if path == "headers" {
-            merge_headers(&mut meta, value);
+            if merge_headers(&mut meta, value) {
+                // Go stores anything but a string map as decoded.
+                literals.push((vec!["headers".to_owned()], raw.clone()));
+            }
         } else {
             let parts: Vec<&str> = path.split('.').map(str::trim).collect();
             if parts.iter().any(|p| p.is_empty()) {
@@ -1859,7 +1869,11 @@ fn apply_fields(state: &Management, name: &str, fields: &[Field], retry: Option<
     if let Some(retry) = retry {
         match retry {
             None => meta.remove("request_retry"),
-            Some(v) => meta.insert("request_retry".into(), v.into()),
+            Some(v) => {
+                // Go stores the decoded int, exactly.
+                literals.push((vec!["request_retry".to_owned()], GoValue::Number(v.to_string())));
+                meta.insert("request_retry".into(), v.into())
+            }
         };
         changed = true;
     }
@@ -1934,22 +1948,24 @@ fn save_file_backed(
     metadata: &Map<String, Value>,
     literals: &[(Vec<String>, GoValue)],
 ) -> Result<(), PatchError> {
-    let as_go = |bytes: &[u8]| GoValue::parse_f64(bytes).filter(|v| matches!(v, GoValue::Object(_)));
-    let converted = serde_json::to_vec(metadata).map_err(|e| PatchError::Io(e.to_string()))?;
-    let mut doc = as_go(&converted).ok_or_else(|| PatchError::Io("metadata is not a JSON object".into()))?;
     let path = path_of(target).map(Path::to_path_buf);
     let existing = path.as_deref().and_then(|path| std::fs::read(path).ok());
-    let mut saved = state.saved.lock().unwrap_or_else(PoisonError::into_inner);
-    // While the file is what the last save wrote, Go's metadata still holds what that
-    // save held.
-    if let Some((bytes, prior)) = path.as_ref().and_then(|p| saved.get(p))
-        && existing.as_ref() == Some(bytes)
-    {
-        keep_number_forms(&mut doc, prior);
+    let object = |v: Option<GoValue>| v.and_then(|v| v.into_object().ok());
+    // The file's own text, numbers as written.
+    let mut disk = object(existing.as_deref().and_then(GoValue::parse));
+    if let Some(disk) = disk.as_mut() {
+        normalize_go(disk);
     }
-    let Ok(mut doc) = doc.into_object() else {
-        unreachable!("parsed as an object")
-    };
+    let disk = disk.map(GoValue::Object);
+    let mut saved = state.saved.lock().unwrap_or_else(PoisonError::into_inner);
+    // While the file is what the last save wrote, Go's metadata is still what that save
+    // held.
+    let prior = path
+        .as_ref()
+        .and_then(|p| saved.get(p))
+        .filter(|(bytes, _)| existing.as_ref() == Some(bytes))
+        .map(|(_, doc)| doc);
+    let mut doc = go_map(metadata, prior, disk.as_ref());
     for (parts, value) in literals {
         go_set_path(&mut doc, parts, value.clone());
     }
@@ -1958,11 +1974,10 @@ fn save_file_backed(
     if let Some(Value::Bool(disabled)) = metadata.get("disabled") {
         doc.insert("disabled".into(), GoValue::Bool(*disabled));
     }
-    let disk = existing.as_deref().and_then(as_go).and_then(|d| d.into_object().ok());
     let codex = target.provider.go_eq_fold("codex")
         || matches!(doc.get("type"), Some(GoValue::String(t)) if t.trim().go_eq_fold("codex"));
-    if codex && let Some(disk) = disk.as_ref().filter(|d| !d.is_empty()) {
-        merge_codex_from_disk(disk, &mut doc);
+    if codex && let Some(disk) = object(existing.as_deref().and_then(GoValue::parse_f64)).filter(|d| !d.is_empty()) {
+        merge_codex_from_disk(&disk, &mut doc);
     }
     normalize_go(&mut doc);
     let doc = GoValue::Object(doc);
@@ -1970,42 +1985,94 @@ fn save_file_backed(
     // Go compares Codex bytes exactly and other records as decoded documents.
     let unchanged = match &existing {
         Some(old) if codex => *old == bytes,
-        Some(old) => as_go(old).is_some_and(|old| Some(old) == as_go(&bytes)),
+        Some(old) => GoValue::parse(old).is_some_and(|old| go_json_equal(&old, &doc)),
         None => false,
     };
-    let bytes = match existing {
-        Some(old) if unchanged => old,
-        _ => bytes,
+    let written = match existing {
+        Some(old) if unchanged => {
+            state.rt.store().confirm_file_backed(&target.id, target.revision)?;
+            old
+        }
+        _ => {
+            // A document the auth loader cannot read would drop the credential.
+            if serde_json::from_slice::<Map<String, Value>>(&bytes).is_err() {
+                return Err(PatchError::Io("the saved auth file could not be read back".into()));
+            }
+            save_bytes(state, target, bytes.clone())?;
+            bytes
+        }
     };
-    save_bytes(state, target, bytes.clone())?;
     if let Some(path) = path {
-        saved.insert(path, (bytes, doc));
+        saved.insert(path, (written, doc));
     }
     Ok(())
 }
 
-/// Puts back the form `prior` gave each number whose value is unchanged: Go holds a
-/// patched `json.Number` as sent, a number read from the file as float64.
-fn keep_number_forms(doc: &mut GoValue, prior: &GoValue) {
-    match (doc, prior) {
-        (GoValue::Number(now), GoValue::Number(then)) => {
-            if cpa_common::json::json_float(cpa_common::json::parse_float(then.as_bytes())).as_ref() == Some(now) {
-                now.clone_from(then);
-            }
+/// Go's in-memory metadata for `meta`, the record the auth loader read with serde. A
+/// number the loader read keeps the form `prior` (Go's metadata after the last save)
+/// gives the same value, else becomes Go's float64 reading of the file's own text
+/// (`strconv.ParseFloat`, correctly rounded where serde's default parse is not); any
+/// other number is float64.
+fn go_map(meta: &Map<String, Value>, prior: Option<&GoValue>, disk: Option<&GoValue>) -> BTreeMap<String, GoValue> {
+    fn at<'a>(v: Option<&'a GoValue>, key: &str) -> Option<&'a GoValue> {
+        match v {
+            Some(GoValue::Object(m)) => m.get(key),
+            _ => None,
         }
-        (GoValue::Object(now), GoValue::Object(then)) => {
-            for (key, value) in now.iter_mut() {
-                if let Some(then) = then.get(key) {
-                    keep_number_forms(value, then);
+    }
+    meta.iter()
+        .map(|(k, v)| (k.clone(), go_value(v, at(prior, k), at(disk, k))))
+        .collect()
+}
+
+fn go_value(v: &Value, prior: Option<&GoValue>, disk: Option<&GoValue>) -> GoValue {
+    let float = |text: &str| {
+        cpa_common::json::json_float(cpa_common::json::parse_float(text.as_bytes())).unwrap_or_else(|| text.to_owned())
+    };
+    match v {
+        Value::Null => GoValue::Null,
+        Value::Bool(b) => GoValue::Bool(*b),
+        Value::String(s) => GoValue::String(s.clone()),
+        Value::Number(n) => {
+            let same = |text: &str| serde_json::from_str::<Value>(text).ok().and_then(|t| t.as_f64()) == n.as_f64();
+            GoValue::Number(match (prior, disk) {
+                (Some(GoValue::Number(form)), _) if same(form) => form.clone(),
+                (_, Some(GoValue::Number(text))) if same(text) => float(text),
+                _ => float(&n.to_string()),
+            })
+        }
+        Value::Array(items) => {
+            fn at(v: Option<&GoValue>, i: usize) -> Option<&GoValue> {
+                match v {
+                    Some(GoValue::Array(items)) => items.get(i),
+                    _ => None,
                 }
             }
+            GoValue::Array(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| go_value(v, at(prior, i), at(disk, i)))
+                    .collect(),
+            )
         }
-        (GoValue::Array(now), GoValue::Array(then)) => {
-            for (value, then) in now.iter_mut().zip(then) {
-                keep_number_forms(value, then);
-            }
+        Value::Object(map) => GoValue::Object(go_map(map, prior, disk)),
+    }
+}
+
+/// Go `jsonEqual` (sdk/auth/filestore.go): documents compared as `json.Unmarshal`
+/// decodes them, numbers as float64, so `0` equals `-0`.
+fn go_json_equal(a: &GoValue, b: &GoValue) -> bool {
+    let num = |n: &str| cpa_common::json::parse_float(n.as_bytes());
+    match (a, b) {
+        (GoValue::Number(x), GoValue::Number(y)) => num(x) == num(y),
+        (GoValue::Object(x), GoValue::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| go_json_equal(v, w)))
         }
-        _ => {}
+        (GoValue::Array(x), GoValue::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(v, w)| go_json_equal(v, w))
+        }
+        _ => a == b,
     }
 }
 
@@ -2123,11 +2190,11 @@ fn set_path(meta: &mut Map<String, Value>, parts: &[&str], value: Value) {
 }
 
 /// Go `applyAuthFileHeadersPatch`: string maps merge (empty values delete); anything
-/// else replaces `headers` verbatim.
-fn merge_headers(meta: &mut Map<String, Value>, value: &Value) {
+/// else replaces `headers` verbatim, and the result is `true`.
+fn merge_headers(meta: &mut Map<String, Value>, value: &Value) -> bool {
     let Some(patch) = value.as_object().filter(|m| m.values().all(Value::is_string)) else {
         meta.insert("headers".into(), value.clone());
-        return;
+        return true;
     };
     let mut next: BTreeMap<String, String> = BTreeMap::new();
     if let Some(Value::Object(existing)) = meta.get("headers") {
@@ -2159,6 +2226,7 @@ fn merge_headers(meta: &mut Map<String, Value>, value: &Value) {
             Value::Object(next.into_iter().map(|(k, v)| (k, v.into())).collect()),
         );
     }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -2559,6 +2627,31 @@ mod tests {
 
     fn on_disk(dir: &std::path::Path, file: &str) -> Value {
         serde_json::from_slice(&std::fs::read(dir.join(file)).unwrap()).unwrap()
+    }
+
+    /// Go's store leaves a file whose document is unchanged alone (`jsonEqual`, numbers
+    /// as float64): no new inode or mtime, and the credential keeps its revision.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unchanged_save_writes_nothing() {
+        use std::os::unix::fs::MetadataExt;
+        let (state, dir) = management(
+            "unchanged",
+            &[("a.json", "{\"type\":\"claude\",\"disabled\":false,\"x\":0}\n")],
+        );
+        let file = dir.join("a.json");
+        let stamp = || {
+            let m = std::fs::metadata(&file).unwrap();
+            (m.ino(), m.mtime(), m.mtime_nsec(), std::fs::read(&file).unwrap())
+        };
+        let before = stamp();
+        let current = state.rt.store().get("a.json").unwrap();
+        let literals = [(vec!["x".to_owned()], GoValue::Number("-0".into()))];
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        save_file_backed(&state, &current, &current.metadata, &literals).unwrap();
+        assert_eq!(stamp(), before);
+        assert_eq!(state.rt.store().get("a.json").unwrap().revision, current.revision);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Go `Manager.Modify` (`d69962e4`): a refresh that commits after a patch read the

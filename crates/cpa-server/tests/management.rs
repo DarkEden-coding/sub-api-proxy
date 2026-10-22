@@ -1354,11 +1354,16 @@ async fn fields_refuses_values_its_auth_loader_cannot_read() {
     let (base, server) = f.server().await;
     let client = wreq::Client::new();
     let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    let deep = ["q"; 128].join(".");
+    let deep_error = format!("invalid field {deep}");
     for (fields, want) in [
         (format!(r#""x":{}"#, nested(126)), None),
         (format!(r#""x":{}"#, nested(127)), Some("invalid field x")),
         (format!(r#""a.b":{}"#, nested(125)), None),
         (format!(r#""a.b":{}"#, nested(126)), Some("invalid field a.b")),
+        // A dotted path's objects count too, around a scalar as around a container.
+        (format!(r#""{}":1"#, ["p"; 127].join(".")), None),
+        (format!(r#""{deep}":1"#), Some(deep_error.as_str())),
         (r#""note":1e400"#.to_owned(), Some("invalid field note")),
         (r#""note":1e308"#.to_owned(), None),
     ] {

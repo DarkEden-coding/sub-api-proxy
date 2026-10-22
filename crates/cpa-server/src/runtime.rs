@@ -1970,6 +1970,23 @@ impl CredentialStore {
     /// One write lock covers the check, the file and the swap, so a concurrent token
     /// refresh ([`Self::apply_patch`]) lands either before (`Stale`) or after, never
     /// under it, and nothing else in the set is re-read or replaced.
+    /// [`Self::replace_file_backed`] for a save whose document the file already holds:
+    /// Go's store skips the write, so the file, the credential and its revision stay as
+    /// they are, under the same lock and revision check.
+    pub fn confirm_file_backed(&self, id: &str, expected_revision: u64) -> Result<(), PatchError> {
+        self.write_unlocked(
+            id,
+            expected_revision,
+            false,
+            |current| match current.source {
+                Source::File(_) => Ok(None::<(std::path::PathBuf, Vec<u8>, ())>),
+                _ => Err(PatchError::ConfigBacked),
+            },
+            |_, _, _, ()| (),
+        )
+        .map(drop)
+    }
+
     pub fn replace_file_backed(
         &self,
         id: &str,
