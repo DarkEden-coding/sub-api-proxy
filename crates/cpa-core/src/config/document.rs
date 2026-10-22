@@ -413,6 +413,29 @@ impl ConfigDocument {
         archived
     }
 
+    /// Go `NormalizeConfigLayout(data, false)`, as the startup load runs it: `text`
+    /// without the legacy fields that a v8 field overrides (presence wins), or `None`
+    /// when it has none. A legacy-only document is not migrated.
+    pub fn without_conflicts(text: &str) -> anyhow::Result<Option<String>> {
+        let mut raw: Value = serde_yaml_ng::from_str(text)?;
+        super::expand_merges(&mut raw)?;
+        let Some(root) = raw.as_mapping_mut() else {
+            return Ok(None);
+        };
+        let mut changed = false;
+        // Go checks each pair against the document as earlier deletions left it.
+        for (old, new) in conflict_candidates(root) {
+            let legacy = lookup(root, &old).is_some_and(|v| !(old == "api-keys" && v.is_mapping()));
+            if legacy && lookup(root, &new).is_some() {
+                changed |= delete_pruning(root, &old.split('.').collect::<Vec<_>>());
+            }
+        }
+        if !changed {
+            return Ok(None);
+        }
+        Ok(Some(ConfigDocument(raw).render_preserving(text)?))
+    }
+
     /// Preserve unaffected comments, key order and scalar styles. Changes are applied
     /// to a private syntax tree and validated again before the destination is touched.
     /// New or retyped root sections are appended in block style (yaml-edit misindents
@@ -630,6 +653,70 @@ impl ConfigDocument {
         }
         remove(&mut self.0, parts)
     }
+}
+
+/// Go's `buildV8Paths` output for v8.0.35, in its order: the declared legacy leaves
+/// and structs, each with its v8 path. Regenerate with
+/// `tests/reference/legacy_paths/main.go`.
+#[derive(serde::Deserialize)]
+struct LegacyPaths {
+    leaves: Vec<(String, String)>,
+    structs: Vec<(String, String)>,
+}
+
+static LEGACY: std::sync::LazyLock<LegacyPaths> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("legacy_paths.json")).expect("legacy_paths.json is valid")
+});
+
+/// The (legacy, v8) pairs Go's non-migrating `NormalizeConfigLayout` checks, in its
+/// order: the private-IP alias, the historical v8 aliases, Go's declared legacy
+/// leaves, the empty or null legacy structs whose v8 struct is present, then the key
+/// families. A same-spelled field Go does not declare is not an override.
+fn conflict_candidates(root: &Mapping) -> Vec<(String, String)> {
+    let pair = |old: &str, new: &str| (old.to_owned(), new.to_owned());
+    let mut out = vec![pair(
+        "codex.live-media-relay.allow-private-remote-ips",
+        "oauth.providers.codex.live-media-relay.disable-private-remote-ips",
+    )];
+    out.extend(CLIENT_PATHS.iter().chain(SHARED_PATHS).map(|(old, new)| pair(old, new)));
+    out.extend(LEGACY.leaves.iter().cloned());
+    let structs = LEGACY.structs.iter().map(|(old, new)| (old.as_str(), new.as_str()));
+    for (old, new) in structs.chain(SHARED_STRUCTS.iter().copied()) {
+        let empty = match lookup(root, old) {
+            Some(Value::Null) => true,
+            Some(Value::Mapping(m)) => m.is_empty(),
+            _ => false,
+        };
+        if empty && lookup(root, new).is_some() {
+            out.push(pair(old, new));
+        }
+    }
+    out.extend(
+        FAMILIES
+            .iter()
+            .map(|(old, family)| ((*old).to_owned(), format!("api-keys.{family}"))),
+    );
+    out
+}
+
+/// Go `deleteYAMLPath`: removes `parts` and every parent mapping the removal empties.
+fn delete_pruning(map: &mut Mapping, parts: &[&str]) -> bool {
+    let Some((first, rest)) = parts.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return map.shift_remove(*first).is_some();
+    }
+    let Some(child) = map.get_mut(*first).and_then(Value::as_mapping_mut) else {
+        return false;
+    };
+    if !delete_pruning(child, rest) {
+        return false;
+    }
+    if child.is_empty() {
+        map.shift_remove(*first);
+    }
+    true
 }
 
 fn sync_mapping(dst: &yaml_edit::Mapping, src: &Mapping, before: &Mapping) -> anyhow::Result<()> {
