@@ -13,10 +13,30 @@
 
 use std::borrow::Cow;
 
+use cpa_common::gostr::trim_space;
+
 const DATA: &[u8] = b"data:";
 
 /// Go's `codexSSEDiagnosticLines`: data lines one invalid-event warning describes.
 const DIAGNOSTIC_LINES: usize = 8;
+
+/// One delivered line and the physical lines and bytes it was read from (Go's `RawLines`
+/// and `RawBytes`), which the bootstrap budget spends.
+pub(crate) struct Scanned<'a> {
+    pub line: Cow<'a, [u8]>,
+    pub raw_lines: usize,
+    pub raw_bytes: usize,
+}
+
+impl<'a> Scanned<'a> {
+    fn read(line: &'a [u8]) -> Self {
+        Self {
+            line: Cow::Borrowed(line),
+            raw_lines: 1,
+            raw_bytes: line.len(),
+        }
+    }
+}
 
 /// The scanner's state between physical lines.
 pub(crate) struct DataLines {
@@ -53,23 +73,23 @@ impl DataLines {
 
     /// One physical line, its terminator and a trailing CR removed. Appends the lines it
     /// completes to `out`, in the order Go's `Scan` delivers them.
-    pub(crate) fn push<'a>(&mut self, line: &'a [u8], out: &mut Vec<Cow<'a, [u8]>>) {
+    pub(crate) fn push<'a>(&mut self, line: &'a [u8], out: &mut Vec<Scanned<'a>>) {
         if !line.starts_with(DATA) {
             if line.is_empty() && self.count > 0 {
                 self.release(out);
             }
-            out.push(Cow::Borrowed(line));
+            out.push(Scanned::read(line));
             return;
         }
         if self.count == 0 {
-            if !incomplete_json(line[DATA.len()..].trim_ascii()) {
-                out.push(Cow::Borrowed(line));
+            if !incomplete_json(trim_space(&line[DATA.len()..])) {
+                out.push(Scanned::read(line));
                 return;
             }
         } else if self.size + line.len() > self.max {
             // Bounded like a single line: stop collecting and deliver this line on its own.
             self.release(out);
-            out.push(Cow::Borrowed(line));
+            out.push(Scanned::read(line));
             return;
         }
         if self.hold(line) {
@@ -78,7 +98,7 @@ impl DataLines {
     }
 
     /// The input ended: an event still being collected is delivered.
-    pub(crate) fn finish(&mut self, out: &mut Vec<Cow<'_, [u8]>>) {
+    pub(crate) fn finish(&mut self, out: &mut Vec<Scanned<'_>>) {
         if self.count > 0 {
             self.release(out);
         }
@@ -99,21 +119,31 @@ impl DataLines {
         self.nesting.feed(value)
     }
 
-    fn release(&mut self, out: &mut Vec<Cow<'_, [u8]>>) {
+    fn release(&mut self, out: &mut Vec<Scanned<'_>>) {
         let held = std::mem::take(&mut self.held);
         let joined = std::mem::take(&mut self.joined);
-        let lines = self.count;
+        let (lines, raw_bytes) = (self.count, self.size);
         (self.count, self.size, self.nesting) = (0, 0, Nesting::default());
+        let line = self.assemble(held, lines, joined);
+        out.push(Scanned {
+            line: Cow::Owned(line),
+            raw_lines: lines,
+            raw_bytes,
+        });
+    }
+
+    /// Go's `assemble`: the event compacted onto one line when its data is valid JSON,
+    /// otherwise as held.
+    fn assemble(&mut self, held: Vec<u8>, lines: usize, joined: Vec<u8>) -> Vec<u8> {
         if lines > 1 && cpa_common::json::std_valid(&joined) {
             let mut line = Vec::with_capacity(DATA.len() + 1 + joined.len());
             line.extend_from_slice(b"data: ");
             line.extend_from_slice(&cpa_common::json::compact(&joined, false));
-            out.push(Cow::Owned(line));
-            return;
+            return line;
         }
-        let data = if lines == 1 { joined.trim_ascii() } else { &joined[..] };
+        let data = if lines == 1 { trim_space(&joined) } else { &joined[..] };
         self.diagnose(&held, lines, data);
-        out.push(Cow::Owned(held));
+        held
     }
 
     /// One bounded warning for the stream's first event whose data is not valid JSON. It
@@ -128,7 +158,7 @@ impl DataLines {
         let shown = lines.min(DIAGNOSTIC_LINES);
         let (mut lengths, mut valid) = (Vec::with_capacity(shown), Vec::with_capacity(shown));
         for line in held.split(|b| *b == b'\n').take(shown) {
-            let value = line[DATA.len()..].trim_ascii();
+            let value = trim_space(&line[DATA.len()..]);
             lengths.push(value.len().to_string());
             valid.push(cpa_common::json::std_valid(value).to_string());
         }

@@ -1472,11 +1472,50 @@ async fn split_sse_events_spend_the_bootstrap_budget() {
     );
     let error = through_sse(&within, true, true).await.expect_err("fails over");
     assert_eq!(error.status, 503, "{error:?}");
+    // Each delivered line spends the budget before the next is read, and a handshake may
+    // fill it exactly (outcomes recorded from Go v8.0.35): 47 comments and the overload's
+    // `event:` line are 48 held lines; one comment of raw plus translated bytes equal to
+    // 1 MiB is held, so the overload after it fails over.
+    let overload_data = SPLIT_OVERLOAD.strip_prefix("event: error\n").unwrap();
+    let comment = |len: usize| format!(": {}\n", "p".repeat(len - 2));
+    // A completed 40-line split event, its blank line and `n` comments.
+    let split_40 = |n: usize| {
+        format!(
+            "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: ]}}\n\n{}{SPLIT_OVERLOAD}",
+            "data: \n".repeat(38),
+            ": k\n".repeat(n)
+        )
+    };
+    for (name, sse) in [
+        ("47 comments", format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(47))),
+        ("40 split lines and 6 comments", split_40(6)),
+        ("1 MiB exactly", format!("{}{overload_data}", comment(512 * 1024))),
+    ] {
+        let error = through_sse(&sse, true, true)
+            .await
+            .expect_err(&format!("{name}: fails over"));
+        assert_eq!(error.status, 503, "{name}: {error:?}");
+    }
     // Go sends a delta as read, which starts the stream before the overload after it in
     // the same event is seen.
     let delta_first =
         format!("{SPLIT_CREATED}data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n{SPLIT_OVERLOAD}");
+    // A split handshake that completes over the byte budget (600 KB read plus 600 KB
+    // translated) releases the stream before the overload after it is read.
+    let completed_over_bytes = format!(
+        "data: {{\"type\":\"response.in_progress\",\"response\":{{\"model\":\"gpt-5.4\"}},\"pad\":\"{}\",\ndata: \"n\":0}}\n{SPLIT_OVERLOAD}",
+        "x".repeat(600_000)
+    );
+    let comments_48 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(48));
+    let comments_49 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(49));
+    let over_one_mib = format!("{}{overload_data}", comment(512 * 1024 + 1));
+    let split_40_and_7 = split_40(7);
     for (name, sse) in [
+        ("completed over the byte budget", &completed_over_bytes),
+        ("48 comments", &comments_48),
+        ("49 comments", &comments_49),
+        ("1 MiB and one byte", &over_one_mib),
+        ("40 split lines and 7 comments", &split_40_and_7),
         ("delta first", &delta_first),
         ("line budget", &over_lines),
         ("no blank line", &no_blank),

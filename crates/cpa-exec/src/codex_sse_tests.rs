@@ -15,7 +15,9 @@ fn scan(stream: &str, max: usize) -> Vec<String> {
         scanner.push(line.strip_suffix(b"\r").unwrap_or(line), &mut out);
     }
     scanner.finish(&mut out);
-    out.iter().map(|l| String::from_utf8(l.to_vec()).unwrap()).collect()
+    out.iter()
+        .map(|l| String::from_utf8(l.line.to_vec()).unwrap())
+        .collect()
 }
 
 /// `TestCodexSSEScannerAssemblesEventData`.
@@ -32,6 +34,12 @@ fn assembles_event_data() {
             "CRLF line endings",
             "event: a\r\ndata: {\"type\":\"a\"}\r\n\r\n".into(),
             vec!["event: a".into(), r#"data: {"type":"a"}"#.into(), "".into()],
+        ),
+        (
+            // Go trims a data value with bytes.TrimSpace, which strips Unicode spaces.
+            "a value after a Unicode space starts an event",
+            "data:\u{a0}{\"type\":\"response.completed\",\ndata: \"response\":{\"output\":[]}}\n\n".into(),
+            vec!["data:\u{a0}{\"type\":\"response.completed\",\ndata: \"response\":{\"output\":[]}}".into(), "".into()],
         ),
         (
             "data lines of one event are joined and compacted",
