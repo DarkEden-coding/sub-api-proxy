@@ -89,8 +89,9 @@ secret-file bytes. The store's parent directory must already exist. Invalid,
 duplicate, and self peer identities are rejected. Unknown YAML fields fail.
 
 Claude account IDs are `claude:<account_uuid>` with email as fallback. Codex IDs
-are `codex:<account_id>`. Credentials without these subscription identity fields
-are not invented into logical accounts. Account preferences survive rescans;
+are `codex:<account_id>`. Config API keys without subscription metadata use
+`<provider>:api-key:<credential_id>` as their logical account. Other credentials
+without subscription identity fields are omitted. Account preferences survive rescans;
 credentials stay local. A peer-known account without a usable local credential
 appears as `login_needed_on` this node.
 
@@ -179,3 +180,14 @@ No real provider endpoint or LLM was contacted.
   to choose that same subscription.
 - Workstream I must mount its management/dashboard router alongside the sync
   routes. This branch intentionally does not implement or edit `api/`.
+
+## E2E follow-up, October 22, 2026
+
+The [real-client mock chain](../../harness/sap-e2e/README.md) now passes account
+assignment, child affinity, confirmed Codex/Claude exhaustion moves, and backup
+failover. SAP selection can replace a Codex WebSocket credential pin after
+confirmed exhaustion before output. Late hook replies preserve native error
+status/type in SSE and WebSocket frames. No public API or sap-core change was
+needed. The custom-base Claude client sends full history without `thread`, so
+its in-process move succeeds without triggering forced 400 recovery. Native
+ChatGPT bootstrap and native Claude server-thread recovery remain unverified.

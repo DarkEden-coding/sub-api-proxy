@@ -108,3 +108,78 @@ After killing the primary, an untracked synthetic HTTP transport probe returned
 200 through backup in 25 ms with default probe settings. The real Claude request
 still failed account selection on backup, so the five-second real-client target
 remains unproven.
+
+
+## SAP exhaustion fixes and final rerun, October 22, 2026
+
+This supersedes the credential-blocker results above. Config API keys are now
+logical accounts. The full-chain run at implementation commit `9227fffc` exits
+0 with 18 passes, no failures, and two ChatGPT bootstrap diagnostics.
+[Sanitized chain evidence](../../harness/sap-e2e/evidence/chain/results.json)
+and [client-only evidence](../../harness/sap-e2e/evidence/clients/results.json)
+are separate. Full raw logs remain outside the repository in
+`/tmp/sap-e2e-codex-chain-final` and `/tmp/sap-e2e-codex-clients-verified`.
+
+The mock previously sent Codex 429s without confirmed quota signals, and the
+scenario exhausted both accounts. HTTP now supplies Codex limit/window/reset
+headers and `usage_limit_reached`; WebSocket sends `codex.rate_limits` with
+`limit_reached` before the native error frame. Only the selected account is
+exhausted. The SAP quota/outcome path classifies this as `Outcome::Exhausted`,
+which moves immediately, rather than `RateLimited`, which retains affinity.
+
+WebSocket dispatch also excluded every credential except the old session pin
+before `Runtime::acquire` called SAP. That restriction is now omitted for an
+identified SAP context so the hook can select the replacement. Hook `Reply`
+previously carried a generic 400 sentinel outside `take_reply`; it now carries
+the actual status and JSON body. WebSocket hook errors are delivered before the
+upstream-only suppression/replay rules. Claude SSE emits `event: error`;
+Codex SSE uses its native error/failed event, and WebSocket carries status 429
+and the original error type. Request bodies are not rewritten by these changes.
+
+| Contract | Final result |
+| --- | --- |
+| Assignment and parent/child affinity | Pass |
+| Codex custom WebSocket normal turn | Pass |
+| Codex custom WebSocket exhaustion after prewarm | Pass, generating request retries on the other account |
+| Codex custom HTTP SSE normal turn and exhaustion | Pass, same turn completes on the other account |
+| Late hook replies in Claude/Codex SSE and Codex WebSocket | Pass, scoped regression tests |
+| Claude exhaustion between turns in one process | Pass, A 200 then A 429 and B 200 with full history |
+| Claude native forced 400/full-history resend | Not triggered, custom-base requests omit `thread` |
+| Native ChatGPT normal/exhausted modes | Diagnostic, both time out before inference because bootstrap is not emulated |
+| Real Claude client on backup after primary termination | Pass, first request after 0.178 seconds |
+
+The Claude two-turn run uses streaming JSON input in a single live process.
+Message counts are 1, then 3 on the exhausted account, then 3 on its replacement.
+There is no native continuation, forced 400, or client resend to claim here.
+Every request carries full history, so the move is free. Existing SAP synthetic
+integration tests still verify forced 400 until a full-history resend arrives.
+A separate `--resume` process is not used as evidence for that contract.
+
+Both Codex exhaustion logs finish with `turn.completed`, without `turn.failed`
+or a visible usage-limit error. The WebSocket mock sees successful prewarm,
+then 429 on the generating request, then 200 on the other account with the same
+input count. The HTTP case likewise sees 429 followed by 200. The primary's
+quota state is reset between transports so both scenarios exercise exhaustion.
+
+Validation uses command alarms and `CARGO_BUILD_JOBS=4 nice -n 19` for Rust:
+
+- `cargo build -p cliproxy -p sap-router`: passed.
+- `cargo fmt -p cpa-server -p sap-server`: passed.
+- `cargo test -p cpa-server --lib sap_hooks`: six passed, including late SSE
+  replies and a WebSocket hook reply during an in-request retry after upstream 429.
+- Existing `cpa-server --lib` filters: `dispatch::tests` 12 passed,
+  `claude::tests` 3 passed, `openai::tests` 4 passed, `websocket` 35 passed.
+- `cargo test -p sap-server`: five API and ten node integration tests passed,
+  including confirmed Codex exhaustion moving within one full-history request.
+- `cargo clippy -p cpa-server -p sap-server --all-targets -- -D warnings`: passed.
+- Three Python loopback protocol tests: passed.
+- Full chain: exit 0, 18 passes and two diagnostics. Separate client-only run:
+  exit 0, 13 passes and six diagnostics. Intentional direct-mock quota failures
+  and unsupported native metadata/bootstrap checks remain diagnostics.
+
+Tests use private auth directories and local mock upstreams. Sandbox and deny
+proxy protections remain active, including during the piped two-turn Claude
+case. No real provider, LLM, deployment, release, push, or workspace-wide test was
+used. Public APIs and sap-core contracts are unchanged. Actual native ChatGPT
+bootstrap, remote compaction, and live native Claude server-thread recovery
+remain outside this mock run.
