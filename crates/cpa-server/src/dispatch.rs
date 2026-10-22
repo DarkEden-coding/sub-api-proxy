@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use bytes::{Bytes, BytesMut};
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::exec::{Caller, ExecError, ExecRequest, ExecStream, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -361,11 +362,7 @@ pub fn upstream_summary(raw: &str) -> String {
             message = s(v.get("message"));
         }
         let summary = match (code.is_empty(), message.is_empty()) {
-            (false, false)
-                if code.eq_ignore_ascii_case(&message) || message.to_lowercase().contains(&code.to_lowercase()) =>
-            {
-                message
-            }
+            (false, false) if code.go_eq_fold(&message) || message.go_lower().contains(&code.go_lower()) => message,
             (false, false) => format!("{code}: {message}"),
             (true, false) => message,
             (false, true) => code,
@@ -393,7 +390,7 @@ fn route_base_name(model: &str) -> &str {
 /// image-only models serve only the image routes, speech-only models only the speech
 /// routes.
 fn check_route_only(base: &str, call: &Call) -> Result<(), RunError> {
-    let name = route_base_name(base).to_lowercase();
+    let name = route_base_name(base).go_lower();
     let kind = call.media.as_ref().map(|m| m.kind);
     if IMAGE_ONLY.contains(&name.as_str()) && kind != Some(MediaKind::Images) {
         return Err(Failure::ImageOnly(base.to_owned()).into());
@@ -685,7 +682,7 @@ pub async fn run_with_bootstrap_retries(rt: &Arc<Runtime>, call: Call, trace: &T
     // executor takes the request whole; a provider decision replaces the registry route.
     use crate::plugins::execution::{self as plugin_execution, Route};
     let query = plugin_execution::query();
-    let forced = call.forced_provider.as_deref().map(|p| p.trim().to_lowercase());
+    let forced = call.forced_provider.as_deref().map(|p| p.trim().go_lower());
     let routed = match (plugin_execution::route(rt, &call, &query, trace).await, forced) {
         (None, _) => None,
         // Go `validateNativeInteractionsExecution` / `providersForExecution`: a forced
@@ -1144,9 +1141,9 @@ async fn run_routed(
                 // Go `nextModelPoolOffset`: rotate the alias pool once per selection.
                 let key = format!(
                     "{}|{}|{}",
-                    lease.credential.id.trim().to_lowercase(),
+                    lease.credential.id.trim().go_lower(),
                     registry::provider_key(&lease.credential),
-                    canonical_model(registry::strip_prefix(&selection.model, &lease.credential)).to_lowercase()
+                    canonical_model(registry::strip_prefix(&selection.model, &lease.credential)).go_lower()
                 );
                 let offset = rt.next_pool_offset(&key, models.len());
                 models.rotate_left(offset);
@@ -1673,7 +1670,7 @@ async fn remote_round(
                     }
                     // Go `shouldReturnLastErrorOnPickFailure` in Home mode.
                     if matches!(
-                        code.to_lowercase().as_str(),
+                        code.go_lower().as_str(),
                         "auth_not_found" | "auth_unavailable" | "request_retry_exceeded"
                     ) {
                         return Err(
@@ -1749,14 +1746,22 @@ async fn remote_round(
                 request.caller.principal = user_key.clone();
                 let usage = cx.usage.map(|facts| {
                     let mut facts = (**facts).clone();
-                    facts.client.api_key = user_key;
+                    facts.client.api_key = user_key.clone();
                     Arc::new(facts)
                 });
-                (request, usage)
+                // A count_tokens Home 401 record too: Go's handler context drops the
+                // middleware's usage key (`GetContextWithCancel` over a background
+                // context), so `usage.APIKeyFromContext` reads the gin key Home set.
+                let unauthorized = cx.unauthorized.map(|facts| {
+                    let mut facts = (**facts).clone();
+                    facts.client.api_key = user_key.clone();
+                    Arc::new(facts)
+                });
+                (request, usage, unauthorized)
             });
-            let (request, usage) = match &home_caller {
-                Some((request, usage)) => (request, usage.as_ref()),
-                None => (cx.request, cx.usage),
+            let (request, usage, unauthorized) = match &home_caller {
+                Some((request, usage, unauthorized)) => (request, usage.as_ref(), unauthorized.as_ref()),
+                None => (cx.request, cx.usage, cx.unauthorized),
             };
             // Go `executeHomeOnce`: Home's upstream model when it chose one, and only the
             // first model either way.
@@ -1802,7 +1807,7 @@ async fn remote_round(
                 alias: &alias,
                 compact: cx.compact,
                 keep_model: cx.call.selection_model.is_some(),
-                unauthorized: cx.unauthorized,
+                unauthorized,
             };
             let cancelled = lease
                 .remote_cancelled()
@@ -1881,7 +1886,7 @@ fn lifecycle(e: &ExecError) -> bool {
     if classify::go_status(e) != 0 {
         return false;
     }
-    let lower = classify::error_text(e).trim().to_lowercase();
+    let lower = classify::error_text(e).trim().go_lower();
     matches!(
         lower.as_str(),
         "context canceled" | "context deadline exceeded" | "eof" | "unexpected eof"
@@ -2017,7 +2022,7 @@ impl Credits<'_> {
         // Go's ExecuteCount has no credits fallback; Execute and ExecuteStream do.
         if request.operation == Operation::CountTokens
             || !self.wanted(cfg, &error)
-            || !self.model.to_lowercase().contains("claude")
+            || !self.model.go_lower().contains("claude")
         {
             return Err(error);
         }
@@ -2172,8 +2177,18 @@ async fn attempt(
                 tracker
             })
         };
+        // Go `Options.WebSocketResponseObserver`, bound to the credential the executor gets.
+        let observe = |credential: &cpa_core::credential::Credential, req: &mut ExecRequest| {
+            if let Some(hooks) = hooks {
+                let observer = hooks.websocket_observer(req, credential, &route_model);
+                req.usage = std::mem::take(&mut req.usage).with_websocket(observer);
+            }
+        };
         let mut tracker = start(&lease.credential, &mut req);
+        observe(&lease.credential, &mut req);
         let session = session.as_ref();
+        let private = lease.home_private().map(|p| p.attributes.clone()).unwrap_or_default();
+        let private = &private;
         let execute = |credential: Arc<cpa_core::credential::Credential>, req: ExecRequest| async move {
             let credential = match crate::plugins::model_callbacks::context().filter(|c| !c.proxy_url.is_empty()) {
                 Some(context) => {
@@ -2185,7 +2200,8 @@ async fn attempt(
             };
             let credential = rt.for_executor(&credential);
             if let Some(adapter) = rt.plugin_runtime().executor(&credential, cfg) {
-                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, req).await;
+                return crate::plugins::execution::execute_credential(rt, call, &adapter, &credential, private, req)
+                    .await;
             }
             match (session, call.media.as_ref().map(|m| m.kind)) {
                 (Some(session), _) => rt.executors.execute_in_session(&credential, req, cfg, session).await,
@@ -2203,6 +2219,9 @@ async fn attempt(
             }
         };
         tracing::trace!(target: "cpa_latency", stage = "selected");
+        // Each pooled model is its own upstream dispatch, stamped right before it runs:
+        // after preparation and the after-auth interceptor (Go `nextExecutionSeq`).
+        lease.redispatch();
         let mut executed = execute(lease.credential.clone(), req.clone()).await;
         // Go `tryRefreshAfterUnauthorized`: one refresh-and-retry per credential. Home
         // credentials never refresh here (Go home_unauthorized_refresh): the 401 goes to
@@ -2218,7 +2237,9 @@ async fn attempt(
                 t.fail(error);
             }
             lease.credential = current;
+            lease.redispatch();
             tracker = start(&lease.credential, &mut req);
+            observe(&lease.credential, &mut req);
             executed = execute(lease.credential.clone(), req).await;
         }
         if let (Ok(response), Some(t)) = (&executed, tracker.as_mut()) {
@@ -2336,10 +2357,11 @@ fn keep_home(
         return Some(lease);
     };
     let pick = guard.defuse()?;
-    let (credential, route) = (lease.credential.id.clone(), lease.selection.model.clone());
+    let (credential, route) = (lease.credential.clone(), lease.selection.model.clone());
+    let availability = lease.home_private().map(|p| p.availability.clone()).unwrap_or_default();
     match pick.keep(lease) {
         None => {
-            home.keep(pick, &credential, &route, user_key.to_owned());
+            home.keep(pick, &credential, availability, &route, user_key.to_owned());
             None
         }
         Some(lease) => {
@@ -2357,6 +2379,13 @@ fn usage_client(
     trace: &Trace,
     session: &crate::session::Session,
 ) -> crate::usage_record::Client {
+    // A nested `host.model.*` call has no caller of its own; its records carry the
+    // parent request's identity (Go restores the parent callback context).
+    let nested = (call.caller.principal.is_empty() && call.caller.provider.is_empty())
+        .then(crate::plugins::model_callbacks::nested_usage_identity)
+        .flatten();
+    let (api_key, access_provider) =
+        nested.unwrap_or_else(|| (call.caller.principal.clone(), call.caller.provider.clone()));
     crate::usage_record::Client {
         session_id: session.id.clone().unwrap_or_default(),
         parent_session_id: session.parent.clone().unwrap_or_default(),
@@ -2371,7 +2400,8 @@ fn usage_client(
             if call.turn.is_some() { "GET" } else { "POST" },
             call.request_path
         ),
-        api_key: call.caller.principal.clone(),
+        api_key,
+        access_provider,
         ..request_client(cfg, &call.headers, call.peer)
     }
 }
@@ -2766,6 +2796,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             forced_provider: None,
             selection_model: None,
@@ -2831,6 +2862,7 @@ mod tests {
             caller: Caller {
                 principal: String::new(),
                 source: "",
+                provider: String::new(),
             },
             resolved_model: None,
             usage: Default::default(),

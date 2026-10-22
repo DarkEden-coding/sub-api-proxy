@@ -7,15 +7,15 @@
 //! files in auth-dir; cliproxy-rs keeps the callback with the pending session in
 //! memory, so nothing extra appears in the watched directory.
 
+use cpa_core::gostr::GoStr;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use cpa_core::exec::ExecError;
 use cpa_exec::proxy::Proxy;
 use serde_json::{Value, json};
@@ -75,7 +75,7 @@ impl Sessions {
     }
 
     fn register(&self, state: &str, provider: &str) {
-        let (state, provider) = (state.trim(), provider.trim().to_lowercase());
+        let (state, provider) = (state.trim(), provider.trim().go_lower());
         if state.is_empty() || provider.is_empty() {
             return;
         }
@@ -98,7 +98,7 @@ impl Sessions {
 
     /// Go `RegisterPlugin`: `false` when the state is unusable or already registered.
     pub(super) fn register_plugin(&self, state: &str, provider: &str, metadata: cpa_plugin::gojson::Metadata) -> bool {
-        let (state, provider) = (state.trim(), provider.trim().to_lowercase());
+        let (state, provider) = (state.trim(), provider.trim().go_lower());
         if state.is_empty() || provider.is_empty() || !valid_state(state) {
             return false;
         }
@@ -168,9 +168,9 @@ impl Sessions {
     }
 
     fn is_pending(&self, state: &str, provider: &str) -> bool {
-        let provider = provider.trim().to_lowercase();
+        let provider = provider.trim().go_lower();
         self.lock().get(state.trim()).is_some_and(|s| {
-            !s.completed && s.status.is_empty() && (provider.is_empty() || s.provider.eq_ignore_ascii_case(&provider))
+            !s.completed && s.status.is_empty() && (provider.is_empty() || s.provider.go_eq_fold(&provider))
         })
     }
 
@@ -208,7 +208,7 @@ impl Sessions {
         if s.siwc.is_some() {
             return Delivery::RequiresV8;
         }
-        if s.completed || !s.status.is_empty() || !s.provider.eq_ignore_ascii_case(&provider) {
+        if s.completed || !s.status.is_empty() || !s.provider.go_eq_fold(&provider) {
             return Delivery::NotPending;
         }
         s.callback = Some(Callback {
@@ -288,12 +288,12 @@ impl Sessions {
     /// Go `beginSIWCFileMutation` (callers hold `disk`): a v8 upload or delete of a
     /// binding's file, even an identical one, fails that binding.
     pub(super) fn invalidate_siwc(&self, path: &std::path::Path) {
-        let target = super::siwc::canonical(path);
         let mut map = self.lock();
         for s in map.values_mut() {
-            if let Some(flow) = s.siwc.as_ref().filter(|f| f.path == target)
+            if let Some(flow) = s.siwc.as_ref()
                 && !s.completed
                 && s.status.is_empty()
+                && super::siwc::same_path(path, &flow.path)
             {
                 flow.cancel();
                 s.status = "SIWC binding target changed; start a new binding".into();
@@ -319,7 +319,7 @@ pub(super) fn valid_state(state: &str) -> bool {
 
 /// Go `NormalizeOAuthCallbackProvider`: the built-in aliases, else a plugin-style name.
 pub(super) fn normalize_callback_provider(provider: &str) -> Option<String> {
-    let p = provider.trim().to_lowercase();
+    let p = provider.trim().go_lower();
     let builtin = match p.as_str() {
         "anthropic" | "claude" => Some("anthropic"),
         "codex" | "openai" => Some("codex"),
@@ -451,10 +451,10 @@ pub(crate) async fn auth_url(State(state): State<Arc<Management>>, RawQuery(raw)
     let raw_query = raw.clone();
     let q = Query::parse(raw);
     let webui = matches!(
-        q.first("is_webui").trim().to_lowercase().as_str(),
+        q.first("is_webui").trim().go_lower().as_str(),
         "1" | "true" | "yes" | "on"
     );
-    match q.first("provider").trim().to_lowercase().as_str() {
+    match q.first("provider").trim().go_lower().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
         "claude" => start_claude(state, webui).await,
         "codex" => start_codex(state, webui).await,
@@ -489,26 +489,43 @@ pub(crate) async fn import(
     State(state): State<Arc<Management>>,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
     let query = Query::parse(raw);
-    match query.first("provider").trim().to_lowercase().as_str() {
+    match query.first("provider").trim().go_lower().as_str() {
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
-        "vertex" => import_vertex(state, &query, &headers, &body).await,
+        "vertex" => import_vertex(state, &query, &headers, read).await,
         _ => fail(StatusCode::NOT_FOUND, "provider_not_found"),
     }
 }
 
 /// Go `ImportVertexCredential`: a service-account key uploaded as the `file` form field;
 /// `location` from the form, else the query.
-async fn import_vertex(state: Arc<Management>, query: &Query, headers: &HeaderMap, body: &[u8]) -> Response {
+async fn import_vertex(
+    state: Arc<Management>,
+    query: &Query,
+    headers: &HeaderMap,
+    read: crate::body_limit::Read,
+) -> Response {
+    use super::multipart::Failed;
     use cpa_exec::vertex_auth::{UploadError, import_upload};
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    // Go `FormFile("file")`: any form error reads as a missing file.
-    let Ok((mut files, values)) = super::multipart::form(content_type, body) else {
+    // Go `FormFile("file")`: any form error reads as a missing file, with the limit's
+    // status for the limit error.
+    let body = match super::multipart::body(read, content_type) {
+        Ok(body) => body,
+        Err(Failed::Read(rejection)) => return rejection.into_response(),
+        Err(Failed::Form(status, _)) => {
+            return fail(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+                "file required",
+            );
+        }
+    };
+    let Ok((mut files, values)) = super::multipart::form(content_type, &body) else {
         return fail(StatusCode::BAD_REQUEST, "file required");
     };
     let Some(file) = files.remove("file").and_then(|parts| parts.into_iter().next()) else {
@@ -1419,28 +1436,26 @@ pub(crate) async fn callback_get(
 }
 
 /// Go `PostOAuthCallback`: gin's `ShouldBindJSON` into `oauthCallbackRequest`
-/// (first JSON value, exact-then-case-insensitive names, type mismatches rejected).
+/// (first JSON value, exact-then-folded names, type mismatches rejected).
 /// Under v8, `PostOAuthCallbackV8`, whose request also has `client_id`.
-pub(crate) async fn callback_post(State(state): State<Arc<Management>>, uri: axum::http::Uri, body: Bytes) -> Response {
+pub(crate) async fn callback_post(
+    State(state): State<Arc<Management>>,
+    uri: axum::http::Uri,
+    body: Result<crate::body_limit::FirstJson, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(crate::body_limit::FirstJson(body)) => body,
+        Err(rejection) => return status_error(super::read_status(&rejection), "invalid body"),
+    };
     let v8 = uri.path().starts_with("/v8/");
     const FIELDS: [&str; 6] = ["provider", "redirect_url", "code", "state", "error", "client_id"];
     let fields = if v8 { &FIELDS[..] } else { &FIELDS[..5] };
     let invalid = || status_error(StatusCode::BAD_REQUEST, "invalid body");
-    let members = serde_json::Deserializer::from_slice(&body)
-        .into_iter::<super::api_call::Members>()
-        .next();
-    let Some(Ok(super::api_call::Members(members))) = members else {
+    let Some(members) = super::api_call::bind_struct(&body, fields) else {
         return invalid();
     };
     let mut req = CallbackRequest::default();
-    for (key, v) in members.unwrap_or_default() {
-        let Some(i) = fields
-            .iter()
-            .position(|f| *f == key)
-            .or_else(|| fields.iter().position(|f| f.eq_ignore_ascii_case(&key)))
-        else {
-            continue;
-        };
+    for (i, v) in members {
         let slot = match i {
             0 => &mut req.provider,
             1 => &mut req.redirect_url,
@@ -1517,7 +1532,7 @@ fn handle_callback(state: &Management, req: CallbackRequest) -> Response {
     if !status.is_empty() {
         return status_error(StatusCode::CONFLICT, &status);
     }
-    if !session_provider.eq_ignore_ascii_case(&canonical) {
+    if !session_provider.go_eq_fold(&canonical) {
         return status_error(StatusCode::BAD_REQUEST, "provider does not match state");
     }
     // A plugin reads its callback from the auth directory, where Go writes every one.
@@ -1651,6 +1666,25 @@ mod tests {
         s.register("live", "kimi");
         assert!(s.cancel("live"));
         assert!(s.get("live").is_none());
+    }
+
+    /// Go `TestSIWCBindCommitSurvivesSessionExpiry`: a binding whose disk commit has
+    /// started outlives its session expiry so it can report the outcome, and completing
+    /// it releases that hold.
+    #[test]
+    fn a_claimed_siwc_commit_outlives_the_session_expiry() {
+        let s = Sessions::default();
+        let flow = super::super::siwc::Flow::idle("codex.json");
+        assert!(s.register_siwc("st", flow.clone(), Duration::from_secs(300)));
+        assert!(s.claim_siwc_commit("st", &flow));
+        let expire = || s.lock().get_mut("st").unwrap().expires = Instant::now();
+        expire();
+        assert_eq!(s.get("st"), Some(("codex".into(), String::new(), false)));
+        assert!(!s.cancel("st"), "a started commit is past cancelling");
+        s.complete("st");
+        assert_eq!(s.get("st"), Some(("codex".into(), String::new(), true)));
+        expire();
+        assert!(s.get("st").is_none(), "the completed session no longer holds on");
     }
 
     #[test]

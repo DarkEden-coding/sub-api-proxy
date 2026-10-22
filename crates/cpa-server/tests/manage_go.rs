@@ -1,5 +1,6 @@
 //! Replays expectations recorded from the pinned Go reference
 //! (tests/reference/manage/main.go -> tests/fixtures/manage_go.json).
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -113,7 +114,7 @@ fn yaml_bool_spellings_and_durations_load_like_go() {
             // ponytail: serde resolves the YAML 1.2 bool spellings without keeping their
             // text, so a string field reads `True`/`TRUE` as `true` where Go keeps it.
             "server.host" if ["True", "TRUE", "False", "FALSE"].contains(&spelling) => {
-                assert_eq!(cfg.host, spelling.to_lowercase(), "{at}");
+                assert_eq!(cfg.host, spelling.go_lower(), "{at}");
                 continue;
             }
             "server.host" => json!(cfg.host),
@@ -261,19 +262,11 @@ fn trusted_proxy_validation_errors_match_go_text() {
 
 /// Go records OAuth-only fields by legacy name; cliproxy-rs by v8 path. Go's prefix
 /// table for `oauth.providers` (internal/config/config_v8.go buildV8Paths) maps them.
-/// The fixture predates Go 52d5507d, which moved the shared Codex, Claude and xAI
-/// settings to `upstream.*`; v8.0.35 records only fields whose current path stays
-/// under `oauth.providers.` (config_v8.go:259-264), so the moved ones drop out here.
+/// Since Go 52d5507d, the shared Codex, Claude and xAI settings live under
+/// `upstream.*`, and Go records only fields whose current path stays under
+/// `oauth.providers.` (config_v8.go:259-264).
 #[test]
 fn oauth_only_presence_matches_go() {
-    const SHARED_CODEX: &[&str] = &[
-        "disable-codex-cloaking",
-        "stream-bootstrap-buffering",
-        "stream-bootstrap-timeout",
-        "orphan-delegation-compatibility",
-        "model-level-cooling",
-        "response-steering",
-    ];
     const PREFIXES: &[(&str, &str)] = &[
         ("ws-auth", "oauth.providers.aistudio.ws-auth"),
         ("codex", "oauth.providers.codex"),
@@ -299,11 +292,6 @@ fn oauth_only_presence_matches_go() {
         ("devin", "oauth.providers.devin"),
     ];
     let to_v8 = |old: &str| {
-        if let Some(field) = old.strip_prefix("codex.")
-            && SHARED_CODEX.contains(&field)
-        {
-            return format!("upstream.codex.{field}");
-        }
         PREFIXES
             .iter()
             .find(|(p, _)| old == *p || old.starts_with(&format!("{p}.")))
@@ -319,7 +307,6 @@ fn oauth_only_presence_matches_go() {
             .unwrap()
             .iter()
             .map(|f| to_v8(f.as_str().unwrap()))
-            .filter(|path| path.starts_with("oauth.providers."))
             .collect();
         assert_eq!(Config::parse(yaml).unwrap().oauth_only, want, "{yaml}");
     }
@@ -627,10 +614,6 @@ mod routes {
                 if want.contains_key("X-CPA-SUPPORT-PLUGIN") {
                     want.insert("X-CPA-SUPPORT-PLUGIN".into(), cpa_plugin::SUPPORT_PLUGIN.into());
                 }
-                // The goldens predate v8.0.35, which exposes `ETag` for config writes (`fa68946a`).
-                if let Some(Value::String(exposed)) = want.get_mut("Access-Control-Expose-Headers") {
-                    *exposed = exposed.replacen("Retry-After, ", "Retry-After, ETag, ", 1);
-                }
                 assert_eq!(Value::Object(headers), Value::Object(want), "{name}[{i}] headers");
                 compared += 1;
             }
@@ -645,67 +628,84 @@ mod config_writes {
     use super::*;
     use cpa_exec::Executors;
     use cpa_exec::claude::ClaudeExecutor;
+    use std::collections::HashSet;
 
     use cpa_server::management::{Management, Options};
     use std::sync::Arc;
 
-    /// bcrypt output differs per run; compare its presence, not its bytes.
-    fn normalize(v: &Value) -> Value {
-        match v {
-            Value::String(s) if s.starts_with("$2a$") || s.starts_with("$2b$") => json!("<bcrypt>"),
-            Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), normalize(v))).collect()),
-            Value::Array(a) => Value::Array(a.iter().map(normalize).collect()),
-            other => other.clone(),
+    const SECRETS: [&str; 2] = ["/management/secret-key", "/remote-management/secret-key"];
+
+    /// The management key, the one bcrypt value in these configs, differs per run; its
+    /// presence is compared, not its bytes. Go v8.0.35 saves a plaintext key written
+    /// through the v8 API until its post-save reload hashes it, while cliproxy-rs stores
+    /// the hash at once (docs/DIFFERENCES-FROM-GO.md), so in Go's recording (`go`) a
+    /// plaintext `fake-*` key stands for the hash Rust writes; [`same_key`] checks that
+    /// hash against it. A plaintext key on the Rust side is never normalized.
+    fn normalize(v: &Value, go: bool) -> Value {
+        let mut v = v.clone();
+        for at in SECRETS {
+            if let Some(key) = v.pointer_mut(at)
+                && key
+                    .as_str()
+                    .is_some_and(|k| k.starts_with("$2a$") || k.starts_with("$2b$") || (go && k.starts_with("fake-")))
+            {
+                *key = json!("<bcrypt>");
+            }
         }
+        v
     }
 
-    /// Go's saver adds default-valued keys to every PUT/PATCH; cliproxy-rs deliberately
-    /// writes only what the request changed (untouched text stays byte-stable). So
-    /// `rust` must equal `go` except for keys Go added whose values are exactly Go's
-    /// materialized defaults at that path.
-    fn same_modulo_defaults(go: &Value, rust: &Value, defaults: &Value, at: &str) -> Result<(), String> {
+    /// Where Go's file holds a plaintext key, Rust's file must hold a hash of it.
+    /// `verified` caches (plaintext, hash) pairs, so a hash kept across a rotation to a
+    /// new plaintext is checked again.
+    fn same_key(go: &Value, rust: &Value, verified: &mut HashSet<(String, String)>) -> Result<(), String> {
+        for at in SECRETS {
+            if let Some(plain) = go
+                .pointer(at)
+                .and_then(Value::as_str)
+                .filter(|k| k.starts_with("fake-"))
+            {
+                let hash = rust.pointer(at).and_then(Value::as_str).unwrap_or_default();
+                let pair = (plain.to_owned(), hash.to_owned());
+                if !verified.contains(&pair) {
+                    if !bcrypt::verify(plain, hash).unwrap_or(false) {
+                        return Err(format!("{at}: {hash:?} is not a hash of {plain:?}"));
+                    }
+                    verified.insert(pair);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A `/config/...` response as the document it is part of, so [`normalize`] sees
+    /// the key at its path.
+    fn rooted(path: &str, v: &Value) -> Value {
+        path.trim_start_matches("/config")
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .rev()
+            .fold(v.clone(), |doc, part| json!({ part: doc }))
+    }
+
+    /// cliproxy-rs writes only what the request changed (untouched text stays
+    /// byte-stable); since v8.0.35 Go's v8 saver also adds no default-valued keys, so
+    /// the values compare exactly.
+    fn same(go: &Value, rust: &Value, at: &str) -> Result<(), String> {
         match (go, rust) {
             (Value::Object(g), Value::Object(r)) => {
-                for (k, rv) in r {
-                    let gv = g.get(k).ok_or(format!("{at}.{k}: only in Rust: {rv}"))?;
-                    same_modulo_defaults(gv, rv, defaults.get(k).unwrap_or(&Value::Null), &format!("{at}.{k}"))?;
-                }
-                for (k, gv) in g {
-                    if !r.contains_key(k) {
-                        only_defaults(gv, defaults.get(k).unwrap_or(&Value::Null), &format!("{at}.{k}"))?;
-                    }
-                }
-                Ok(())
-            }
-            (Value::Array(g), Value::Array(r)) if g.len() == r.len() => {
-                for (i, (gv, rv)) in g.iter().zip(r).enumerate() {
-                    same_modulo_defaults(gv, rv, &Value::Null, &format!("{at}[{i}]"))?;
+                for k in g.keys().chain(r.keys()) {
+                    let missing = Value::String("<absent>".into());
+                    same(
+                        g.get(k).unwrap_or(&missing),
+                        r.get(k).unwrap_or(&missing),
+                        &format!("{at}.{k}"),
+                    )?;
                 }
                 Ok(())
             }
             _ if go == rust => Ok(()),
             _ => Err(format!("{at}: Go {go} != Rust {rust}")),
-        }
-    }
-
-    /// Go-only keys are acceptable when they are Go's materialized defaults or typed
-    /// zero values its saver writes for struct fields (for example `username: ""` in a
-    /// new list item).
-    fn only_defaults(go: &Value, defaults: &Value, at: &str) -> Result<(), String> {
-        let zero = matches!(go, Value::Null | Value::Bool(false))
-            || go.as_str() == Some("")
-            || go.as_i64() == Some(0)
-            || go.as_array().is_some_and(Vec::is_empty)
-            || go.as_object().is_some_and(serde_json::Map::is_empty);
-        if zero {
-            return Ok(());
-        }
-        match (go, defaults) {
-            (Value::Object(g), Value::Object(d)) => g
-                .iter()
-                .try_for_each(|(k, v)| only_defaults(v, d.get(k).unwrap_or(&Value::Null), &format!("{at}.{k}"))),
-            _ if go == defaults => Ok(()),
-            _ => Err(format!("{at}: Go has {go}, missing in Rust and not a Go default")),
         }
     }
 
@@ -716,45 +716,14 @@ mod config_writes {
         serde_json::to_value(v).unwrap()
     }
 
-    /// Typed scalars as Go loads them (YAML 1.1 bools, truncated floats), and null
-    /// plugin entries as the `{}` Go's saver writes. Go re-encodes these on its first
-    /// write; cliproxy-rs keeps untouched text as written, so files compare by what
-    /// they load as.
-    fn typed_bools(v: &Value) -> Value {
-        let mut yaml = serde_yaml_ng::to_value(v).unwrap();
-        cpa_core::config::coerce_typed_scalars(&mut yaml);
-        let mut json = serde_json::to_value(yaml).unwrap();
-        if let Some(entries) = json.pointer_mut("/plugins/configs").and_then(Value::as_object_mut) {
-            for entry in entries.values_mut().filter(|e| e.is_null()) {
-                *entry = json!({});
-            }
-        }
-        json
-    }
-
-    /// [`typed_bools`] for the value at a `/config/...` sub-path.
-    fn typed_at(path: &str, v: &Value) -> Value {
-        let parts: Vec<&str> = path
-            .trim_start_matches("/config")
-            .split('/')
-            .filter(|p| !p.is_empty())
-            .collect();
-        let mut doc = v.clone();
-        for part in parts.iter().rev() {
-            doc = json!({ *part: doc });
-        }
-        let typed = typed_bools(&doc);
-        parts.iter().fold(&typed, |node, part| &node[*part]).clone()
-    }
-
     #[tokio::test]
     async fn go_config_v8_writes_replay_value_for_value() {
-        let defaults = normalize(&fixture()["materialized_defaults"]);
         let hash = bcrypt::hash("fake-secret", 4).unwrap();
         let client = wreq::Client::new();
         let mut compared = 0;
         let mut bytes_compared = 0;
         let mut failures: Vec<String> = Vec::new();
+        let mut verified = HashSet::new();
         for scenario in fixture()["config_writes"].as_array().unwrap() {
             let name = scenario["name"].as_str().unwrap();
             let dir = std::env::temp_dir().join(format!("cpa-config-{name}-{}", std::process::id()));
@@ -799,8 +768,8 @@ mod config_writes {
                 assert_eq!(status, step["status"], "{at}: {body}");
                 let want = &step["response"];
                 if step["path"] == "/config.yaml" && step["method"] == "GET" && status == 200 {
-                    let got = normalize(&rust_yaml_value(&body));
-                    if let Err(e) = same_modulo_defaults(&normalize(want), &got, &defaults, "yaml view") {
+                    let got = normalize(&rust_yaml_value(&body), false);
+                    if let Err(e) = same(&normalize(want, true), &got, "yaml view") {
                         failures.push(format!("{at}: {e}"));
                     }
                     let go_archived = step["raw_response"].as_str().unwrap().contains("# mystery-section");
@@ -808,11 +777,7 @@ mod config_writes {
                 } else if want.is_null() {
                     assert!(body.is_empty(), "{at}: {body}");
                 } else {
-                    let mut got: Value = serde_json::from_str(&body).unwrap();
-                    let mut body = body;
-                    if step["method"] == "GET" {
-                        strip_auth_indexes(step["path"].as_str().unwrap(), &mut got, &mut body);
-                    }
+                    let got: Value = serde_json::from_str(&body).unwrap();
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
                         if got == *want {
@@ -835,26 +800,23 @@ mod config_writes {
                             "{at}: {got}"
                         );
                     } else {
-                        // Config reads are compared like the file they reflect.
+                        // Values as written: `"on"` stays a string, as in Go's file.
                         let path = step["path"].as_str().unwrap();
                         let (want, got) = if path == "/config" || path.starts_with("/config/") {
-                            (typed_at(path, want), typed_at(path, &got))
+                            (rooted(path, want), rooted(path, &got))
                         } else {
                             (want.clone(), got)
                         };
-                        if let Err(e) = same_modulo_defaults(&normalize(&want), &normalize(&got), &defaults, "response")
-                        {
+                        if let Err(e) = same(&normalize(&want, true), &normalize(&got, false), "response") {
                             failures.push(format!("{at}: {e}"));
                         }
                     }
                 }
                 let file = std::fs::read_to_string(&path).unwrap();
-                if let Err(e) = same_modulo_defaults(
-                    &normalize(&typed_bools(&step["file"])),
-                    &normalize(&typed_bools(&rust_yaml_value(&file))),
-                    &defaults,
-                    "file",
-                ) {
+                let rust_file = rust_yaml_value(&file);
+                if let Err(e) = same(&normalize(&step["file"], true), &normalize(&rust_file, false), "file")
+                    .and_then(|()| same_key(&step["file"], &rust_file, &mut verified))
+                {
                     failures.push(format!("{at}: {e}"));
                 }
                 if file.contains("# mystery-section") != step["file_has_archive"].as_bool().unwrap() {
@@ -872,95 +834,9 @@ mod config_writes {
             let _ = std::fs::remove_dir_all(&dir);
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
-        assert_eq!(compared, 98);
+        assert_eq!(compared, 123);
         eprintln!("config writes: {bytes_compared} of {compared} steps compared byte for byte");
-        assert_eq!(bytes_compared, 69, "steps compared byte for byte");
-    }
-}
-
-/// The goldens predate v8.0.35, whose v8 credential list adds a SIWC summary to each
-/// Codex entry (`d50a1995`). None of the recorded credentials is bound or toggled, so
-/// Go v8.0.35 reports `use_siwc` and `siwc_bound` false and no expiry. The summary is
-/// checked and removed (from the bytes too, so they still compare).
-fn strip_siwc_summaries(value: &mut Value, body: &mut String, at: &str) {
-    let Some(files) = value.get_mut("files").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for entry in files.iter_mut().filter(|e| e["provider"] == "codex") {
-        let map = entry.as_object_mut().unwrap();
-        assert_eq!(map.shift_remove("use_siwc"), Some(json!(false)), "{at}");
-        assert_eq!(map.shift_remove("siwc_bound"), Some(json!(false)), "{at}");
-        assert!(
-            map.shift_remove("siwc_bind_supported").is_some_and(|v| v.is_boolean()),
-            "{at}"
-        );
-        assert!(!map.contains_key("siwc_expires_at"), "{at}");
-    }
-    for field in [
-        r#""siwc_bind_supported":false,"#,
-        r#""siwc_bind_supported":true,"#,
-        r#""siwc_bound":false,"#,
-        r#""use_siwc":false,"#,
-    ] {
-        *body = body.replace(field, "");
-    }
-    *body = body.replace(r#","use_siwc":false}"#, "}");
-}
-
-/// The goldens predate v8.0.35, whose v8 api-keys reads give each group
-/// (`api-keys/<provider>/<n>`) or key (`.../keys/<m>`) its `auth_index`, 16 hex digits
-/// (`0fb50a18`; tests/management.rs pins them). Removes exactly those, located by the
-/// read's config path, from the value and from gin's compact bytes, so both comparisons
-/// still run.
-fn strip_auth_indexes(path: &str, value: &mut Value, body: &mut String) {
-    fn entry(at: &[String]) -> bool {
-        let index = |s: &String| s.parse::<usize>().is_ok();
-        match at {
-            [root, _, group] => root == "api-keys" && index(group),
-            [root, _, group, keys, key] => root == "api-keys" && index(group) && keys == "keys" && index(key),
-            _ => false,
-        }
-    }
-    fn walk(value: &mut Value, at: &mut Vec<String>, removed: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                let index = map.get("auth_index").and_then(Value::as_str).map(str::to_owned);
-                if let Some(index) =
-                    index.filter(|i| entry(at) && i.len() == 16 && i.bytes().all(|b| b.is_ascii_hexdigit()))
-                {
-                    map.shift_remove("auth_index");
-                    removed.push(index);
-                }
-                for (key, v) in map.iter_mut() {
-                    at.push(key.clone());
-                    walk(v, at, removed);
-                    at.pop();
-                }
-            }
-            Value::Array(items) => {
-                for (i, v) in items.iter_mut().enumerate() {
-                    at.push(i.to_string());
-                    walk(v, at, removed);
-                    at.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(rest) = path.strip_prefix("/config") else {
-        return;
-    };
-    let mut at: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(str::to_owned).collect();
-    let mut removed = Vec::new();
-    walk(value, &mut at, &mut removed);
-    for index in removed {
-        let field = format!(r#""auth_index":"{index}""#);
-        let (before, after) = (format!(",{field}"), format!("{field},"));
-        *body = if body.contains(&before) {
-            body.replacen(&before, "", 1)
-        } else {
-            body.replacen(&after, "", 1)
-        };
+        assert_eq!(bytes_compared, 91, "steps compared byte for byte");
     }
 }
 
@@ -1138,6 +1014,7 @@ mod creds {
             let mut last_cursor = "no-cursor".to_owned();
             for (i, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
                 let at = format!("{name}[{i}] {} {}", step["method"], step["path"]);
+                let step = &pin_pending_steps(step.clone(), name, i, &at);
                 if let Some(ms) = step["sleep_ms"].as_u64() {
                     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 }
@@ -1189,14 +1066,15 @@ mod creds {
                         assert_eq!(headers.get(h).map(String::as_str), v.as_str(), "{at}: header {h}");
                     }
                 } else {
-                    let mut got: Value = serde_json::from_str(&body).unwrap();
-                    let mut body = body;
-                    if req_path.starts_with("/credentials") && step["method"] == "GET" {
-                        strip_siwc_summaries(&mut got, &mut body, &at);
-                    }
+                    let got: Value = serde_json::from_str(&body).unwrap();
                     // gin's exact bytes wherever the values agree exactly; key order always.
                     if let Some(raw) = step["raw_json"].as_str() {
-                        if got == step["response"] {
+                        // `recent_requests` labels are the last twenty 10-minute windows of
+                        // the wall clock, so a response carrying them equals Go's recording
+                        // only when the test runs in the window it was recorded in
+                        // (api_call_and_usage[28], GET /observability/usage/api-keys, at
+                        // 06:18 UTC). They are compared normalized below, never as bytes.
+                        if got == step["response"] && !raw.contains(r#""recent_requests":"#) {
                             assert_eq!(body, raw, "{at}: bytes");
                             bytes_compared += 1;
                         }
@@ -1307,7 +1185,113 @@ mod creds {
         }
         assert_eq!(compared, 199);
         eprintln!("credentials: {bytes_compared} of {compared} steps compared byte for byte");
-        assert!(bytes_compared >= 80, "only {bytes_compared} byte comparisons");
+        assert_eq!(bytes_compared, 149, "steps compared byte for byte");
+    }
+
+    /// Pending v8.0.35 drift outside the config saver. Each pin names its scenario and
+    /// steps, asserts Go's recorded value there, then expects cliproxy-rs's current
+    /// (6fecc6e) value in just the differing fields, so porting the change, or losing
+    /// the old behaviour some other way, fails here until the pin is removed.
+    fn pin_pending_steps(mut step: Value, name: &str, i: usize, at: &str) -> Value {
+        let inventory = name == "credential_inventory_and_edits";
+        // Each pin is keyed by step index; the request it expects keeps a re-record
+        // from shifting it onto another step.
+        let request = |method: &str, path: &str, body_name: Option<&str>| {
+            assert_eq!(
+                (step["method"].as_str(), step["path"].as_str()),
+                (Some(method), Some(path)),
+                "{at}"
+            );
+            if let Some(want) = body_name {
+                let body: Value = serde_json::from_str(step["body"].as_str().unwrap()).unwrap();
+                assert_eq!(body["name"], want, "{at}");
+            }
+        };
+        match (inventory, i) {
+            // The edits that first touch each codex file, and the last step.
+            (true, 19) => request("PATCH", "/credentials/fields", Some("codex-b.json")),
+            (true, 73) => request("PATCH", "/credentials/fields", Some("retype.json")),
+            (true, 88) => request("GET", "/credentials", None),
+            (true, 0) => request("GET", "/credentials", None),
+            (true, 1) => request("GET", "/credentials?name=claude-a.json", None),
+            (true, 82) => request("GET", "/routing/model-definitions/claude", None),
+            _ => {}
+        }
+        match (name, i) {
+            ("runtime_credentials", 4) => request("GET", "/credentials/models?name=aistudio-0123456789abcdef", None),
+            ("runtime_credentials", 6) => request("POST", "/routing/cooldown/reset", None),
+            _ => {}
+        }
+        // Go 7b0319fb (Sign in with ChatGPT): codex auth files get an empty
+        // `<name>.lock` side file. Credentials owner.
+        if let Some(files) = step["files"].as_object_mut() {
+            let mut locks: Vec<&str> = Vec::new();
+            if inventory && (19..=88).contains(&i) {
+                locks.push("codex-b.json.lock");
+            }
+            if inventory && (73..=88).contains(&i) {
+                locks.push("retype.json.lock");
+            }
+            let mut recorded: Vec<String> = files.keys().filter(|f| f.ends_with(".lock")).cloned().collect();
+            recorded.sort();
+            assert_eq!(recorded, locks, "{at}: Go's lock files");
+            for lock in locks {
+                assert_eq!(files.remove(lock), Some(json!("raw:")), "{at}: {lock}");
+            }
+        }
+        let mut response = step["response"].take();
+        let response = &mut response;
+        match (name, i) {
+            // Go f62d4d28 and a19a8ecd: the Claude catalog adds claude-haiku-5-5 and
+            // changes six models' thinking metadata. Models catalog owner.
+            ("credential_inventory_and_edits", 82) => {
+                let models = response["models"].as_array_mut().unwrap();
+                let at_haiku = models
+                    .iter()
+                    .position(|m| m["id"] == "claude-haiku-5-5")
+                    .expect("Go adds it");
+                assert_eq!(models[at_haiku - 1]["id"], "claude-sonnet-5-5", "{at}");
+                models.remove(at_haiku);
+                let levels = json!(["low", "medium", "high", "xhigh", "max"]);
+                let budget = json!({"levels": levels, "max": 128000, "min": 1024, "zero_allowed": true});
+                let dynamic = json!({"dynamic_allowed": true, "levels": levels, "zero_allowed": true});
+                let fable = json!({"dynamic_allowed": true, "levels": levels});
+                for (id, go, old) in [
+                    ("claude-opus-4-7", &dynamic, &budget),
+                    ("claude-opus-4-8", &dynamic, &budget),
+                    ("claude-fable-5", &fable, &budget),
+                    ("claude-fable-5-1", &fable, &budget),
+                    ("claude-opus-5-5", &fable, &dynamic),
+                ] {
+                    let model = models.iter_mut().find(|m| m["id"] == id).unwrap();
+                    assert_eq!(&model["thinking"], go, "{at}: {id}");
+                    model["thinking"] = old.clone();
+                }
+                let sonnet = models.iter_mut().find(|m| m["id"] == "claude-sonnet-5-5").unwrap();
+                let thinking = sonnet["thinking"].as_object_mut().unwrap();
+                assert_eq!(thinking.remove("disable_type"), Some(json!("between_tools")), "{at}");
+                assert_eq!(Value::Object(thinking.clone()), dynamic, "{at}");
+                step.as_object_mut().unwrap().remove("raw_json");
+            }
+            // Go f62d4d28 and a19a8ecd: AI Studio drops gemini-3.7-flash, the 15th
+            // model. Models catalog owner.
+            ("runtime_credentials", 4 | 6) => {
+                let models = response["models"].as_array_mut().unwrap();
+                let id = |m: &Value| m.get("id").unwrap_or(m).clone();
+                assert!(models.iter().all(|m| id(m) != "gemini-3.7-flash"), "{at}");
+                assert_eq!(id(&models[13]), "gemini-3.6-flash", "{at}");
+                let old = if i == 4 {
+                    json!({"display_name": "Gemini 3.7 Flash", "id": "gemini-3.7-flash", "owned_by": "google", "type": "gemini"})
+                } else {
+                    json!("gemini-3.7-flash")
+                };
+                models.insert(14, old);
+                step.as_object_mut().unwrap().remove("raw_json");
+            }
+            _ => {}
+        }
+        step["response"] = response.take();
+        step
     }
 
     /// Writes or appends a fixture log file and sets Go's fixed mtime

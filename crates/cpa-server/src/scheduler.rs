@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
+use cpa_common::gostr::GoStr;
 use cpa_core::credential::Credential;
 use cpa_core::exec::ExecError;
 #[cfg(test)]
@@ -496,7 +497,7 @@ impl Policy {
     /// enabled entry (config order) named by the credential's `compat_name`,
     /// `provider_key` or provider.
     fn provider_cooling(&self, c: &Credential) -> Option<bool> {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
         let (compat_name, mut provider_key) = (attr("compat_name"), attr("provider_key"));
         if provider.is_empty()
@@ -508,10 +509,9 @@ impl Policy {
             provider_key = &provider;
         }
         let candidates = [compat_name, provider_key, provider.as_str()];
-        // ponytail: ASCII case folding; Go's EqualFold also folds non-ASCII names.
         self.compat_disable_cooling
             .iter()
-            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.eq_ignore_ascii_case(name)))
+            .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.go_eq_fold(name)))
             .and_then(|(_, disable)| *disable)
     }
 
@@ -520,7 +520,7 @@ impl Policy {
             metadata(c, "request_scoped_errors").and_then(|v| serde_json::from_value(v.clone()).ok());
         let rules = file_rules.as_ref().filter(|r| !r.is_empty()).or_else(|| {
             oauth(c)
-                .then(|| self.oauth_request_scoped_errors.get(&c.provider))
+                .then(|| self.oauth_request_scoped_errors.get(&c.provider.trim().go_lower()))
                 .flatten()
         });
         if let Some(rules) = rules {
@@ -614,6 +614,10 @@ pub(crate) struct Cooldown {
     /// keeps the block. Not saved: a record saved meanwhile is the failure's alone, and
     /// a restore keeps a live block from the entry it merges with.
     pub quota_under: Option<(Instant, QuotaKind)>,
+    /// The dispatch watermark when a failure last recorded this entry (Go
+    /// `cooldownRecordedSeq`): a success from a dispatch at or before it predates the
+    /// failure and leaves a live cooldown alone. Zero after a restart, as in Go.
+    pub recorded: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -711,6 +715,9 @@ pub(crate) struct Scheduler {
     /// Bounded windows opened plus probes reserved; each lease carries the value at its
     /// pick ([`Trust::generation`]).
     generation: u32,
+    /// Upstream dispatches so far (Go `Manager.executionSeq`): each dispatch takes the
+    /// next value ([`Self::dispatch`]); a recorded failure stamps the current one.
+    dispatched: u64,
 }
 
 /// Go `cfg.OpenAICompatibility` for cooling: enabled entries with a base URL (Go
@@ -1288,9 +1295,8 @@ impl Scheduler {
         self.record_picked(c, model, outcome, policy, self.generation, now);
     }
 
-    /// Applies one attempt's outcome (Go `MarkResult`). `picked` is the generation its
-    /// lease was picked at ([`Self::reserve_probe`]): a bounded window or probe
-    /// reservation newer than that is not answered by it.
+    /// [`Self::record_dispatched`] for a result without a dispatch stamp.
+    #[cfg(test)]
     pub fn record_picked(
         &mut self,
         c: &Credential,
@@ -1300,7 +1306,62 @@ impl Scheduler {
         picked: u32,
         now: Instant,
     ) {
+        self.record_dispatched(c, model, outcome, policy, picked, 0, now);
+    }
+
+    /// Stamps one upstream dispatch (Go `nextExecutionSeq`).
+    pub fn dispatch(&mut self) -> u64 {
+        self.dispatched += 1;
+        self.dispatched
+    }
+
+    /// Applies one attempt's outcome (Go `MarkResult`). `picked` is the generation its
+    /// lease was picked at ([`Self::reserve_probe`]): a bounded window or probe
+    /// reservation newer than that is not answered by it. `seq` is its dispatch stamp
+    /// ([`Self::dispatch`], 0 when unknown): a success leaves alone a live cooldown that
+    /// a failure recorded after the dispatch (Go 35af74f9).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_dispatched(
+        &mut self,
+        c: &Credential,
+        model: &str,
+        outcome: &Outcome,
+        policy: &Policy,
+        picked: u32,
+        seq: u64,
+        now: Instant,
+    ) {
         let model = canonical_model(model);
+        self.apply(c, model, outcome, policy, picked, seq, now);
+        // Go stamps the failing state with the dispatch watermark; a credential-wide 429
+        // also stamps the credential and every sibling state. A credential-level failure
+        // stamps the credential even when it skips the cooldown (Go's auth-level branch
+        // has no skip).
+        if let Outcome::Failure(error) = outcome {
+            let action = policy.error_action(c, error);
+            if action.cooldown || model.is_empty() {
+                let disabled = policy.cooling_disabled(c) && !action.force_cooldown;
+                let all = crate::classify::credential_scoped(error) && !disabled;
+                for ((id, m), s) in &mut self.cooldowns {
+                    if *id == c.id && (all || m == model) {
+                        s.recorded = self.dispatched;
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        c: &Credential,
+        model: &str,
+        outcome: &Outcome,
+        policy: &Policy,
+        picked: u32,
+        seq: u64,
+        now: Instant,
+    ) {
         let key = (c.id.clone(), model.to_owned());
         // Any answer ends a probe reservation on the keys it touches, except one taken
         // after its lease was picked (a later probe's, once this one's hold lapsed).
@@ -1316,6 +1377,17 @@ impl Scheduler {
                 // Active credential quota survives success on an in-flight sibling.
                 let global = (c.id.clone(), String::new());
                 if self.cooldowns.get(&global).is_some_and(|s| s.quota && s.deadline > now) {
+                    return;
+                }
+                // A live cooldown recorded after this attempt was dispatched: the success
+                // predates the failure and proves no recovery (Go `retainModelCooldown`,
+                // `retainAuthCooldown`).
+                if seq > 0
+                    && self
+                        .cooldowns
+                        .get(&key)
+                        .is_some_and(|s| s.deadline > now && s.recorded >= seq)
+                {
                     return;
                 }
                 // A request that started before a bounded window opened leaves it for the
@@ -1537,6 +1609,7 @@ impl Scheduler {
             trust: provenance(deadline),
             quota_kind: kind(reason),
             quota_under: quota_under.filter(|_| !quota),
+            recorded: 0,
         };
         let reason = if credential_quota {
             "credential_quota"
@@ -1764,6 +1837,7 @@ impl Scheduler {
             s => u16::try_from(s).unwrap_or(0),
         };
         let key = (c.id.clone(), canonical_model(model).to_owned());
+        let recorded = self.cooldowns.get(&key).map_or(0, |prev| prev.recorded);
         let prev = self.cooldowns.get(&key).filter(|prev| prev.deadline > now);
         let prev_wins = prev.is_some_and(|p| p.deadline > deadline);
         let deadline = prev.map_or(deadline, |prev| prev.deadline.max(deadline));
@@ -1822,6 +1896,8 @@ impl Scheduler {
                 trust,
                 quota_kind: quota_kind.filter(|_| quota),
                 quota_under: quota_under.filter(|_| !quota),
+                // Go `mergeModelState` keeps the live state's watermark.
+                recorded,
             },
         );
         true
@@ -2032,6 +2108,7 @@ mod tests {
             trust: Trust::default(),
             quota_kind: None,
             quota_under: None,
+            recorded: 0,
         };
         let mut s = Scheduler::default();
         for (id, model, c) in [
@@ -2956,6 +3033,84 @@ mod tests {
         assert_eq!(merged.trust.generation, live.generation, "the live window's generation");
     }
 
+    /// Go 35af74f9 (conductor_issue6643_test.go): a success dispatched before a live
+    /// cooldown was recorded leaves it, model-keyed or credential-level, and across a
+    /// restore while serving; one dispatched after it, or one without a stamp, clears it.
+    #[test]
+    fn a_success_dispatched_before_a_cooldown_keeps_it() {
+        let c = cred("a", serde_json::json!({}));
+        let p = Policy {
+            max_trusted_cooldown: Duration::ZERO,
+            ..Policy::default()
+        };
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let g = 0;
+        let quota = || hinted(FailureScope::Model, secs(H));
+        // Here a credential-level 429 is the credential's quota, which no success clears;
+        // the credential-level case uses a 503 with a retry hint.
+        let unavailable = || {
+            let mut e = ExecError::local(503, FailureScope::Model, "unavailable");
+            e.retry_after = Some(secs(H));
+            Outcome::Failure(e)
+        };
+        for (model, failure) in [("m", quota()), ("", unavailable())] {
+            let mut s = Scheduler::default();
+            let stale = s.dispatch();
+            let failed = s.dispatch();
+            s.record_dispatched(&c, model, &failure, &p, g, failed, now);
+            s.record_dispatched(&c, model, &Outcome::Success, &p, g, stale, now);
+            s.record_dispatched(&c, model, &Outcome::Success, &p, g, failed, now);
+            assert!(s.cooling(&c, model, now), "{model:?}: the stale successes keep it");
+            let after = s.dispatch();
+            s.record_dispatched(&c, model, &Outcome::Success, &p, g, after, now);
+            assert!(!s.cooling(&c, model, now), "{model:?}: a later dispatch clears it");
+
+            let again = s.dispatch();
+            s.record_dispatched(&c, model, &failure, &p, g, again, now);
+            s.record_dispatched(&c, model, &Outcome::Success, &p, g, 0, now);
+            assert!(!s.cooling(&c, model, now), "{model:?}: an unstamped success clears it");
+        }
+        // A skipped credential-level failure (a connection drop) still moves the
+        // credential's watermark past a success dispatched before it.
+        let mut s = Scheduler::default();
+        let first = s.dispatch();
+        s.record_dispatched(&c, "", &unavailable(), &p, g, first, now);
+        let success = s.dispatch();
+        let dropped = Outcome::Failure(ExecError::local(0, FailureScope::Model, "http2: client conn is closed"));
+        let third = s.dispatch();
+        s.record_dispatched(&c, "", &dropped, &p, g, third, now);
+        s.record_dispatched(&c, "", &Outcome::Success, &p, g, success, now);
+        assert!(s.cooling(&c, "", now), "the skipped failure stamped the credential");
+        // Go `mergeModelState` keeps the live watermark through a restore; a cooldown
+        // restored after a restart has none, and any success clears it.
+        let mut s = Scheduler::default();
+        let stale = s.dispatch();
+        let failed = s.dispatch();
+        s.record_dispatched(&c, "m", &quota(), &p, g, failed, now);
+        let saved = s.records(&c, now, wall);
+        assert!(s.restore(&c, &saved[0], true, Duration::ZERO, now, wall));
+        s.record_dispatched(&c, "m", &Outcome::Success, &p, g, stale, now);
+        assert!(s.cooling(&c, "m", now), "the restore kept the watermark");
+        let mut restarted = Scheduler::default();
+        assert!(restarted.restore(&c, &saved[0], true, Duration::ZERO, now, wall));
+        let first = restarted.dispatch();
+        restarted.record_dispatched(&c, "m", &Outcome::Success, &p, g, first, now);
+        assert!(!restarted.cooling(&c, "m", now), "no watermark after a restart");
+        // A credential-wide 429 stamps every sibling it extends.
+        let mut s = Scheduler::default();
+        let other = s.dispatch();
+        s.record_dispatched(&c, "other", &quota(), &p, g, other, now);
+        let stale = s.dispatch();
+        let wide = s.dispatch();
+        s.record_dispatched(&c, "m", &hinted(FailureScope::Credential, secs(H)), &p, g, wide, now);
+        s.cooldowns.remove(&(c.id.clone(), String::new()));
+        s.record_dispatched(&c, "other", &Outcome::Success, &p, g, stale, now);
+        assert!(
+            s.cooling(&c, "other", now),
+            "the sibling carries the credential's watermark"
+        );
+    }
+
     /// A restore while serving (`save-cooldown-status` turned on) that reinstalls a
     /// bounded window gives it a fresh generation: a stream picked before the window
     /// opened still cannot end it.
@@ -3619,6 +3774,54 @@ mod tests {
             Some(Duration::from_secs(60)),
             "unlisted statuses ignore hint"
         );
+    }
+
+    /// Go matches openai-compatibility groups by `EqualFold` against the credential's
+    /// compat name, provider key and provider (`resolveOpenAICompatConfig`), where σ and ς
+    /// are equal. Group `ΟΣ` now registers `openai-compatible-οσ` (Go `strings.ToLower`),
+    /// and the earlier group `openai-compatible-ος` still supplies its proxy and its
+    /// disable-cooling setting.
+    #[test]
+    fn compat_groups_match_with_go_equal_fold() {
+        let cfg = cpa_core::config::Config::parse(
+            "openai-compatibility:\n  - name: openai-compatible-ος\n    base-url: http://127.0.0.1:9\n    disable-cooling: true\n    api-key-entries: [{api-key: k, proxy-url: 'http://127.0.0.1:8080'}]\n  - name: ΟΣ\n    base-url: http://127.0.0.1:9\n    api-key-entries: [{api-key: k}]\n",
+        )
+        .unwrap();
+        let creds = cpa_core::config::credentials::from_config(&cfg);
+        let c = creds
+            .iter()
+            .find(|c| c.attributes.get("compat_name").is_some_and(|n| n == "ΟΣ"))
+            .unwrap();
+        assert_eq!(cpa_core::registry::dynamic::provider_key(c), "openai-compatible-οσ");
+        assert_eq!(
+            cpa_core::config::credentials::api_key_config_proxy(&cfg, c),
+            "http://127.0.0.1:8080"
+        );
+        let mut policy = crate::management::policy(&cfg);
+        policy.compat_disable_cooling = compat_cooling(&cfg);
+        assert_eq!(policy.provider_cooling(c), Some(true));
+    }
+
+    /// OAuth request-scoped-error channels and the credential provider they are looked up
+    /// by are both Go `strings.ToLower` (U+0130 becomes a plain `i`): rules keyed `HİGH`
+    /// apply to a `"type":"HİGH"` file credential.
+    #[test]
+    fn oauth_rule_channels_lowercase_like_go() {
+        let cfg = cpa_core::config::Config::parse(
+            "oauth:\n  request-scoped-errors:\n    HİGH:\n      - {status: 503, match: [boom], action: stop}\n",
+        )
+        .unwrap();
+        let c = cpa_core::config::credentials::from_file(
+            &cfg,
+            std::path::Path::new("/auth"),
+            std::path::Path::new("/auth/a.json"),
+            r#"{"type":"HİGH","access_token":"t"}"#.as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        let action =
+            crate::management::policy(&cfg).error_action(&c, &ExecError::local(503, FailureScope::Request, "boom"));
+        assert!(action.matched && action.stop);
     }
 
     /// Go matches rules against a local missing-thread error's structured body, which

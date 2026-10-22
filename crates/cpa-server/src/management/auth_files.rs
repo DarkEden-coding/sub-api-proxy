@@ -11,14 +11,17 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use cpa_common::gostr::GoStr;
 use cpa_core::config::{ConfigDocument, credentials};
 use cpa_core::credential::{Credential, MetadataPatch, Source};
 use serde_json::{Map, Value, json};
 
 use super::{Management, json as respond, multipart};
+use crate::body_limit::FirstJson;
 use crate::runtime::PatchError;
 
 const MODEL_DEFINITIONS: &str = include_str!("model_definitions.json");
@@ -124,7 +127,7 @@ fn local(t: SystemTime) -> String {
 /// Go `quotaObservationPayloadForProvider`: the latest passive quota snapshot
 /// (`observed_at`, `signals`) for providers Go observes; empty signals otherwise.
 fn quota_observation(state: &Management, c: &Credential) -> Value {
-    let snapshot = match c.provider.trim().to_lowercase().as_str() {
+    let snapshot = match c.provider.trim().go_lower().as_str() {
         "codex" => state.rt.executors.codex.quota().snapshot(&c.id),
         "claude" => state.rt.executors.claude.quota().snapshot(&c.id),
         // Devin's credential snapshot comes from its status refresh.
@@ -140,7 +143,7 @@ fn quota_observation(state: &Management, c: &Credential) -> Value {
 /// Go `modelQuotaObservationPayload`: the latest snapshot per (canonical) model;
 /// empty for providers without observations.
 fn model_quota_observations(state: &Management, c: &Credential) -> Map<String, Value> {
-    match c.provider.trim().to_lowercase().as_str() {
+    match c.provider.trim().go_lower().as_str() {
         "codex" => state
             .rt
             .executors
@@ -177,6 +180,38 @@ pub(super) fn file_name(c: &Credential) -> Option<String> {
 /// Go `isRuntimeOnlyAuth`: an AI Studio browser on the `/v1/ws` relay, with no file.
 pub(super) fn runtime_only(c: &Credential) -> bool {
     matches!(c.source, Source::Runtime)
+}
+
+/// Go `errPluginVirtualAuth`.
+const PLUGIN_VIRTUAL: &str = "plugin virtual auth cannot be modified directly; edit or delete the source auth file";
+
+/// Go `IsPluginVirtualAuth`: one of several credentials a plugin parsed from one file.
+fn plugin_virtual(c: &Credential) -> bool {
+    c.attributes
+        .get("plugin_virtual")
+        .is_some_and(|v| v.trim().go_eq_fold("true"))
+}
+
+/// The file a plugin-virtual credential was parsed from (Go `virtual_source`, else
+/// `path`).
+fn virtual_source(c: &Credential) -> &str {
+    let attr = |key: &str| c.attributes.get(key).map_or("", |v| v.trim());
+    Some(attr("virtual_source"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| attr("path"))
+}
+
+/// Go `isPluginVirtualSourceDelete`: a plugin-virtual credential is changed or deleted
+/// only through its source file's name.
+fn names_virtual_source(name: &str, c: &Credential) -> bool {
+    if !plugin_virtual(c) {
+        return true;
+    }
+    let base = |p: &str| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned());
+    match (base(name.trim()), base(virtual_source(c))) {
+        (Some(name), Some(source)) => name.go_eq_fold(&source),
+        _ => false,
+    }
 }
 
 /// Go `authFileListName`: the file name, else the credential ID.
@@ -243,7 +278,7 @@ fn unsafe_name(name: &str) -> bool {
 }
 
 fn ends_json(name: &str) -> bool {
-    name.to_lowercase().ends_with(".json")
+    name.go_lower().ends_with(".json")
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +493,7 @@ fn note_disabled(state: &Management, id: &str, disabled: Option<bool>) {
 
 /// Go `Auth.AuthKind`: `oauth`, `apikey` or unknown.
 pub(super) fn auth_kind(c: &Credential) -> Option<&'static str> {
-    let normalize = |s: &str| match s.trim().to_lowercase().as_str() {
+    let normalize = |s: &str| match s.trim().go_lower().as_str() {
         "apikey" | "api_key" | "api-key" => Some("apikey"),
         "oauth" | "oauth2" => Some("oauth"),
         _ => None,
@@ -505,9 +540,12 @@ fn int_value(v: &Value) -> Option<i64> {
     }
 }
 
+/// Go `authFileQuotaContext`: the quota plugin selected per provider key.
+type QuotaPlugins = std::collections::HashMap<String, String>;
+
 /// Go `buildAuthFileEntryLocked`. `None` hides the credential (config API keys and
 /// disabled credentials whose file is gone).
-fn entry(state: &Management, c: &Credential, v8: bool) -> Option<BTreeMap<&'static str, Value>> {
+fn entry(state: &Management, c: &Credential, v8: bool, quota: &QuotaPlugins) -> Option<BTreeMap<&'static str, Value>> {
     let runtime = runtime_only(c);
     // Go `buildAuthFileEntryLocked`: runtime-only auths are listed from memory and
     // hidden while disabled; other credentials need a file path.
@@ -561,7 +599,18 @@ fn entry(state: &Management, c: &Credential, v8: bool) -> Option<BTreeMap<&'stat
     if !model_quotas.is_empty() {
         e.insert("model_quotas", Value::Object(model_quotas));
     }
-    if let Some(probe) = c.metadata.get("quota_probe").filter(|v| !v.is_null()) {
+    if let Some(plugin_id) = quota
+        .get(&cpa_plugin::host::normalize_provider(&c.provider))
+        .filter(|id| !id.is_empty())
+    {
+        e.insert("supports_quota", true.into());
+        e.insert("quota_provider", c.provider.clone().into());
+        if v8 {
+            e.insert("quota_plugin_id", plugin_id.clone().into());
+        }
+    }
+    // Go 0c708401: only the v0 quota route runs a declarative `quota_probe`.
+    if !v8 && let Some(probe) = c.metadata.get("quota_probe").filter(|v| !v.is_null()) {
         e.insert("supports_quota", true.into());
         e.insert("quota_probe", super::sorted_keys(probe));
     }
@@ -745,6 +794,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
         q.first("name").trim().to_owned(),
         q.first("auth_index").trim().to_owned(),
     );
+    let quota = state.rt.plugins().quota_provider_plugin_ids().await;
     let observed = go_time(chrono::Utc::now());
     let all = state.rt.store().snapshot();
     // Forget runtime-only credentials whose relay session ended.
@@ -761,9 +811,9 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     if !paginated {
         let mut files: Vec<(String, Value)> = matching
             .iter()
-            .filter_map(|c| entry(&state, c, v8).map(|e| (list_name(c), entry_value(e))))
+            .filter_map(|c| entry(&state, c, v8, &quota).map(|e| (list_name(c), entry_value(e))))
             .collect();
-        files.sort_by_key(|(n, _)| n.to_lowercase());
+        files.sort_by_key(|(n, _)| n.go_lower());
         return reply_ordered(
             StatusCode::OK,
             [
@@ -776,8 +826,8 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     matching.retain(|c| path_of(c).is_some_and(|p| p.exists() || !c.disabled) || (runtime_only(c) && !c.disabled));
     matching.sort_by(|a, b| {
         let (na, nb) = (list_name(a), list_name(b));
-        na.to_lowercase()
-            .cmp(&nb.to_lowercase())
+        na.go_lower()
+            .cmp(&nb.go_lower())
             .then_with(|| na.cmp(&nb))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -786,7 +836,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, uri: Uri, RawQuer
     let end = (start + page_size).min(total);
     let files: Vec<Value> = matching[start..end]
         .iter()
-        .filter_map(|c| entry(&state, c, v8).map(entry_value))
+        .filter_map(|c| entry(&state, c, v8, &quota).map(entry_value))
         .collect();
     reply_ordered(
         StatusCode::OK,
@@ -865,8 +915,9 @@ fn resync(state: &Management) {
     state.publish((*state.rt.config()).clone(), None);
 }
 
-/// Go `writeAuthFile`: validate as Go's `buildAuthFromFileData` does, then persist.
-fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(), String> {
+/// Go `writeAuthFile`: validate as Go's `buildAuthFromFileData` does, then persist. An
+/// invalid file is the client's error (`Err((true, _))`, Go `errInvalidAuthFile`, 400).
+fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(), (bool, String)> {
     let cfg = state.rt.config();
     let base = Path::new(name)
         .file_name()
@@ -875,10 +926,21 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
     let dst = std::path::absolute(cfg.auth_dir.join(&base)).unwrap_or_else(|_| cfg.auth_dir.join(&base));
     let meta = match serde_json::from_slice::<Map<String, Value>>(data) {
         Ok(m) => m,
-        Err(e) => return Err(format!("invalid auth file: {e}")),
+        Err(e) => return Err((true, format!("invalid auth file: {e}"))),
     };
+    // Loading tolerates invalid exclusion rules, so they are rejected here (Go 1a28c61e),
+    // after Go's `NormalizeCredentialMetadata`, so an error names the canonical key.
+    let mut canonical = meta.clone();
+    for (alias, canon) in ALIASES {
+        if let Some(v) = canonical.remove(*alias) {
+            canonical.entry(*canon).or_insert(v);
+        }
+    }
+    if let (_, Some(e)) = credentials::excluded_models_from_metadata(&canonical) {
+        return Err((true, format!("invalid auth file: {e}")));
+    }
     let synthesized = credentials::from_file(&cfg, &cfg.auth_dir, &dst, data)
-        .map_err(|e| format!("invalid auth file: invalid weight in {base}: {e}"))?;
+        .map_err(|e| (true, format!("invalid auth file: invalid weight in {base}: {e}")))?;
     // Go writes the upload as sent, then its file store rewrites it unless it is
     // already JSON-equal to the canonical form: canonical metadata keys plus the
     // auth's disabled flag, in `json.Marshal` key order with no trailing newline.
@@ -895,13 +957,13 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
     let bytes = if persisted == uploaded {
         data.to_vec()
     } else {
-        serde_json::to_vec(&persisted).map_err(|e| e.to_string())?
+        serde_json::to_vec(&persisted).map_err(|e| (false, e.to_string()))?
     };
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     if v8 {
         state.oauth.invalidate_siwc(&dst);
     }
-    write_file(&dst, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
+    write_file(&dst, &bytes).map_err(|e| (false, format!("failed to write file: {e}")))?;
     {
         let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
         if synthesized.is_none() {
@@ -910,7 +972,8 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
             fallbacks.remove(&dst);
         }
     }
-    resync(state);
+    let written: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+    state.publish_upload((*state.rt.config()).clone(), None, synthesized.map(|c| (c, written)));
     Ok(())
 }
 
@@ -919,7 +982,7 @@ pub(crate) async fn upload(
     uri: Uri,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
-    body: Bytes,
+    read: crate::body_limit::Read,
 ) -> Response {
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -928,6 +991,24 @@ pub(crate) async fn upload(
         .to_owned();
     // Go `UploadAuthFileV8`: v8 writes fail a pending SIWC binding of the file.
     let v8 = uri.path().starts_with("/v8/");
+    let body = if multipart::is_form(&content_type) {
+        match multipart::body(read, &content_type) {
+            Ok(body) => body,
+            Err(multipart::Failed::Form(status, e)) => {
+                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                return fail(status, format!("invalid multipart form: {e}"));
+            }
+            Err(multipart::Failed::Read(rejection)) => {
+                let reason = super::read_reason(&rejection);
+                return fail(StatusCode::BAD_REQUEST, format!("invalid multipart form: {reason}"));
+            }
+        }
+    } else {
+        match read.body {
+            Ok(body) => body,
+            Err(rejection) => return fail(super::read_status(&rejection), "failed to read body"),
+        }
+    };
     if multipart::is_form(&content_type) {
         let files = match multipart::form_files(&content_type, &body) {
             Ok(files) => files,
@@ -938,9 +1019,7 @@ pub(crate) async fn upload(
             if !ends_json(&name) {
                 return Err((true, "file must be .json".into()));
             }
-            store_file(&state, &name, &part.data, v8)
-                .map(|()| name)
-                .map_err(|e| (false, e))
+            store_file(&state, &name, &part.data, v8).map(|()| name)
         };
         return match files.len() {
             0 => fail(StatusCode::BAD_REQUEST, "no files uploaded"),
@@ -996,7 +1075,8 @@ pub(crate) async fn upload(
     let result = tokio::task::spawn_blocking(move || store_file(&state, &name, &body, v8)).await;
     match result {
         Ok(Ok(())) => reply(StatusCode::OK, [("status", "ok".into())]),
-        Ok(Err(msg)) => fail(StatusCode::INTERNAL_SERVER_ERROR, msg),
+        Ok(Err((true, msg))) => fail(StatusCode::BAD_REQUEST, msg),
+        Ok(Err((false, msg))) => fail(StatusCode::INTERNAL_SERVER_ERROR, msg),
         Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }
@@ -1060,6 +1140,9 @@ fn delete_one(state: &Management, name: &str, v8: bool) -> Result<String, (Statu
     if found.is_some_and(|c| runtime_only(c)) {
         return Err((StatusCode::NOT_FOUND, "auth file not found".into()));
     }
+    if found.is_some_and(|c| !names_virtual_source(name, c)) {
+        return Err((StatusCode::CONFLICT, PLUGIN_VIRTUAL.into()));
+    }
     let target: PathBuf = found
         .and_then(|c| path_of(c).map(Path::to_path_buf))
         .unwrap_or_else(|| cfg.auth_dir.join(&base));
@@ -1085,9 +1168,18 @@ pub(crate) async fn delete(
     State(state): State<Arc<Management>>,
     uri: Uri,
     RawQuery(raw): RawQuery,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let q = Query::parse(raw);
+    // Go reads names from the body only without `all` or `name` in the query.
+    let body = match body {
+        Ok(body) => body,
+        Err(_) if matches!(q.first("all"), "true" | "1" | "*") || !q.first("name").is_empty() => Bytes::new(),
+        Err(rejection) if crate::body_limit::is_too_large(&rejection) => {
+            return fail(StatusCode::PAYLOAD_TOO_LARGE, crate::body_limit::MESSAGE);
+        }
+        Err(_) => return fail(StatusCode::BAD_REQUEST, "failed to read body"),
+    };
     // Go `DeleteAuthFileV8`.
     let v8 = uri.path().starts_with("/v8/");
     tokio::task::spawn_blocking(move || {
@@ -1100,7 +1192,7 @@ pub(crate) async fn delete(
     .unwrap_or_else(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
 }
 
-fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response {
+pub(super) fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response {
     if matches!(q.first("all"), "true" | "1" | "*") {
         let dir = state.rt.config().auth_dir.clone();
         let entries = match std::fs::read_dir(&dir) {
@@ -1114,7 +1206,7 @@ fn delete_sync(state: &Management, q: &Query, body: &[u8], v8: bool) -> Response
         };
         let mut deleted = 0;
         for entry in entries.flatten() {
-            let is_json = entry.file_name().to_string_lossy().to_lowercase().ends_with(".json");
+            let is_json = entry.file_name().to_string_lossy().go_lower().ends_with(".json");
             if entry.file_type().is_ok_and(|t| !t.is_dir()) && is_json && {
                 if v8 {
                     state.oauth.invalidate_siwc(&entry.path());
@@ -1188,7 +1280,7 @@ fn patch_error(e: Option<PatchError>) -> Response {
 }
 
 /// Go `syncAuthFileMetadataFields`: attributes that mirror the patched metadata roots.
-/// Used for config-backed credentials, which are not re-synthesized after a patch.
+/// Used for runtime-only credentials, which are not re-synthesized after a patch.
 fn sync_patched_attributes(c: &mut Credential, roots: &[String]) {
     let touched = |r: &str| roots.iter().any(|x| x == r);
     let text = |c: &Credential, key: &str| c.metadata.get(key).and_then(Value::as_str).map(|s| s.trim().to_owned());
@@ -1198,6 +1290,18 @@ fn sync_patched_attributes(c: &mut Credential, roots: &[String]) {
             && let Some(v) = text(c, key)
         {
             c.attributes.insert(key.into(), v);
+        }
+    }
+    if touched("excluded_models") {
+        // Go `ApplyAuthExcludedModelsMeta`: only the credential's own rules.
+        let (rules, _) = credentials::excluded_models_from_metadata(&c.metadata);
+        let mut rules: Vec<String> = rules.iter().map(|r| r.go_lower()).collect();
+        rules.sort();
+        rules.dedup();
+        if rules.is_empty() {
+            c.attributes.remove("excluded_models");
+        } else {
+            c.attributes.insert("excluded_models".into(), rules.join(","));
         }
     }
     if touched("headers") {
@@ -1325,25 +1429,45 @@ fn toggle_config_key(state: &Management, id: &str, disabled: bool) -> Result<boo
     Ok(true)
 }
 
-pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) -> Response {
-    #[derive(serde::Deserialize, Default)]
-    #[serde(default)]
-    struct Req {
-        name: String,
-        auth_index: String,
-        disabled: Option<bool>,
-    }
-    let Ok(req) = serde_json::from_slice::<Req>(&body) else {
+pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<FirstJson, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(FirstJson(body)) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
+    // gin `ShouldBindJSON` into `struct{ Name, AuthIndex string; Disabled *bool }`:
+    // every member in order; any type mismatch fails the bind, even one a later
+    // duplicate would fix.
+    let Some(members) = super::api_call::bind_struct(&body, &["name", "auth_index", "disabled"]) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
-    let name = req.name.trim().to_owned();
+    let (mut name, mut auth_index, mut disabled) = (String::new(), String::new(), None);
+    for (field, value) in members {
+        let slot = match field {
+            0 => &mut name,
+            1 => &mut auth_index,
+            _ => {
+                match value {
+                    Value::Bool(b) => disabled = Some(b),
+                    Value::Null => disabled = None,
+                    _ => return fail(StatusCode::BAD_REQUEST, "invalid request body"),
+                }
+                continue;
+            }
+        };
+        match value {
+            Value::String(s) => *slot = s,
+            Value::Null => {}
+            _ => return fail(StatusCode::BAD_REQUEST, "invalid request body"),
+        }
+    }
+    let name = name.trim().to_owned();
     if name.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "name is required");
     }
-    let Some(disabled) = req.disabled else {
+    let Some(disabled) = disabled else {
         return fail(StatusCode::BAD_REQUEST, "disabled is required");
     };
-    let Some(target) = lookup(&state, &name, &req.auth_index) else {
+    let Some(target) = lookup(&state, &name, &auth_index) else {
         return fail(StatusCode::NOT_FOUND, "auth file not found");
     };
     if runtime_only(&target) {
@@ -1362,6 +1486,14 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) ->
     }
     tokio::task::spawn_blocking(move || {
         let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        if plugin_virtual(&target) {
+            // Go: only through the source file's name, which toggles the file and every
+            // credential parsed from it; a parsed credential alone cannot be changed.
+            if !names_virtual_source(&name, &target) {
+                return fail(StatusCode::CONFLICT, PLUGIN_VIRTUAL);
+            }
+            return virtual_source_status(&state, &target, disabled);
+        }
         if matches!(target.source, Source::Config { .. }) {
             return match toggle_config_key(&state, &target.id, disabled) {
                 Ok(true) => reply(
@@ -1406,6 +1538,104 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Bytes) ->
     .unwrap_or_else(|_| patch_error(None))
 }
 
+/// Go `patchPluginVirtualSourceStatus`: writes `disabled` into the source file (Go's
+/// `setSourceAuthFileDisabled`: normalized keys, `json.Marshal` form) and sets it on
+/// every credential parsed from that file, in memory (the store never writes a
+/// plugin-virtual credential's file). The watcher's reload of the file agrees.
+fn virtual_source_status(state: &Management, target: &Credential, disabled: bool) -> Response {
+    let source = virtual_source(target).to_owned();
+    if source.is_empty() {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, PLUGIN_VIRTUAL);
+    }
+    let data = match std::fs::read(&source) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return fail(StatusCode::NOT_FOUND, "auth file not found");
+        }
+        Err(e) => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to update source auth file: {e}"),
+            );
+        }
+    };
+    let mut meta = if data.trim_ascii().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_slice::<Map<String, Value>>(&data) {
+            Ok(meta) => meta,
+            Err(e) => {
+                return fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to update source auth file: invalid auth file: {e}"),
+                );
+            }
+        }
+    };
+    // Go `NormalizeCredentialMetadata`, whose aliases include the OpenAPI pair the field
+    // edits do not take: the alias goes, and a canonical spelling already there wins.
+    let openapi = [
+        ("openapi-location", "openapi_location"),
+        ("openapi-models", "openapi_models"),
+    ];
+    for (alias, canon) in ALIASES.iter().chain(openapi.iter()) {
+        if let Some(v) = meta.remove(*alias) {
+            meta.entry(*canon).or_insert(v);
+        }
+    }
+    meta.insert("disabled".into(), disabled.into());
+    let raw = serde_json::to_vec(&meta)
+        .ok()
+        .and_then(|b| cpa_common::json::GoValue::parse_f64(&b))
+        .map(|v| v.marshal());
+    let Some(raw) = raw else {
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to update source auth file: marshal auth file",
+        );
+    };
+    if let Err(e) = write_file(Path::new(&source), &raw) {
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to update source auth file: {e}"),
+        );
+    }
+    let same = |p: &str| {
+        let clean = |p: &str| std::path::absolute(p.trim()).ok();
+        !p.trim().is_empty() && clean(p) == clean(&source)
+    };
+    let store = state.rt.store();
+    for c in store.snapshot().iter() {
+        let path = c.attributes.get("path").map_or("", String::as_str);
+        let from = c.attributes.get("virtual_source").map_or("", String::as_str);
+        if !same(path) && !same(from) {
+            continue;
+        }
+        let mut patch = MetadataPatch::default();
+        patch.set.insert("disabled".into(), disabled.into());
+        let mut current = c.clone();
+        for _ in 0..16 {
+            match store.apply_patch(&current.id, current.revision, &patch) {
+                Ok(_) => {
+                    note_disabled(state, &current.id, Some(disabled));
+                    break;
+                }
+                Err(PatchError::Stale { .. }) => match store.get(&current.id) {
+                    Some(next) => current = next,
+                    None => break,
+                },
+                Err(e) => {
+                    return fail(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to update auth {}: {e:?}", current.id),
+                    );
+                }
+            }
+        }
+    }
+    reply(StatusCode::OK, [("status", "ok".into()), ("disabled", disabled.into())])
+}
+
 const ALIASES: &[(&str, &str)] = &[
     ("api-key", "api_key"),
     ("base-url", "base_url"),
@@ -1425,10 +1655,17 @@ fn canonical(key: &str) -> &str {
 
 /// Go `PatchAuthFileFields`: dotted metadata paths, `weight`, `request_retry` and a
 /// merging `headers` field. The canonical spelling wins over a config-style alias.
-pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) -> Response {
-    let Ok(req) = serde_json::from_slice::<Map<String, Value>>(&body) else {
+pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Result<FirstJson, BytesRejection>) -> Response {
+    let body = match body {
+        Ok(FirstJson(body)) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
+    // `json.Decoder.Decode` into `map[string]json.RawMessage`: the first JSON value,
+    // a later duplicate key replacing an earlier one; null is an empty map.
+    let Some(members) = super::api_call::first_map(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
+    let req: Map<String, Value> = members.into_iter().collect();
     let name = req
         .get("name")
         .and_then(Value::as_str)
@@ -1513,6 +1750,14 @@ fn apply_fields(
     else {
         return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
     };
+    // Go d69962e4 and 3e309fb4: config credentials are edited through the config
+    // endpoints, not as auth files.
+    if matches!(target.source, Source::Config { .. }) {
+        return Some(fail(StatusCode::NOT_FOUND, "auth file not found"));
+    }
+    if plugin_virtual(&target) {
+        return Some(fail(StatusCode::CONFLICT, PLUGIN_VIRTUAL));
+    }
     // Start from Go's normalized metadata so aliases persist under canonical names.
     let mut meta = target.metadata.clone();
     for (alias, canon) in ALIASES {
@@ -1524,6 +1769,21 @@ fn apply_fields(
     for (path, value) in fields {
         if path.is_empty() {
             return Some(fail(StatusCode::BAD_REQUEST, "field name is required"));
+        }
+        if root(path) == "excluded_models" {
+            if path != "excluded_models" {
+                return Some(fail(
+                    StatusCode::BAD_REQUEST,
+                    "excluded_models does not support nested fields",
+                ));
+            }
+            let strings = value.as_array().is_some_and(|l| l.iter().all(Value::is_string));
+            if !value.is_null() && !strings {
+                return Some(fail(
+                    StatusCode::BAD_REQUEST,
+                    "excluded_models must be a string array or null",
+                ));
+            }
         }
         if path == "weight" {
             if value.is_null() {
@@ -1570,9 +1830,8 @@ fn apply_fields(
     } else {
         None
     };
-    if matches!(target.source, Source::Config { .. } | Source::Runtime) {
-        // Go updates config API keys and runtime-only auths in memory only (no file,
-        // no config write).
+    if matches!(target.source, Source::Runtime) {
+        // Go updates runtime-only auths in memory only (no file, no config write).
         let mut next = Credential::clone(&target);
         next.metadata = meta;
         sync_patched_attributes(&mut next, &roots);
@@ -1731,7 +1990,7 @@ fn definitions() -> &'static Map<String, Value> {
 
 /// Go `GetStaticModelDefinitionsByChannel`.
 fn channel_models(channel: &str) -> Option<&'static Vec<Value>> {
-    let key = match channel.trim().to_lowercase().as_str() {
+    let key = match channel.trim().go_lower().as_str() {
         "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi".to_owned(),
         "x-ai" | "grok" => "xai".to_owned(),
         "muse" => "meta".to_owned(),
@@ -1763,10 +2022,7 @@ pub(crate) async fn model_definitions(
     }
     reply_ordered(
         StatusCode::OK,
-        [
-            ("channel", channel.to_lowercase().into()),
-            ("models", Value::Array(models)),
-        ],
+        [("channel", channel.go_lower().into()), ("models", Value::Array(models))],
     )
 }
 
@@ -1912,7 +2168,14 @@ pub(crate) async fn models(State(state): State<Arc<Management>>, RawQuery(raw): 
     reply(StatusCode::OK, [("models", Value::Array(models))])
 }
 
-pub(crate) async fn cooldown_reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn cooldown_reset(
+    State(state): State<Arc<Management>>,
+    body: Result<FirstJson, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(FirstJson(body)) => body,
+        Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
+    };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Req {
@@ -1966,7 +2229,21 @@ fn auth_json(c: &Credential) -> Value {
     })
 }
 
-pub(crate) async fn refresh(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery, body: Bytes) -> Response {
+pub(crate) async fn refresh(
+    State(state): State<Arc<Management>>,
+    RawQuery(raw): RawQuery,
+    body: Result<FirstJson, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(FirstJson(body)) => body,
+        Err(rejection) => {
+            let reason = super::read_reason(&rejection);
+            return fail(
+                super::read_status(&rejection),
+                format!("invalid request body: {reason}"),
+            );
+        }
+    };
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
     struct Req {
@@ -1998,7 +2275,14 @@ pub(crate) async fn refresh(State(state): State<Arc<Management>>, RawQuery(raw):
             .store()
             .snapshot()
             .into_iter()
-            .filter(|c| !c.disabled && meta_str(c, "refresh_token").is_some_and(|t| !t.trim().is_empty()))
+            .filter(|c| {
+                !c.disabled
+                    && (meta_str(c, "refresh_token").is_some_and(|t| !t.trim().is_empty())
+                        // Go `authHasRefreshCredential`'s SIWC clause; Codex only until the
+                        // Claude replay, as in `Executors::has_refresh_credential`.
+                        || c.provider == "codex"
+                            && cpa_exec::codex_siwc::refresh_due(c, chrono::Utc::now()).is_some())
+            })
             .collect();
         let mut results = Vec::with_capacity(targets.len());
         for c in targets {
@@ -2157,13 +2441,21 @@ mod tests {
         refresh(&state, "c.json", "fake-new");
         std::fs::write(dir.join("c.json"), r#"{"type":"claude","access_token":"fake-old"}"#).unwrap();
         let token = |state: &Management| state.rt.store().get("c.json").unwrap().metadata["access_token"].clone();
-        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","note":1}"#)).await;
+        let r = fields(
+            State(state.clone()),
+            Ok(FirstJson(Bytes::from(r#"{"name":"a.json","note":1}"#))),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
-        let r = fields(State(state.clone()), Bytes::from(r#"{"name":"a.json","type":"codex"}"#)).await;
+        let r = fields(
+            State(state.clone()),
+            Ok(FirstJson(Bytes::from(r#"{"name":"a.json","type":"codex"}"#))),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         let r = status(
             State(state.clone()),
-            Bytes::from(r#"{"name":"a.json","disabled":true}"#),
+            Ok(FirstJson(Bytes::from(r#"{"name":"a.json","disabled":true}"#))),
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
@@ -2173,6 +2465,63 @@ mod tests {
             (a.provider.as_str(), a.disabled, &a.metadata["note"]),
             ("codex", true, &json!(1))
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An upload registers what it uploaded, as Go's upload does without asking plugin
+    /// auth providers, even while one is active and has not parsed the new bytes: it
+    /// replaces the credential with the same ID instead of keeping the old one.
+    #[tokio::test]
+    async fn an_upload_replaces_its_credential_while_plugins_parse_auth_files() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-plugins",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
+            assert_eq!(token(&state), "fake-0");
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            assert_eq!(token(&state), "fake-1");
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A token refresh that commits between an upload's write and its publication
+    /// changed the file: the refreshed credential stays, on disk and in the store.
+    #[tokio::test]
+    async fn a_refresh_between_an_upload_and_its_publication_survives() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-refresh",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let refreshing = state.clone();
+            crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+                state.rt.config().auth_dir.clone(),
+                Box::new(move || refresh(&refreshing, "a.json", "fake-refreshed")),
+            ));
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            let stored = state.rt.store().get("a.json").unwrap();
+            assert_eq!(stored.provider, "claude");
+            assert_eq!(stored.metadata["access_token"], "fake-refreshed");
+            assert_eq!(on_disk(&dir, "a.json")["access_token"], "fake-refreshed");
+        });
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

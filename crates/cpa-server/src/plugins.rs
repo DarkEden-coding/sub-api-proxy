@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock, Weak};
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::HeaderMap;
+use cpa_common::gostr::GoStr;
 use cpa_core::config::Config;
 use cpa_core::exec::Caller;
 use tokio::sync::watch;
@@ -21,7 +22,10 @@ pub(crate) mod model_callbacks;
 /// The host plus the config it should converge on.
 pub struct PluginRuntime {
     host: cpa_plugin::Host,
-    latest: watch::Sender<Option<Arc<Config>>>,
+    /// The latest published config and its publish sequence number.
+    latest: watch::Sender<Option<(u64, Arc<Config>)>>,
+    /// The sequence number of the last config the worker applied.
+    applied: watch::Sender<u64>,
     access: RwLock<Arc<AccessRegistry>>,
     /// Go's executor table entries owned by plugins: provider to the registered executor.
     executors: RwLock<HashMap<String, cpa_plugin::executor::Adapter>>,
@@ -40,6 +44,7 @@ impl PluginRuntime {
         Self {
             host,
             latest: watch::Sender::new(None),
+            applied: watch::Sender::new(0),
             access: RwLock::default(),
             executors: RwLock::default(),
         }
@@ -61,7 +66,7 @@ impl PluginRuntime {
     ) -> Option<cpa_plugin::executor::Adapter> {
         let adapter = {
             let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            executors.get(&credential.provider.trim().to_lowercase()).cloned()?
+            executors.get(&credential.provider.trim().go_lower()).cloned()?
         };
         let compat_names = cpa_core::config::credentials::openai_compat_names(cfg);
         (!binds_native(credential, &compat_names)).then_some(adapter)
@@ -70,13 +75,32 @@ impl PluginRuntime {
     /// Whether a plugin executor is registered for `provider`.
     pub(crate) fn has_executor(&self, provider: &str) -> bool {
         let executors = self.executors.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        executors.contains_key(&provider.trim().to_lowercase())
+        executors.contains_key(&provider.trim().go_lower())
     }
 
     /// Records a published config; the worker started by [`start`] applies it.
     pub(crate) fn config_published(&self, cfg: Arc<Config>) {
-        self.latest.send_replace(Some(cfg));
+        self.latest.send_modify(|latest| {
+            let seq = latest.as_ref().map_or(1, |(seq, _)| seq + 1);
+            *latest = Some((seq, cfg));
+        });
     }
+
+    fn published_seq(&self) -> u64 {
+        self.latest.borrow().as_ref().map_or(0, |(seq, _)| *seq)
+    }
+}
+
+/// Waits until the plugin worker started by [`start`] has applied every config published
+/// so far (Go applies plugin config synchronously while it applies a config).
+pub async fn applied(rt: &Runtime) {
+    let seq = rt.plugin_runtime().published_seq();
+    let _ = rt
+        .plugin_runtime()
+        .applied
+        .subscribe()
+        .wait_for(|applied| *applied >= seq)
+        .await;
 }
 
 /// Go's startup and reload sequence (`syncPluginRuntimeConfigForConfig` and
@@ -94,7 +118,80 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     rt.plugin_runtime()
         .register_access(!cfg.api_keys.is_empty(), providers, exclusive);
     host.register_management_routes(&reserved_management_routes()).await;
+    // Go `sdktranslator.SetPluginHooks(s.pluginHost)`: the hooks are skipped while no
+    // plugin offers one.
+    cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+    // Go `registerPluginAuthParser`: auth files go to plugin auth providers first; the
+    // next auth-folder reload picks up what a newly loaded plugin parses.
+    cpa_core::config::credentials::set_plugin_auth_parser(Some(host.auth_parser()));
     sync_models(rt).await;
+}
+
+/// Go loads plugins while it builds the service, so its first auth-folder load already
+/// asks plugin auth providers (sdk/cliproxy/builder.go `ApplyConfig`, then
+/// `coreManager.Load` in `Service.Run`). Credentials load before plugins start here, so
+/// the binary calls this once they have: while a plugin offers an auth provider, the
+/// auth folder and config credentials load again, before serving. Not in Home mode,
+/// whose credentials come from Home. Published as the watcher publishes a scan: a file
+/// changed after the scan read it (a token refresh committed meanwhile) keeps its
+/// current credential, and so does a file the scan read half-written. Plugins parse on
+/// a blocking thread, holding no lock: a parse can make host callbacks that need the
+/// async runtime, even with one worker thread.
+pub async fn reload_plugin_auth_files(rt: &Arc<Runtime>) {
+    use cpa_core::config::credentials;
+    if !credentials::plugin_auth_parser_active() {
+        return;
+    }
+    let rt = rt.clone();
+    let reload = tokio::task::spawn_blocking(move || {
+        let cfg = rt.config();
+        credentials::preparse_auth_dir(&cfg);
+        let scan = credentials::scan_auth_dir(&cfg);
+        let mut all = scan.credentials;
+        for existing in rt.store().snapshot() {
+            if let cpa_core::credential::Source::File(path) = &existing.source
+                && scan.incomplete.contains(path)
+                && !all.iter().any(|c| c.id == existing.id)
+            {
+                all.push(cpa_core::credential::Credential::clone(&existing));
+            }
+        }
+        all.extend(credentials::from_config(&cfg));
+        rt.store().reconcile_scanned_with(all, &scan.read, |current, all| {
+            keep_deferred(current, all, &scan.deferred)
+        });
+    });
+    if let Err(e) = reload.await {
+        tracing::error!(error = %e, "reloading auth files for plugin auth providers failed");
+    }
+}
+
+/// Keeps the store's `current` credentials of the files a scan deferred (no plugin auth
+/// provider has answered for their current bytes yet) and publishes nothing new for
+/// them, as Go's watcher asks the plugin first; the watcher's next reload parses them.
+/// Run under the store's reconciliation gate
+/// ([`crate::runtime::CredentialStore::reconcile_scanned_with`]), so a refresh committed
+/// after the scan is what is kept.
+pub(crate) fn keep_deferred(
+    current: &[Arc<cpa_core::credential::Credential>],
+    all: &mut Vec<cpa_core::credential::Credential>,
+    deferred: &std::collections::HashSet<std::path::PathBuf>,
+) {
+    use cpa_core::credential::{Credential, Source};
+    if deferred.is_empty() {
+        return;
+    }
+    // Saves and uploads record absolute paths; a relative auth-dir scans relative ones.
+    let absolute = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
+    let deferred: std::collections::HashSet<_> = deferred.iter().map(|p| absolute(p)).collect();
+    for existing in current {
+        if let Source::File(p) = &existing.source
+            && deferred.contains(&absolute(p))
+            && !all.iter().any(|c| c.id == existing.id)
+        {
+            all.push(Credential::clone(existing));
+        }
+    }
 }
 
 /// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim
@@ -174,7 +271,7 @@ const BUILTIN: [&str; 14] = [
 /// candidate keeps the provider.
 fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -> bool {
     let attr = |k: &str| c.attributes.get(k).map(|v| v.trim()).unwrap_or_default();
-    let provider = c.provider.trim().to_lowercase();
+    let provider = c.provider.trim().go_lower();
     if !attr("compat_name").is_empty() || provider == "openai-compatibility" || BUILTIN.contains(&provider.as_str()) {
         return true;
     }
@@ -184,7 +281,7 @@ fn binds_native(c: &cpa_core::credential::Credential, compat_names: &[String]) -
         provider.as_str()
     };
     !attr("base_url").is_empty()
-        || [key, &attr("provider_key").to_lowercase(), &provider]
+        || [key, &attr("provider_key").go_lower(), &provider]
             .iter()
             .any(|candidate| !candidate.is_empty() && compat_names.iter().any(|n| n == candidate))
 }
@@ -202,7 +299,7 @@ async fn native_executor_providers(rt: &Runtime) -> HashSet<String> {
     let host = rt.plugins();
     let mut native = HashSet::new();
     for c in rt.store().snapshot().iter().filter(|c| !c.disabled) {
-        let provider = c.provider.trim().to_lowercase();
+        let provider = c.provider.trim().go_lower();
         let key = if !c.attributes.get("compat_name").is_none_or(|v| v.trim().is_empty())
             || provider == "openai-compatibility"
         {
@@ -285,7 +382,7 @@ pub(crate) fn scheduler_request(
     let candidates = rt.store().scheduler_candidates(selection, policy, admit, across)?;
     let mut providers: Vec<String> = Vec::new();
     for p in selection.provider_keys() {
-        let p = p.trim().to_lowercase();
+        let p = p.trim().go_lower();
         if !p.is_empty() && p != "mixed" && !providers.contains(&p) {
             providers.push(p);
         }
@@ -296,7 +393,7 @@ pub(crate) fn scheduler_request(
         // Provider empty; Codex realtime and Alpha Search select one provider (Go
         // `pickNextLegacy`), which names it.
         provider: if selection.providers.is_empty() {
-            selection.provider.trim().to_lowercase()
+            selection.provider.trim().go_lower()
         } else {
             String::new()
         },
@@ -308,7 +405,7 @@ pub(crate) fn scheduler_request(
             .iter()
             .map(|c| cpa_plugin::api::SchedulerAuthCandidate {
                 id: c.id.clone(),
-                provider: c.provider.trim().to_lowercase(),
+                provider: c.provider.trim().go_lower(),
                 priority: crate::scheduler::priority(c),
                 // ponytail: candidates are ready, which Go reports as `active` unless an
                 // earlier failure left the credential in `error`; that status is not
@@ -369,7 +466,7 @@ pub(crate) async fn scheduler_pick(
 
 /// Go `schedulerAttributeSensitive`: credential attributes a scheduler never sees.
 fn scheduler_attribute_sensitive(key: &str) -> bool {
-    let key = key.trim().to_lowercase();
+    let key = key.trim().go_lower();
     let normalized: String = key
         .chars()
         .map(|c| if matches!(c, '-' | '.' | ' ') { '_' } else { c })
@@ -480,7 +577,12 @@ impl PluginRuntime {
     /// Go `configaccess.Register` then `RegisterFrontendAuthProviders`: register or
     /// unregister the client-key provider, register each plugin provider, set the
     /// exclusive key, and drop plugin keys no longer offered.
-    fn register_access(&self, client_keys: bool, providers: Vec<(String, String)>, exclusive: Option<String>) {
+    pub(crate) fn register_access(
+        &self,
+        client_keys: bool,
+        providers: Vec<(String, String)>,
+        exclusive: Option<String>,
+    ) {
         let mut slot = self.access.write().unwrap_or_else(|e| e.into_inner());
         let mut next = AccessRegistry {
             order: slot.order.clone(),
@@ -511,10 +613,10 @@ impl PluginRuntime {
 pub(crate) enum Access {
     /// No provider registered: Go's manager returns no result and sets nothing.
     Open,
-    /// Go `sdkaccess.Result`: the caller and the provider identifier that accepted it.
+    /// Go `sdkaccess.Result`: the caller, with the provider identifier that accepted it.
     /// ponytail: a plugin's result metadata is not kept (`Caller` has no field for it;
     /// only Go's Home mode reads it).
-    Granted { caller: Caller, provider: String },
+    Granted(Caller),
 }
 
 /// Go `sdkaccess.AuthError` as the middlewares answer it.
@@ -549,10 +651,10 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                     parts.uri.query().unwrap_or_default(),
                 ) {
                     Ok(caller) => {
-                        outcome = Some(Ok(Access::Granted {
-                            caller,
+                        outcome = Some(Ok(Access::Granted(Caller {
                             provider: CONFIG_PROVIDER.to_owned(),
-                        }));
+                            ..caller
+                        })));
                         break;
                     }
                     Err(message) => invalid |= message != MISSING_API_KEY,
@@ -569,6 +671,14 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                             outcome = Some(Err(Denied {
                                 status: 413,
                                 message: "request body too large",
+                            }));
+                            break;
+                        }
+                        // Go `NewRequestEntityTooLargeError` (dd7b4334).
+                        Err(error) if crate::body_limit::is_too_large(&error) => {
+                            outcome = Some(Err(Denied {
+                                status: 413,
+                                message: crate::body_limit::MESSAGE,
                             }));
                             break;
                         }
@@ -592,13 +702,11 @@ pub(crate) async fn authenticate(rt: &Runtime, req: Request) -> (Request, Result
                     body: cpa_plugin::gojson::NonNilBytes(bytes),
                 };
                 if let Some(accepted) = rt.plugins().frontend_authenticate(id, &request).await {
-                    outcome = Some(Ok(Access::Granted {
-                        caller: Caller {
-                            principal: accepted.principal,
-                            source: "",
-                        },
+                    outcome = Some(Ok(Access::Granted(Caller {
+                        principal: accepted.principal,
+                        source: "",
                         provider: accepted.provider,
-                    }));
+                    })));
                     break;
                 }
             }
@@ -667,17 +775,21 @@ pub async fn start(rt: &Arc<Runtime>) {
     model_callbacks::attach(rt);
     let mut rx = rt.plugin_runtime().latest.subscribe();
     rx.mark_unchanged();
+    // At least this publish is in the current config.
+    let seq = rt.plugin_runtime().published_seq();
     sync(rt, rt.config()).await;
+    rt.plugin_runtime().applied.send_replace(seq);
     let weak: Weak<Runtime> = Arc::downgrade(rt);
     tokio::spawn(async move {
         while rx.changed().await.is_ok() {
-            let Some(cfg) = rx.borrow_and_update().clone() else {
+            let Some((seq, cfg)) = rx.borrow_and_update().clone() else {
                 continue;
             };
             let Some(rt) = weak.upgrade() else {
                 return;
             };
             sync(&rt, cfg).await;
+            rt.plugin_runtime().applied.send_replace(seq);
         }
     });
 }

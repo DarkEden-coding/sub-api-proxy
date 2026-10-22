@@ -12,6 +12,7 @@
 //! container needs `git` installed. Any failure to read HEAD's objects counts as
 //! corruption; go-git tells a missing object from other read errors, the CLI does not.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -511,7 +512,7 @@ impl GitStore {
     fn pull_once(&self) -> Result<()> {
         let fetched = self.run_in(&self.repo, &["fetch", "-q", "origin"])?;
         if !fetched.status.success() {
-            let message = String::from_utf8_lossy(&fetched.stderr).to_lowercase();
+            let message = String::from_utf8_lossy(&fetched.stderr).go_lower();
             // Go ignores authentication prompts and empty remotes during this sync.
             let benign = message.contains("authentication failed")
                 || message.contains("could not read username")

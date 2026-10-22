@@ -7,6 +7,7 @@
 //! credential is written under Go's file name, merged with an existing file of that
 //! name and with a matching legacy file, which is then removed.
 
+use cpa_core::gostr::GoStr;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -495,7 +496,7 @@ pub(crate) fn credential_file_name(email: &str, organization: &str, account: &st
 /// `IsAuthTokenPayloadKey`: never inherited from an existing file.
 fn token_payload_key(key: &str) -> bool {
     matches!(
-        key.trim().to_lowercase().as_str(),
+        key.trim().go_lower().as_str(),
         "access_token"
             | "refresh_token"
             | "id_token"
@@ -551,7 +552,7 @@ fn legacy_credential(directory: &Path, target_name: &str, target: &BTreeMap<Stri
     let (email, organization, account) = (field("email"), field("organization_uuid"), field("account_uuid"));
     if email.is_empty()
         || (organization.is_empty() && account.is_empty())
-        || !target_name.eq_ignore_ascii_case(&credential_file_name(&email, &organization, &account))
+        || !target_name.go_eq_fold(&credential_file_name(&email, &organization, &account))
     {
         return None;
     }
@@ -569,8 +570,8 @@ fn legacy_credential(directory: &Path, target_name: &str, target: &BTreeMap<Stri
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let email_legacy = base.eq_ignore_ascii_case(&legacy_name);
-        let account_predecessor = !account_name.is_empty() && base.eq_ignore_ascii_case(&account_name);
+        let email_legacy = base.go_eq_fold(&legacy_name);
+        let account_predecessor = !account_name.is_empty() && base.go_eq_fold(&account_name);
         if !email_legacy && !account_predecessor {
             return false;
         }
@@ -590,13 +591,10 @@ fn legacy_credential(directory: &Path, target_name: &str, target: &BTreeMap<Stri
         }
         let (c_org, c_account) = (get("organization_uuid"), get("account_uuid"));
         if !organization.is_empty() {
-            (!c_org.is_empty() && c_org.eq_ignore_ascii_case(&organization))
-                || (c_org.is_empty()
-                    && account_predecessor
-                    && !c_account.is_empty()
-                    && c_account.eq_ignore_ascii_case(&account))
+            (!c_org.is_empty() && c_org.go_eq_fold(&organization))
+                || (c_org.is_empty() && account_predecessor && !c_account.is_empty() && c_account.go_eq_fold(&account))
         } else {
-            email_legacy && c_org.is_empty() && !c_account.is_empty() && c_account.eq_ignore_ascii_case(&account)
+            email_legacy && c_org.is_empty() && !c_account.is_empty() && c_account.go_eq_fold(&account)
         }
     })
 }

@@ -66,6 +66,7 @@ impl AuthManager for PluginAuthManager {
         write()?;
         let path = PathBuf::from(auth.attributes.get("path").cloned().unwrap_or_default());
         let bytes = persist(&path, &auth)?;
+        credentials::note_plugin_auth_write(&path, &bytes);
         let cfg = state.rt.config();
         let credential = match credentials::from_file(&cfg, &cfg.auth_dir, &path, &bytes) {
             Ok(Some(c)) => {
@@ -226,5 +227,72 @@ fn host_auth(state: &Management, c: &Credential) -> HostAuth {
         next_retry_after: go_time(cooldown.map(|cd| SystemTime::now() + cd.remaining)),
         account_type: account_type.into(),
         account,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A plugin's `host.auth.save` writes and publishes under the disk lock, so it cannot
+    /// interleave with a SIWC commit, which holds that lock from its read of the backing
+    /// file to its publication: the save's write waits until the lock is released, and
+    /// the file and the registered credential then agree.
+    #[test]
+    fn a_plugin_save_waits_for_a_commit_holding_the_disk_lock() {
+        let dir = std::env::temp_dir().join(format!("cpa-plugin-save-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        let cfg = cpa_core::config::Config::load(&path).unwrap();
+        let rt = Arc::new(crate::testing::runtime(
+            cfg,
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let state = Management::new(rt, path);
+        let manager = PluginAuthManager(Arc::downgrade(&state));
+        let file = dir.join("saved.json");
+        let auth = HostAuth {
+            attributes: [("path".to_owned(), file.display().to_string())].into(),
+            metadata: serde_json::json!({"type": "claude", "access_token": "saved"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            ..Default::default()
+        };
+        let commit = state.disk.lock().unwrap();
+        let (wrote, written) = mpsc::channel();
+        let save = std::thread::spawn({
+            let file = file.clone();
+            move || {
+                manager.save(auth, &mut || {
+                    wrote.send(()).unwrap();
+                    std::fs::write(&file, r#"{"type":"claude","access_token":"saved"}"#).map_err(|e| e.to_string())
+                })
+            }
+        });
+        assert!(
+            written.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the save wrote while a commit held the disk lock"
+        );
+        assert!(!file.exists());
+        drop(commit);
+        written.recv_timeout(Duration::from_secs(5)).unwrap();
+        save.join().unwrap().unwrap();
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let stored = state.rt.store().get("saved.json").unwrap();
+        assert_eq!(on_disk, Value::Object(stored.metadata.clone()));
+        assert_eq!(stored.metadata["access_token"], "saved");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

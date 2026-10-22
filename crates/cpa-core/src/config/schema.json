@@ -117,7 +117,9 @@
             },
             "advertise-management": "bool"
           }
-        }
+        },
+        "max-request-body-bytes": "int",
+        "github-token": "string"
       }
     },
     "management": {
@@ -368,7 +370,8 @@
               }
             }
           }
-        }
+        },
+        "tls-handshake-timeout-seconds": "int"
       }
     },
     "oauth": {
