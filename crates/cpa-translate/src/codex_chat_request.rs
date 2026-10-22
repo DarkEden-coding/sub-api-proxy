@@ -337,6 +337,17 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
                     }
                     used.insert(call_id.clone());
                 }
+                // Codex rejects call_id values longer than 64 bytes (b0debb35).
+                let mut shortened = shorten_call_id(&call_id);
+                if shortened != call_id {
+                    let mut attempt = 1;
+                    while used.contains(&shortened) {
+                        shortened = shorten_call_id(&[&call_id[..], format!("_{attempt}").as_bytes()].concat());
+                        attempt += 1;
+                    }
+                    used.insert(shortened.clone());
+                    call_id = shortened;
+                }
                 pending.push(PendingCall {
                     call_id: call_id.clone(),
                     source_id,
@@ -476,6 +487,21 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
 }
 
 /// setToolCallOutputContent.
+/// `shortenCodexCallIDIfNeeded`: an ID over 64 bytes keeps its first bytes (cut without
+/// regard to UTF-8, as Go slices the string) and ends in `_` plus 8 bytes of its SHA-256.
+fn shorten_call_id(id: &[u8]) -> Vec<u8> {
+    const LIMIT: usize = 64;
+    if id.len() <= LIMIT {
+        return id.to_vec();
+    }
+    use sha2::{Digest, Sha256};
+    let sum = Sha256::digest(id);
+    let suffix: String = std::iter::once("_".to_owned())
+        .chain(sum[..8].iter().map(|b| format!("{b:02x}")))
+        .collect();
+    [&id[..LIMIT - suffix.len()], suffix.as_bytes()].concat()
+}
+
 fn set_tool_output(output: &mut Vec<u8>, content: &Res<'_>) {
     if content.kind == Kind::String {
         let structured = gj::parse(&content.s).into_owned();
@@ -584,4 +610,27 @@ fn has_image_part(content: &Res<'_>) -> bool {
                 b"input_image" => !item.get("image_url").bytes().is_empty() || !item.get("file_id").bytes().is_empty(),
                 _ => false,
             })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Go v8.0.35 `ConvertOpenAIRequestToCodex` on over-length tool call IDs (b0debb35):
+    /// see tests/reference/codex_chat.
+    #[test]
+    fn over_length_call_ids_match_go() {
+        let go: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/codex_chat_go.json")).unwrap();
+        for case in go["requests"].as_array().unwrap() {
+            let out = super::convert(
+                case["model"].as_str().unwrap(),
+                case["in"].as_str().unwrap().as_bytes(),
+                case["stream"].as_bool().unwrap(),
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out),
+                case["out"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
 }
