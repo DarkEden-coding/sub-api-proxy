@@ -285,7 +285,7 @@ impl Host {
     }
 
     /// `host.auth.save`: writes the credential file and registers it.
-    pub(crate) fn host_auth_save(&self, caller: &crate::callbacks::Caller, raw: &[u8]) -> Result<Bytes, CallbackError> {
+    pub(crate) fn host_auth_save(&self, raw: &[u8]) -> Result<Bytes, CallbackError> {
         let req: HostAuthSaveRequest =
             gojson::from_slice(raw).map_err(|e| err(format!("decode host auth save request: {e}")))?;
         // validateHostAuthSaveRequest.
@@ -301,16 +301,6 @@ impl Host {
             return Err(err("json is required"));
         }
         gojson::from_slice::<Metadata>(&data).map_err(|e| err(format!("invalid auth json: {e}")))?;
-        // The scan this plugin is parsing for holds the disk lock the save takes and
-        // waits for the plugin, so the save is refused instead of deadlocking; every
-        // other save waits for the lock. Go allows it (its synthesizer holds no lock).
-        // ponytail: parse outside the disk lock, then publish under it with the
-        // additions, removals and config revalidated, and allow this save again.
-        if self.parsing_for_scan(&caller.plugin_id) {
-            return Err(err(
-                "host.auth.save is not available while this plugin is parsing an auth file",
-            ));
-        }
         // saveAuthFile.
         let dir = self
             .resolved_auth_dir()

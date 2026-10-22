@@ -134,25 +134,69 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
 /// auth folder and config credentials load again, before serving. Not in Home mode,
 /// whose credentials come from Home. Published as the watcher publishes a scan: a file
 /// changed after the scan read it (a token refresh committed meanwhile) keeps its
-/// current credential, and so does a file the scan read half-written.
-pub fn reload_plugin_auth_files(rt: &Runtime) {
+/// current credential, and so does a file the scan read half-written. Plugins parse on
+/// a blocking thread, holding no lock: a parse can make host callbacks that need the
+/// async runtime, even with one worker thread.
+pub async fn reload_plugin_auth_files(rt: &Arc<Runtime>) {
     use cpa_core::config::credentials;
     if !credentials::plugin_auth_parser_active() {
         return;
     }
-    let cfg = rt.config();
-    let scan = credentials::scan_auth_dir(&cfg);
-    let mut all = scan.credentials;
-    for existing in rt.store().snapshot() {
-        if let cpa_core::credential::Source::File(path) = &existing.source
-            && scan.incomplete.contains(path)
-            && !all.iter().any(|c| c.id == existing.id)
+    let rt = rt.clone();
+    let reload = tokio::task::spawn_blocking(move || {
+        let cfg = rt.config();
+        credentials::preparse_auth_dir(&cfg);
+        let scan = credentials::scan_auth_dir(&cfg);
+        let mut all = scan.credentials;
+        for existing in rt.store().snapshot() {
+            if let cpa_core::credential::Source::File(path) = &existing.source
+                && scan.incomplete.contains(path)
+                && !all.iter().any(|c| c.id == existing.id)
+            {
+                all.push(cpa_core::credential::Credential::clone(&existing));
+            }
+        }
+        keep_deferred(&rt, &mut all, scan.deferred);
+        all.extend(credentials::from_config(&cfg));
+        rt.store().reconcile_scanned(all, &scan.read);
+    });
+    if let Err(e) = reload.await {
+        tracing::error!(error = %e, "reloading auth files for plugin auth providers failed");
+    }
+}
+
+/// The credentials of the files a scan deferred (no plugin auth provider has answered
+/// for their current bytes yet): a file keeps the credentials it has, and a file without
+/// any takes its built-in credential, as Go's management upload registers one before
+/// its watcher asks plugins. The watcher's next reload parses them.
+pub(crate) fn keep_deferred(
+    rt: &Runtime,
+    all: &mut Vec<cpa_core::credential::Credential>,
+    deferred: std::collections::HashMap<std::path::PathBuf, Option<cpa_core::credential::Credential>>,
+) {
+    use cpa_core::credential::{Credential, Source};
+    if deferred.is_empty() {
+        return;
+    }
+    let current = rt.store().snapshot();
+    // Saves and uploads record absolute paths; a relative auth-dir scans relative ones.
+    let absolute = |p: &std::path::Path| std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
+    for (path, builtin) in deferred {
+        let path = absolute(&path);
+        let mut kept = false;
+        for existing in current
+            .iter()
+            .filter(|c| matches!(&c.source, Source::File(p) if absolute(p) == path))
         {
-            all.push(cpa_core::credential::Credential::clone(&existing));
+            kept = true;
+            if !all.iter().any(|c| c.id == existing.id) {
+                all.push(Credential::clone(existing));
+            }
+        }
+        if !kept && let Some(builtin) = builtin {
+            all.push(builtin);
         }
     }
-    all.extend(credentials::from_config(&cfg));
-    rt.store().reconcile_scanned(all, &scan.read);
 }
 
 /// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim

@@ -11,6 +11,9 @@
 //	inputs: a,b            executor_input_formats (default chat-completions)
 //	outputs: a,b           executor_output_formats (default chat-completions)
 //	scope: <scope>         executor_model_scope (default both)
+//	serial: true           answer one call at a time (plugin.register and
+//	                       plugin.reconfigure excepted), holding the turn across the
+//	                       host callbacks a call makes
 //
 // Any other method is answered from <record>/respond/<label>/<method>.json when that
 // file exists: the file is the complete response envelope, written by the test before
@@ -107,6 +110,9 @@ var (
 	inputs  = []string{"chat-completions"}
 	outputs = []string{"chat-completions"}
 	scope   = "both"
+	serial  = false
+	// turn serializes calls while serial is set.
+	turn sync.Mutex
 )
 
 type envelope struct {
@@ -149,6 +155,14 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	name := C.GoString(method)
 	if name == pluginabi.MethodPluginRegister || name == pluginabi.MethodPluginReconfigure {
 		configure(requestBytes)
+	} else {
+		mu.Lock()
+		serialized := serial
+		mu.Unlock()
+		if serialized {
+			turn.Lock()
+			defer turn.Unlock()
+		}
 	}
 	record(name, requestBytes)
 	raw, rc := handle(name, requestBytes)
@@ -181,6 +195,7 @@ func configure(raw []byte) {
 	inputs = []string{"chat-completions"}
 	outputs = []string{"chat-completions"}
 	scope = "both"
+	serial = false
 	for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
 		if !ok {
@@ -210,6 +225,8 @@ func configure(raw []byte) {
 			outputs = splitList(value)
 		case "scope":
 			scope = value
+		case "serial":
+			serial = value == "true"
 		}
 	}
 }

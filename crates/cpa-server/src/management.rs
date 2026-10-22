@@ -245,6 +245,7 @@ impl Management {
         let scan = files.unwrap_or_else(|| credentials::scan_auth_dir(&cfg));
         let mut all = scan.credentials;
         let mut read = scan.read;
+        crate::plugins::keep_deferred(&self.rt, &mut all, scan.deferred);
         // Uploads record absolute paths; a relative auth-dir scans relative ones.
         let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
         // Fallbacks follow their file: gone with it, replaced once a synthesizer

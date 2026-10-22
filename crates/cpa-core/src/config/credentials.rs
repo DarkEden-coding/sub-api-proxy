@@ -23,9 +23,10 @@ use crate::credential::{Credential, Source};
 use crate::gostr::GoStr;
 
 mod plugin_auth;
+use plugin_auth::Ask;
 pub use plugin_auth::{
-    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, set_plugin_auth_parser,
-    set_plugin_auth_parser_active,
+    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, preparse_auth_dir,
+    set_plugin_auth_parser, set_plugin_auth_parser_active,
 };
 
 const WEIGHT_MAX: i64 = 1_000_000;
@@ -1035,7 +1036,7 @@ pub fn parse_weight(value: &Json) -> Result<i64, String> {
 pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Result<Option<Credential>, String> {
     Ok(match file_credentials(None, auth_dir, path, data)? {
         Some(FileCredentials::One(c)) => Some(c),
-        Some(FileCredentials::Plugin(_)) | None => None,
+        Some(FileCredentials::Plugin(_) | FileCredentials::Deferred(_)) | None => None,
     })
 }
 
@@ -1044,10 +1045,13 @@ enum FileCredentials {
     One(Credential),
     /// What a plugin parsed: possibly none (the plugin suppresses the file) or several.
     Plugin(Vec<Credential>),
+    /// No cached plugin answer for these bytes yet ([`plugin_auth::Ask::Cached`]), with
+    /// what the built-in synthesizer makes of them.
+    Deferred(Option<Credential>),
 }
 
 fn file_credentials(
-    parser: Option<&dyn PluginAuthParser>,
+    parser: Option<Ask<'_>>,
     auth_dir: &Path,
     path: &Path,
     data: &[u8],
@@ -1074,7 +1078,14 @@ fn file_credentials(
     if let Some(parser) = parser
         && let Some(parsed) = plugin_auth::credentials(parser, &meta, &provider, path, data)
     {
-        return parsed.map(|all| Some(FileCredentials::Plugin(all)));
+        if let Ok(FileCredentials::Deferred(_)) = parsed {
+            let builtin = match file_credentials(None, auth_dir, path, data) {
+                Ok(Some(FileCredentials::One(c))) => Some(c),
+                _ => None,
+            };
+            return Ok(Some(FileCredentials::Deferred(builtin)));
+        }
+        return parsed.map(Some);
     }
     if provider.is_empty() || provider == "gemini" || provider == "gemini-cli" {
         return Ok(None);
@@ -1379,17 +1390,25 @@ pub struct AuthScan {
     /// `SynthesisContext.IncompleteFiles`); a caller keeps their last good credentials.
     pub incomplete: HashSet<PathBuf>,
     /// The SHA-256 of every file read, so the watcher records what it applied rather than
-    /// what it observed before a later write.
+    /// what it observed before a later write. Deferred files are left out.
     pub read: BTreeMap<PathBuf, [u8; 32]>,
+    /// The files no plugin auth provider has answered for yet ([`preparse_auth_dir`]),
+    /// with the built-in credential each synthesizes to: a caller keeps a file's last
+    /// credentials, or else takes that one (as Go's management upload registers a file
+    /// before its watcher asks plugins), and the watcher reloads the file again.
+    pub deferred: HashMap<PathBuf, Option<Credential>>,
 }
 
 /// [`from_auth_dir`], with the files it found incomplete and the hashes of what it read.
 /// A file that cannot be read is skipped, as in Go's full scan.
+///
+/// While a plugin offers an auth provider, only answers [`preparse_auth_dir`] cached
+/// are used, so callers may hold locks a plugin waits on; other files are deferred.
 pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
-    scan_with(cfg, plugin_auth::current().as_deref())
+    scan_with(cfg, plugin_auth::current().map(|_| Ask::Cached))
 }
 
-fn scan_with(cfg: &Config, parser: Option<&dyn PluginAuthParser>) -> AuthScan {
+fn scan_with(cfg: &Config, parser: Option<Ask<'_>>) -> AuthScan {
     let mut scan = AuthScan::default();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
@@ -1426,6 +1445,10 @@ fn scan_with(cfg: &Config, parser: Option<&dyn PluginAuthParser>) -> AuthScan {
         match file_credentials(parser, &cfg.auth_dir, &path, &data) {
             Ok(Some(FileCredentials::One(c))) => scan.credentials.push(c),
             Ok(Some(FileCredentials::Plugin(all))) => scan.credentials.extend(all),
+            Ok(Some(FileCredentials::Deferred(builtin))) => {
+                scan.read.remove(&path);
+                scan.deferred.insert(path, builtin);
+            }
             Ok(None) => {}
             Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping auth file"),
         }

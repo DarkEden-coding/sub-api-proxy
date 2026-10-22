@@ -450,6 +450,11 @@ fn reload_config(
     read_config: bool,
     observed: &Snapshot,
 ) -> (Result<Option<Config>, ReloadError>, Snapshot) {
+    // Plugin auth providers parse before the lock is taken, so one can save an auth or
+    // wait on its own locks meanwhile; the scan under the lock takes their answers for
+    // the bytes it reads and defers a file changed since (Go's synthesizer holds no
+    // lock). A no-op while no plugin offers an auth provider.
+    credentials::preparse_auth_dir(&state.rt.config());
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let mut read = Snapshot {
         config: observed.config,
