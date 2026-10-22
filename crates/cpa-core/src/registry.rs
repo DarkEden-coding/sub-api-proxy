@@ -69,6 +69,15 @@ impl ModelInfo {
         self.raw.get("is_compat").and_then(Value::as_bool).unwrap_or(false)
     }
 
+    /// A catalog model: the typed fields as Go's typed decode reads them ([`go_model_json`]:
+    /// `-0` is 0, a null `type` is `""`, a null level is `""`), `raw` as published.
+    fn from_catalog(raw: Map<String, Value>) -> Result<Self, serde_json::Error> {
+        let typed = go_model_json(&raw).map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        let mut info = Self::from_raw(serde_json::from_value(typed)?)?;
+        info.raw = raw;
+        Ok(info)
+    }
+
     pub fn from_raw(raw: Map<String, Value>) -> Result<Self, serde_json::Error> {
         #[derive(Deserialize)]
         struct Typed {
@@ -105,7 +114,10 @@ impl Catalog {
                 continue;
             }
             let models: Vec<Map<String, Value>> = serde_json::from_value(models)?;
-            let models = models.into_iter().map(ModelInfo::from_raw).collect::<Result<_, _>>()?;
+            let models = models
+                .into_iter()
+                .map(ModelInfo::from_catalog)
+                .collect::<Result<_, _>>()?;
             channels.push((name, models));
         }
         Ok(Self { channels })
@@ -438,7 +450,19 @@ fn check_catalog_members(json: &str) -> Result<(), String> {
                 }
                 Config => {
                     if let Some(c) = object(v) {
-                        known(&["override_header"], &c?, &at)?;
+                        for (_, headers) in known(&["override_header"], &c?, &at)? {
+                            // Go records a type error even when a repeated key's later value
+                            // would replace it; header names are matched as written.
+                            let Some(headers) = object(headers) else { continue };
+                            for (name, value) in headers?.0 {
+                                if !(value.get().starts_with('"') || value.get() == "null") {
+                                    return Err(format!(
+                                        "{at}.override_header.{name}: {} is not a string",
+                                        value.get()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 Native => {

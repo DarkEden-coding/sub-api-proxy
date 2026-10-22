@@ -28,9 +28,13 @@ const TYPED_GEMINI_GO: &str = r#"{"id":"gemini-typed","object":"","created":0,"o
 /// Catalogs refused whole (docs/DIFFERENCES-FROM-GO.md, remote model catalogs), as raw
 /// text: a parsed `Value` cannot hold repeated members. Each adds one Gemini model (or a
 /// section) to the otherwise acceptable refreshed catalog. Go refuses the integer-field
-/// fractions, `"bad"` then `123`, and the empty decoded ID; it serves `levels: [""]` for
-/// `[null]` and merges the others differently from the decoded map.
+/// fractions, `"bad"` then `123` (also as a repeated header name), and the empty decoded
+/// ID; it merges the others differently from the decoded map.
 const REFUSED: [(&str, &str); 15] = [
+    (
+        "repeated_header_bad_first",
+        r#"{"id":"g","config":{"override_header":{"X-Test":123,"X-Test":"ok"}}}"#,
+    ),
     ("zero_fraction", r#"{"id":"g","inputTokenLimit":0.0}"#),
     ("negative_zero_fraction", r#"{"id":"g","inputTokenLimit":-0.0}"#),
     ("zero_exponent", r#"{"id":"g","inputTokenLimit":-0e0}"#),
@@ -56,12 +60,15 @@ const REFUSED: [(&str, &str); 15] = [
         "repeated_native",
         r#"{"id":"g","native_capabilities":{"web_search":"x","web_search":true}}"#,
     ),
-    ("levels_null", r#"{"id":"g","thinking":{"levels":[null]}}"#),
     ("thinking_member_case", r#"{"id":"g","thinking":{"Min":1}}"#),
     ("empty_decoded_id", r#"{"id":"g","ID":""}"#),
     ("section_in_two_cases", r#"SECTION"GEMINI":[{"id":"b"}]"#),
     ("section_in_another_case", r#"LONE"GEMINI":[{"id":"b"}]"#),
 ];
+
+/// An accepted model only Go's typed decode reads as intended: `-0` in thinking's integer
+/// fields, a null `type` and level, and a repeated header name.
+const LENIENT: &str = r#"{"id":"g-lenient","type":null,"thinking":{"min":-0,"max":-0,"levels":[null]},"config":{"override_header":{"X-Test":"a","X-Test":"ok","x-test":null}}}"#;
 
 /// The refreshed catalog with `case` from [`REFUSED`] added, its model ID made unique so
 /// that one wrongly accepted case cannot hide the next.
@@ -113,6 +120,7 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
         root["gemini"][0]["inputTokenLimit"] = serde_json::json!(1.5);
         render(&root)
     };
+    let lenient = modified.replacen(r#""gemini":["#, &format!(r#""gemini":[{LENIENT},"#), 1);
     let refused_cases: Vec<(&str, String)> = REFUSED.iter().map(|(n, c)| (*n, refused(&modified, n, c))).collect();
     let without_meta = {
         let mut root = root.clone();
@@ -123,12 +131,13 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
         .route(
             "/{name}",
             axum::routing::get(move |State(hits): State<Arc<AtomicUsize>>, Path(name): Path<String>| {
-                let (modified, invalid, mistyped, without_meta, refused_cases) = (
+                let (modified, invalid, mistyped, without_meta, refused_cases, lenient) = (
                     modified.clone(),
                     invalid.clone(),
                     mistyped.clone(),
                     without_meta.clone(),
                     refused_cases.clone(),
+                    lenient.clone(),
                 );
                 async move {
                     hits.fetch_add(1, Ordering::SeqCst);
@@ -137,6 +146,7 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
                         "invalid" => invalid.into_response(),
                         "mistyped" => mistyped.into_response(),
                         "modified" => modified.into_response(),
+                        "lenient" => lenient.into_response(),
                         name if name.starts_with("refused-") => {
                             let case = refused_cases.iter().find(|(n, _)| name[8..] == **n).unwrap();
                             case.1.clone().into_response()
@@ -247,4 +257,20 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
     cpa_server::model_updater::refresh(&urls(&["no-meta"]), "test").await;
     assert_eq!(catalog_generation(), generation + 1, "identical once meta is kept");
     assert_eq!(pinned().channel("meta").len(), meta_before);
+
+    // Go's typed decode reads `-0` as 0 and nulls as empty strings, in the typed fields
+    // and the rendering, and takes the last of repeated header names.
+    cpa_server::model_updater::refresh(&urls(&["lenient"]), "test").await;
+    assert_eq!(catalog_generation(), generation + 2);
+    let model = pinned().lookup("g-lenient").unwrap();
+    assert_eq!(model.kind, "");
+    let thinking = model.thinking.as_ref().unwrap();
+    assert_eq!(
+        (thinking.min, thinking.max, thinking.levels.as_slice()),
+        (0, 0, [String::new()].as_slice())
+    );
+    // Go 1.26.4 json.Marshal of LENIENT decoded into registry.ModelInfo.
+    let go = r#"{"id":"g-lenient","object":"","created":0,"owned_by":"","type":"","thinking":{"levels":[""]},"config":{"override_header":{"X-Test":"ok","x-test":""}}}"#;
+    let body = served(addr).await;
+    assert!(body.contains(go), "{body}");
 }
