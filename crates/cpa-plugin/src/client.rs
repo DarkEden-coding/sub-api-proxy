@@ -176,8 +176,9 @@ impl GuardedClient {
     /// [`GuardedClient::call`] for synchronous callers (translator hooks and thinking
     /// appliers run inside the translation that needs them, as Go's do). The call runs
     /// on this thread, inside `block_in_place` on a multi-threaded runtime so plugin
-    /// callbacks may block on it; from a current-thread runtime it runs on a scoped
-    /// thread instead.
+    /// callbacks may block on it. From a current-thread runtime it runs on a scoped
+    /// thread while the runtime waits, so callbacks that need the runtime
+    /// (`host.http.*`, `host.model.*`) fail during the call instead of hanging.
     pub fn call_blocking(self: &Arc<Self>, method: &str, request: &[u8]) -> Result<Bytes, GuardError> {
         let inner = self.acquire()?;
         struct Release<'a>(&'a GuardedClient);
@@ -194,7 +195,20 @@ impl GuardedClient {
         };
         match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
             Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(call),
-            Ok(_) => std::thread::scope(|s| s.spawn(call).join().unwrap_or_else(|p| std::panic::resume_unwind(p))),
+            Ok(_) => {
+                // This thread drives the runtime and now waits, so callbacks that need
+                // the runtime fail fast (see `PARKED_CURRENT_THREAD`).
+                use std::sync::atomic::Ordering;
+                struct Parked;
+                impl Drop for Parked {
+                    fn drop(&mut self) {
+                        crate::callbacks::PARKED_CURRENT_THREAD.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                crate::callbacks::PARKED_CURRENT_THREAD.fetch_add(1, Ordering::AcqRel);
+                let _parked = Parked;
+                std::thread::scope(|s| s.spawn(call).join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            }
             Err(_) => call(),
         }
     }
