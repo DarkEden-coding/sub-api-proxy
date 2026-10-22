@@ -725,6 +725,7 @@ dependencies = [
  "http-body",
  "libc",
  "ratatui",
+ "sap-server",
  "serde_json",
  "serde_yaml_ng",
  "socket2",
@@ -3513,6 +3514,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cpa-core",
+ "cpa-exec",
  "cpa-server",
  "futures-util",
  "http",
@@ -3525,6 +3527,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tokio",
+ "tower",
  "tracing",
 ]
 

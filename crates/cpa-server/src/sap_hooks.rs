@@ -80,6 +80,10 @@ pub trait SapHooks: Send + Sync {
     fn on_observation(&self, request: &SapRequest, credential: &str, observation: Observation);
     fn on_stream(&self, request: &SapRequest, open: bool);
     fn health(&self) -> HealthReport;
+    // sub-api-proxy: mount node-owned sync and management routes.
+    fn routes(&self) -> Option<axum::Router> {
+        None
+    }
 }
 
 pub(crate) struct Context {
@@ -505,6 +509,10 @@ mod tests {
         fn on_stream(&self, _: &SapRequest, open: bool) {
             self.streams.lock().unwrap().push(open);
         }
+        // sub-api-proxy: exercise merging a node-owned, already state-bound router.
+        fn routes(&self) -> Option<axum::Router> {
+            Some(axum::Router::new().route("/sap/test-node-route", axum::routing::get(|| async { "node-owned" })))
+        }
         fn health(&self) -> HealthReport {
             HealthReport {
                 node: NodeId("test".into()),
@@ -700,6 +708,18 @@ mod tests {
         let report: HealthReport =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(report.node.0, "test");
+        // sub-api-proxy: health and node routes are mounted together at startup.
+        let response = crate::router(fixture.rt.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/sap/test-node-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), "node-owned");
     }
 
     #[tokio::test]

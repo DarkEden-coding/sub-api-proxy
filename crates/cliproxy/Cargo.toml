@@ -7,6 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# sub-api-proxy: optional node startup.
+sap-server = { path = "../sap-server" }
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
