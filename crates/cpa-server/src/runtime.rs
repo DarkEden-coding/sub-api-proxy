@@ -489,6 +489,7 @@ impl Runtime {
             (None, None) => self.executors.prepare(&view, cfg).await?,
         };
         let store = self.store.clone();
+        let plugin_refreshed = plugin.as_ref().map(|_| crate::plugins::refresh::refreshed(self));
         let committed = tokio::task::spawn_blocking({
             let id = id.to_owned();
             move || {
@@ -510,11 +511,11 @@ impl Runtime {
                         Err(PatchError::Stale { .. }) => {
                             let latest = store.get(&id).ok_or(PatchError::NotFound)?;
                             if credentials_changed(&current, &latest) {
-                                return Ok((latest, false));
+                                return Ok(latest);
                             }
                             attempt = rebase_patch(&current.provider, &current.metadata, &latest.metadata, &patch);
                             if attempt.set.is_empty() && attempt.remove.is_empty() {
-                                return Ok((latest, false));
+                                return Ok(latest);
                             }
                             revision = latest.revision;
                         }
@@ -526,7 +527,16 @@ impl Runtime {
                             if rotated {
                                 store.recover_unauthorized(&id);
                             }
-                            return Ok((committed, true));
+                            // Go `LastRefreshedAt`, recorded with the commit.
+                            if let Some(refreshed) = &plugin_refreshed {
+                                crate::plugins::refresh::committed(
+                                    refreshed,
+                                    &id,
+                                    committed.revision,
+                                    chrono::Utc::now(),
+                                );
+                            }
+                            return Ok(committed);
                         }
                     }
                 }
@@ -542,10 +552,6 @@ impl Runtime {
                 format!("committing prepared credential: {e:?}"),
             )
         })?;
-        let (committed, ours) = committed;
-        if ours && plugin.is_some() {
-            crate::plugins::refresh::committed(self, id, committed.revision, chrono::Utc::now());
-        }
         Ok(committed)
     }
 

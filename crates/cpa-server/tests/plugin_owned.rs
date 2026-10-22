@@ -2717,13 +2717,30 @@ async fn a_compatible_credential_refreshes_through_its_providers_auth_provider()
         return;
     };
     cpa_server::plugins::reload_plugin_auth_files(&env.rt).await;
+    // Storage that does not decode as an object fails the refresh (Go cannot persist it)
+    // and leaves the stored document alone.
+    std::fs::write(
+        env.records.join("respond/acme/auth.refresh.once.json"),
+        json!({"ok":true,"result":{"Auth":{"StorageJSON":"W10=","Metadata":{"type":"acme","access_token":"bad"}}}})
+            .to_string(),
+    )
+    .unwrap();
+    let error = env.rt.refresh_credential("acme.json").await.unwrap_err();
+    assert!(
+        String::from_utf8_lossy(&error.body).contains("persist refreshed auth"),
+        "{error:?}"
+    );
+    assert_eq!(
+        auth_file(&env, "acme.json"),
+        json!({"type":"acme","access_token":"old","refresh_token":"r1"})
+    );
     let refreshed = env.rt.refresh_credential("acme.json").await.unwrap();
     assert_eq!(refreshed.metadata["access_token"], "new");
     assert_eq!(
         refreshed.metadata["refresh_token"], "r1",
         "kept from the stored document"
     );
-    assert_eq!(calls(&env.records, "acme", "auth.refresh").len(), 1);
+    assert_eq!(calls(&env.records, "acme", "auth.refresh").len(), 2);
     let before = env.rt.store().get("zeta-1").expect("the parsed credential");
     let error = env.rt.refresh_credential("zeta-1").await.unwrap_err();
     assert!(

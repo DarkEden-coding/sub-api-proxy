@@ -43,10 +43,15 @@
 # compiles the spawned plugin unload once instead of once per calling crate, 38 KB less
 # .text in a local build. The rest of the rise came with master's changes since
 # 2026-10-20.
-size.x86_64-unknown-linux-gnu.binary_bytes   42_833_072  2
-size.x86_64-unknown-linux-gnu.text_bytes     28_487_159  2
-size.x86_64-unknown-linux-gnu.rodata_bytes    8_533_472  2
-size.x86_64-unknown-linux-gnu.archive_bytes  18_169_191  2
+# 2026-10-22: plugin credential refresh through auth providers (#150): the plugin and
+# compatible refresh routes, the interval schedule and the wire test's API. At c27d6b6,
+# +46 KB .text (+52 KB binary, +24 KB archive) over master's tree at 0805c43 in this job
+# (#143's head 6debc28: 29_040_183 to 29_086_583 .text); the lines below are that job's
+# measurements. The rest of the rise came with master's changes since 2026-10-21.
+size.x86_64-unknown-linux-gnu.binary_bytes   43_567_056  2
+size.x86_64-unknown-linux-gnu.text_bytes     29_086_583  2
+size.x86_64-unknown-linux-gnu.rodata_bytes    8_562_144  2
+size.x86_64-unknown-linux-gnu.archive_bytes  18_497_320  2
 # Crates linked into the binary in two or more versions; a new one fails until it is
 # justified here. 2026-10-05: base64, block-buffer, cpufeatures, crypto-common, digest,
 # getrandom, hashbrown (3), rand, rand_core, sha2, thiserror.

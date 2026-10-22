@@ -8,6 +8,8 @@ use cpa_core::config::Config;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, FailureScope};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::Runtime;
 
@@ -40,12 +42,14 @@ pub(crate) fn route(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<Route>
     if rt.plugin_runtime().executor(c, cfg).is_some() {
         return Some(Route::Executor);
     }
-    let home = cfg
-        .document
-        .get("home")
-        .and_then(|h| h.get("enabled"))
-        .and_then(serde_yaml_ng::Value::as_bool)
-        .unwrap_or(false);
+    // Home mode installs the remote dispatcher; the config may not carry `home.enabled`.
+    let home = rt.remote_dispatch().is_some()
+        || cfg
+            .document
+            .get("home")
+            .and_then(|h| h.get("enabled"))
+            .and_then(serde_yaml_ng::Value::as_bool)
+            .unwrap_or(false);
     if home {
         return None;
     }
@@ -103,10 +107,18 @@ pub(crate) fn due_at(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<DateT
     Some(by_expiry.map_or(by_last, |at| at.min(by_last)))
 }
 
+/// Credential ID to the revision a plugin refresh committed and when.
+pub(crate) type Refreshed = Arc<Mutex<HashMap<String, (u64, DateTime<Utc>)>>>;
+
+/// Where [`committed`] records plugin refreshes; cloned into the commit, which a
+/// cancelled caller cannot stop.
+pub(crate) fn refreshed(rt: &Runtime) -> Refreshed {
+    rt.plugin_runtime().refreshed.clone()
+}
+
 /// Records a committed plugin refresh of revision `revision` (Go `LastRefreshedAt`).
-pub(crate) fn committed(rt: &Runtime, id: &str, revision: u64, at: DateTime<Utc>) {
-    rt.plugin_runtime()
-        .refreshed
+pub(crate) fn committed(refreshed: &Refreshed, id: &str, revision: u64, at: DateTime<Utc>) {
+    refreshed
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.to_owned(), (revision, at));
@@ -167,12 +179,12 @@ pub(crate) async fn refresh(rt: &Runtime, route: &Route, c: &Credential) -> Resu
             }
         };
     };
-    // What Go's `pluginTokenStorage` saves: the storage overlaid with the metadata.
+    // What Go's `pluginTokenStorage` saves: the storage overlaid with the metadata. Go
+    // fails to persist storage that does not decode, and the refresh fails with it.
     let next: Map<String, Value> = refreshed
         .storage_payload()
-        .ok()
-        .and_then(|payload| serde_json::from_slice(&payload).ok())
-        .unwrap_or_else(|| refreshed.metadata.clone().into_iter().collect());
+        .and_then(|payload| serde_json::from_slice(&payload).map_err(|e| e.to_string()))
+        .map_err(|e| ExecError::local(500, FailureScope::Credential, format!("persist refreshed auth: {e}")))?;
     Ok(diff(&c.metadata, &next))
 }
 

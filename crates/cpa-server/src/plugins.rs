@@ -32,7 +32,7 @@ pub struct PluginRuntime {
     executors: RwLock<HashMap<String, cpa_plugin::executor::Adapter>>,
     /// Credential ID to the revision a plugin refresh committed and when (Go
     /// `LastRefreshedAt`, which Go keeps in memory too).
-    refreshed: std::sync::Mutex<HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>>,
+    refreshed: refresh::Refreshed,
 }
 
 impl Default for PluginRuntime {
@@ -51,7 +51,7 @@ impl PluginRuntime {
             applied: watch::Sender::new(0),
             access: RwLock::default(),
             executors: RwLock::default(),
-            refreshed: std::sync::Mutex::default(),
+            refreshed: refresh::Refreshed::default(),
         }
     }
 
