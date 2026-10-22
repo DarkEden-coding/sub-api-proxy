@@ -55,6 +55,26 @@ func main() {
 		{"custom-tagged number secret", "management:\n  secret-key: !keep 0x1F\n"},
 		{"custom-tagged port", "port: !keep 8317\n"},
 		{"aliased custom-tagged secret", "proxy-url: &a !keep secret\nmanagement:\n  secret-key: *a\n"},
+		// Anchor redefinition: libyaml binds each alias to the latest definition.
+		{"redefined anchor around a binary secret", "a: &x unused\nb: &x {secret-key: !!binary c2VjcmV0}\nmanagement: *x\nc: &y {panel-github-repository: original, secret-key: other}\n"},
+		{"redefined anchor", "a: &x 1\nb: &x 2\nport: *x\n"},
+		{"alternating redefinitions over a binary scalar", "l0: &a !!binary c2VjcmV0\nl1: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl2: &a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl3: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl4: &a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl5: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl6: &a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl7: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl8: &a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl9: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nend: &a []\n"},
+		// Tagged and aliased mapping keys.
+		{"locally tagged api-keys key", "access: {!keep api-keys: [!!binary a2V5]}\n"},
+		{"locally tagged port key", "!keep port: 1\n"},
+		{"aliased port key", "name: &k port\n*k : 1\n"},
+		// The non-specific tag and literal standard tags.
+		{"non-specific null secret", "management:\n  secret-key: ! null\n"},
+		{"non-specific quoted null secret", "management:\n  secret-key: ! 'null'\n"},
+		{"non-specific number secret", "management:\n  secret-key: ! 0x1F\n"},
+		{"non-specific port", "port: ! 8317\n"},
+		{"literal null tag", "management:\n  secret-key: !<!!null> null\n"},
+		{"literal null tag on text", "management:\n  secret-key: !<!!null> secret\n"},
+		{"literal str tag", "management:\n  secret-key: !<!!str> 0x1F\n"},
+		{"literal int tag", "port: !<!!int> 8317\n"},
+		// A NUL escape: libyaml cuts the tag there, Go keeps it.
+		{"NUL in a binary tag", "management:\n  secret-key: !!binary%00x c2VjcmV0\n"},
+		{"NUL in a tag directive", "%TAG !e! tag:yaml.org,2002:bin%00\n---\nmanagement:\n  secret-key: !e!ary c2VjcmV0\n"},
 		{"binary proxy-url", "proxy-url: !!binary aHR0cDovL3Byb3h5Lmxhbjo4MA==\n"},
 		{"binary api key", "api-keys: [plain, !!binary a2V5]\n"},
 		{"aliased binary secret", "proxy-url: &a !!binary c2VjcmV0\nmanagement:\n  secret-key: *a\n"},

@@ -1,13 +1,27 @@
 //! `Config::parse` against Go v8.0.35's config decoder for `!!binary` and locally
 //! tagged scalars,
 //! recorded by `tests/reference/binary_strings/main.go`: the error, the management key
-//! as decoded, `proxy-url`, `port` and `api-keys`. A value a Rust string cannot hold
-//! (bytes that are not UTF-8) is refused where Go decodes it
-//! (docs/DIFFERENCES-FROM-GO.md).
+//! as decoded, `proxy-url`, `port` and `api-keys`. [`REFUSED`] names the cases Rust
+//! refuses where Go loads (docs/DIFFERENCES-FROM-GO.md), with the refusal expected.
 use cpa_core::config::Config;
 use serde_json::Value as Json;
 
-const NOT_UTF8: &[&str] = &["not UTF-8"];
+const TAG: &str = "a YAML tag in the config file is not supported";
+const KEY: &str = "a tagged or aliased mapping key in the config file is not supported";
+const ANCHOR: &str = "a YAML anchor name is defined more than once in the config file";
+const REFUSED: &[(&str, &str)] = &[
+    ("not UTF-8", "a !!binary value in the config file is not UTF-8 text"),
+    ("redefined anchor around a binary secret", ANCHOR),
+    ("redefined anchor", ANCHOR),
+    ("locally tagged api-keys key", KEY),
+    ("locally tagged port key", KEY),
+    ("aliased port key", KEY),
+    ("non-specific number secret", TAG),
+    ("non-specific port", TAG),
+    ("literal int tag", TAG),
+    ("NUL in a binary tag", TAG),
+    ("NUL in a tag directive", TAG),
+];
 
 #[test]
 fn binary_scalars_decode_like_go() {
@@ -18,9 +32,11 @@ fn binary_scalars_decode_like_go() {
         let go_error = case["error"].as_str().unwrap();
         let mut fail = |what: String| failures.push(format!("{name}: {what}"));
         let config = match (Config::parse(case["yaml"].as_str().unwrap()), go_error.is_empty()) {
-            (Err(e), _) if NOT_UTF8.contains(&name) => {
-                if e.to_string() != "a !!binary value in the config file is not UTF-8 text" {
-                    fail(format!("error {e:#}, expected the UTF-8 refusal"));
+            (result, _) if REFUSED.iter().any(|(n, _)| *n == name) => {
+                let want = REFUSED.iter().find(|(n, _)| *n == name).unwrap().1;
+                match result {
+                    Err(e) if e.to_string() == want => {}
+                    other => fail(format!("{:?}, expected {want:?}", other.map(|_| ()))),
                 }
                 continue;
             }

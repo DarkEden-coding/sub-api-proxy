@@ -144,6 +144,152 @@
     "api_keys": null
   },
   {
+    "name": "redefined anchor around a binary secret",
+    "yaml": "a: \u0026x unused\nb: \u0026x {secret-key: !!binary c2VjcmV0}\nmanagement: *x\nc: \u0026y {panel-github-repository: original, secret-key: other}\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "redefined anchor",
+    "yaml": "a: \u0026x 1\nb: \u0026x 2\nport: *x\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 2,
+    "api_keys": null
+  },
+  {
+    "name": "alternating redefinitions over a binary scalar",
+    "yaml": "l0: \u0026a !!binary c2VjcmV0\nl1: \u0026b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl2: \u0026a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl3: \u0026b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl4: \u0026a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl5: \u0026b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl6: \u0026a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl7: \u0026b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nl8: \u0026a [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nl9: \u0026b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nend: \u0026a []\n",
+    "error": "yaml: document contains excessive aliasing",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "locally tagged api-keys key",
+    "yaml": "access: {!keep api-keys: [!!binary a2V5]}\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": [
+      "key"
+    ]
+  },
+  {
+    "name": "locally tagged port key",
+    "yaml": "!keep port: 1\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 1,
+    "api_keys": null
+  },
+  {
+    "name": "aliased port key",
+    "yaml": "name: \u0026k port\n*k : 1\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 1,
+    "api_keys": null
+  },
+  {
+    "name": "non-specific null secret",
+    "yaml": "management:\n  secret-key: ! null\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "non-specific quoted null secret",
+    "yaml": "management:\n  secret-key: ! 'null'\n",
+    "error": "",
+    "secret_key": "null",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "non-specific number secret",
+    "yaml": "management:\n  secret-key: ! 0x1F\n",
+    "error": "",
+    "secret_key": "0x1F",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "non-specific port",
+    "yaml": "port: ! 8317\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 8317,
+    "api_keys": null
+  },
+  {
+    "name": "literal null tag",
+    "yaml": "management:\n  secret-key: !\u003c!!null\u003e null\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "literal null tag on text",
+    "yaml": "management:\n  secret-key: !\u003c!!null\u003e secret\n",
+    "error": "yaml: cannot decode !!str `secret` as a !!null",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "literal str tag",
+    "yaml": "management:\n  secret-key: !\u003c!!str\u003e 0x1F\n",
+    "error": "",
+    "secret_key": "0x1F",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "literal int tag",
+    "yaml": "port: !\u003c!!int\u003e 8317\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 8317,
+    "api_keys": null
+  },
+  {
+    "name": "NUL in a binary tag",
+    "yaml": "management:\n  secret-key: !!binary%00x c2VjcmV0\n",
+    "error": "",
+    "secret_key": "c2VjcmV0",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "NUL in a tag directive",
+    "yaml": "%TAG !e! tag:yaml.org,2002:bin%00\n---\nmanagement:\n  secret-key: !e!ary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "c2VjcmV0",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
     "name": "binary proxy-url",
     "yaml": "proxy-url: !!binary aHR0cDovL3Byb3h5Lmxhbjo4MA==\n",
     "error": "",

@@ -1,17 +1,31 @@
+//! Tagged scalars as yaml.v3 reads them, where serde_yaml_ng reads them differently.
 //! yaml.v3 base64-decodes a scalar whose tag resolves to `!!binary` into any string
-//! field it decodes (decode.go `scalar`); serde_yaml_ng reads the base64 text. A
-//! scalar with a local tag (`!keep x`, `! x`) is its text in yaml.v3 (`resolve`
-//! leaves unknown tags unresolved); serde_yaml_ng wraps it as a tagged value. The
-//! tags come from libyaml's own events, so handles, `%TAG` directives and `%XX`
-//! escapes resolve as they do in yaml.v3, whose `shortTag` also keeps a literal
-//! `!!binary` tag (`!<!!binary>`, `!%21binary`).
+//! field (decode.go `scalar`); serde_yaml_ng keeps the base64 text. yaml.v3 reads a
+//! scalar with an unknown local tag (`!keep x`) as its text, resolves a plain scalar
+//! with the non-specific `!` tag implicitly, and treats the literal short tags
+//! `!!binary`, `!!null` and `!!str` that its `shortTag` keeps (`!<!!null>`,
+//! `!%21binary`) as the standard ones; serde_yaml_ng wraps all of those as tagged
+//! values. The tags come from libyaml's own events, so handles, `%TAG` directives and
+//! `%XX` escapes resolve as they do for yaml.v3.
+//!
+//! What this does not follow is refused rather than read differently: other literal
+//! short tags, a non-specific tag that resolves to a number or boolean, tagged or
+//! aliased mapping keys, a repeated anchor name (serde_yaml_ng binds a redefined
+//! anchor's aliases to a different node than libyaml does), and a `%00` escape in a
+//! tag (libyaml cuts the tag there; Go keeps the NUL).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
 
 use anyhow::{Context, bail, ensure};
 use serde_yaml_ng::Value;
+
+const UNSUPPORTED_TAG: &str = "a YAML tag in the config file is not supported";
+const UNSUPPORTED_KEY: &str = "a tagged or aliased mapping key in the config file is not supported";
+const REPEATED_ANCHOR: &str = "a YAML anchor name is defined more than once in the config file";
+/// More rewritten scalars than a config has; alias chains past it are refused.
+const MAX_REWRITES: usize = 1 << 20;
 
 /// Go's `base64.StdEncoding` as yaml.v3 applies it: padding required, unused bits
 /// ignored, CR and LF skipped. `None` for invalid data.
@@ -28,55 +42,77 @@ pub(super) fn go_base64(text: &[u8]) -> Option<Vec<u8>> {
     engine.decode(payload).ok()
 }
 
-/// Replaces each `!!binary` scalar in `value`, which serde_yaml_ng parsed from `text`
-/// with merges not yet expanded, by its decoded text, and each locally tagged scalar
-/// by its text, aliases of them included. Fails on
-/// invalid base64 as Go does, and refuses what a string cannot hold: bytes that are
-/// not UTF-8, and a binary mapping key.
+/// Rewrites the tagged scalars in `value`, which serde_yaml_ng parsed from `text` with
+/// merges not yet expanded, to what yaml.v3 reads, aliases of them included. Fails on
+/// invalid base64 as Go does, and refuses what it does not follow (see the module
+/// docs) and binary bytes that are not UTF-8, which a setting cannot hold.
 pub(super) fn decode(text: &str, value: &mut Value) -> anyhow::Result<()> {
-    // No tag, no binary scalar.
-    if !text.contains('!') {
+    // Without a tag or an anchor, serde_yaml_ng reads the file as yaml.v3 does here.
+    if !text.contains(['!', '&']) {
         return Ok(());
+    }
+    if text.contains("%00") {
+        let tokens = yaml_edit::lex(text);
+        let nul = tokens.iter().any(|(kind, token)| {
+            matches!(kind, yaml_edit::SyntaxKind::TAG | yaml_edit::SyntaxKind::DIRECTIVE) && token.contains("%00")
+        });
+        // yaml-edit ends lines only at LF and CR, so with these it may misplace tags.
+        ensure!(
+            !nul && !text.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+            UNSUPPORTED_TAG
+        );
     }
     let mut walk = Walk {
         events: events(text)?.into_iter(),
+        defined: HashSet::new(),
         anchors: HashMap::new(),
         found: Vec::new(),
     };
     if let Some(root) = walk.events.next() {
         walk.node(root, &mut Vec::new(), false)?;
     }
-    for (path, decoded) in walk.found {
-        let mut node = &mut *value;
-        for &i in &path {
-            while let Value::Tagged(tagged) = node {
-                node = &mut tagged.value;
-            }
-            node = match node {
-                Value::Mapping(m) => m.values_mut().nth(i),
-                Value::Sequence(items) => items.get_mut(i),
-                _ => None,
-            }
-            .context("config YAML changed while it was read")?;
-        }
-        *node = Value::String(decoded);
-    }
-    Ok(())
+    // Paths are entry or item positions; patch them in one ordered pass.
+    let mut found = walk.found;
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    apply(value, 0, &found)
 }
 
-#[derive(PartialEq)]
-enum Tag {
-    Binary,
-    /// A local tag, which serde_yaml_ng keeps as `Value::Tagged`.
-    Local,
-    Other,
+fn apply(node: &mut Value, depth: usize, patches: &[(Vec<usize>, Value)]) -> anyhow::Result<()> {
+    let Some((path, replacement)) = patches.first() else {
+        return Ok(());
+    };
+    if path.len() == depth {
+        *node = replacement.clone();
+        return Ok(());
+    }
+    let mut node = node;
+    while let Value::Tagged(tagged) = node {
+        node = &mut tagged.value;
+    }
+    let children: Box<dyn Iterator<Item = &mut Value>> = match node {
+        Value::Mapping(m) => Box::new(m.values_mut()),
+        Value::Sequence(items) => Box::new(items.iter_mut()),
+        _ => bail!("config YAML changed while it was read"),
+    };
+    let mut rest = patches;
+    for (i, child) in children.enumerate() {
+        if rest.is_empty() {
+            break;
+        }
+        let n = rest.iter().take_while(|(p, _)| p[depth] == i).count();
+        apply(child, depth + 1, &rest[..n])?;
+        rest = &rest[n..];
+    }
+    ensure!(rest.is_empty(), "config YAML changed while it was read");
+    Ok(())
 }
 
 /// The document's node events, in order, without stream and document markers.
 enum Event {
     Scalar {
         anchor: Option<Vec<u8>>,
-        tag: Tag,
+        tag: Option<Vec<u8>>,
+        plain: bool,
         value: Vec<u8>,
     },
     Alias(Vec<u8>),
@@ -124,14 +160,10 @@ fn events(text: &str) -> anyhow::Result<Vec<Event>> {
             let next = match kind {
                 unsafe_libyaml::YAML_SCALAR_EVENT => {
                     let s = &event.data.scalar;
-                    let tag = match bytes(s.tag) {
-                        Some(t) if t == b"tag:yaml.org,2002:binary" || t == b"!!binary" => Tag::Binary,
-                        Some(t) if t.starts_with(b"!") => Tag::Local,
-                        _ => Tag::Other,
-                    };
                     Some(Event::Scalar {
                         anchor: bytes(s.anchor),
-                        tag,
+                        tag: bytes(s.tag),
+                        plain: s.style == unsafe_libyaml::YAML_PLAIN_SCALAR_STYLE,
                         value: std::slice::from_raw_parts(s.value, s.length as usize).to_vec(),
                     })
                 }
@@ -156,12 +188,46 @@ fn events(text: &str) -> anyhow::Result<Vec<Event>> {
     }
 }
 
+/// What yaml.v3 reads for a tagged scalar, where serde_yaml_ng reads something else;
+/// `None` where they agree.
+fn rewrite(tag: &[u8], plain: bool, value: Vec<u8>) -> anyhow::Result<Option<Value>> {
+    let text = || {
+        String::from_utf8(value.clone())
+            .ok()
+            .context("config YAML is not UTF-8")
+    };
+    Ok(Some(match tag {
+        b"tag:yaml.org,2002:binary" | b"!!binary" => {
+            let bytes = go_base64(&value).context("yaml: !!binary value contains invalid base64 data")?;
+            let text = String::from_utf8(bytes)
+                .ok()
+                .context("a !!binary value in the config file is not UTF-8 text")?;
+            Value::String(text)
+        }
+        // Non-specific: a plain scalar resolves as if untagged, a quoted one is text.
+        b"!" if plain => match serde_yaml_ng::from_str::<Value>(&text()?) {
+            Ok(v @ (Value::Null | Value::String(_))) => v,
+            _ => bail!(UNSUPPORTED_TAG),
+        },
+        b"!" | b"!!str" => Value::String(text()?),
+        b"!!null" => match serde_yaml_ng::from_str::<Value>(&text()?) {
+            Ok(Value::Null) => Value::Null,
+            _ => bail!(UNSUPPORTED_TAG),
+        },
+        t if t.starts_with(b"!!") => bail!(UNSUPPORTED_TAG),
+        // Any other local tag is unknown to yaml.v3: the scalar is its text.
+        t if t.starts_with(b"!") => Value::String(text()?),
+        _ => return Ok(None),
+    }))
+}
+
 struct Walk {
     events: std::vec::IntoIter<Event>,
-    /// Each anchor's binary scalars, by their path below it.
-    anchors: HashMap<Vec<u8>, Vec<(Vec<usize>, String)>>,
-    /// Binary scalars by their path: entry or item positions from the root.
-    found: Vec<(Vec<usize>, String)>,
+    defined: HashSet<Vec<u8>>,
+    /// Each anchor's rewritten scalars, by their path below it.
+    anchors: HashMap<Vec<u8>, Vec<(Vec<usize>, Value)>>,
+    /// Rewritten scalars by their path: entry or item positions from the root.
+    found: Vec<(Vec<usize>, Value)>,
 }
 
 impl Walk {
@@ -169,36 +235,49 @@ impl Walk {
         self.events.next().context("config YAML ended early")
     }
 
+    fn define(&mut self, anchor: &Option<Vec<u8>>) -> anyhow::Result<()> {
+        if let Some(name) = anchor {
+            ensure!(self.defined.insert(name.clone()), REPEATED_ANCHOR);
+        }
+        Ok(())
+    }
+
     fn node(&mut self, event: Event, path: &mut Vec<usize>, key: bool) -> anyhow::Result<()> {
         let start = self.found.len();
         let anchor = match event {
-            Event::Scalar { anchor, tag, value } => {
-                if tag == Tag::Local && !key {
-                    // ponytail: a locally tagged key stays tagged; it names no setting.
-                    let text = String::from_utf8(value).ok().context("config YAML is not UTF-8")?;
-                    self.found.push((path.clone(), text));
-                } else if tag == Tag::Binary {
-                    ensure!(!key, "a !!binary mapping key in the config file is not supported");
-                    let bytes = go_base64(&value).context("yaml: !!binary value contains invalid base64 data")?;
-                    let text = String::from_utf8(bytes)
-                        .ok()
-                        .context("a !!binary value in the config file is not UTF-8 text")?;
-                    self.found.push((path.clone(), text));
+            Event::Scalar {
+                anchor,
+                tag,
+                plain,
+                value,
+            } => {
+                self.define(&anchor)?;
+                if let Some(tag) = tag {
+                    // yaml.v3's layout code matches keys by their written text.
+                    ensure!(!key || !tag.starts_with(b"!"), UNSUPPORTED_KEY);
+                    if tag == b"tag:yaml.org,2002:binary" {
+                        ensure!(!key, UNSUPPORTED_KEY);
+                    }
+                    if let Some(v) = rewrite(&tag, plain, value)? {
+                        self.found.push((path.clone(), v));
+                    }
                 }
                 anchor
             }
             Event::Alias(name) => {
+                ensure!(!key, UNSUPPORTED_KEY);
                 let copies = self.anchors.get(&name).cloned().unwrap_or_default();
                 ensure!(
-                    !key || copies.is_empty(),
-                    "a !!binary mapping key in the config file is not supported"
+                    self.found.len() + copies.len() <= MAX_REWRITES,
+                    "config YAML aliases expand too far"
                 );
-                for (below, text) in copies {
-                    self.found.push(([path.as_slice(), &below].concat(), text));
+                for (below, v) in copies {
+                    self.found.push(([path.as_slice(), &below].concat(), v));
                 }
                 None
             }
             Event::Start { anchor, mapping } => {
+                self.define(&anchor)?;
                 let mut i = 0;
                 loop {
                     let event = self.next()?;
@@ -209,7 +288,7 @@ impl Walk {
                         self.node(event, path, true)?;
                         let value = self.next()?;
                         path.push(i);
-                        self.node(value, path, key)?;
+                        self.node(value, path, false)?;
                     } else {
                         path.push(i);
                         self.node(event, path, key)?;
@@ -224,7 +303,7 @@ impl Walk {
         if let Some(name) = anchor {
             let below = self.found[start..]
                 .iter()
-                .map(|(p, text)| (p[path.len()..].to_vec(), text.clone()))
+                .map(|(p, v)| (p[path.len()..].to_vec(), v.clone()))
                 .collect();
             self.anchors.insert(name, below);
         }
