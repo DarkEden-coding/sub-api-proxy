@@ -1462,9 +1462,14 @@ async fn split_sse_events_spend_the_bootstrap_budget() {
         "{SPLIT_CREATED}{open}{}data: ]}}}}\n{SPLIT_OVERLOAD}",
         "data: \n".repeat(10)
     );
-    let error = through_sse(&within, true, true).await.err().expect("fails over");
+    let error = through_sse(&within, true, true).await.expect_err("fails over");
     assert_eq!(error.status, 503, "{error:?}");
+    // Go sends a delta as read, which starts the stream before the overload after it in
+    // the same event is seen.
+    let delta_first =
+        format!("{SPLIT_CREATED}data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n{SPLIT_OVERLOAD}");
     for (name, sse) in [
+        ("delta first", &delta_first),
         ("line budget", &over_lines),
         ("no blank line", &no_blank),
         ("comments", &comments),
@@ -1474,6 +1479,9 @@ async fn split_sse_events_spend_the_bootstrap_budget() {
             .await
             .unwrap_or_else(|e| panic!("{name}: the attempt failed over: {e:?}"));
         assert!(failure.is_some(), "{name}: the failure arrives in-stream");
+        if name == "delta first" {
+            assert!(frames.iter().any(|f| f.contains("\"delta\":\"hi\"")), "{frames:?}");
+        }
         if name == "no blank line" {
             let progress = frames.iter().find(|f| f.contains("response.in_progress")).unwrap();
             let data = progress.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
@@ -1483,6 +1491,8 @@ async fn split_sse_events_spend_the_bootstrap_budget() {
                 serde_json::json!([{"key_at_boundary": 123}, {"key_after_boundary": 456}])
             );
         }
+    }
+}
 
 /// Go `TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770`
 /// (e7d4c731) through the executor: the bodies sent on the stream, non-stream and compact
