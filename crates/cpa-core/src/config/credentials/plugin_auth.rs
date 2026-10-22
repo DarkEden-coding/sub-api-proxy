@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde_json::{Map, Value as Json};
@@ -73,6 +73,17 @@ pub fn set_plugin_auth_parser_active(active: bool) {
     ACTIVE.store(active, Ordering::Release);
 }
 
+/// Plugin parses in progress: see [`plugin_auth_parsing`].
+static PARSING: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a plugin is parsing an auth file right now. Auth-folder scans run under the
+/// management disk lock, and a plugin may save a credential (`host.auth.save`, which
+/// takes that lock) while it parses; the save checks this instead of waiting for the
+/// scan that waits for it.
+pub fn plugin_auth_parsing() -> bool {
+    PARSING.load(Ordering::Acquire) > 0
+}
+
 /// Whether auth files go to the installed parser first.
 pub fn plugin_auth_parser_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -110,12 +121,22 @@ pub(super) fn credentials(
 ) -> Option<Result<Vec<Credential>, String>> {
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let provider = if provider == "gemini" { "gemini-cli" } else { provider };
-    let Parsed::Handled(auths) = parser.parse_auths(&ParseRequest {
+    struct Parsing;
+    impl Drop for Parsing {
+        fn drop(&mut self) {
+            PARSING.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    PARSING.fetch_add(1, Ordering::AcqRel);
+    let parsing = Parsing;
+    let parsed = parser.parse_auths(&ParseRequest {
         provider,
         path,
         file_name: &file_name,
         raw_json: data,
-    }) else {
+    });
+    drop(parsing);
+    let Parsed::Handled(auths) = parsed else {
         return None;
     };
     // Go `compactPluginAuths`: an auth with an invalid weight is dropped.
@@ -246,7 +267,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::super::{FileCredentials, auth_index, file_credentials};
+    use super::super::{FileCredentials, auth_index, file_credentials, scan_with};
     use super::*;
 
     /// A parser answering from a closure and recording what it was asked.
@@ -255,18 +276,18 @@ mod tests {
         asked: Mutex<Vec<(String, String, String)>>,
     }
 
-    impl<F: Fn() -> Parsed + Send + Sync> PluginAuthParser for Fake<F> {
+    impl<F: Fn(&ParseRequest<'_>) -> Parsed + Send + Sync> PluginAuthParser for Fake<F> {
         fn parse_auths(&self, req: &ParseRequest<'_>) -> Parsed {
             self.asked.lock().unwrap().push((
                 req.provider.to_owned(),
                 req.path.display().to_string(),
                 req.file_name.to_owned(),
             ));
-            (self.answer)()
+            (self.answer)(req)
         }
     }
 
-    fn fake<F: Fn() -> Parsed + Send + Sync>(answer: F) -> Fake<F> {
+    fn fake<F: Fn(&ParseRequest<'_>) -> Parsed + Send + Sync>(answer: F) -> Fake<F> {
         Fake {
             answer,
             asked: Mutex::default(),
@@ -299,7 +320,7 @@ mod tests {
     /// Go `TestSynthesizeAuthFileExpandsPluginMultiAuths`.
     #[test]
     fn expands_plugin_multi_auths() {
-        let parser = fake(|| {
+        let parser = fake(|_| {
             let headers = json!({"X-Test": "value"});
             Parsed::Handled(vec![
                 auth(
@@ -346,7 +367,7 @@ mod tests {
     /// A single parsed auth is not virtual: it owns its file.
     #[test]
     fn a_single_plugin_auth_is_not_virtual() {
-        let parser = fake(|| Parsed::Handled(vec![auth("plugin.json", "acme", json!({}), &[])]));
+        let parser = fake(|_| Parsed::Handled(vec![auth("plugin.json", "acme", json!({}), &[])]));
         let auths = plugin_creds(
             &parser,
             "plugin.json",
@@ -366,7 +387,7 @@ mod tests {
             (r#"{"type":"plugin","priority":1}"#, "1", json!(1)),
             (r#"{"type":"plugin","priority":" 2 "}"#, "2", json!(" 2 ")),
         ] {
-            let parser = fake(|| {
+            let parser = fake(|_| {
                 Parsed::Handled(vec![
                     auth("first", "plugin", json!({"project_id": "first"}), &[]),
                     auth("second", "plugin", json!({"project_id": "second"}), &[]),
@@ -385,7 +406,7 @@ mod tests {
     /// Go `TestSynthesizeAuthFileSkipsInvalidPluginAuthWeight`.
     #[test]
     fn skips_invalid_plugin_auth_weight() {
-        let parser = fake(|| {
+        let parser = fake(|_| {
             Parsed::Handled(vec![
                 auth("invalid", "plugin", json!({}), &[("weight", "1.5")]),
                 auth("valid", "plugin", json!({}), &[("weight", "0")]),
@@ -398,7 +419,7 @@ mod tests {
     /// Go `TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths`.
     #[test]
     fn applies_source_disabled_to_plugin_multi_auths() {
-        let parser = fake(|| {
+        let parser = fake(|_| {
             Parsed::Handled(vec![
                 auth("geminicli.json", "gemini-cli", json!({"type": "gemini-cli"}), &[]),
                 auth(
@@ -420,10 +441,10 @@ mod tests {
     /// Go `TestSynthesizeAuthFilePluginHandledEmptySuppressesBuiltin`.
     #[test]
     fn plugin_handled_empty_suppresses_builtin() {
-        let parser = fake(|| Parsed::Handled(Vec::new()));
+        let parser = fake(|_| Parsed::Handled(Vec::new()));
         let raw = r#"{"type":"codex","access_token":"token"}"#;
         assert!(plugin_creds(&parser, "codex.json", raw).is_empty());
-        let none = fake(|| Parsed::NotHandled);
+        let none = fake(|_| Parsed::NotHandled);
         assert!(matches!(
             synth(&none, "codex.json", raw),
             Ok(Some(FileCredentials::One(_)))
@@ -433,7 +454,7 @@ mod tests {
     /// Go `TestSynthesizeAuthFileKeepsPluginExcludedModelsWithoutFileRules`.
     #[test]
     fn keeps_plugin_excluded_models_without_file_rules() {
-        let parser = fake(|| {
+        let parser = fake(|_| {
             Parsed::Handled(vec![auth(
                 "plugin.json",
                 "acme",
@@ -460,7 +481,7 @@ mod tests {
     /// every auth provider. The file's own weight is still checked first.
     #[test]
     fn unhandled_files_take_the_builtin_path() {
-        let parser = fake(|| Parsed::NotHandled);
+        let parser = fake(|_| Parsed::NotHandled);
         for raw in [
             r#"{"type":" Claude ","email":"a@example.test","priority":3,"prefix":"p"}"#,
             r#"{"type":"gemini"}"#,
@@ -487,5 +508,48 @@ mod tests {
             3,
             "an invalid file weight is never parsed"
         );
+    }
+
+    /// Go's scan with a plugin parser: files in name order (`os.ReadDir`), and the last
+    /// auth under an ID wins, including several a response leaves without an ID (they
+    /// all take the file name).
+    #[test]
+    fn plugin_scans_read_files_in_name_order_and_the_last_id_wins() {
+        let dir = std::env::temp_dir().join(format!("plugin-scan-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Created out of name order.
+        for name in ["c.json", "b.json", "a.json"] {
+            std::fs::write(dir.join(name), r#"{"type":"acme"}"#).unwrap();
+        }
+        let parser = fake(|req| {
+            let shared = |from: &str| auth("shared", "acme", json!({"from": from}), &[]);
+            let unnamed = |n: u64| auth(req.file_name, "acme", json!({"n": n}), &[]);
+            Parsed::Handled(match req.file_name {
+                "a.json" => vec![shared("a"), unnamed(1), unnamed(2)],
+                "b.json" => vec![shared("b")],
+                _ => vec![shared("c")],
+            })
+        });
+        let cfg = crate::config::Config {
+            auth_dir: dir.clone(),
+            ..Default::default()
+        };
+        let scan = scan_with(&cfg, Some(&parser));
+        let asked: Vec<String> = parser.asked.lock().unwrap().iter().map(|a| a.2.clone()).collect();
+        assert_eq!(asked, ["a.json", "b.json", "c.json"]);
+        let got: Vec<(String, Json)> = scan
+            .credentials
+            .iter()
+            .map(|c| (c.id.clone(), Json::Object(c.metadata.clone())))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.json".to_owned(), json!({"n": 2})),
+                ("shared".to_owned(), json!({"from": "c"})),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

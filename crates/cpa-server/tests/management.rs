@@ -5063,3 +5063,91 @@ async fn auth_files_list_v8_quota_plugin_id_and_no_quota_probe() {
     let _ = std::fs::remove_dir_all(&auth);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Go's management rules for plugin-virtual credentials (several a plugin parsed from
+/// one file): a field edit, status change or delete naming one of them is refused with
+/// 409, and the source file is never overwritten with one credential's document; a
+/// status change or delete naming the source file applies to the file and every
+/// credential parsed from it. Go `TestPatchPluginVirtualAuthStatusReturnsConflictForVirtualChild`,
+/// `TestPatchPluginVirtualSourceStatusDisablesAllExpandedAuths`,
+/// `TestPatchPluginVirtualAuthFieldsReturnsConflict` and
+/// `TestDeletePluginVirtualSourceRemovesExpandedRuntimeAuths`.
+#[tokio::test]
+async fn plugin_virtual_credentials_change_only_through_their_source_file() {
+    let f = Fixture::new("plugin-virtual");
+    let dir = f.dir.join("auth");
+    let source = dir.join("acme.json");
+    let original = r#"{"type":"acme","proxy-url":"http://proxy.invalid"}"#;
+    std::fs::write(&source, original).unwrap();
+    let full = source.display().to_string();
+    let child = |id: &str, token: &str| {
+        let metadata = json!({"type": "acme", "token": token});
+        let mut c =
+            cpa_core::credential::Credential::from_file(&dir, &source, metadata.as_object().unwrap().clone()).unwrap();
+        c.id = id.into();
+        for (k, v) in [
+            ("plugin_virtual", "true"),
+            ("virtual_source", &full),
+            ("path", &full),
+            ("source", &full),
+        ] {
+            c.attributes.insert(k.into(), v.to_owned());
+        }
+        c
+    };
+    f.rt.store().reconcile(vec![child("acme-a", "a"), child("acme-b", "b")]);
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let call = |method: wreq::Method, path: &str, body: Option<Value>| {
+        let mut req = client
+            .request(method, format!("{base}/v8/management/credentials{path}"))
+            .bearer_auth("fake-management-only");
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    let refused =
+        json!({"error": "plugin virtual auth cannot be modified directly; edit or delete the source auth file"});
+    let status = |name: &str| Some(json!({"name": name, "disabled": true}));
+    assert_eq!(
+        call(wreq::Method::PATCH, "/status", status("acme-a")).await,
+        (409, refused.clone())
+    );
+    assert_eq!(
+        call(
+            wreq::Method::PATCH,
+            "/fields",
+            Some(json!({"name": "acme-a", "prefix": "x"}))
+        )
+        .await,
+        (409, refused.clone())
+    );
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    for id in ["acme-a", "acme-b"] {
+        assert!(!f.rt.store().get(id).unwrap().disabled, "{id}");
+    }
+    // Through the source file's name: the file and every parsed credential.
+    assert_eq!(
+        call(wreq::Method::PATCH, "/status", status("acme.json")).await,
+        (200, json!({"status": "ok", "disabled": true}))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        r#"{"disabled":true,"proxy_url":"http://proxy.invalid","type":"acme"}"#
+    );
+    for id in ["acme-a", "acme-b"] {
+        let c = f.rt.store().get(id).unwrap();
+        assert!(c.disabled, "{id}");
+        assert_eq!(c.metadata["token"], if id == "acme-a" { "a" } else { "b" });
+    }
+    // A refused delete still republishes the folder, as every delete does.
+    assert_eq!(call(wreq::Method::DELETE, "?name=acme-a", None).await, (409, refused));
+    assert!(source.exists());
+    assert_eq!(call(wreq::Method::DELETE, "?name=acme.json", None).await.0, 200);
+    assert!(!source.exists());
+    server.abort();
+}

@@ -24,8 +24,8 @@ use crate::gostr::GoStr;
 
 mod plugin_auth;
 pub use plugin_auth::{
-    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, set_plugin_auth_parser,
-    set_plugin_auth_parser_active,
+    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, plugin_auth_parsing,
+    set_plugin_auth_parser, set_plugin_auth_parser_active,
 };
 
 const WEIGHT_MAX: i64 = 1_000_000;
@@ -1386,8 +1386,11 @@ pub struct AuthScan {
 /// [`from_auth_dir`], with the files it found incomplete and the hashes of what it read.
 /// A file that cannot be read is skipped, as in Go's full scan.
 pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
+    scan_with(cfg, plugin_auth::current().as_deref())
+}
+
+fn scan_with(cfg: &Config, parser: Option<&dyn PluginAuthParser>) -> AuthScan {
     let mut scan = AuthScan::default();
-    let parser = plugin_auth::current();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -1397,7 +1400,19 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
             return scan;
         }
     };
-    for entry in entries.flatten() {
+    // With a plugin parser, Go's traversal: file-name order (`os.ReadDir`), and the last
+    // auth read under an ID wins. Without one, nothing changes.
+    let (mut plain, mut sorted);
+    let entries: &mut dyn Iterator<Item = std::fs::DirEntry> = if parser.is_some() {
+        let mut all: Vec<_> = entries.flatten().collect();
+        all.sort_by_key(std::fs::DirEntry::file_name);
+        sorted = all.into_iter();
+        &mut sorted
+    } else {
+        plain = entries.flatten();
+        &mut plain
+    };
+    for entry in entries {
         let path: PathBuf = entry.path();
         if !entry.file_name().to_string_lossy().go_lower().ends_with(".json") {
             continue;
@@ -1408,7 +1423,7 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
             scan.incomplete.insert(path);
             continue;
         }
-        match file_credentials(parser.as_deref(), &cfg.auth_dir, &path, &data) {
+        match file_credentials(parser, &cfg.auth_dir, &path, &data) {
             Ok(Some(FileCredentials::One(c))) => scan.credentials.push(c),
             Ok(Some(FileCredentials::Plugin(all))) => scan.credentials.extend(all),
             Ok(None) => {}
@@ -1416,6 +1431,16 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
         }
     }
     scan.credentials.sort_by(|a, b| a.id.cmp(&b.id));
+    if parser.is_some() {
+        // The sort is stable: of equal IDs, the last read is last.
+        let all = std::mem::take(&mut scan.credentials);
+        for c in all {
+            if scan.credentials.last().is_some_and(|last| last.id == c.id) {
+                scan.credentials.pop();
+            }
+            scan.credentials.push(c);
+        }
+    }
     scan
 }
 
