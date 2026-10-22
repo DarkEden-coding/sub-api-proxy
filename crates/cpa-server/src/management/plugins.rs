@@ -578,9 +578,9 @@ pub(crate) async fn patch_enabled(
         Ok(id) => id,
         Err(r) => return *r,
     };
-    // gin ShouldBindJSON into `struct{ Enabled *bool }`: the first JSON value.
-    let enabled = match serde_json::Deserializer::from_slice(&body).into_iter::<Value>().next() {
-        Some(Ok(Value::Object(map))) => match map.get("enabled") {
+    // gin ShouldBindJSON into `struct{ Enabled *bool }`.
+    let enabled = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(map)) => match map.get("enabled") {
             Some(Value::Bool(b)) => Some(*b),
             _ => None,
         },

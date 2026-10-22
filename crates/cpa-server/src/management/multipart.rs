@@ -25,6 +25,8 @@ const NOT_MULTIPART: &str = "request Content-Type isn't multipart/form-data";
 const MISSING_BOUNDARY: &str = "no multipart boundary param in Content-Type";
 const TOO_LARGE: &str = "multipart: message too large";
 const MAX_PARTS: usize = 1000;
+/// Go `peekBufferSize`, the multipart reader's `bufio` size.
+const PEEK_BUFFER: usize = 4096;
 
 /// gin `Context.ContentType`: the header up to the first space or `;`, unchanged.
 pub(super) fn is_form(content_type: &str) -> bool {
@@ -202,6 +204,13 @@ impl<'a> Reader<'a, '_> {
         }
         let mut expect_new_part = false;
         loop {
+            // Go reads lines through a 4096-byte `bufio.Reader`; a line that does not
+            // end within it fails before the limit error is read.
+            // ponytail: limited bodies only; a whole body keeps the unbounded line.
+            let rest = &self.buf[self.pos..];
+            if self.limited && rest.len() >= PEEK_BUFFER && !rest[..PEEK_BUFFER].contains(&b'\n') {
+                return Err("multipart: NextPart: bufio: buffer full".into());
+            }
             let (line, eof) = self.read_slice();
             if eof && !self.limited && self.is_final_boundary(line) {
                 return Ok(None);
@@ -279,7 +288,10 @@ impl<'a> Reader<'a, '_> {
             if !first.contains(&b':') {
                 return Err(format!("malformed MIME header: missing colon: {}", go_quote(first)));
             }
-            let mut kv = trim_ascii_space(first).to_vec();
+            // textproto trims spaces and tabs; a whole body keeps the wider trim.
+            // ponytail: the limited parse only, where a cut line can end in "\r".
+            let trim = if self.limited { go_trim } else { trim_ascii_space };
+            let mut kv = trim(first).to_vec();
             loop {
                 let spaces = self.buf[self.pos..]
                     .iter()
@@ -291,7 +303,7 @@ impl<'a> Reader<'a, '_> {
                 self.pos += spaces;
                 kv.push(b' ');
                 match self.read_line() {
-                    Some(line) => kv.extend_from_slice(trim_ascii_space(line)),
+                    Some(line) => kv.extend_from_slice(trim(line)),
                     None => break,
                 }
             }
@@ -386,6 +398,14 @@ fn match_after_prefix(buf: &[u8], prefix: &[u8]) -> bool {
 fn skip_lwsp(b: &[u8]) -> &[u8] {
     let n = b.iter().take_while(|&&c| c == b' ' || c == b'\t').count();
     &b[n..]
+}
+
+/// textproto `trim`: spaces and tabs at both ends.
+fn go_trim(b: &[u8]) -> &[u8] {
+    let is_space = |c: &u8| matches!(c, b' ' | b'\t');
+    let start = b.iter().position(|c| !is_space(c)).unwrap_or(b.len());
+    let end = b.iter().rposition(|c| !is_space(c)).map_or(start, |i| i + 1);
+    &b[start..end]
 }
 
 fn trim_ascii_space(b: &[u8]) -> &[u8] {

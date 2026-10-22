@@ -313,6 +313,40 @@ func scenarios() []scenario {
 		add(scenario{Name: "multipart_limit_in_header_value " + path, YAML: limited(mgmtYAML, headerCut), Method: "POST", Path: path,
 			Headers: upload, Body: smallForm, Chunked: true})
 	}
+	// Go's scanner rejects a bad \u escape digit at once and nesting past 10,000
+	// levels; a completed value binds alone, without the bytes after it.
+	for _, c := range []struct {
+		name, path string
+		limit      int
+		body       string
+	}{
+		{"bad_escape_digit", "/v0/management/plugins/demo/quota", 4, `"\uX000"` + strings.Repeat(" ", 8)},
+		{"nesting_over_go_limit", "/v0/management/plugins/demo/quota", 10001, strings.Repeat("[", 10002)},
+		{"nesting_at_go_limit", "/v0/management/plugins/demo/quota", 10000, strings.Repeat("[", 10001)},
+		{"value_then_data", "/v0/management/reset-quota", 3, "{}xx"},
+		{"value_then_data", "/v0/management/auth-files/refresh", 3, "{}xx"},
+		{"value_then_data", "/v0/management/plugins/demo/enabled", 17, `{"enabled":true}xx`},
+	} {
+		method := "POST"
+		if strings.HasSuffix(c.path, "/enabled") {
+			method = "PATCH"
+		}
+		add(scenario{Name: "json_first_value " + c.name + " " + c.path, YAML: limited(mgmtYAML, c.limit), Method: method, Path: c.path,
+			Headers: mgmt, Body: c.body, Chunked: true})
+	}
+	// Without a limit gin binds the whole body into the struct: the first occurrence's
+	// type error wins over a later duplicate, and data after the value is not read.
+	add(scenario{Name: "json_duplicate_key_no_limit /v0/management/plugins/demo/enabled", YAML: limited(mgmtYAML, 0), Method: "PATCH",
+		Path: "/v0/management/plugins/demo/enabled", Headers: mgmt, Body: `{"enabled":1,"enabled":true}x`})
+	// textproto trims only spaces and tabs, so a cut header line keeps its "\r"; and a
+	// line longer than the reader's 4096-byte buffer fails before the limit.
+	bType := map[string]string{"Authorization": "Bearer mgmt-secret", "Content-Type": "multipart/form-data; boundary=b"}
+	add(scenario{Name: "multipart_limit_after_header_cr /v0/management/auth-files", YAML: limited(mgmtYAML, 8), Method: "POST", Path: "/v0/management/auth-files",
+		Headers: bType, Body: "--b\r\nX:\r\n\r\nhello\r\n--b--\r\n", Chunked: true})
+	add(scenario{Name: "multipart_preamble_over_buffer /v0/management/auth-files", YAML: limited(mgmtYAML, 4097), Method: "POST", Path: "/v0/management/auth-files",
+		Headers: bType, Body: strings.Repeat("p", 4098), Chunked: true})
+	add(scenario{Name: "multipart_preamble_within_buffer /v0/management/auth-files", YAML: limited(mgmtYAML, 4095), Method: "POST", Path: "/v0/management/auth-files",
+		Headers: bType, Body: strings.Repeat("p", 4096), Chunked: true})
 	for _, path := range []string{"/v1/images/edits", "/openai/v1/videos"} {
 		images := map[string]string{"Authorization": "Bearer test-key", "Content-Type": imageType}
 		add(scenario{Name: "multipart_form_ends_within_limit " + path, YAML: apiLimited(1024), Method: "POST", Path: path,

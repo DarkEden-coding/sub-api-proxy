@@ -443,7 +443,7 @@ pub(crate) async fn reset_plugin(
     if index.is_empty() {
         // Go reads the body only here and ignores binding errors, keeping whatever
         // fields did bind.
-        let body = match crate::body_limit::first_json_body(req.into_body()).await {
+        let body = match crate::body_limit::first_json_body(req).await {
             Ok(body) => body,
             // dd7b4334: the configured body limit is the one read error Go reports.
             Err(error) if crate::body_limit::is_too_large(&error) => {
