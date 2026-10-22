@@ -19,7 +19,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M1 | 151 | 66 | 73 | 12 |
 | M2 | 189 | 71 | 114 | 4 |
 | M3 | 424 | 197 | 209 | 18 |
-| M4 | 589 | 254 | 325 | 10 |
+| M4 | 589 | 255 | 324 | 10 |
 | M5 | 331 | 220 | 108 | 3 |
 | M6 | 267 | 143 | 114 | 10 |
 
@@ -30,7 +30,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | claude | 12 | 63 | M1-0120, M1-0121, M1-0122, M1-0123, M1-0124, M1-0125, M1-0126, M1-0127, M1-0136, M1-0137, M1-0147, M5-0314 |
 | server | 10 | 286 | M1-0119, M4-0371, M4-0372, M4-0512, M4-0515, M4-0543, M4-0579, M4-0580, M4-0585, M5-0316 |
 | plugins | 9 | 83 | M6-0192, M6-0211, M6-0213, M6-0220, M6-0240, M6-0241, M6-0249, M6-0250, M6-0251 |
-| codex | 8 | 77 | M3-0351, M3-0355, M3-0362, M3-0363, M3-0364, M3-0367, M3-0380, M5-0323 |
+| codex | 8 | 76 | M3-0351, M3-0355, M3-0362, M3-0363, M3-0364, M3-0367, M3-0380, M5-0323 |
 | google | 6 | 78 | M3-0058, M3-0059, M3-0353, M3-0354, M3-0360, M3-0361 |
 | translate | 5 | 122 | M2-0166, M2-0167, M2-0168, M2-0181, M3-0405 |
 | openai-xai | 3 | 30 | M3-0356, M3-0359, M6-0217 |
@@ -1562,7 +1562,7 @@ Method: `docs/parity-audit/audit.py` regenerates this file. Routes come from `pr
 | M4-0554 | internal/runtime/executor/payload_barrier_test.go | partial | Existing subsystem: crates/cpa-server/src/; new Go suite internal/runtime/executor/payload_barrier_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | server | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M4-0555 | internal/runtime/executor/payload_review_test.go | partial | Existing subsystem: crates/cpa-server/src/; new Go suite internal/runtime/executor/payload_review_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | server | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M4-0556 | internal/runtime/executor/unsupported_part_executor_test.go | partial | Existing subsystem: crates/cpa-server/src/; new Go suite internal/runtime/executor/unsupported_part_executor_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | server | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
-| M4-0557 | internal/runtime/executor/websocket_upstream_disconnect_test.go | partial | Existing subsystem: crates/cpa-exec/src/codex_request.rs; new Go suite internal/runtime/executor/websocket_upstream_disconnect_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | codex | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
+| M4-0557 | internal/runtime/executor/websocket_upstream_disconnect_test.go | covered | crates/cpa-exec/src/codex_ws_tests.rs a_turn_activating_after_the_reader_stopped_gets_its_error (TestWebsocketActivationAfterUpstreamDisconnect) |  | Go's codex and xai subtests run each executor's reader; Rust's xAI WebSocket executor runs the same reader and Upstream::activate (codex_ws::read_loop), so the Codex run covers both. Replayed for an upstream close and a binary message. |
 | M4-0558 | internal/signature/meta_validation_test.go | partial | Existing subsystem: crates/cpa-exec/src/antigravity.rs; new Go suite internal/signature/meta_validation_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | google | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
 | M4-0559 | internal/store/config_seed_test.go | covered | crates/cpa-store/src/object.rs seeding_uploads_the_prepared_config and bootstrap_creates_the_bucket_and_uploads_the_template; crates/cpa-store/tests/postgres.rs seeding_upserts_the_prepared_config and postgres_store_round_trips_config_auth_and_cooldowns |  | Go f9437700. The stores call prepare_for_upload, whose full case matrix is M4-0522; these tests check the seeded bytes, a refused seed that uploads nothing and keeps the local file, and settled templates seeded unchanged. |
 | M4-0560 | internal/thinking/configuration_update_test.go | partial | Existing subsystem: crates/cpa-exec/src/antigravity.rs; new Go suite internal/thinking/configuration_update_test.go. No case-by-case v8.0.35 replay or assertion mapping has been verified. | google | Added since 6fecc6e. Partial records an unproven contract, not a claim that every new behavior is implemented. |
