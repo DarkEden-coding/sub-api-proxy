@@ -92,11 +92,15 @@ pub(crate) fn due_at(rt: &Runtime, c: &Credential, cfg: &Config) -> Option<DateT
     route(rt, c, cfg)?;
     // Go registers a parsed auth with the plugin's `NextRefreshAfter`, and keeps both
     // fields when the auth is registered again (`prepareCoreAuthForModelRegistration`).
+    // The parsed value is taken either way: it seeds this registration only, so a
+    // credential registered afresh later (removed or disabled meanwhile) waits for a
+    // new parse of its file to get one.
+    let parsed = rt.plugins().take_parsed_next_refresh_after(&c.id);
     let schedule = *lock(&rt.plugin_runtime().schedules)
         .entry(c.id.clone())
-        .or_insert_with(|| Schedule {
+        .or_insert(Schedule {
             last: None,
-            next_after: rt.plugins().parsed_next_refresh_after(&c.id),
+            next_after: parsed,
         });
     let by_last = schedule
         .last
@@ -163,7 +167,7 @@ pub(crate) fn committed(schedules: &Schedules, c: &Credential, now: DateTime<Utc
 // ponytail: Go's other failure branches (an invalid grant's growing backoff, a 401 on an
 // expired token retrying at once, a disabled credential) all take this 5 min; port them
 // if a plugin needs them.
-fn failed(rt: &Runtime, c: &Credential, now: DateTime<Utc>) {
+pub(crate) fn failed(rt: &Runtime, c: &Credential, now: DateTime<Utc>) {
     let mut at = now + chrono::Duration::minutes(5);
     if let Some(expiry) = cpa_exec::expiration(c).filter(|expiry| *expiry > now) {
         at = at.min(expiry);
@@ -174,15 +178,22 @@ fn failed(rt: &Runtime, c: &Credential, now: DateTime<Utc>) {
         .next_after = Some(at);
 }
 
-/// Refreshes `c` through its plugin and returns the metadata change to commit. `stored`
-/// is the credential `c` was made from for the executor (which may route it through
-/// another proxy).
+/// What a plugin refresh commits: the metadata change, and the proxy URL the credential
+/// has afterwards (Go `Auth.ProxyURL`, empty for none), published with it.
+pub(crate) struct Refreshed {
+    pub patch: MetadataPatch,
+    pub proxy_url: String,
+}
+
+/// Refreshes `c` through its plugin and returns what to commit. `stored` is the
+/// credential `c` was made from for the executor (which may route it through another
+/// proxy).
 pub(crate) async fn refresh(
     rt: &Runtime,
     route: &Route,
     c: &Credential,
     stored: &Credential,
-) -> Result<MetadataPatch, ExecError> {
+) -> Result<Refreshed, ExecError> {
     let result = refresh_once(rt, route, c, stored).await;
     if result.is_err() {
         failed(rt, c, Utc::now());
@@ -190,20 +201,21 @@ pub(crate) async fn refresh(
     result
 }
 
-// ponytail: only the credential's JSON document is committed (a file-backed one; the
-// commit refuses config-backed credentials, as for built-in refreshes). Go's document
-// is the refreshed storage overlaid with the merged metadata, its `disabled` and
-// canonical `proxy_url` included, and so is this one, but the running credential keeps
-// its previous proxy URL until the file is next loaded. Changes to the provider, ID,
-// label, prefix or attributes are not applied (a warning names them): the store cannot
-// move a credential to another provider or ID, and a refresh commits the document only.
-// Upgrade: a store write that also replaces a credential's attributes.
+// ponytail: the credential's JSON document and its proxy URL are committed (a
+// file-backed one; the commit refuses config-backed credentials, as for built-in
+// refreshes). Go's document is the refreshed storage overlaid with the merged metadata,
+// its `disabled` and canonical `proxy_url` included, and so is this one. A response
+// that moves the credential to another provider or ID is refused (Go saves the new
+// provider's type, and cannot commit another ID). Go merges changes to the prefix and
+// attributes into the running auth only, and keeps its label; here they are not
+// applied (a warning names them) until the file is next loaded, which gives both the
+// parsed values. Upgrade: a store write that also replaces the prefix and attributes.
 async fn refresh_once(
     rt: &Runtime,
     route: &Route,
     c: &Credential,
     stored: &Credential,
-) -> Result<MetadataPatch, ExecError> {
+) -> Result<Refreshed, ExecError> {
     let metadata: cpa_plugin::gojson::Metadata = c.metadata.clone().into_iter().collect();
     let view = cpa_plugin::auth::AuthView {
         id: c.id.clone(),
@@ -234,10 +246,15 @@ async fn refresh_once(
             };
             ExecError::local(status, FailureScope::Credential, e.to_string())
         })?;
+    let own_proxy = stored.attributes.get("proxy_url").map_or("", |p| p.trim()).to_owned();
     let Some(mut refreshed) = refreshed else {
         // No plugin answers for the credential's provider.
+        let unchanged = Refreshed {
+            patch: MetadataPatch::default(),
+            proxy_url: own_proxy,
+        };
         return match route {
-            Route::Executor => Ok(MetadataPatch::default()),
+            Route::Executor => Ok(unchanged),
             Route::Compat { identifier } => {
                 let filled = |k: &str| c.str(k).is_some_and(|v| !v.trim().is_empty());
                 if filled("refresh_token") || filled("refreshToken") {
@@ -247,11 +264,30 @@ async fn refresh_once(
                         format!("plugin auth provider refresh is unavailable for provider {identifier}"),
                     ))
                 } else {
-                    Ok(MetadataPatch::default())
+                    Ok(unchanged)
                 }
             }
         };
     };
+    let (from, to) = (
+        cpa_plugin::host::normalize_provider(&c.provider),
+        cpa_plugin::host::normalize_provider(&refreshed.provider),
+    );
+    if to != from || refreshed.id != c.id {
+        // Go saves the refreshed storage with the new provider's `type`, so the file
+        // moves to that provider at its next load, and fails to commit another ID ("auth
+        // not found"). Neither is a refresh this store can commit.
+        let change = if to != from {
+            format!("provider from {from} to {to}")
+        } else {
+            format!("ID to {}", refreshed.id)
+        };
+        return Err(ExecError::local(
+            500,
+            FailureScope::Credential,
+            format!("plugin auth refresh changed the credential's {change}; refusing to save it"),
+        ));
+    }
     // Go `MergeRefreshedAuth` with nothing edited meanwhile (a concurrent edit is merged
     // at commit): the response's `disabled`, and the three-way proxy URL of the auth's
     // field (`proxy_url` attribute here) and its metadata, written to the metadata.
@@ -269,24 +305,21 @@ async fn refresh_once(
         (true, true) => updated.1.as_str(),
         // Unchanged: the stored credential's own proxy URL.
         (false, false) => {
-            let own = stored.attributes.get("proxy_url").map_or("", |p| p.trim());
-            if own.is_empty() { base.1 } else { own }
+            if own_proxy.is_empty() {
+                base.1
+            } else {
+                own_proxy.as_str()
+            }
         }
     }
     .to_owned();
     if proxy.is_empty() {
         refreshed.metadata.remove("proxy_url");
     } else {
-        refreshed.metadata.insert("proxy_url".into(), proxy.into());
+        refreshed.metadata.insert("proxy_url".into(), proxy.clone().into());
     }
     refreshed.metadata.insert("disabled".into(), refreshed.disabled.into());
     let mut ignored = Vec::new();
-    if cpa_plugin::host::normalize_provider(&refreshed.provider) != cpa_plugin::host::normalize_provider(&c.provider) {
-        ignored.push("provider".to_owned());
-    }
-    if refreshed.id != c.id {
-        ignored.push("id".to_owned());
-    }
     if refreshed.prefix.trim() != view.prefix.trim() {
         ignored.push("prefix".to_owned());
     }
@@ -307,7 +340,7 @@ async fn refresh_once(
         tracing::warn!(
             credential = %c.id,
             fields = %ignored.join(", "),
-            "plugin refresh response changes not applied; the refreshed tokens and document are saved"
+            "plugin refresh response changes not applied until the file is next loaded; the refreshed tokens and document are saved"
         );
     }
     // What Go's `pluginTokenStorage` saves: the storage overlaid with the metadata. Go
@@ -317,11 +350,14 @@ async fn refresh_once(
         .storage_payload()
         .and_then(|payload| serde_json::from_slice(&payload).map_err(|e| e.to_string()))
         .map_err(|e| ExecError::local(500, FailureScope::Credential, format!("persist refreshed auth: {e}")))?;
-    Ok(diff(&c.metadata, &next))
+    Ok(Refreshed {
+        patch: diff(&c.metadata, &next),
+        proxy_url: proxy,
+    })
 }
 
-/// The patch turning `current` into `next`. `type` stays: a refresh cannot move a
-/// credential to another provider here.
+/// The patch turning `current` into `next`. `type` stays: a refresh that moves the
+/// credential to another provider is refused before this.
 fn diff(current: &Map<String, Value>, next: &Map<String, Value>) -> MetadataPatch {
     let kept = |k: &str| k != "type";
     MetadataPatch {

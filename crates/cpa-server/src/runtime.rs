@@ -495,11 +495,24 @@ impl Runtime {
         }
         let view = self.for_executor(&current);
         let plugin = crate::plugins::refresh::route(self, &current, cfg);
-        let patch = match (&plugin, failed) {
-            (Some(route), _) => crate::plugins::refresh::refresh(self, route, &view, &current).await?,
-            (None, Some(_)) if management => self.executors.prepare_management(&view, cfg).await?,
-            (None, Some(_)) => self.executors.prepare_forced(&view, cfg).await?,
-            (None, None) => self.executors.prepare(&view, cfg).await?,
+        // A plugin refresh also publishes the credential's proxy URL with its document.
+        let (patch, plugin_proxy) = match (&plugin, failed) {
+            (Some(route), _) => {
+                let refreshed = crate::plugins::refresh::refresh(self, route, &view, &current).await?;
+                (refreshed.patch, Some(refreshed.proxy_url))
+            }
+            (None, Some(_)) if management => (self.executors.prepare_management(&view, cfg).await?, None),
+            (None, Some(_)) => (self.executors.prepare_forced(&view, cfg).await?, None),
+            (None, None) => (self.executors.prepare(&view, cfg).await?, None),
+        };
+        let publish_proxy = move |c: &mut Credential| {
+            if let Some(proxy) = &plugin_proxy {
+                if proxy.is_empty() {
+                    c.attributes.remove("proxy_url");
+                } else {
+                    c.attributes.insert("proxy_url".into(), proxy.clone());
+                }
+            }
         };
         let store = self.store.clone();
         let plugin_schedules = plugin.as_ref().map(|_| crate::plugins::refresh::schedules(self));
@@ -510,7 +523,9 @@ impl Runtime {
                 let mut revision = current.revision;
                 let mut attempt = patch.clone();
                 loop {
-                    match store.apply_refresh(&id, revision, &attempt, |c| credentials_changed(&current, c)) {
+                    match store.apply_refresh(&id, revision, &attempt, &publish_proxy, |c| {
+                        credentials_changed(&current, c)
+                    }) {
                         // Edited since the snapshot (the prepare lock does not hold off other
                         // writers). Go 935aa6e3: an edit that changed the credentials wins and
                         // this refresh is dropped; any other edit is merged with it (Go
@@ -564,6 +579,10 @@ impl Runtime {
         .map_err(|e| PatchError::Io(e.to_string()))
         .and_then(|r| r)
         .map_err(|e| {
+            // The plugin refreshed but nothing was saved: back off as for a failed refresh.
+            if plugin.is_some() {
+                crate::plugins::refresh::failed(self, &view, chrono::Utc::now());
+            }
             ExecError::local(
                 500,
                 FailureScope::Request,
@@ -723,10 +742,14 @@ impl Runtime {
                             {
                                 return;
                             }
-                            let ineffective = result.is_ok() && rt.readiness(&current, &cfg) != Readiness::Ready;
+                            // A plugin refresh keeps its own deadlines (Go `NextRefreshAfter`,
+                            // `crate::plugins::refresh`): release the reservation only.
+                            let plugin = crate::plugins::refresh::route(&rt, &current, &cfg).is_some();
+                            let ineffective =
+                                !plugin && result.is_ok() && rt.readiness(&current, &cfg) != Readiness::Ready;
                             rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner).finish(
                                 &current,
-                                result.as_ref().err(),
+                                result.as_ref().err().filter(|_| !plugin),
                                 ineffective,
                                 Instant::now(),
                             );
@@ -1831,10 +1854,11 @@ impl CredentialStore {
         id: &str,
         expected_revision: u64,
         patch: &MetadataPatch,
+        edit: impl FnOnce(&mut Credential),
         rotated: impl FnOnce(&Credential) -> bool,
     ) -> Result<(Arc<Credential>, bool), PatchError> {
         let mut state = self.unauthorized.lock().unwrap_or_else(PoisonError::into_inner);
-        let committed = self.apply_patch(id, expected_revision, patch)?;
+        let committed = self.apply_patch_with(id, expected_revision, patch, edit)?;
         let rotated = rotated(&committed);
         if rotated {
             state
@@ -1879,6 +1903,18 @@ impl CredentialStore {
         expected_revision: u64,
         patch: &MetadataPatch,
     ) -> Result<Arc<Credential>, PatchError> {
+        self.apply_patch_with(id, expected_revision, patch, |_| {})
+    }
+
+    /// [`Self::apply_patch`], with `edit` applied to the credential before it is
+    /// published (fields outside the document, such as a plugin refresh's proxy URL).
+    fn apply_patch_with(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        patch: &MetadataPatch,
+        edit: impl FnOnce(&mut Credential),
+    ) -> Result<Arc<Credential>, PatchError> {
         let committed = self.write_unlocked(
             id,
             expected_revision,
@@ -1898,6 +1934,7 @@ impl CredentialStore {
                 let mut next = Credential::clone(current);
                 patch.apply(&mut next.metadata);
                 next.refresh_derived();
+                edit(&mut next);
                 // Go `FileTokenStore.Save` always records the disabled state.
                 next.metadata.insert("disabled".into(), Value::Bool(next.disabled));
                 // Go's `json.NewEncoder(f).Encode`: compact JSON and a newline.
