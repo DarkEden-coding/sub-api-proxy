@@ -1436,15 +1436,15 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<Fi
     // gin `ShouldBindJSON` into `struct{ Name, AuthIndex string; Disabled *bool }`:
     // every member in order; any type mismatch fails the bind, even one a later
     // duplicate would fix.
-    let Some(members) = super::api_call::first_object(&body) else {
+    let Some(members) = super::api_call::bind_struct(&body, &["name", "auth_index", "disabled"]) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
     let (mut name, mut auth_index, mut disabled) = (String::new(), String::new(), None);
-    for (key, value) in members {
-        let slot = match super::api_call::go_field(&["name", "auth_index", "disabled"], &key) {
-            Some(0) => &mut name,
-            Some(1) => &mut auth_index,
-            Some(_) => {
+    for (field, value) in members {
+        let slot = match field {
+            0 => &mut name,
+            1 => &mut auth_index,
+            _ => {
                 match value {
                     Value::Bool(b) => disabled = Some(b),
                     Value::Null => disabled = None,
@@ -1452,7 +1452,6 @@ pub(crate) async fn status(State(state): State<Arc<Management>>, body: Result<Fi
                 }
                 continue;
             }
-            None => continue,
         };
         match value {
             Value::String(s) => *slot = s,
@@ -1662,7 +1661,7 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Result<Fi
     };
     // `json.Decoder.Decode` into `map[string]json.RawMessage`: the first JSON value,
     // a later duplicate key replacing an earlier one; null is an empty map.
-    let Some(members) = super::api_call::first_object(&body) else {
+    let Some(members) = super::api_call::first_map(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
     let req: Map<String, Value> = members.into_iter().collect();

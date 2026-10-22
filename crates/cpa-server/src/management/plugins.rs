@@ -581,10 +581,7 @@ pub(crate) async fn patch_enabled(
     // gin ShouldBindJSON into `struct{ Enabled *bool }`: the first JSON value, every
     // member in order; a type mismatch fails the bind even if a later duplicate fixes it.
     let mut enabled = None;
-    for (key, value) in super::api_call::first_object(&body).into_iter().flatten() {
-        if super::api_call::go_field(&["enabled"], &key).is_none() {
-            continue;
-        }
+    for (_, value) in super::api_call::bind_struct(&body, &["enabled"]).into_iter().flatten() {
         match value {
             Value::Bool(b) => enabled = Some(b),
             Value::Null => enabled = None,
