@@ -1800,6 +1800,40 @@ async fn latest_version_is_anonymous_cached_and_explicit() {
     release_server.abort();
 }
 
+/// Go v8.0.35 `TestGitHubTokenConfigRoundTrip` (7c41cd05): `server.github-token` never
+/// reaches the v0 config JSON (`json:"-"`), whichever spelling holds it. The v8 reads
+/// and writes are the `server_github_token` scenario in `manage_go.json`.
+#[tokio::test]
+async fn github_token_stays_out_of_the_v0_config_json() {
+    for (name, layout) in [
+        (
+            "ghv8",
+            "config-version: 8\nserver:\n  github-token: fake-github-secret\n",
+        ),
+        ("ghlegacy", "github-token: fake-github-secret\n"),
+    ] {
+        let f = Fixture::from_yaml(name, |auth, hash| {
+            private_config(layout, auth, hash, !layout.starts_with("config-version"))
+        });
+        let (base, server) = f.server().await;
+        let (status, body) = call(&base, wreq::Method::GET, "/v0/management/config", "").await;
+        assert_eq!(status, 200, "{name}: {body}");
+        assert!(
+            !body.contains("fake-github-secret") && !body.contains("github-token"),
+            "{name}: {body}"
+        );
+        let (_, v8) = call(
+            &base,
+            wreq::Method::GET,
+            "/v8/management/config/server/github-token",
+            "",
+        )
+        .await;
+        assert_eq!(v8, r#""fake-github-secret""#, "{name}");
+        server.abort();
+    }
+}
+
 /// Separate processes give the environment fallback a fresh proxy snapshot without
 /// changing the environment of concurrently running tests. Every address is local;
 /// the unresolvable release host forces the check to use the configured transport.
