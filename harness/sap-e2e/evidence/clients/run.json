@@ -1,1 +1,1 @@
-{"mode": "router-mock-diagnostic", "recorded_at": 1792708742.3770938, "commit": "9227fffcedcf21123f4e7e65cf3aa152abe6968d"}
+{"mode": "router-mock-diagnostic", "recorded_at": 1792709149.707996, "commit": "809dd2ac76f524d7f8ec19e211ee46a4f3d496a6", "harness_changes": "Subscription gateway validation added on top of recorded commit"}

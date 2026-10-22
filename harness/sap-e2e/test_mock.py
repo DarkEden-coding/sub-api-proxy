@@ -46,6 +46,16 @@ class ProtocolTests(unittest.TestCase):
         response, _ = self.post('/v1/messages', {'thread': {'type': 'create'}}, 'fake-claude-a')
         self.assertEqual(response.status, 200)
 
+    def test_credential_checks_do_not_record_tokens(self):
+        token = 'sk-ant-oat01-fake-fixture'
+        self.post('/v1/messages', {}, token)
+        self.assertTrue(self.mock.records[-1]['client_oauth_forwarded'])
+        self.assertNotIn(token, self.mock.evidence.read_text())
+        self.post('/v1/messages', {}, 'fake-local-client')
+        self.assertTrue(self.mock.records[-1]['router_client_key'])
+        self.assertFalse(self.mock.records[-1]['client_oauth_forwarded'])
+        self.assertNotIn('fake-local-client', self.mock.evidence.read_text())
+
     def test_responses_sse_and_websocket(self):
         response, body = self.post('/v1/responses', dict(model='local', input=[]), 'fake-codex-a')
         self.assertEqual(response.status, 200)

@@ -2,40 +2,40 @@
   "status": 200,
   "body": [
     {
-      "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
+      "key": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e",
       "client": "claude_code",
       "machine": "sap-e2e",
       "title": null,
       "lineage": "root",
       "parent": null,
       "agent_label": null,
-      "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+      "account": "claude:api-key:claude:apikey:04dab589f3ae",
       "reason": "kept",
       "serving_node": "primary",
       "streaming": false,
       "cache_hit_percent": 0.0,
       "compactions": 0,
       "requests": 4,
-      "first_seen": "2026-10-22T22:38:58.685996Z",
-      "last_seen": "2026-10-22T22:38:59.031567Z"
+      "first_seen": "2026-10-22T22:45:51.712441Z",
+      "last_seen": "2026-10-22T22:45:52.078997Z"
     },
     {
-      "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba/acdc944f348f5daf9",
+      "key": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e/a5ea70136139fc9f9",
       "client": "claude_code",
       "machine": "sap-e2e",
       "title": null,
       "lineage": "subagent",
-      "parent": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
-      "agent_label": null,
-      "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+      "parent": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e",
+      "agent_label": "general-purpose",
+      "account": "claude:api-key:claude:apikey:04dab589f3ae",
       "reason": "parent affinity",
       "serving_node": "primary",
       "streaming": false,
       "cache_hit_percent": 0.0,
       "compactions": 0,
       "requests": 1,
-      "first_seen": "2026-10-22T22:38:58.745411Z",
-      "last_seen": "2026-10-22T22:38:58.745411Z"
+      "first_seen": "2026-10-22T22:45:51.776951Z",
+      "last_seen": "2026-10-22T22:45:51.776951Z"
     }
   ]
 }

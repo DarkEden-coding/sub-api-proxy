@@ -148,7 +148,11 @@ class Run:
         _, backup_base = self.node('backup')
         router_port = port()
         router = self.tmp / 'router.yaml'
+        client_key = self.tmp / 'client-key'
+        client_key.write_text(KEY + '\n')
+        client_key.chmod(0o600)
         router.write_text(json.dumps(dict(listen=f'127.0.0.1:{router_port}', client_host='sap-e2e',
+                                         client_key_file=str(client_key),
                                          servers=[dict(name='primary', base_url=self.upstream if self.client_only else primary_base),
                                                   dict(name='backup', base_url=self.upstream if self.client_only else backup_base)],
                                          probe_interval_ms=1000, probe_timeout_ms=1500, down_after_failures=2,
@@ -172,15 +176,17 @@ class Run:
         claude_home.mkdir()
         (claude_home / 'settings.json').write_text(json.dumps({'skipDangerousModePermissionPrompt': True}))
         claude_env = dict(CLAUDE_CONFIG_DIR=str(claude_home), ANTHROPIC_BASE_URL=self.base,
-                          ANTHROPIC_AUTH_TOKEN=KEY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
-                          DISABLE_AUTOUPDATER='1', DISABLE_TELEMETRY='1', DISABLE_ERROR_REPORTING='1',
-                          CLAUDE_CODE_SKIP_OAUTH='1')
+                          CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-fixture',
+                          CLAUDE_CODE_GATEWAY_HINT_HEADERS='1',
+                          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
+                          DISABLE_AUTOUPDATER='1', DISABLE_TELEMETRY='1', DISABLE_ERROR_REPORTING='1')
         claude = [shutil.which('claude'), '-p', '--model', 'claude-sonnet-4-6',
                   '--dangerously-skip-permissions', '--output-format', 'json']
         self.client('claude-version', [claude[0], '--version'], claude_env, 10)
         session = str(uuid.uuid4())
         self.client('claude-new-tool-child', [*claude, '--session-id', session, 'Say local.'], claude_env)
         self.client('claude-resume', [*claude, '--resume', session, 'Continue locally.'], claude_env)
+        self.claude_subscription_features()
         if not self.client_only:
             status, threads = request(self.base, '/sap/api/threads')
             (self.output / 'threads.json').write_text(json.dumps(dict(status=status, body=threads), indent=2) + '\n')
@@ -323,6 +329,22 @@ class Run:
                  'No thread field in custom-base mode; each request carries full history, so the move is free.',
                  requests=rows))
 
+    def claude_subscription_features(self):
+        rows = [r for r in self.mock.records if r['scenario'] == 'claude-new-tool-child'
+                and 'messages' in r['path']]
+        main = [r for r in rows if r['headers'].get('x-claude-code-request-class') == 'main']
+        self.result('claude-subscription-gateway', bool(main)
+                    and all('oauth-2025-04-20' in r['headers'].get('anthropic-beta', '')
+                            and 'extended-cache-ttl-2025-04-11' in r['headers'].get('anthropic-beta', '')
+                            for r in main)
+                    and all(not r['client_oauth_forwarded'] for r in rows)
+                    and (not self.client_only or all(r['router_client_key'] for r in rows)),
+                    dict(requests=len(rows), main_requests=len(main),
+                         oauth_forwarded=any(r['client_oauth_forwarded'] for r in rows),
+                         router_key_verified=all(r['router_client_key'] for r in rows)
+                         if self.client_only and rows else None,
+                         headers=[r['headers'] for r in main]))
+
     def client_features(self):
         records = self.mock.records
         claude = [r for r in records if r['scenario'] == 'claude-new-tool-child']
@@ -333,6 +355,11 @@ class Run:
                     dict(thread_fields=[r['thread'] for r in claude],
                          request_class=[r['headers'].get('x-claude-code-request-class') for r in claude],
                          compaction_headers=[r['headers'].get('x-claude-code-compaction') for r in records if r['scenario'] == 'claude-compact']))
+        self.result('claude-gateway-hint-headers', bool(claude)
+                    and all(r['headers'].get('x-claude-code-request-class') in ('main', 'subagent') for r in claude)
+                    and any(r['headers'].get('x-claude-code-compaction') == 'manual'
+                            for r in records if r['scenario'] == 'claude-compact'),
+                    'Request classes and manual compaction are labelled in subscription gateway mode.')
         closed = [r for r in records if r['scenario'] == 'codex-custom-socket-close']
         close_index = next((i for i, r in enumerate(closed) if r['action'] == 'close'), None)
         resent = closed[close_index + 1:] if close_index is not None else []

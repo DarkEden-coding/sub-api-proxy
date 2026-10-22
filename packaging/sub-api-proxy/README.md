@@ -18,6 +18,8 @@ Create `~/.config/sub-api-proxy` and `~/.local/share/sub-api-proxy`, mode 0700.
 Use separate random client and management keys. Store the management key in
 `~/.config/sub-api-proxy/management-key`, mode 0600. The CLI also accepts `--key`
 or `SAP_MANAGEMENT_KEY`; the file avoids a key in shell history or process args.
+Store the client key in `~/.config/sub-api-proxy/client-key`, mode 0600, matching
+the router's `client_key_file` and both servers' client access keys.
 
 The server's `config.yaml` uses cliproxy's existing configuration format. Start
 from the project's documented config, retain the intended providers, and set:

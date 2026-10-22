@@ -5,7 +5,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.039,
+      "elapsed": 0.02,
       "log": "claude-version.log",
       "requests": 0,
       "diagnostic_reason": null
@@ -17,7 +17,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.343,
+      "elapsed": 0.341,
       "log": "claude-new-tool-child.log",
       "requests": 4,
       "diagnostic_reason": null
@@ -36,6 +36,38 @@
     }
   },
   {
+    "name": "claude-subscription-gateway",
+    "passed": true,
+    "status": "pass",
+    "evidence": {
+      "requests": 4,
+      "main_requests": 3,
+      "oauth_forwarded": false,
+      "router_key_verified": null,
+      "headers": [
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-request-class": "main",
+          "x-claude-code-session-id": "bf2326ee-fa39-4a63-ac0c-f809573b681e"
+        },
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-prev-tool-durations": "Agent=3",
+          "x-claude-code-request-class": "main",
+          "x-claude-code-session-id": "bf2326ee-fa39-4a63-ac0c-f809573b681e"
+        },
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-request-class": "main",
+          "x-claude-code-session-id": "bf2326ee-fa39-4a63-ac0c-f809573b681e"
+        }
+      ]
+    }
+  },
+  {
     "name": "sap-assignment-and-affinity",
     "passed": true,
     "status": "pass",
@@ -43,40 +75,40 @@
       "status": 200,
       "threads": [
         {
-          "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
+          "key": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e",
           "client": "claude_code",
           "machine": "sap-e2e",
           "title": null,
           "lineage": "root",
           "parent": null,
           "agent_label": null,
-          "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+          "account": "claude:api-key:claude:apikey:04dab589f3ae",
           "reason": "kept",
           "serving_node": "primary",
           "streaming": false,
           "cache_hit_percent": 0.0,
           "compactions": 0,
           "requests": 4,
-          "first_seen": "2026-10-22T22:38:58.685996Z",
-          "last_seen": "2026-10-22T22:38:59.031567Z"
+          "first_seen": "2026-10-22T22:45:51.712441Z",
+          "last_seen": "2026-10-22T22:45:52.078997Z"
         },
         {
-          "key": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba/acdc944f348f5daf9",
+          "key": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e/a5ea70136139fc9f9",
           "client": "claude_code",
           "machine": "sap-e2e",
           "title": null,
           "lineage": "subagent",
-          "parent": "claude:6075a59b-9ee2-47d1-81e2-4579e62774ba",
-          "agent_label": null,
-          "account": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+          "parent": "claude:bf2326ee-fa39-4a63-ac0c-f809573b681e",
+          "agent_label": "general-purpose",
+          "account": "claude:api-key:claude:apikey:04dab589f3ae",
           "reason": "parent affinity",
           "serving_node": "primary",
           "streaming": false,
           "cache_hit_percent": 0.0,
           "compactions": 0,
           "requests": 1,
-          "first_seen": "2026-10-22T22:38:58.745411Z",
-          "last_seen": "2026-10-22T22:38:58.745411Z"
+          "first_seen": "2026-10-22T22:45:51.776951Z",
+          "last_seen": "2026-10-22T22:45:51.776951Z"
         }
       ]
     }
@@ -94,16 +126,19 @@
         {
           "scenario": "claude-in-process-exhaustion",
           "transport": "http",
-          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
+          "path": "http://127.0.0.1:62509/v1/messages?beta=true",
           "action": "reply",
           "connection": null,
-          "account": "fake-claude-a",
+          "account": "fake-claude-b",
           "status": 200,
           "headers": {
             "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
-            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
-            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11",
+            "x-claude-code-request-class": "main",
+            "x-claude-code-session-id": "32709fe7-cce1-4bfc-9326-d9931d8211c3"
           },
+          "client_oauth_forwarded": false,
+          "router_client_key": false,
           "fields": [
             "context_management",
             "max_tokens",
@@ -135,67 +170,24 @@
             "DeferredToolPlaceholder",
             "Write"
           ],
-          "time": 1792708739.428185
+          "time": 1792709152.456285
         },
         {
           "scenario": "claude-in-process-exhaustion",
           "transport": "http",
-          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
-          "action": "reply",
-          "connection": null,
-          "account": "fake-claude-a",
-          "status": 429,
-          "headers": {
-            "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
-            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
-            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
-          },
-          "fields": [
-            "context_management",
-            "max_tokens",
-            "messages",
-            "metadata",
-            "model",
-            "output_config",
-            "stream",
-            "system",
-            "thinking",
-            "tools"
-          ],
-          "thread": null,
-          "previous_response_id": null,
-          "generate": null,
-          "message_count": 3,
-          "input_count": 0,
-          "tools": [
-            "Agent",
-            "Bash",
-            "Edit",
-            "ListAgents",
-            "Read",
-            "ReportFindings",
-            "ScheduleWakeup",
-            "Skill",
-            "ToolSearch",
-            "Workflow",
-            "DeferredToolPlaceholder",
-            "Write"
-          ],
-          "time": 1792708739.522558
-        },
-        {
-          "scenario": "claude-in-process-exhaustion",
-          "transport": "http",
-          "path": "http://127.0.0.1:60737/v1/messages?beta=true",
+          "path": "http://127.0.0.1:62509/v1/messages?beta=true",
           "action": "reply",
           "connection": null,
           "account": "fake-claude-b",
-          "status": 200,
+          "status": 429,
           "headers": {
             "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
-            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18",
-            "x-claude-code-session-id": "8615d506-5870-400b-8c07-d290a91f2142"
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11",
+            "x-claude-code-request-class": "main",
+            "x-claude-code-session-id": "32709fe7-cce1-4bfc-9326-d9931d8211c3"
           },
+          "client_oauth_forwarded": false,
+          "router_client_key": false,
           "fields": [
             "context_management",
             "max_tokens",
@@ -227,7 +219,56 @@
             "DeferredToolPlaceholder",
             "Write"
           ],
-          "time": 1792708739.553005
+          "time": 1792709152.551829
+        },
+        {
+          "scenario": "claude-in-process-exhaustion",
+          "transport": "http",
+          "path": "http://127.0.0.1:62509/v1/messages?beta=true",
+          "action": "reply",
+          "connection": null,
+          "account": "fake-claude-a",
+          "status": 200,
+          "headers": {
+            "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11",
+            "x-claude-code-request-class": "main",
+            "x-claude-code-session-id": "32709fe7-cce1-4bfc-9326-d9931d8211c3"
+          },
+          "client_oauth_forwarded": false,
+          "router_client_key": false,
+          "fields": [
+            "context_management",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "thread": null,
+          "previous_response_id": null,
+          "generate": null,
+          "message_count": 3,
+          "input_count": 0,
+          "tools": [
+            "Agent",
+            "Bash",
+            "Edit",
+            "ListAgents",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "Skill",
+            "ToolSearch",
+            "Workflow",
+            "DeferredToolPlaceholder",
+            "Write"
+          ],
+          "time": 1792709152.582957
         }
       ]
     }
@@ -250,7 +291,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.178,
+      "elapsed": 0.186,
       "log": "codex-custom.log",
       "requests": 2,
       "diagnostic_reason": null
@@ -262,7 +303,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.51,
+      "elapsed": 0.555,
       "log": "codex-custom-exhausted.log",
       "requests": 3,
       "diagnostic_reason": null
@@ -276,17 +317,19 @@
       {
         "scenario": "codex-custom-exhausted",
         "transport": "ws",
-        "path": "http://127.0.0.1:60737/v1/responses",
+        "path": "http://127.0.0.1:62509/v1/responses",
         "action": "reply",
         "connection": 10,
-        "account": "fake-codex-b",
+        "account": "fake-codex-a",
         "status": 200,
         "headers": {
           "x-codex-beta-features": "remote_compaction_v2",
-          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"5f3f8bbe-8918-4102-be8f-21e179628caf\",\"session_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"thread_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e:0\",\"window_number\":0,\"context_window_id\":\"01a165ca-d057-7f62-a021-caac626ef18c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
           "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
           "openai-beta": "responses_websockets=2026-02-06"
         },
+        "client_oauth_forwarded": false,
+        "router_client_key": false,
         "fields": [
           "client_metadata",
           "generate",
@@ -320,22 +363,24 @@
           null,
           null
         ],
-        "time": 1792708739.943887
+        "time": 1792709152.994267
       },
       {
         "scenario": "codex-custom-exhausted",
         "transport": "ws",
-        "path": "http://127.0.0.1:60737/v1/responses",
+        "path": "http://127.0.0.1:62509/v1/responses",
         "action": "rate_limits+error+close",
         "connection": 10,
-        "account": "fake-codex-b",
+        "account": "fake-codex-a",
         "status": 429,
         "headers": {
           "x-codex-beta-features": "remote_compaction_v2",
-          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"5f3f8bbe-8918-4102-be8f-21e179628caf\",\"session_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"thread_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"agent_name\":\"/root\",\"turn_id\":\"\",\"window_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e:0\",\"window_number\":0,\"context_window_id\":\"01a165ca-d057-7f62-a021-caac626ef18c\",\"request_kind\":\"prewarm\",\"history_initialization\":\"new\",\"thread_source\":\"user\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
           "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
           "openai-beta": "responses_websockets=2026-02-06"
         },
+        "client_oauth_forwarded": false,
+        "router_client_key": false,
         "fields": [
           "client_metadata",
           "include",
@@ -368,22 +413,24 @@
           null,
           null
         ],
-        "time": 1792708739.9625149
+        "time": 1792709153.013134
       },
       {
         "scenario": "codex-custom-exhausted",
         "transport": "ws",
-        "path": "http://127.0.0.1:60737/v1/responses",
+        "path": "http://127.0.0.1:62509/v1/responses",
         "action": "reply",
         "connection": 12,
-        "account": "fake-codex-a",
+        "account": "fake-codex-b",
         "status": 200,
         "headers": {
           "x-codex-beta-features": "remote_compaction_v2",
-          "x-codex-turn-metadata": "{\"installation_id\":\"a2510e2c-43ac-43c5-ad4a-9bb4c5deda88\",\"session_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"thread_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-830a-7b71-8b23-97b4b2d5f39f\",\"window_id\":\"01a165c4-82eb-7c52-9857-e2172a01cd71:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-82ec-7120-8966-690c964f035c\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-830a-7b71-8b23-97b4b2d5f39f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708739851,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-turn-metadata": "{\"installation_id\":\"5f3f8bbe-8918-4102-be8f-21e179628caf\",\"session_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"thread_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e\",\"agent_name\":\"/root\",\"turn_id\":\"01a165ca-d076-7561-9a2f-68e97521f9e9\",\"window_id\":\"01a165ca-d057-7f62-a021-ca7af729fe5e:0\",\"window_number\":0,\"context_window_id\":\"01a165ca-d057-7f62-a021-caac626ef18c\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165ca-d076-7561-9a2f-68e97521f9e9\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792709152887,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
           "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
           "openai-beta": "responses_websockets=2026-02-06"
         },
+        "client_oauth_forwarded": false,
+        "router_client_key": false,
         "fields": [
           "client_metadata",
           "include",
@@ -416,7 +463,7 @@
           null,
           null
         ],
-        "time": 1792708740.281704
+        "time": 1792709153.3627572
       }
     ]
   },
@@ -426,7 +473,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.039,
+      "elapsed": 0.021,
       "log": "codex-custom-http-version.log",
       "requests": 0,
       "diagnostic_reason": null
@@ -438,7 +485,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.126,
+      "elapsed": 0.131,
       "log": "codex-custom-http.log",
       "requests": 1,
       "diagnostic_reason": null
@@ -450,7 +497,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.131,
+      "elapsed": 0.127,
       "log": "codex-custom-http-exhausted.log",
       "requests": 2,
       "diagnostic_reason": null
@@ -464,19 +511,21 @@
       {
         "scenario": "codex-custom-http-exhausted",
         "transport": "http",
-        "path": "http://127.0.0.1:60737/v1/responses",
+        "path": "http://127.0.0.1:62509/v1/responses",
         "action": "reply",
         "connection": null,
-        "account": "fake-codex-b",
+        "account": "fake-codex-a",
         "status": 429,
         "headers": {
           "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
-          "session-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
-          "thread-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "session-id": "01a165ca-d38b-7923-9ae5-3f114d795511",
+          "thread-id": "01a165ca-d38b-7923-9ae5-3f114d795511",
           "x-codex-beta-features": "remote_compaction_v2",
-          "x-codex-turn-metadata": "{\"installation_id\":\"9d77ad54-70e7-4ec7-a6e4-e0a38c465552\",\"session_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"thread_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"window_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-85fb-7580-a4ad-a7ed6d3f46d0\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708740633,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
-          "x-codex-window-id": "01a165c4-85fa-7d73-a273-bcf214181b7c:0"
+          "x-codex-turn-metadata": "{\"installation_id\":\"7916b12e-6ab4-4358-9c94-25b7c6bcbfaf\",\"session_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511\",\"thread_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511\",\"agent_name\":\"/root\",\"turn_id\":\"01a165ca-d3a8-7182-9d8c-69e7e2fb974c\",\"window_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511:0\",\"window_number\":0,\"context_window_id\":\"01a165ca-d38c-79e0-a598-190d482f6903\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165ca-d3a8-7182-9d8c-69e7e2fb974c\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792709153705,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-window-id": "01a165ca-d38b-7923-9ae5-3f114d795511:0"
         },
+        "client_oauth_forwarded": false,
+        "router_client_key": false,
         "fields": [
           "client_metadata",
           "include",
@@ -508,24 +557,26 @@
           null,
           null
         ],
-        "time": 1792708740.653013
+        "time": 1792709153.724268
       },
       {
         "scenario": "codex-custom-http-exhausted",
         "transport": "http",
-        "path": "http://127.0.0.1:60737/v1/responses",
+        "path": "http://127.0.0.1:62509/v1/responses",
         "action": "reply",
         "connection": null,
-        "account": "fake-codex-a",
+        "account": "fake-codex-b",
         "status": 200,
         "headers": {
           "user-agent": "codex_exec/0.163.0 (Mac OS 26.6.2; arm64) dumb (codex_exec; 0.163.0)",
-          "session-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
-          "thread-id": "01a165c4-85fa-7d73-a273-bcf214181b7c",
+          "session-id": "01a165ca-d38b-7923-9ae5-3f114d795511",
+          "thread-id": "01a165ca-d38b-7923-9ae5-3f114d795511",
           "x-codex-beta-features": "remote_compaction_v2",
-          "x-codex-turn-metadata": "{\"installation_id\":\"9d77ad54-70e7-4ec7-a6e4-e0a38c465552\",\"session_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"thread_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c\",\"agent_name\":\"/root\",\"turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"window_id\":\"01a165c4-85fa-7d73-a273-bcf214181b7c:0\",\"window_number\":0,\"context_window_id\":\"01a165c4-85fb-7580-a4ad-a7ed6d3f46d0\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165c4-8618-7971-8a01-1d19e542f95f\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792708740633,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
-          "x-codex-window-id": "01a165c4-85fa-7d73-a273-bcf214181b7c:0"
+          "x-codex-turn-metadata": "{\"installation_id\":\"7916b12e-6ab4-4358-9c94-25b7c6bcbfaf\",\"session_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511\",\"thread_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511\",\"agent_name\":\"/root\",\"turn_id\":\"01a165ca-d3a8-7182-9d8c-69e7e2fb974c\",\"window_id\":\"01a165ca-d38b-7923-9ae5-3f114d795511:0\",\"window_number\":0,\"context_window_id\":\"01a165ca-d38c-79e0-a598-190d482f6903\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a165ca-d3a8-7182-9d8c-69e7e2fb974c\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1792709153705,\"analytics_enabled\":true,\"model\":\"gpt-5.4\"}",
+          "x-codex-window-id": "01a165ca-d38b-7923-9ae5-3f114d795511:0"
         },
+        "client_oauth_forwarded": false,
+        "router_client_key": false,
         "fields": [
           "client_metadata",
           "include",
@@ -557,7 +608,7 @@
           null,
           null
         ],
-        "time": 1792708740.665332
+        "time": 1792709153.736359
       }
     ]
   },
@@ -579,7 +630,7 @@
     "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.073,
+      "elapsed": 15.021,
       "log": "codex-chatgpt.log",
       "requests": 0,
       "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
@@ -591,7 +642,7 @@
     "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.031,
+      "elapsed": 15.081,
       "log": "codex-chatgpt-exhausted.log",
       "requests": 0,
       "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
@@ -603,7 +654,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.343,
+      "elapsed": 0.297,
       "log": "claude-exhausted.log",
       "requests": 2,
       "diagnostic_reason": null
@@ -624,7 +675,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.239,
+      "elapsed": 0.241,
       "log": "claude-backup.log",
       "requests": 1,
       "diagnostic_reason": null
@@ -635,7 +686,7 @@
     "passed": true,
     "status": "pass",
     "evidence": {
-      "kill_to_first_request_secs": 0.178,
+      "kill_to_first_request_secs": 0.192,
       "router": {
         "preferred": "backup",
         "servers": [

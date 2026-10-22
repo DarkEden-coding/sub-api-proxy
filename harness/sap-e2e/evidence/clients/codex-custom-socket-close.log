@@ -1,5 +1,5 @@
 Reading additional input from stdin...
-{"type":"thread.started","thread_id":"01a165c4-91b6-7880-b6f7-b7c5c880be23"}
+{"type":"thread.started","thread_id":"01a165ca-c8db-7323-b613-9f08e2ab13d7"}
 {"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Local mock answer."}}

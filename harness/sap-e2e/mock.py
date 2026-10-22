@@ -51,6 +51,9 @@ class Mock(ThreadingHTTPServer):
         record = dict(scenario=self.scenario, transport=transport, path=handler.path,
                       action=action, connection=getattr(handler, 'connection_id', None),
                       account=account, status=status, headers=headers,
+                      client_oauth_forwarded=any('sk-ant-oat01-fake-fixture' in handler.headers.get(name, '')
+                                                 for name in ('Authorization', 'x-api-key')),
+                      router_client_key=key == 'fake-local-client',
                       fields=sorted(body), thread=body.get('thread'),
                       previous_response_id=body.get('previous_response_id'),
                       generate=body.get('generate'),

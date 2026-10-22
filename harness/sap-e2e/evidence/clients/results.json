@@ -17,7 +17,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.238,
+      "elapsed": 0.243,
       "log": "claude-new-tool-child.log",
       "requests": 4,
       "diagnostic_reason": null
@@ -29,10 +29,45 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.183,
+      "elapsed": 0.178,
       "log": "claude-resume.log",
       "requests": 1,
       "diagnostic_reason": null
+    }
+  },
+  {
+    "name": "claude-subscription-gateway",
+    "passed": true,
+    "status": "pass",
+    "evidence": {
+      "requests": 4,
+      "main_requests": 3,
+      "oauth_forwarded": false,
+      "router_key_verified": true,
+      "headers": [
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "x-claude-code-session-id": "cacfa765-8514-4807-8417-45c9b26b211c",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-prompt-id": "328f9cf2-58c3-4180-8810-50e453cf81f2",
+          "x-claude-code-request-class": "main"
+        },
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "x-claude-code-session-id": "cacfa765-8514-4807-8417-45c9b26b211c",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-prev-tool-durations": "Agent=3",
+          "x-claude-code-prompt-id": "328f9cf2-58c3-4180-8810-50e453cf81f2",
+          "x-claude-code-request-class": "main"
+        },
+        {
+          "user-agent": "claude-cli/2.1.309 (external, sdk-cli)",
+          "x-claude-code-session-id": "cacfa765-8514-4807-8417-45c9b26b211c",
+          "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+          "x-claude-code-prompt-id": "795af088-22e5-49ac-8307-0607cda5a687",
+          "x-claude-code-request-class": "main"
+        }
+      ]
     }
   },
   {
@@ -53,7 +88,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.177,
+      "elapsed": 0.179,
       "log": "codex-custom.log",
       "requests": 2,
       "diagnostic_reason": null
@@ -65,7 +100,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.506,
+      "elapsed": 0.504,
       "log": "codex-custom-socket-close.log",
       "requests": 4,
       "diagnostic_reason": null
@@ -77,7 +112,7 @@
     "status": "diagnostic",
     "evidence": {
       "exit": 1,
-      "elapsed": 0.181,
+      "elapsed": 0.179,
       "log": "codex-custom-exhausted.log",
       "requests": 2,
       "diagnostic_reason": "Intentional direct-mock exhaustion"
@@ -89,7 +124,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.019,
+      "elapsed": 0.02,
       "log": "codex-custom-http-version.log",
       "requests": 0,
       "diagnostic_reason": null
@@ -101,7 +136,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.077,
+      "elapsed": 0.132,
       "log": "codex-custom-http.log",
       "requests": 1,
       "diagnostic_reason": null
@@ -137,7 +172,7 @@
     "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.028,
+      "elapsed": 15.067,
       "log": "codex-chatgpt.log",
       "requests": 0,
       "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
@@ -149,7 +184,7 @@
     "status": "diagnostic",
     "evidence": {
       "exit": -14,
-      "elapsed": 15.053,
+      "elapsed": 15.071,
       "log": "codex-chatgpt-exhausted.log",
       "requests": 0,
       "diagnostic_reason": "Native ChatGPT bootstrap is not emulated"
@@ -161,7 +196,7 @@
     "status": "pass",
     "evidence": {
       "exit": 0,
-      "elapsed": 0.18,
+      "elapsed": 0.668,
       "log": "claude-compact.log",
       "requests": 1,
       "diagnostic_reason": null
@@ -172,10 +207,10 @@
     "passed": null,
     "status": "diagnostic",
     "evidence": {
-      "exit": -14,
-      "elapsed": 15.032,
+      "exit": 1,
+      "elapsed": 0.183,
       "log": "claude-exhausted.log",
-      "requests": 5,
+      "requests": 1,
       "diagnostic_reason": "Intentional direct-mock exhaustion"
     }
   },
@@ -205,15 +240,21 @@
         null
       ],
       "request_class": [
-        null,
-        null,
-        null,
-        null
+        "main",
+        "subagent",
+        "main",
+        "main"
       ],
       "compaction_headers": [
-        null
+        "manual"
       ]
     }
+  },
+  {
+    "name": "claude-gateway-hint-headers",
+    "passed": true,
+    "status": "pass",
+    "evidence": "Request classes and manual compaction are labelled in subscription gateway mode."
   },
   {
     "name": "codex-full-input-after-normal-close",
@@ -225,28 +266,28 @@
         "connection": 7,
         "input_count": 1,
         "previous_response_id": null,
-        "time": 1792708743.72298
+        "time": 1792709151.052375
       },
       {
         "action": "reply",
         "connection": 7,
         "input_count": 4,
         "previous_response_id": null,
-        "time": 1792708743.72941
+        "time": 1792709151.059118
       },
       {
         "action": "close",
         "connection": 7,
         "input_count": 1,
         "previous_response_id": "resp_local_9",
-        "time": 1792708743.7655392
+        "time": 1792709151.09567
       },
       {
         "action": "reply",
         "connection": 10,
         "input_count": 6,
         "previous_response_id": null,
-        "time": 1792708744.063071
+        "time": 1792709151.389935
       }
     ]
   },

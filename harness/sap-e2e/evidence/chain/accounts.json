@@ -2,7 +2,7 @@
   "status": 200,
   "body": [
     {
-      "id": "claude:api-key:claude:apikey:9e79c6c3f3ea",
+      "id": "claude:api-key:claude:apikey:04dab589f3ae",
       "provider": "claude",
       "label": "claude-apikey",
       "email": null,
@@ -19,7 +19,7 @@
       "stale": true
     },
     {
-      "id": "claude:api-key:claude:apikey:ea57a9428d53",
+      "id": "claude:api-key:claude:apikey:77125befa4ae",
       "provider": "claude",
       "label": "claude-apikey",
       "email": null,
@@ -36,7 +36,7 @@
       "stale": true
     },
     {
-      "id": "codex:api-key:codex:apikey:78a1fb1903d9",
+      "id": "codex:api-key:codex:apikey:526104e53d77",
       "provider": "codex",
       "label": "codex-apikey",
       "email": null,
@@ -53,7 +53,7 @@
       "stale": true
     },
     {
-      "id": "codex:api-key:codex:apikey:8f25c62e5d70",
+      "id": "codex:api-key:codex:apikey:bba98c9701bb",
       "provider": "codex",
       "label": "codex-apikey",
       "email": null,

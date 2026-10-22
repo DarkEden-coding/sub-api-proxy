@@ -1,1 +1,1 @@
-{"mode": "sap-chain", "recorded_at": 1792708734.736644, "commit": "9227fffcedcf21123f4e7e65cf3aa152abe6968d"}
+{"mode": "sap-chain", "recorded_at": 1792709150.840249, "commit": "809dd2ac76f524d7f8ec19e211ee46a4f3d496a6", "harness_changes": "Subscription gateway validation added on top of recorded commit"}

@@ -55,6 +55,14 @@ from evidence. Full process logs stay in the output folder for local diagnosis;
 review them before sharing. Checked-in evidence contains sanitized JSON and
 selected synthetic client events.
 
+Claude runs in subscription gateway mode with a literal fake OAuth token and
+`CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. The router reads a private fake client-key
+file and replaces inference credentials. Required checks verify that main
+requests retain the OAuth and extended-cache-TTL betas. The client-only run
+also verifies the router key reaches the mock, the OAuth token does not, and
+request classes and manual compaction carry their hint headers. Evidence stores
+only boolean credential checks, never authentication header values.
+
 ## Mock controls
 
 `mock.Mock(evidence: pathlib.Path, port: int = 0)` binds loopback:
@@ -81,14 +89,18 @@ The first Claude request advertising `Agent` or `Task` receives a tool response
 that launches a local child. Later requests receive text. Codex fixtures support
 HTTP SSE, masked/fragmented WebSocket text frames, ping/pong, prewarm, completion
 events, and normal close. These scripted fixtures do not emulate provider thread
-storage or validate real subscription quotas. Three loopback protocol tests cover
+storage or validate real subscription quotas. Four loopback protocol tests cover
 Claude tool/SSE output, forced 400, both providers' exhaustion signals, Codex SSE,
-and WebSocket error/normal-close frames.
+WebSocket error/normal-close frames, and credential-check redaction.
 
 ## Recorded results, October 22, 2026
 
 The final full-chain run exits 0. Evidence is in `evidence/chain/`; the separately
 rerun client/router/mock diagnostics are in `evidence/clients/`.
+The subscription-mode rerun has 19 passes and two diagnostics in the full chain,
+and 15 passes and six diagnostics in client-only mode, with no failures. The
+real Claude client reaches the backup 192 ms after primary termination. Run
+metadata identifies the base commit and notes the added harness changes.
 
 | Scenario | Result |
 | --- | --- |

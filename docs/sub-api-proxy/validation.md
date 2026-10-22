@@ -183,3 +183,30 @@ case. No real provider, LLM, deployment, release, push, or workspace-wide test w
 used. Public APIs and sap-core contracts are unchanged. Actual native ChatGPT
 bootstrap, remote compaction, and live native Claude server-thread recovery
 remain outside this mock run.
+
+## Subscription gateway chain, October 22, 2026
+
+The final harness now follows the chosen Claude setup rather than key mode.
+It supplies a literal fake OAuth token, enables gateway hint headers, and gives
+the router a private client-key file. Both debug binaries build successfully.
+The four Python protocol tests pass, including a check that credential evidence
+contains booleans rather than tokens.
+
+The full chain exits 0 with 19 passes and two expected ChatGPT bootstrap
+diagnostics. Client-only mode exits 0 with 15 passes and six diagnostics.
+Evidence in `harness/sap-e2e/evidence/` is refreshed from these runs. Its metadata
+records base commit `809dd2ac` and notes the harness changes tested on top.
+
+Required assertions confirm that Claude main requests retain the OAuth and
+extended-cache-TTL betas through the full chain. The client-only run confirms
+that the router client key reaches the mock while the fake OAuth token does
+not. Main and subagent request classes and the manual-compaction header also
+arrive. This checks protocol headers, not actual cache reads or writes.
+
+Claude's same-process exhaustion move, Codex exhaustion over WebSocket and HTTP,
+and parent/child assignment still pass. A real Claude client reaches the backup
+192 ms after primary termination. Claude custom-base requests still omit native
+server threads and carry full history. Real remote compaction and ChatGPT
+bootstrap remain unverified. All traffic stays in the loopback sandbox, with
+private client homes and fake credentials. No real model calls or deployment
+were performed.
