@@ -973,7 +973,8 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
             fallbacks.remove(&dst);
         }
     }
-    resync(state);
+    let written: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+    state.publish_upload((*state.rt.config()).clone(), None, synthesized.map(|c| (c, written)));
     Ok(())
 }
 
@@ -2589,6 +2590,63 @@ mod tests {
             (a.provider.as_str(), a.disabled, &a.metadata["note"]),
             ("codex", true, &json!(1))
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An upload registers what it uploaded, as Go's upload does without asking plugin
+    /// auth providers, even while one is active and has not parsed the new bytes: it
+    /// replaces the credential with the same ID instead of keeping the old one.
+    #[tokio::test]
+    async fn an_upload_replaces_its_credential_while_plugins_parse_auth_files() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-plugins",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
+            assert_eq!(token(&state), "fake-0");
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            assert_eq!(token(&state), "fake-1");
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A token refresh that commits between an upload's write and its publication
+    /// changed the file: the refreshed credential stays, on disk and in the store.
+    #[tokio::test]
+    async fn a_refresh_between_an_upload_and_its_publication_survives() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-refresh",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        // This thread only: tests sharing the process never see the parser.
+        credentials::with_thread_plugin_auth_parser(Arc::new(Nothing), || {
+            let refreshing = state.clone();
+            crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+                state.rt.config().auth_dir.clone(),
+                Box::new(move || refresh(&refreshing, "a.json", "fake-refreshed")),
+            ));
+            store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+            let stored = state.rt.store().get("a.json").unwrap();
+            assert_eq!(stored.provider, "claude");
+            assert_eq!(stored.metadata["access_token"], "fake-refreshed");
+            assert_eq!(on_disk(&dir, "a.json")["access_token"], "fake-refreshed");
+        });
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

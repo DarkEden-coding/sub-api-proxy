@@ -360,6 +360,7 @@ async fn the_host_as_auth_parser_owns_its_plugins_auth_files() {
         ..Default::default()
     };
     let load = || {
+        credentials::preparse_auth_dir(&cfg);
         let mut all = credentials::scan_auth_dir(&cfg).credentials;
         assert_eq!(all.len(), 1);
         all.remove(0)
