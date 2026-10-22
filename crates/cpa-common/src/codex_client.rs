@@ -570,12 +570,13 @@ fn from_template(id: &str, template: &Res<'_>) -> SpawnModel {
 }
 
 /// `codexSpawnAgentModelsFromTemplates` over the current catalog: catalog models by
-/// priority, then other served models by display name with the `gpt-5.5` template's
+/// priority, then other served models by display name with the default template's
 /// reasoning efforts (or the registry's thinking levels) and no service tiers.
 fn spawn_models(available: &[AvailableModel], lookup: &dyn Fn(&str) -> Option<ModelFacts>) -> Vec<SpawnModel> {
     let (raw, _) = crate::codex_catalog::snapshot();
     let catalog = gj::get(raw.as_slice(), "models");
     let mut templates: HashMap<String, Res<'_>> = HashMap::new();
+    let mut default_template = None;
     if catalog.is_array() {
         for model in catalog.array() {
             if !model.is_object() {
@@ -583,11 +584,15 @@ fn spawn_models(available: &[AvailableModel], lookup: &dyn Fn(&str) -> Option<Mo
             }
             let slug = catalog_string(&model, "slug");
             if !slug.is_empty() {
+                // `gpt-5.5`, else the catalog's first model (e240bd84).
+                if default_template.is_none() || slug == "gpt-5.5" {
+                    default_template = Some(model.clone());
+                }
                 templates.insert(slug, model);
             }
         }
     }
-    let Some(default_template) = templates.get("gpt-5.5") else {
+    let Some(default_template) = default_template.as_ref() else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
