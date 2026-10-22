@@ -81,8 +81,8 @@ pub(crate) fn inject_x_search(cfg: &Config) -> bool {
 
 /// `TranslateRequestWithAPIKeyModelCompatibility(AndUpdateIntent)ForExecutor` with
 /// target executor xai (Codex-client rewrites, then the pair or its compat variant).
-// ponytail: the configuration-update intent is not exposed by crate::codex_client
-// (owner: Codex), so thinking always sees `updates_changed: false`.
+// ponytail: the configuration-update intent crate::codex_client reports is not read
+// here yet, so thinking always sees `updates_changed: false`; xAI's port reads it.
 fn translate(
     req: &ExecRequest,
     client: &crate::codex_client::Client<'_>,
@@ -92,6 +92,7 @@ fn translate(
     body: &[u8],
 ) -> Result<Vec<u8>, ExecError> {
     crate::codex_client::translate_request(req.source_format, to, &RequestCtx { model, stream }, body, client)
+        .map(|t| t.body)
         .map_err(|e| bad_request(e.to_string()))
 }
 

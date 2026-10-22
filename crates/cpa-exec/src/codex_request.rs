@@ -352,9 +352,8 @@ pub(crate) fn is_native(req: &ExecRequest) -> bool {
 /// `translateCodexRequestPairWithUpdateIntent` + `helps.ApplyRequestThinking`: the
 /// registered pair (Go's model-rewrite fallback for same-format bodies), then the
 /// thinking pipeline for `codex` (`openai-response` for compact). Also returns the
-/// translated original request, which payload default rules consult.
-// ponytail: the translator's configuration-update intent is not surfaced, so
-// `updates_changed` stays false.
+/// translated original request, which payload default rules consult. Thinking reads the
+/// working translation's configuration-update intent (a plugin normalizer's edit).
 fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(String, Vec<u8>), ExecError> {
     let target = call.target();
     let registered = cpa_translate::pair(req.source_format, target).is_some();
@@ -388,16 +387,18 @@ fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(
         if is_compat && req.source_format == Format::Claude && target == Format::Codex {
             crate::codex_client::translate_request(req.source_format, target, &ctx, raw, &compat)
         } else {
-            cpa_translate::translate_request(req.source_format, target, &ctx, raw)
+            cpa_translate::translate_request_tracked(req.source_format, target, &ctx, raw)
         }
         .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
     };
-    let body = translate(&req.body)?;
-    let original = if req.original_body.is_empty() || req.original_body == req.body {
-        body.clone()
+    // Go translates the original first, and equal payloads once.
+    let (original, working) = if req.original_body.is_empty() || req.original_body == req.body {
+        let working = translate(&req.body)?;
+        (working.body.clone(), working)
     } else {
-        translate(&req.original_body)?
+        (translate(&req.original_body)?.body, translate(&req.body)?)
     };
+    let body = working.body;
     let caps = req
         .resolved_model
         .as_ref()
@@ -412,7 +413,7 @@ fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(
         provider: "codex",
         resolved: caps.as_ref().map(Some),
         has_request_transformer: registered,
-        updates_changed: false,
+        updates_changed: working.configuration_updates_changed,
     })
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let body = String::from_utf8(thought)
