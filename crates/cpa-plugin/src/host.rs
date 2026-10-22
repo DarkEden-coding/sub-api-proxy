@@ -166,6 +166,9 @@ pub(crate) struct Inner {
     snapshot: RwLock<Arc<Snapshot>>,
     loader: Arc<dyn Loader>,
     pub callbacks: Callbacks,
+    /// Set once this host's translator hooks are handed out (`translator_hooks`): from
+    /// then on its lifecycle keeps cpa-translate's hook flag current.
+    pub(crate) hooks_installed: std::sync::atomic::AtomicBool,
 }
 
 /// The plugin host. Cheap to clone.
@@ -214,6 +217,7 @@ impl Host {
             snapshot: RwLock::new(Arc::default()),
             loader,
             callbacks: Callbacks::new(me.clone()),
+            hooks_installed: Default::default(),
         });
         Self { inner }
     }
@@ -233,7 +237,8 @@ impl Host {
     /// Publishes a snapshot. Takes the state guard so that publication and the active
     /// maps change in one critical section (Go `h.mu`): a registration that compares
     /// snapshots under the state lock then never commits against a half-applied change.
-    fn store_snapshot(&self, _state: &mut State, snapshot: Snapshot) {
+    fn store_snapshot(&self, state: &mut State, snapshot: Snapshot) {
+        self.publish_hook_activity(state, &snapshot.records);
         *self
             .inner
             .snapshot
@@ -297,6 +302,7 @@ impl Host {
         // Go `thinking.UnregisterPluginProviders`.
         state.thinking_providers.retain(|_, owner| owner != id);
         cpa_common::thinking::unregister_plugin_providers(id);
+        self.publish_hook_activity(&state, &self.snapshot().records);
         drop(state);
         tracing::error!(plugin_id = %id, method = %what, "pluginhost: plugin panic recovered: {panic}");
     }
@@ -710,7 +716,9 @@ impl Host {
         }
         let plugin = match self.call_register(id, &item).await {
             Some(plugin) => {
-                self.state().fused.remove(id);
+                let mut state = self.state();
+                state.fused.remove(id);
+                self.publish_hook_activity(&state, &self.snapshot().records);
                 plugin
             }
             None => previous?,

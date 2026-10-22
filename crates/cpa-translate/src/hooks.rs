@@ -7,7 +7,12 @@
 //! any pair.
 //!
 //! With no hooks installed, or none active, every entry point takes its old path after
-//! one atomic load: no copy, no parse.
+//! one atomic load: no lock, copy or parse. The plugin host keeps that flag current
+//! ([`set_plugin_hooks_active`]) as plugins load, unload, reload and fuse.
+//!
+//! A stream reads the flag once, when its translator is built (Go reads the hooks on
+//! every `TranslateStream` call), so a translator plugin loaded mid-stream applies from
+//! the next stream.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -29,11 +34,8 @@ pub struct Response<'a> {
 }
 
 /// Go `translator.PluginHooks`. Each method returns `None` for "unchanged" (Go returns
-/// a copy of its input), so an installed hook set without plugins costs no copy.
+/// a copy of its input), so a hook no plugin offers costs no copy.
 pub trait Hooks: Send + Sync {
-    /// Whether any plugin offers one of the hooks; when false the hooks are skipped (Go
-    /// calls them and each returns its input unchanged).
-    fn active(&self) -> bool;
     /// Go `NormalizeRequest`: every request normalizer, chained.
     fn normalize_request(&self, from: &str, to: &str, model: &str, body: &[u8], stream: bool) -> Option<Vec<u8>>;
     /// Go `TranslateRequest`: the first request translator that answers.
@@ -47,6 +49,9 @@ pub trait Hooks: Send + Sync {
 }
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Whether a plugin offers any hook. While false (Go: every hook returns its input),
+/// the entry points skip the hooks without touching `HOOKS`.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 static HOOKS: RwLock<Option<Arc<dyn Hooks>>> = RwLock::new(None);
 
 /// Go `translator.SetPluginHooks`.
@@ -61,16 +66,23 @@ pub fn has_plugin_hooks() -> bool {
     INSTALLED.load(Ordering::Acquire)
 }
 
+/// Set by the owner of the installed hooks whenever the set of plugins offering one
+/// changes.
+pub fn set_plugin_hooks_active(active: bool) {
+    ACTIVE.store(active, Ordering::Release);
+}
+
+/// Whether the installed hooks are in use: a plugin offers one.
+pub fn plugin_hooks_active() -> bool {
+    ACTIVE.load(Ordering::Acquire) && INSTALLED.load(Ordering::Acquire)
+}
+
 /// The installed hooks when a plugin offers any.
 pub(crate) fn current() -> Option<Arc<dyn Hooks>> {
-    if !INSTALLED.load(Ordering::Acquire) {
+    if !ACTIVE.load(Ordering::Acquire) {
         return None;
     }
-    let hooks = HOOKS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()?;
-    hooks.active().then_some(hooks)
+    HOOKS.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 /// Go registry `NormalizeRequest`: the plugin request normalizers, or `body` as is.
@@ -128,8 +140,10 @@ fn response<'a>(from: &'a str, to: &'a str, ctx: &'a ResponseCtx<'_>, stream: bo
 }
 
 /// Go `TranslateNonStream` for a registered pair: `native` between the before and after
-/// normalizers. A failed or empty translation skips the after normalizers (Go returns
-/// nil).
+/// normalizers. A failed or empty translation skips the after normalizers.
+// ponytail: Go skips them only for a nil result, so an empty non-nil one (an
+// OpenAI-to-OpenAI passthrough of an empty body) still reaches them there. Native
+// translators here return no nil marker; one would be the upgrade (M6-0083).
 pub(crate) fn non_stream(
     upstream: &str,
     client: &str,

@@ -34,9 +34,6 @@ impl Fake {
 
 /// Go's fake returns its input when it has no edit; `None` is this trait's "unchanged".
 impl Hooks for Fake {
-    fn active(&self) -> bool {
-        true
-    }
     fn normalize_request(&self, from: &str, to: &str, _: &str, body: &[u8], _: bool) -> Option<Vec<u8>> {
         self.call("normalize-request", from, to);
         self.normalize_request.as_ref().map(|f| f(body))
@@ -64,6 +61,7 @@ struct Installed(#[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Drop for Installed {
     fn drop(&mut self) {
+        hooks::set_plugin_hooks_active(false);
         hooks::set_plugin_hooks(None);
     }
 }
@@ -72,6 +70,7 @@ fn install(fake: Arc<dyn Hooks>) -> Installed {
     static SERIAL: Mutex<()> = Mutex::new(());
     let guard = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     hooks::set_plugin_hooks(Some(fake));
+    hooks::set_plugin_hooks_active(true);
     Installed(guard)
 }
 
@@ -354,14 +353,12 @@ fn configuration_update_changes_are_tracked_across_the_normalizer() {
     }
 }
 
-/// Installed hooks that no plugin backs are skipped: the native result, untouched.
+/// Installed hooks that no plugin backs (the host's flag is off) are skipped: the
+/// native result, untouched.
 #[test]
 fn inactive_hooks_change_nothing() {
     struct Inactive;
     impl Hooks for Inactive {
-        fn active(&self) -> bool {
-            false
-        }
         fn normalize_request(&self, _: &str, _: &str, _: &str, _: &[u8], _: bool) -> Option<Vec<u8>> {
             panic!("an inactive hook ran")
         }
@@ -380,6 +377,7 @@ fn inactive_hooks_change_nothing() {
     }
     let body = br#"{"model":"other","input":"hi"}"#;
     let installed = install(Arc::new(Inactive));
+    hooks::set_plugin_hooks_active(false);
     let with = cpa_translate::translate_request(Format::Codex, Format::Gemini, &ctx(false), body).unwrap();
     assert!(hooks::unregistered_non_stream("claude", "claude", &RESPONSE_CTX, b"{}").is_none());
     assert!(hooks::wrap_stream("claude", "claude", &RESPONSE_CTX, None).is_none());

@@ -1887,3 +1887,55 @@ async fn a_plugin_response_translator_serves_a_private_executor_format() {
     assert_eq!(asked[1]["Stream"], true);
     env.finish().await;
 }
+
+/// Go's OpenAI-compatible executor calls `TranslateStream` once per upstream frame
+/// (`data: ` plus the joined payload), so plugin response hooks run once per frame. An
+/// after normalizer that answers even an empty input exposes any extra call: a blank
+/// line passed after each frame would add a second chunk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_response_hooks_run_once_per_openai_compatible_stream_frame() {
+    let upstream = {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let handler = move || async move {
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                sse.to_owned(),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(handler))
+                .await
+                .unwrap()
+        });
+        url
+    };
+    let compat = format!(
+        "openai-compatibility:\n  - name: up\n    base-url: {upstream}/v1\n    api-key-entries: [{{api-key: k1}}]\n    models: [{{name: up-model}}]\n"
+    );
+    let Some(env) = env(
+        "plugin-owned-stream-hooks",
+        &[("norm", "response_after_translator")],
+        &compat,
+        &[],
+        |records| {
+            let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, r#"{"plugin":true}"#);
+            canned(records, "norm", "response.normalize_after", json!({ "Body": body }));
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let (got, body) = env.chat_stream("up-model").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(body, "data: {\"plugin\":true}\n\ndata: [DONE]\n\n");
+    let asked = calls(&env.records, "norm", "response.normalize_after");
+    assert_eq!(
+        asked.len(),
+        1,
+        "one call for the content frame, none for [DONE]: {asked:?}"
+    );
+    env.finish().await;
+}

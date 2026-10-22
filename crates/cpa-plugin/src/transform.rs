@@ -278,8 +278,27 @@ fn translator_hook(r: &Record) -> bool {
 impl Host {
     /// This host as Go's `translator.PluginHooks` (`sdktranslator.SetPluginHooks(host)`).
     /// It holds the host weakly, so installing it process-wide keeps nothing alive.
+    /// From then on, this host keeps cpa-translate's hook flag current, so with no
+    /// translator plugin the registry skips the hooks after one atomic load.
     pub fn translator_hooks(&self) -> Arc<dyn cpa_translate::hooks::Hooks> {
+        self.inner
+            .hooks_installed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let state = self.state();
+        self.publish_hook_activity(&state, &self.snapshot().records);
+        drop(state);
         Arc::new(TranslatorHooks(Arc::downgrade(&self.inner)))
+    }
+
+    /// Publishes whether an unfused plugin among `records` offers a translator hook.
+    /// Callers hold the state lock, so updates follow the lifecycle's order.
+    pub(crate) fn publish_hook_activity(&self, state: &crate::host::State, records: &[Record]) {
+        if self.inner.hooks_installed.load(std::sync::atomic::Ordering::Acquire) {
+            let active = records
+                .iter()
+                .any(|r| translator_hook(r) && !state.fused.contains_key(&r.id));
+            cpa_translate::hooks::set_plugin_hooks_active(active);
+        }
     }
 
     /// Whether an active, unfused plugin offers a hook `has` selects, without copying
@@ -312,10 +331,6 @@ fn response_transform<'a>(t: &'a cpa_translate::hooks::Response<'a>) -> Response
 }
 
 impl cpa_translate::hooks::Hooks for TranslatorHooks {
-    fn active(&self) -> bool {
-        self.host(translator_hook).is_some()
-    }
-
     fn normalize_request(&self, from: &str, to: &str, model: &str, body: &[u8], stream: bool) -> Option<Vec<u8>> {
         let host = self.host(|r| r.plugin.caps.request_normalizer)?;
         Some(

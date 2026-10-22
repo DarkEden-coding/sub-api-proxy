@@ -324,6 +324,7 @@ async fn the_host_as_translator_hooks_normalizes_requests() {
     };
     let (quiet, quiet_log) = host_with("hooks-quiet", [("q", none)].into()).await;
     cpa_translate::hooks::set_plugin_hooks(Some(quiet.translator_hooks()));
+    assert!(!cpa_translate::hooks::plugin_hooks_active(), "no plugin offers a hook");
     assert_eq!(translate(), native);
     assert!(calls(&quiet_log).is_empty());
 
@@ -334,7 +335,13 @@ async fn the_host_as_translator_hooks_normalizes_requests() {
     };
     let (host, log) = host_with("hooks-normalize", [("a", a)].into()).await;
     cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+    assert!(cpa_translate::hooks::plugin_hooks_active());
     assert_eq!(translate(), b"a");
     assert_eq!(calls(&log), ["a request.normalize"]);
+    // Unloading the last translator plugin turns the registry's flag off.
+    assert!(host.unload_plugin("a", None).await);
+    assert!(!cpa_translate::hooks::plugin_hooks_active());
+    assert_eq!(translate(), native);
+    assert!(calls(&log).is_empty());
     cpa_translate::hooks::set_plugin_hooks(None);
 }

@@ -621,7 +621,7 @@ impl StreamTranslator for Identity {
         Ok(if event.starts_with(b"data: [DONE]") {
             Vec::new()
         } else {
-            vec![Bytes::copy_from_slice(event)]
+            vec![Bytes::from([event, b"\n\n"].concat())]
         })
     }
 
@@ -678,10 +678,10 @@ impl Frames {
         self.failed = true;
     }
 
+    /// One Go `TranslateStream` call per frame's joined `data:` line: no blank line
+    /// follows it, so plugin stream hooks run once per line, as in Go.
     fn translate(&mut self, line: &[u8]) -> bool {
-        let mut event = line.to_vec();
-        event.extend_from_slice(b"\n\n");
-        match self.translator.event(&event) {
+        match self.translator.event(line) {
             Ok(out) => {
                 self.ready.extend(out.into_iter().map(Ok));
                 false
