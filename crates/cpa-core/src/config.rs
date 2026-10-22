@@ -425,11 +425,13 @@ fn effective_secret(tree: &Value) -> String {
 /// Whether the effective `secret-key` of a [`scalar_texts`] tree carries yaml.v3's
 /// binary tag, resolved as its scanner does: `!!` expands to `tag:yaml.org,2002:`
 /// and `%XX` escapes are decoded, so `!!bin%61ry` and `!<tag:yaml.org,2002:binary>`
-/// are binary too. Fails closed where that resolution is not followed: a `%TAG`
-/// directive beside a tagged secret, a named handle, a malformed escape, or a file
-/// the syntax tree cannot read. ponytail: only a literal key is checked; a binary
-/// scalar reached through an alias or merge keeps its base64 source in the file, so
-/// the plaintext scan refuses it.
+/// are binary too, as are the tags that resolve to the short spelling `!!binary`
+/// (`!<!!binary>`, `!%21binary`), which yaml.v3 also decodes. Fails closed where that
+/// resolution is not followed: a `%TAG` directive beside a tagged secret, a named
+/// handle, a malformed escape, or a file the syntax tree cannot read. A secret
+/// reached through an alias or merge is not resolved: it is refused when any tag in
+/// the file could be binary, since the anchor holding the base64 may be dropped by the
+/// layout cleanup.
 fn binary_secret(text: &str, tree: &Value) -> anyhow::Result<bool> {
     let v8 = tree
         .as_mapping()
@@ -438,40 +440,51 @@ fn binary_secret(text: &str, tree: &Value) -> anyhow::Result<bool> {
     let parent = if v8 { "management" } else { "remote-management" };
     let unresolved = || anyhow::anyhow!("the management key's YAML tag cannot be resolved for upload");
     let file: yaml_edit::YamlFile = text.parse().map_err(|_| unresolved())?;
-    let node = file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key"));
-    let Some(yaml_edit::YamlNode::TaggedNode(node)) = node else {
-        return Ok(false);
-    };
-    let directives = yaml_edit::lex(text)
-        .into_iter()
-        .any(|(kind, token)| kind == yaml_edit::SyntaxKind::DIRECTIVE && token.starts_with("%TAG"));
-    anyhow::ensure!(!directives, unresolved());
-    let raw = node.tag().ok_or_else(unresolved)?;
-    let tag = if let Some(uri) = raw.strip_prefix("!<").and_then(|t| t.strip_suffix('>')) {
-        uri.to_owned()
-    } else if let Some(suffix) = raw.strip_prefix("!!") {
-        format!("tag:yaml.org,2002:{suffix}")
-    } else if raw[1..].contains('!') {
-        anyhow::bail!(unresolved());
-    } else {
-        raw
-    };
-    let mut bytes = Vec::with_capacity(tag.len());
-    let mut rest = tag.as_bytes();
-    while let Some((&b, tail)) = rest.split_first() {
-        if b == b'%' {
-            let hex = tail.get(..2).and_then(|h| std::str::from_utf8(h).ok());
-            bytes.push(
-                hex.and_then(|h| u8::from_str_radix(h, 16).ok())
-                    .ok_or_else(unresolved)?,
-            );
-            rest = &tail[2..];
+    let tokens = yaml_edit::lex(text);
+    let directives = tokens
+        .iter()
+        .any(|(kind, token)| *kind == yaml_edit::SyntaxKind::DIRECTIVE && token.starts_with("%TAG"));
+    let binary = |raw: &str| -> anyhow::Result<bool> {
+        anyhow::ensure!(!directives, unresolved());
+        let tag = if let Some(uri) = raw.strip_prefix("!<").and_then(|t| t.strip_suffix('>')) {
+            uri.to_owned()
+        } else if let Some(suffix) = raw.strip_prefix("!!") {
+            format!("tag:yaml.org,2002:{suffix}")
+        } else if raw[1..].contains('!') {
+            anyhow::bail!(unresolved());
         } else {
-            bytes.push(b);
-            rest = tail;
+            raw.to_owned()
+        };
+        let mut bytes = Vec::with_capacity(tag.len());
+        let mut rest = tag.as_bytes();
+        while let Some((&b, tail)) = rest.split_first() {
+            if b == b'%' {
+                let hex = tail.get(..2).and_then(|h| std::str::from_utf8(h).ok());
+                bytes.push(
+                    hex.and_then(|h| u8::from_str_radix(h, 16).ok())
+                        .ok_or_else(unresolved)?,
+                );
+                rest = &tail[2..];
+            } else {
+                bytes.push(b);
+                rest = tail;
+            }
+        }
+        Ok(bytes == b"tag:yaml.org,2002:binary" || bytes == b"!!binary")
+    };
+    match file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key")) {
+        Some(yaml_edit::YamlNode::TaggedNode(node)) => binary(&node.tag().ok_or_else(unresolved)?),
+        Some(yaml_edit::YamlNode::Scalar(_)) => Ok(false),
+        // Through an alias, a merge or an aliased section.
+        _ => {
+            for (kind, token) in &tokens {
+                if *kind == yaml_edit::SyntaxKind::TAG && binary(token).unwrap_or(true) {
+                    anyhow::bail!(unresolved());
+                }
+            }
+            Ok(false)
         }
     }
-    Ok(bytes == b"tag:yaml.org,2002:binary")
 }
 
 /// `text` as a tree whose scalars are their decoded text, as yaml.v3's `Node.Value`

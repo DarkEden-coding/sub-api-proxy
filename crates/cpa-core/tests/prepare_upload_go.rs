@@ -5,7 +5,8 @@
 //!
 //! Rust refuses two kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
 //! where re-emitting the alias-expanded tree would change another setting, and where
-//! the secret's tag depends on a `%TAG` directive. Those cases expect Rust's refusal.
+//! the secret's tag depends on a `%TAG` directive or the secret is reached through an
+//! alias or merge in a file with a tag that could be binary. Those cases expect Rust's refusal.
 use serde_json::Value as Json;
 use serde_yaml_ng::Value;
 
@@ -21,8 +22,9 @@ fn masked(v: Json) -> Json {
 const REWRITE_REFUSED: &[&str] = &[
     "aliased hex secret",
     "merge key beside a hex value",
-    "binary host beside a merged secret",
     "hex key beside a merged secret",
+    "aliased v8 binary secret",
+    "aliased v8 binary secret beside a copy",
 ];
 const REWRITE_REFUSAL: &str =
     "failed to update remote management key: rewriting the config file would change the text of another setting";
@@ -31,6 +33,13 @@ const TAG_REFUSED: &[&str] = &[
     "named handle binary secret beside a copy",
     "redefined secondary handle secret",
     "redefined secondary handle secret beside a copy",
+    "binary host beside a merged secret",
+    "aliased legacy binary secret",
+    "aliased legacy binary secret beside a copy",
+    "binary secret through an aliased section",
+    "binary secret through an aliased section beside a copy",
+    "binary secret through a merge",
+    "binary secret through a merge beside a copy",
 ];
 const TAG_REFUSAL: &str = "the management key's YAML tag cannot be resolved for upload";
 
