@@ -89,6 +89,9 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
     assert_eq!(hits.load(Ordering::SeqCst), 5);
     assert_eq!(catalog_generation(), generation + 1);
     assert!(pinned().lookup("claude-refreshed-1").is_some());
+    // Management's model definitions read the refreshed catalog.
+    let definitions = cpa_core::registry::dynamic::static_definitions("claude").unwrap();
+    assert_eq!(definitions.last().unwrap().id, "claude-refreshed-1");
     // Go's refresh callback re-registers the credentials of changed providers.
     assert!(registered(&rt));
 

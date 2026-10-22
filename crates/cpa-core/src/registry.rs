@@ -1,6 +1,7 @@
-//! Pinned static model catalog: `internal/registry/models/models.json` from CLIProxyAPI
-//! v8.0.27, embedded verbatim. It is 6fecc6e's catalog plus the Antigravity Claude 5.5
-//! models (`claude-opus-5-5-high`, `claude-sonnet-5-5-high`).
+//! Pinned static model catalog: `internal/registry/models/models.json` from CLIProxyAPI.
+//! Every section except `claude` is v8.0.35's, byte for byte. The `claude` section is
+//! still v8.0.27's (6fecc6e's catalog); v8.0.35's Claude changes (`claude-haiku-5-5`,
+//! new thinking metadata) wait for the Claude replay work.
 //!
 //! This is the static layer only. Go overlays a dynamic registry (per-credential
 //! registrations, config model definitions, remote catalog refresh) and consults it before
@@ -407,15 +408,15 @@ mod tests {
                 ("gemini", 14),
                 ("vertex", 21),
                 ("gemini-cli", 7),
-                ("aistudio", 16),
+                ("aistudio", 15),
                 ("codex-free", 5),
                 ("codex-team", 9),
                 ("codex-plus", 9),
                 ("codex-pro", 9),
                 ("kimi", 10),
-                ("antigravity", 14),
+                ("antigravity", 11),
                 ("xai", 12),
-                ("meta", 5),
+                ("meta", 9),
             ]
         );
     }

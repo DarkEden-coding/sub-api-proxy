@@ -336,7 +336,7 @@ async fn unregistered_and_unserved_models_follow_go_error_contracts() {
     // An Antigravity credential without a project or refresh token: Go's
     // PrepareRequestAuth fails in ensureAccessToken (`missing refresh token`, 401)
     // before any request leaves, and the conductor answers that last error.
-    let res = post(r#"{"model":"gemini-pro-agent"}"#).await.unwrap();
+    let res = post(r#"{"model":"gemini-3-flash"}"#).await.unwrap();
     assert_eq!(res.status().as_u16(), 401);
     assert_eq!(
         res.text().await.unwrap(),

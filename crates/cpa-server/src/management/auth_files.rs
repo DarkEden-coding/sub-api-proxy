@@ -24,8 +24,6 @@ use super::{Management, json as respond, multipart};
 use crate::body_limit::FirstJson;
 use crate::runtime::PatchError;
 
-const MODEL_DEFINITIONS: &str = include_str!("model_definitions.json");
-
 /// `url.ParseQuery` pairs in order: names and values decoded, malformed pairs skipped.
 pub(super) struct Query(Vec<(String, String)>);
 
@@ -1982,21 +1980,94 @@ fn merge_headers(meta: &mut Map<String, Value>, value: &Value) {
 // ---------------------------------------------------------------------------
 // Models, cooldowns, refresh
 
-fn definitions() -> &'static Map<String, Value> {
-    static DEFS: std::sync::LazyLock<Map<String, Value>> =
-        std::sync::LazyLock::new(|| serde_json::from_str(MODEL_DEFINITIONS).expect("embedded model definitions"));
-    &DEFS
-}
-
-/// Go `GetStaticModelDefinitionsByChannel`.
-fn channel_models(channel: &str) -> Option<&'static Vec<Value>> {
-    let key = match channel.trim().go_lower().as_str() {
-        "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi".to_owned(),
-        "x-ai" | "grok" => "xai".to_owned(),
-        "muse" => "meta".to_owned(),
-        other => other.to_owned(),
-    };
-    definitions().get(&key)?.as_array()
+/// A model as Go's `registry.ModelInfo` encodes it: struct order, `omitempty` fields left
+/// out when zero, `json:"-"` fields (`native_capabilities`, `max_context_length`, ...)
+/// dropped and the rest at their zero value when missing.
+fn go_model_info(raw: &Map<String, Value>) -> Value {
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Text,
+        Int,
+        List,
+        Flag,
+    }
+    use Kind::{Flag, Int, List, Text};
+    fn put(out: &mut Map<String, Value>, raw: &Map<String, Value>, key: &str, kind: Kind, omit_empty: bool) {
+        let v = raw.get(key);
+        let v = match kind {
+            Text => Value::from(v.and_then(Value::as_str).unwrap_or_default()),
+            Int => Value::from(v.and_then(Value::as_i64).unwrap_or_default()),
+            List => v.filter(|v| v.is_array()).cloned().unwrap_or(Value::Array(Vec::new())),
+            Flag => Value::from(v.and_then(Value::as_bool).unwrap_or_default()),
+        };
+        let empty = match &v {
+            Value::String(s) => s.is_empty(),
+            Value::Number(n) => n.as_i64() == Some(0),
+            Value::Array(a) => a.is_empty(),
+            Value::Bool(b) => !b,
+            _ => false,
+        };
+        if !(omit_empty && empty) {
+            out.insert(key.into(), v);
+        }
+    }
+    let mut out = Map::new();
+    for key in ["id", "object"] {
+        put(&mut out, raw, key, Text, false);
+    }
+    put(&mut out, raw, "created", Int, false);
+    for key in ["owned_by", "type"] {
+        put(&mut out, raw, key, Text, false);
+    }
+    let fields = [
+        ("display_name", Text),
+        ("name", Text),
+        ("version", Text),
+        ("description", Text),
+        ("inputTokenLimit", Int),
+        ("outputTokenLimit", Int),
+        ("supportedGenerationMethods", List),
+        ("context_length", Int),
+        ("max_completion_tokens", Int),
+        ("supported_parameters", List),
+        ("supportedInputModalities", List),
+        ("supportedOutputModalities", List),
+        ("supports_web_search", Flag),
+    ];
+    for (key, kind) in fields {
+        put(&mut out, raw, key, kind, true);
+    }
+    if let Some(Value::Object(t)) = raw.get("thinking") {
+        let mut thinking = Map::new();
+        let fields = [
+            ("min", Int),
+            ("max", Int),
+            ("zero_allowed", Flag),
+            ("dynamic_allowed", Flag),
+            ("disable_type", Text),
+            ("levels", List),
+        ];
+        for (key, kind) in fields {
+            put(&mut thinking, t, key, kind, true);
+        }
+        out.insert("thinking".into(), Value::Object(thinking));
+    }
+    if let Some(Value::Object(c)) = raw.get("config") {
+        let mut config = Map::new();
+        if let Some(Value::Object(h)) = c
+            .get("override_header")
+            .filter(|h| h.as_object().is_some_and(|h| !h.is_empty()))
+        {
+            // A Go map: keys sorted.
+            let sorted: BTreeMap<_, _> = h.iter().collect();
+            config.insert(
+                "override_header".into(),
+                Value::Object(sorted.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            );
+        }
+        out.insert("config".into(), Value::Object(config));
+    }
+    Value::Object(out)
 }
 
 /// Go `GetStaticModelDefinitions`: the built-in catalog for `channel`, else (v8.0.35,
@@ -2010,8 +2081,8 @@ pub(crate) async fn model_definitions(
     if channel.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = match channel_models(&channel) {
-        Some(models) if !models.is_empty() => models.clone(),
+    let models = match cpa_core::registry::dynamic::static_definitions(&channel) {
+        Some(models) if !models.is_empty() => models.iter().map(|m| go_model_info(&m.raw)).collect(),
         _ => dynamic_definitions(&state, &channel),
     };
     if models.is_empty() {
@@ -2040,21 +2111,7 @@ fn dynamic_definitions(state: &Management, channel: &str) -> Vec<Value> {
         .map(|spec| spec.to_info().raw)
         .collect();
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    models
-        .into_iter()
-        .map(|mut raw| {
-            // `json:"-"` fields of Go's ModelInfo.
-            for internal in [
-                "max_context_length",
-                "support_configuration_update",
-                "is_compat",
-                "user_defined",
-            ] {
-                raw.remove(internal);
-            }
-            Value::Object(raw)
-        })
-        .collect()
+    models.iter().map(go_model_info).collect()
 }
 
 /// Go `pluginModelInfoToRegistryModelInfo` then `json.Marshal`: struct order, with
