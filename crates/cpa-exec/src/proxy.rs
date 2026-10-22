@@ -94,17 +94,23 @@ impl Proxy {
 
     /// The setting `effective` parses, trimmed (Go `proxyURLForAuth`).
     pub fn effective_url(credential: &Credential, cfg: &Config) -> String {
-        let own = credential
+        Self::own_url(credential).map_or_else(|| Self::global_url(cfg), str::to_owned)
+    }
+
+    /// The credential's own proxy setting, trimmed, when it has one.
+    pub(crate) fn own_url(credential: &Credential) -> Option<&str> {
+        credential
             .attributes
             .get("proxy_url")
             .map(String::as_str)
             .filter(|s| !s.trim().is_empty())
             .or_else(|| credential.str("proxy_url"))
             .map(str::trim)
-            .unwrap_or_default();
-        if !own.is_empty() {
-            return own.to_owned();
-        }
+            .filter(|s| !s.is_empty())
+    }
+
+    /// `requests.proxy-url`, trimmed.
+    pub(crate) fn global_url(cfg: &Config) -> String {
         cfg.document
             .get("requests")
             .and_then(|r| r.get("proxy-url"))

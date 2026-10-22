@@ -58,6 +58,10 @@ const NO_READ_DEADLINE: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
 pub(crate) struct Ws {
     pool: Pool,
     states: Mutex<HashMap<String, Arc<IdState>>>,
+    /// Test hook: the next turn signals once it holds its session and waits before it
+    /// takes the ID state.
+    #[cfg(test)]
+    pause: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
 }
 
 impl Default for Ws {
@@ -67,6 +71,8 @@ impl Default for Ws {
         Self {
             pool,
             states: Mutex::default(),
+            #[cfg(test)]
+            pause: Mutex::default(),
         }
     }
 }
@@ -90,6 +96,30 @@ impl Ws {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id);
+    }
+
+    /// `closeXAIWebsocketSessionsInStoreForAuthID`: ends a removed credential's sessions
+    /// and drops their ID state.
+    pub(crate) fn close_credential(&self, credential: &str) {
+        self.pool.close_credential_with(credential, |id| {
+            self.states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
+        });
+    }
+
+    #[cfg(test)]
+    async fn paused(&self) {
+        let pause = self
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((reached, resume)) = pause {
+            let _ = reached.send(());
+            let _ = resume.await;
+        }
     }
 
     /// `UpstreamDisconnectChan`.
@@ -196,9 +226,13 @@ impl IdState {
         inner.transcript = next;
     }
 
-    /// `websocketSessionTargetChanged`.
-    fn target_changed(&self, target: &Target) -> bool {
-        self.lock().last_target.as_ref().is_some_and(|last| last != target)
+    /// `websocketSessionTargetChanged`; `live` when the session's socket for the same
+    /// credential is still open, which keeps its dial-time global proxy (`effectiveConfig`).
+    fn target_changed(&self, target: &Target, live: bool) -> bool {
+        self.lock()
+            .last_target
+            .as_ref()
+            .is_some_and(|last| !if live { last.serves(target) } else { last.same(target) })
     }
 
     fn set_target(&self, target: &Target) {
@@ -1079,7 +1113,9 @@ impl XaiExecutor {
         if state_id.is_empty() {
             state_id.clone_from(&exec_id);
         }
-        let state = self.ws.state(&state_id);
+        // The ID state is taken after the session and its turn lock, as Go builds the
+        // mapper: a credential removal drops both together, so a replacement session
+        // never shares a state that was already dropped.
         if crate::xai::input_has_item_type(&req.body, "compaction_trigger") {
             if exec_session.continuation {
                 req.usage.discard();
@@ -1087,7 +1123,7 @@ impl XaiExecutor {
             }
             let session = self.ws.pool.session(&exec_id);
             let _turn = session.turn.clone().lock_owned().await;
-            let mapper = state.map(|s| IdMapper::new(s, &req.body));
+            let mapper = self.ws.state(&state_id).map(|s| IdMapper::new(s, &req.body));
             return self.ws_compaction(credential, &req, cfg, mapper).await;
         }
 
@@ -1105,17 +1141,19 @@ impl XaiExecutor {
             gj::set_str(&mut prepared.body, "previous_response_id", &previous);
         }
         let http_url = format!("{}/responses", base.strip_suffix('/').unwrap_or(&base));
-        let target = Target {
-            credential: credential.id.clone(),
-            url: self.url(ws_url(&http_url)?),
-            proxy: crate::proxy::Proxy::effective(credential, cfg),
-        };
+        let target = Target::new(credential, self.url(ws_url(&http_url)?), cfg);
 
         let session = self.ws.pool.session(&exec_id);
         let guard = session.turn.clone().lock_owned().await;
+        #[cfg(test)]
+        self.ws.paused().await;
+        let state = self.ws.state(&state_id);
         let mut mapper = state.clone().map(|s| IdMapper::new(s, &req.body));
         if let Some(m) = &mut mapper {
-            if m.state.target_changed(&target) {
+            let live = session
+                .current()
+                .is_some_and(|c| c.target.credential == target.credential);
+            if m.state.target_changed(&target, live) {
                 m.upstream_previous.clear();
             }
             prepared.body = m.upstream_request(std::mem::take(&mut prepared.body));
@@ -1134,7 +1172,7 @@ impl XaiExecutor {
         capture.request();
 
         let (mut conn, mut handshake) = if exec_session.continuation {
-            match session.current().filter(|c| c.target == target) {
+            match session.current().filter(|c| c.target.serves(&target)) {
                 Some(conn) => (conn, None),
                 None => return Err(ExecError::replay_required()),
             }
@@ -1251,7 +1289,7 @@ impl XaiExecutor {
         retry: bool,
     ) -> Result<(Arc<Upstream>, Option<HeaderMap>), ExecError> {
         if let Some(current) = session.current() {
-            if current.target == *target {
+            if current.target.serves(target) {
                 return Ok((current, None));
             }
             // target_changed: another credential, URL or proxy now serves this session.
@@ -1268,7 +1306,7 @@ impl XaiExecutor {
         let conn = Upstream::new(target.clone(), sink, self.ws.pool.write);
         // Publish before the reader runs, as the Codex executor does.
         let mut reader = conn.reader.lock().expect("reader handle");
-        *session.conn.lock().expect("session conn") = Some(conn.clone());
+        session.publish(conn.clone());
         let task = tokio::spawn(codex_ws::read_loop(
             stream,
             Arc::downgrade(session),

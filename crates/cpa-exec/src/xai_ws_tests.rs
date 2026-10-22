@@ -1159,3 +1159,150 @@ async fn ping_is_answered_while_the_writer_is_held() {
     executor.close_session("test-xai-keepalive");
     server.abort();
 }
+
+/// A loopback xAI upstream answering every frame with a completed `resp-1`, so a repeated
+/// ID gets a `-xai-N` downstream suffix.
+async fn repeating_upstream() -> (Shared, String, tokio::task::JoinHandle<()>) {
+    let completed = r#"{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let shared: Shared = Arc::default();
+    let acts: Vec<Value> = (0..8).map(|_| serde_json::json!({"send": [completed]})).collect();
+    shared.lock().unwrap().turn = Some(serde_json::json!({ "acts": acts }));
+    let app = axum::Router::new().fallback(handler).with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (shared, addr, server)
+}
+
+/// One turn on `session` with `previous_response_id` = `previous` (none when empty);
+/// returns the downstream chunks.
+async fn turn_with(
+    executor: &XaiExecutor,
+    credential: &Credential,
+    session: &str,
+    previous: &str,
+    cfg: &Config,
+    continuation: bool,
+) -> Result<Vec<String>, ExecError> {
+    let payload = if previous.is_empty() {
+        r#"{"model":"grok-4.3","input":[{"type":"message","role":"user","content":"hi"}]}"#.to_owned()
+    } else {
+        format!(
+            r#"{{"model":"grok-4.3","previous_response_id":"{previous}","input":[{{"type":"message","role":"user","content":"hi"}}]}}"#
+        )
+    };
+    let req = request(&serde_json::json!({ "payload": payload }), session, Default::default());
+    let exec_session = ExecSession {
+        id: session.to_owned(),
+        continuation,
+        lease: None,
+    };
+    let response = executor.execute_in_session(credential, req, cfg, &exec_session).await?;
+    let ResponseBody::Stream(stream) = response.body else {
+        panic!("buffered response");
+    };
+    let chunks = stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(chunks.iter().map(|c| String::from_utf8_lossy(c).into_owned()).collect())
+}
+
+fn upstream_previous(shared: &Shared) -> Vec<String> {
+    let script = shared.lock().unwrap();
+    script
+        .recorded
+        .frames
+        .iter()
+        .map(|f| gjson::get(f, "previous_response_id").str().to_owned())
+        .collect()
+}
+
+/// Go 1e37b52b for xAI: after a reload that changes only `requests.proxy-url`, the open
+/// socket keeps serving its credential and the session's upstream response IDs (a
+/// downstream `resp-1-xai-1` still reaches upstream as `resp-1`), while a new session
+/// dials through the new proxy.
+#[tokio::test]
+async fn a_global_proxy_reload_keeps_the_open_socket() {
+    let (shared, addr, server) = repeating_upstream().await;
+    let executor = XaiExecutor::with_client(wreq::Client::new());
+    let attrs = serde_json::json!({"api_key": "xai-key", "websockets": "true", "base_url": "http://UPSTREAM/v1"});
+    let credential = credential("xai-reload", &attrs, &addr);
+    // Nothing listens on port 1: a dial through this proxy fails.
+    let reloaded = Config::parse("requests:\n  proxy-url: http://127.0.0.1:1\n").unwrap();
+    let session = "xai-reload-session";
+    let default = Config::default();
+    turn_with(&executor, &credential, session, "", &default, false)
+        .await
+        .unwrap();
+    let second = turn_with(&executor, &credential, session, "resp-1", &default, true)
+        .await
+        .unwrap();
+    assert!(
+        second.iter().any(|c| c.contains(r#""id":"resp-1-xai-1""#)),
+        "{second:?}"
+    );
+    for continuation in [true, false] {
+        turn_with(&executor, &credential, session, "resp-1-xai-1", &reloaded, continuation)
+            .await
+            .unwrap_or_else(|e| panic!("continuation={continuation}: {e:?}"));
+    }
+    assert_eq!(
+        shared.lock().unwrap().recorded.upgrades.len(),
+        1,
+        "every turn kept the first socket"
+    );
+    assert_eq!(
+        upstream_previous(&shared),
+        ["", "resp-1", "resp-1", "resp-1"],
+        "the upstream ID mapping survived"
+    );
+    let error = turn_with(&executor, &credential, "xai-reload-new", "", &reloaded, false)
+        .await
+        .expect_err("a new socket dials through the reloaded proxy");
+    assert_eq!(error.scope, FailureScope::Transport, "{error}");
+    assert_eq!(shared.lock().unwrap().recorded.upgrades.len(), 1);
+    executor.close_session(session);
+    server.abort();
+}
+
+/// A credential removal drops a session and its ID state together, and a turn takes the
+/// ID state only after it holds its session (Go `closeXAIWebsocketSessionsInStoreForAuthID`
+/// and `ExecuteStream`). A turn that waits on its session while the removal runs keeps
+/// its mapping in the live state, so the next turn still sends upstream `resp-1` for
+/// the `resp-1-xai-1` that turn returned.
+#[tokio::test]
+async fn a_removal_during_a_turn_keeps_the_replacement_sessions_ids() {
+    let (shared, addr, server) = repeating_upstream().await;
+    let executor = Arc::new(XaiExecutor::with_client(wreq::Client::new()));
+    let attrs = serde_json::json!({"api_key": "xai-key", "websockets": "true", "base_url": "http://UPSTREAM/v1"});
+    let credential = credential("xai-removed", &attrs, &addr);
+    let (session, cfg) = ("xai-race-session", Config::default());
+    turn_with(&executor, &credential, session, "", &cfg, false)
+        .await
+        .unwrap();
+
+    let (reached_tx, reached) = tokio::sync::oneshot::channel();
+    let (resume, resume_rx) = tokio::sync::oneshot::channel();
+    *executor.ws.pause.lock().unwrap() = Some((reached_tx, resume_rx));
+    let racing = {
+        let (executor, credential, cfg) = (executor.clone(), credential.clone(), cfg.clone());
+        tokio::spawn(async move { turn_with(&executor, &credential, session, "resp-1", &cfg, false).await })
+    };
+    reached.await.expect("the turn holds its session");
+    executor.ws.close_credential("xai-removed");
+    resume.send(()).unwrap();
+    let chunks = racing.await.unwrap().unwrap();
+    assert!(
+        chunks.iter().any(|c| c.contains(r#""id":"resp-1-xai-1""#)),
+        "{chunks:?}"
+    );
+
+    turn_with(&executor, &credential, session, "resp-1-xai-1", &cfg, false)
+        .await
+        .unwrap();
+    assert_eq!(upstream_previous(&shared), ["", "resp-1", "resp-1"]);
+    executor.close_session(session);
+    server.abort();
+}
