@@ -296,6 +296,7 @@ impl Host {
         state.fused.insert(id.to_owned(), format!("{what} panic: {panic}"));
         // Go `thinking.UnregisterPluginProviders`.
         state.thinking_providers.retain(|_, owner| owner != id);
+        cpa_common::thinking::unregister_plugin_providers(id);
         drop(state);
         tracing::error!(plugin_id = %id, method = %what, "pluginhost: plugin panic recovered: {panic}");
     }
@@ -882,6 +883,7 @@ impl Host {
             targets
         };
         self.state().thinking_providers.clear();
+        cpa_common::thinking::clear_plugin_providers();
         self.inner.callbacks.close_all();
         for target in targets {
             self.inner
@@ -920,6 +922,32 @@ impl Host {
         let result = self.call_raw(record, method, raw).await;
         drop(guard);
         result
+    }
+
+    /// [`Host::call`] for synchronous callers; see [`GuardedClient::call_blocking`].
+    pub fn call_blocking<T: GoJson, R: GoJson>(
+        &self,
+        record: &Record,
+        method: &str,
+        request: &R,
+    ) -> Result<T, CallError> {
+        let result = rpc::call_raw_blocking(&record.client, method, &crate::gojson::to_vec(request));
+        self.fuse_on_panic(&record.id, method, result)
+    }
+
+    /// [`Host::call_with_callback`] for synchronous callers.
+    pub fn call_with_callback_blocking<T: GoJson, R: crate::gojson::GoStruct>(
+        &self,
+        record: &Record,
+        method: &str,
+        request: &R,
+        scope: &crate::callbacks::RequestScope,
+    ) -> Result<T, CallError> {
+        let guard = self.open_callback(record, scope);
+        let raw = rpc::encode_with_callback(request, guard.id());
+        let result = rpc::call_raw_blocking(&record.client, method, &raw);
+        drop(guard);
+        self.fuse_on_panic(&record.id, method, result)
     }
 
     /// Opens a callback context for `record`'s instance.

@@ -118,6 +118,9 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     rt.plugin_runtime()
         .register_access(!cfg.api_keys.is_empty(), providers, exclusive);
     host.register_management_routes(&reserved_management_routes()).await;
+    // Go `sdktranslator.SetPluginHooks(s.pluginHost)`: the hooks are skipped while no
+    // plugin offers one.
+    cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
     sync_models(rt).await;
 }
 

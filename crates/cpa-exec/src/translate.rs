@@ -90,6 +90,21 @@ pub(crate) async fn response(
     }
     if let Some(pair) = pair {
         response.body = transform(pair, req, translated, response.body).await?;
+    } else if !req.stream
+        && req.operation == Operation::Generate
+        && let ResponseBody::Buffered(body) = &response.body
+    {
+        // A Claude client's buffered answer: Go's TranslateNonStream (claude to claude)
+        // still runs the plugin response hooks. Its stream is a raw passthrough in Go.
+        let ctx = ResponseCtx {
+            model: &req.model,
+            original_request: &req.original_body,
+            translated_request: &translated,
+        };
+        let claude = Format::Claude.as_str();
+        if let Some(out) = cpa_translate::hooks::unregistered_non_stream(claude, claude, &ctx, body) {
+            response.body = ResponseBody::Buffered(Bytes::from(out));
+        }
     }
     Ok(response)
 }

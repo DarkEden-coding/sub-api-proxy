@@ -374,17 +374,19 @@ impl OpenAICompatExecutor {
         if req.usage.enabled() {
             req.usage.response_body(target, &raw);
         }
+        let ctx = ResponseCtx {
+            model: &req.model,
+            original_request: &original,
+            translated_request: &body,
+        };
         let mut out = match response_pair {
-            Some(pair) => (pair.non_stream)(
-                &ResponseCtx {
-                    model: &req.model,
-                    original_request: &original,
-                    translated_request: &body,
-                },
-                &raw,
-            )
-            .map_err(|_| ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION))?,
-            None => raw.to_vec(),
+            Some(pair) => (pair.non_stream)(&ctx, &raw)
+                .map_err(|_| ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION))?,
+            // Go's TranslateNonStream still runs the plugin response hooks.
+            None => {
+                cpa_translate::hooks::unregistered_non_stream(target.as_str(), req.response_format.as_str(), &ctx, &raw)
+                    .unwrap_or_else(|| raw.to_vec())
+            }
         };
         if out.is_empty() {
             return Err(ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION));

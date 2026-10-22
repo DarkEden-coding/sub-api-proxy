@@ -32,9 +32,7 @@ async fn chained_hooks_skip_a_plugin_fused_by_an_earlier_call() {
         fuse_on: None,
     };
     let (host, log) = host_with("chain", [("a", a), ("b", b)].into()).await;
-    let out = host
-        .normalize_request("openai", "claude", "m", Bytes::from_static(b"{}"), false)
-        .await;
+    let out = host.normalize_request("openai", "claude", "m", Bytes::from_static(b"{}"), false);
     assert_eq!(&out[..], b"a", "b's body would win if it were still called");
     assert_eq!(calls(&log), ["a request.normalize"]);
     let scope = Default::default();
@@ -300,4 +298,80 @@ async fn quota_provider_plugin_ids_lowercase_like_go() {
         host.quota_provider_record("high").await.map(|r| r.id).as_deref(),
         Some("a-upper")
     );
+}
+
+/// Go `TestHostApplyConfigRegistersPluginThinkingApplier`: a plugin's thinking applier
+/// serves its provider through thinking's own entry point; fusing the plugin drops it,
+/// and the body then passes through as for any unknown provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_thinking_applier_serves_its_provider_until_fused() {
+    let applied = r#"{"model":"plugin-model","plugin":"plugin-thinking","thinking_budget":10240}"#;
+    let body = format!(
+        r#"{{"Body":"{}"}}"#,
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, applied)
+    );
+    let a = Script {
+        caps: r#""thinking_applier":true"#,
+        results: [
+            ("thinking.identifier", r#"{"identifier":"Plugin-Thinking"}"#),
+            ("thinking.apply", Box::leak(body.into_boxed_str())),
+        ]
+        .into(),
+        fuse_on: None,
+    };
+    let (host, log) = host_with("thinking-apply", [("a", a)].into()).await;
+    let apply = || {
+        cpa_common::thinking::apply_thinking(
+            br#"{"model":"plugin-model"}"#,
+            "plugin-model(10240)",
+            "openai",
+            "plugin-thinking",
+            "plugin-thinking",
+        )
+        .unwrap()
+    };
+    assert_eq!(String::from_utf8(apply()).unwrap(), applied);
+    assert_eq!(calls(&log), ["a thinking.apply"]);
+    host.fuse("a", "ThinkingApplier.ApplyThinking", "test");
+    assert_eq!(apply(), br#"{"model":"plugin-model"}"#);
+    assert!(calls(&log).is_empty());
+}
+
+/// Go `sdktranslator.SetPluginHooks(host)`: the host's request normalizer owns the
+/// registry's translation; a host whose plugins offer no hook leaves it unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_as_translator_hooks_normalizes_requests() {
+    let translate = || {
+        cpa_translate::translate_request(
+            cpa_core::format::Format::OpenAI,
+            cpa_core::format::Format::OpenAI,
+            &cpa_translate::RequestCtx {
+                model: "m",
+                stream: false,
+            },
+            br#"{"model":"m","messages":[]}"#,
+        )
+        .unwrap()
+    };
+    let native = translate();
+    let none = Script {
+        caps: r#""usage_plugin":true"#,
+        results: BTreeMap::new(),
+        fuse_on: None,
+    };
+    let (quiet, quiet_log) = host_with("hooks-quiet", [("q", none)].into()).await;
+    cpa_translate::hooks::set_plugin_hooks(Some(quiet.translator_hooks()));
+    assert_eq!(translate(), native);
+    assert!(calls(&quiet_log).is_empty());
+
+    let a = Script {
+        caps: r#""request_normalizer":true"#,
+        results: [("request.normalize", r#"{"Body":"YQ=="}"#)].into(),
+        fuse_on: None,
+    };
+    let (host, log) = host_with("hooks-normalize", [("a", a)].into()).await;
+    cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+    assert_eq!(translate(), b"a");
+    assert_eq!(calls(&log), ["a request.normalize"]);
+    cpa_translate::hooks::set_plugin_hooks(None);
 }

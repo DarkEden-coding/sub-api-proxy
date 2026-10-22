@@ -1807,3 +1807,83 @@ async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
     no_more_records().await;
     env.finish().await;
 }
+
+/// Go's registry hooks on the plugin executor path: an executor that answers only in a
+/// format no built-in translator knows is offered once a plugin translates responses,
+/// and its answer reaches the client through that plugin's `response.translate`
+/// (upstream format as `FromFormat`, the client's as `ToFormat`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plugin_response_translator_serves_a_private_executor_format() {
+    let Some(env) = env(
+        "plugin-owned-response-translator",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "executor\n      inputs: openai\n      outputs: private-v1"),
+            ("tr", "response_translator"),
+        ],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            )
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let encode = |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s);
+    canned(
+        &env.records,
+        "acme",
+        "executor.execute",
+        json!({"Payload": encode("private answer")}),
+    );
+    let translated = r#"{"id":"c1","object":"chat.completion","model":"acme-1","choices":[{"index":0,"message":{"role":"assistant","content":"translated"},"finish_reason":"stop"}]}"#;
+    canned(
+        &env.records,
+        "tr",
+        "response.translate",
+        json!({"Body": encode(translated)}),
+    );
+    let (got, body) = env.chat("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"],
+        "translated",
+        "{body}"
+    );
+    let asked = calls(&env.records, "tr", "response.translate");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(
+        (&asked[0]["FromFormat"], &asked[0]["ToFormat"]),
+        (&json!("private-v1"), &json!("openai"))
+    );
+    let sent = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        asked[0]["Body"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sent, b"private answer");
+
+    // A stream: each plugin chunk is one translator call, framed for the chat client.
+    let chunk = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
+    canned(&env.records, "tr", "response.translate", json!({"Body": encode(chunk)}));
+    let dir = env.records.join("respond").join("acme");
+    std::fs::write(
+        dir.join("executor.execute_stream.script.once.json"),
+        json!({"chunks": ["private chunk"], "error": ""}).to_string(),
+    )
+    .unwrap();
+    let (got, body) = env.chat_stream("acme-1").await;
+    assert_eq!(got, 200, "{body}");
+    assert!(body.starts_with(&format!("data: {chunk}\n\n")), "{body}");
+    let asked = calls(&env.records, "tr", "response.translate");
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1]["Stream"], true);
+    env.finish().await;
+}

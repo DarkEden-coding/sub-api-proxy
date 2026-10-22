@@ -451,17 +451,16 @@ pub(crate) fn translate_non_stream(
     data: &[u8],
 ) -> Result<Bytes, ExecError> {
     let response = req.response_format;
+    let ctx = ResponseCtx {
+        model: &req.model,
+        original_request: original_request(req),
+        translated_request: translated,
+    };
     let mut out = match cpa_translate::pair(response, upstream) {
-        Some(pair) => (pair.non_stream)(
-            &ResponseCtx {
-                model: &req.model,
-                original_request: original_request(req),
-                translated_request: translated,
-            },
-            data,
-        )
-        .map_err(|_| bad_gateway())?,
-        None => data.to_vec(),
+        Some(pair) => (pair.non_stream)(&ctx, data).map_err(|_| bad_gateway())?,
+        // Go's TranslateNonStream still runs the plugin response hooks.
+        None => cpa_translate::hooks::unregistered_non_stream(upstream.as_str(), response.as_str(), &ctx, data)
+            .unwrap_or_else(|| data.to_vec()),
     };
     if out.is_empty() {
         return Err(bad_gateway());
@@ -727,20 +726,27 @@ impl Emit {
 /// Only Gemini upstreams reach it (a Codex client); every client format that takes the
 /// native Interactions path has a registered Interactions pair. Executors that pass
 /// scanned lines as [`line_event`]s get the line back without the terminator.
-#[derive(Default)]
-struct Unregistered(cpa_translate::stream::StreamOptions);
+/// With plugin response hooks active, each payload goes through them (`hooks`).
+struct Unregistered {
+    options: cpa_translate::stream::StreamOptions,
+    hooks: Option<Box<dyn cpa_translate::stream::GoStream>>,
+}
 
 impl StreamTranslator for Unregistered {
     fn event(&mut self, event: &[u8]) -> Result<Vec<Bytes>, cpa_translate::Error> {
-        let line = if self.0.whole_events {
+        let line = if self.options.whole_events {
             event
         } else {
             event.strip_suffix(LINE_END).unwrap_or(event)
         };
-        Ok(vec![match self.0.chunk {
-            Some(hook) => Bytes::from(hook(line)),
-            None => Bytes::copy_from_slice(line),
-        }])
+        let emit = |chunk: &[u8]| match self.options.chunk {
+            Some(hook) => Bytes::from(hook(chunk)),
+            None => Bytes::copy_from_slice(chunk),
+        };
+        match &mut self.hooks {
+            Some(hooks) => Ok(hooks.line(line)?.iter().map(|c| emit(c)).collect()),
+            None => Ok(vec![emit(line)]),
+        }
     }
 
     fn finish(&mut self) -> Result<Vec<Bytes>, cpa_translate::Error> {
@@ -785,8 +791,12 @@ impl Output {
             original_request: original_request(req),
             translated_request: translated,
         };
-        let mut translator = cpa_translate::stream_with(client, upstream, &ctx, options)
-            .unwrap_or_else(|| Box::new(Unregistered(options)));
+        let mut translator = cpa_translate::stream_with(client, upstream, &ctx, options).unwrap_or_else(|| {
+            Box::new(Unregistered {
+                options,
+                hooks: cpa_translate::hooks::wrap_stream(upstream.as_str(), client.as_str(), &ctx, None),
+            })
+        });
         if req.stream_payloads {
             translator.executor_chunks();
         }
