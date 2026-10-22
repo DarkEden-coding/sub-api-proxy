@@ -30,19 +30,20 @@
   <h2>Nodes</h2>
   <div class="lede">servers that can serve requests, and how closely they follow each other</div>
   <table class="table">
-    <thead><tr><th>Node</th><th>Role</th><th>State</th><th>Requests/min</th><th>Streams</th><th>Added p50</th><th>Sync lag</th><th>Last failover</th><th>RSS</th></tr></thead>
+    <thead><tr><th>Node</th><th>Role</th><th>State</th><th>Requests/min</th><th>Streams</th><th>Selection p50</th><th>Sync lag</th><th>Last failover</th><th>RSS</th><th>Telemetry</th></tr></thead>
     <tbody>
       {#each snap.nodes as n (n.id)}
         <tr>
           <td><span class="dot" class:ok={n.reachable && n.state === "serving"} class:warn={n.reachable && n.state !== "serving"} class:bad={!n.reachable}></span>{n.id}{#if n.version}<span class="faint ver">v{n.version}</span>{/if}</td>
-          <td>{n.role}</td>
-          <td>{n.reachable ? n.state : "unreachable"}</td>
-          <td>{Math.round(n.requests_per_minute)}</td>
-          <td>{n.open_streams}</td>
+          <td>{n.role ?? "unknown"}</td>
+          <td>{n.reachable ? n.state ?? "unknown" : "unreachable"}</td>
+          <td>{n.requests_per_minute === null ? "—" : Math.round(n.requests_per_minute)}</td>
+          <td>{n.open_streams ?? "—"}</td>
           <td>{n.added_latency_p50_ms === null ? "—" : `${Math.round(n.added_latency_p50_ms)} ms`}</td>
           <td>{n.sync_lag_secs === null ? "—" : `${n.sync_lag_secs.toFixed(1)} s`}</td>
           <td>{n.last_failover_at ? ago(n.last_failover_at, snap.now) : "never"}</td>
           <td>{bytes(n.rss_bytes)}</td>
+          <td>{n.telemetry_stale ? "stale" : n.telemetry_received_at ? ago(n.telemetry_received_at, snap.now) : "unknown"}</td>
         </tr>
       {/each}
     </tbody>

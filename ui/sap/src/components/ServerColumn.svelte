@@ -13,11 +13,11 @@
     {#each snap.nodes as n (n.id)}
       <div class="server" class:primary={n.role === "primary"} class:standby={standby(n)} class:down={!n.reachable} data-node={n.id}>
         <div class="sname"><span class="dot" class:ok={n.reachable && n.state === "serving"} class:warn={n.reachable && n.state !== "serving"} class:bad={!n.reachable}></span>{n.id}</div>
-        <div class="role">{n.role} · {n.reachable ? n.state : "unreachable"}{n.version ? ` · v${n.version}` : ""}</div>
+        <div class="role">{n.role ?? "unknown"} · {n.reachable ? n.state ?? "unknown" : "unreachable"}{n.version ? ` · v${n.version}` : ""}{n.telemetry_stale ? " · stale telemetry" : ""}</div>
         <dl>
-          <dt>requests/min</dt><dd>{Math.round(n.requests_per_minute)}</dd>
-          <dt>open streams</dt><dd>{n.open_streams}</dd>
-          {#if n.added_latency_p50_ms !== null}<dt>added p50</dt><dd>{Math.round(n.added_latency_p50_ms)} ms</dd>{/if}
+          <dt>requests/min</dt><dd>{n.requests_per_minute === null ? "—" : Math.round(n.requests_per_minute)}</dd>
+          <dt>open streams</dt><dd>{n.open_streams ?? "—"}</dd>
+          {#if n.added_latency_p50_ms !== null}<dt>selection p50</dt><dd>{Math.round(n.added_latency_p50_ms)} ms</dd>{/if}
           {#if n.sync_lag_secs !== null && n.id !== snap.node}<dt>sync lag</dt><dd>{n.sync_lag_secs.toFixed(1)} s</dd>{/if}
           {#if n.last_failover_at}<dt>last failover</dt><dd>{ago(n.last_failover_at, snap.now)}</dd>{/if}
           <dt>rss</dt><dd>{bytes(n.rss_bytes)}</dd>

@@ -5,7 +5,7 @@
   const snap = $derived(store.snapshot);
   const serving = $derived.by(() => {
     if (!snap) return null;
-    const busiest = [...snap.nodes].sort((a, b) => b.open_streams - a.open_streams)[0];
+    const busiest = [...snap.nodes].sort((a, b) => (b.open_streams ?? -1) - (a.open_streams ?? -1))[0];
     return snap.nodes.find((n) => n.id === snap.node && n.state === "serving") ?? busiest;
   });
   const lag = $derived(Math.max(0, ...(snap?.nodes.map((n) => n.sync_lag_secs ?? 0) ?? [])));

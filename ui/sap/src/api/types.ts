@@ -93,18 +93,21 @@ export interface ThreadView {
 
 export interface NodeView {
   id: NodeId;
-  role: NodeRole;
-  state: NodeState;
+  role: NodeRole | null;
+  state: NodeState | null;
   /** Reachable from the node producing the snapshot. */
   reachable: boolean;
   version: string | null;
-  requests_per_minute: number;
-  open_streams: number;
+  requests_per_minute: number | null;
+  open_streams: number | null;
   added_latency_p50_ms: number | null;
   rss_bytes: number | null;
   sync_lag_secs: number | null;
   last_failover_at: Timestamp | null;
   last_seen: Timestamp | null;
+  telemetry_observed_at?: Timestamp | null;
+  telemetry_received_at?: Timestamp | null;
+  telemetry_stale?: boolean;
 }
 
 export interface EventView {
