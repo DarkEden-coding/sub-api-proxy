@@ -21,7 +21,7 @@ Columns:
 | Claude: Responses tool_search | 13 | 0 | 13 | 0 | 0 | 0 |
 | Translation to and from Claude | 17 | 0 | 17 | 0 | 0 | 0 |
 | Payload rules | 1 | 0 | 1 | 0 | 0 | 0 |
-| Codex | 19 | 4 | 15 | 0 | 0 | 0 |
+| Codex | 19 | 6 | 13 | 0 | 0 | 0 |
 | Gemini, Vertex and AI Studio | 20 | 0 | 20 | 0 | 0 | 0 |
 | xAI | 8 | 2 | 6 | 0 | 0 | 0 |
 | OpenAI-compatible and Responses translation | 6 | 0 | 6 | 0 | 0 | 0 |
@@ -37,7 +37,7 @@ Columns:
 | Go tests only | 7 | 0 | 0 | 0 | 7 | 0 |
 | Merge commits | 32 | 0 | 0 | 0 | 32 | 0 |
 | Reasoning signature carriage | 8 | 0 | 8 | 0 | 0 | 0 |
-| **All** | **288** | **52** | **170** | **0** | **63** | **3** |
+| **All** | **288** | **54** | **168** | **0** | **63** | **3** |
 
 Suggested order: credential epochs, watcher reconciliation and cooldown fencing first; SIWC security and v8 config concurrency next; plugin model/auth wiring and Home integration alongside them. Port the shared schema cleaner and reasoning-signature carriage series together, then Codex SSE/tool history, Gemini/Vertex tools and OpenAPI models, and the remaining providers. Keep the Antigravity entitlement/probe series (7e857c37, 9521fe29, ad381435, 091ff27f) together. Keep the Claude payload barrier (868e137), Responses tool_search series and deferred-tool cache fix (97ba1e89) together; verify stable prefixes before changing cache semantics. Finish the remaining Claude thinking/date/web-search cache work and catalogs, then SDK, discovery and non-visible performance parity. Sizes are Go diff sizes, not priorities or Rust effort estimates.
 
@@ -146,12 +146,12 @@ Suggested order: credential epochs, watcher reconciliation and cooldown fencing 
 | [`a3b77566`](https://github.com/router-for-me/CLIProxyAPI/commit/a3b77566) | fix(codex): publish main usage before image tool usage in execute | yes | to port | S (+1 −1) | main usage published before image tool usage |
 | [`d7914afd`](https://github.com/router-for-me/CLIProxyAPI/commit/d7914afd) | fix(codex): expand integer field normalization mappings for tools | yes | to port | M (+107 −21) | integer field normalization for tool schemas |
 | [`d31b61cb`](https://github.com/router-for-me/CLIProxyAPI/commit/d31b61cb) | fix(websockets): propagate upstream disconnect errors during session activation | yes | to port | S (+47 −2) | upstream disconnects during session activation (Codex and xAI) |
-| [`16d98881`](https://github.com/router-for-me/CLIProxyAPI/commit/16d98881) | feat(codex): preserve URL citations in OpenAI response translation | yes | to port | M (+125 −9) | URL citations in Chat Completions output |
+| [`16d98881`](https://github.com/router-for-me/CLIProxyAPI/commit/16d98881) | feat(codex): preserve URL citations in OpenAI response translation | yes | ported here | M (+125 −9) | URL citations kept in Chat Completions responses, stream and non-stream (every output_text part now joins the content); Go goldens in `crates/cpa-translate/tests/reference/codex_chat` |
 | [`c7b4d573`](https://github.com/router-for-me/CLIProxyAPI/commit/c7b4d573) | fix(codex): record reasoning effort after applying payload overrides | yes | to port | S (+5 −5) | reasoning effort recorded after payload overrides |
 | [`6331b38b`](https://github.com/router-for-me/CLIProxyAPI/commit/6331b38b) | feat(openai): support response.interrupt in responses websocket handling | yes | to port | M (+257 −24) | `response.interrupt` on the Responses WebSocket |
 | [`51bde0ff`](https://github.com/router-for-me/CLIProxyAPI/commit/51bde0ff) | fix(codex): preserve resolved upstream model in direct openai image requests | yes | to port | S (+42 −7) | resolved upstream model kept for direct image requests |
 | [`d318bcc3`](https://github.com/router-for-me/CLIProxyAPI/commit/d318bcc3) | fix(codex): handle late response interrupts on websocket sessions | yes | to port | M (+106 −13) | late `response.interrupt` on WebSocket sessions |
-| [`b0debb35`](https://github.com/router-for-me/CLIProxyAPI/commit/b0debb35) | fix(codex): shorten over-length tool call IDs in chat completions | yes | to port | S (+26 −0) | over-length tool call IDs shortened |
+| [`b0debb35`](https://github.com/router-for-me/CLIProxyAPI/commit/b0debb35) | fix(codex): shorten over-length tool call IDs in chat completions | yes | ported here | S (+26 −0) | over-length Chat Completions tool call IDs shortened for Codex; Go goldens in `crates/cpa-translate/tests/reference/codex_chat` |
 | [`7b0319fb`](https://github.com/router-for-me/CLIProxyAPI/commit/7b0319fb) | feat(codex): support Sign in with ChatGPT | yes | to port | L (+2384 −256) | Sign in with ChatGPT |
 | [`e240bd84`](https://github.com/router-for-me/CLIProxyAPI/commit/e240bd84) | fix(codex): fallback default model template when gpt-5.5 is missing | yes | ported here | M (+85 −25) | ported: the default template falls back to the catalog's first model and validation no longer requires `gpt-5.5`; the embedded catalog is synced to v8.0.35 (`fetch_codex_models` is a Go tool) |
 | [`1e37b52b`](https://github.com/router-for-me/CLIProxyAPI/commit/1e37b52b) | fix(executor): preserve websocket sessions across reload and auth removal | yes | to port | M (+199 −33) | WebSocket sessions survive reload and credential removal |
