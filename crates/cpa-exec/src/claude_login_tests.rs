@@ -339,9 +339,14 @@ async fn a_busy_port_is_go_port_in_use() {
     let port = holder.local_addr().unwrap().port();
     let error = bind(port).await.unwrap_err();
     assert!(String::from_utf8_lossy(&error.body).starts_with(PORT_IN_USE));
-    // A port held on IPv4 only is in use too: the dual-stack socket covers IPv4.
+    // A port held on 127.0.0.1 only is in use too on Unix: the dual-stack socket
+    // covers IPv4. Windows lets a wildcard bind share a port held on one address;
+    // Go's listener is the same socket there (no SO_REUSEADDR), so it binds too.
     let holder = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = holder.local_addr().unwrap().port();
-    let error = bind(port).await.unwrap_err();
-    assert!(String::from_utf8_lossy(&error.body).starts_with(PORT_IN_USE));
+    let result = bind(port).await;
+    #[cfg(not(windows))]
+    assert!(String::from_utf8_lossy(&result.unwrap_err().body).starts_with(PORT_IN_USE));
+    #[cfg(windows)]
+    assert!(result.is_ok());
 }
