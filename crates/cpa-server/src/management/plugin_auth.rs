@@ -66,6 +66,7 @@ impl AuthManager for PluginAuthManager {
         write()?;
         let path = PathBuf::from(auth.attributes.get("path").cloned().unwrap_or_default());
         let bytes = persist(&path, &auth)?;
+        credentials::note_plugin_auth_write(&path, &bytes);
         let cfg = state.rt.config();
         let credential = match credentials::from_file(&cfg, &cfg.auth_dir, &path, &bytes) {
             Ok(Some(c)) => {

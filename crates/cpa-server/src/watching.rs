@@ -1164,7 +1164,7 @@ mod tests {
             }
         }
         credentials::set_plugin_auth_parser(Some(Arc::new(Acme)));
-        credentials::set_plugin_auth_parser_active(true);
+        credentials::set_plugin_auth_providers(Some(1));
         let (state, dir) = state();
         let file = dir.join("acme.json");
         std::fs::write(&file, r#"{"type":"acme","v":1}"#).unwrap();
@@ -1218,7 +1218,7 @@ mod tests {
             }
         }
         credentials::set_plugin_auth_parser(Some(Arc::new(Bundles)));
-        credentials::set_plugin_auth_parser_active(true);
+        credentials::set_plugin_auth_providers(Some(1));
         let (state, dir) = state();
         reload(&state).unwrap();
         let other = dir.join("other");

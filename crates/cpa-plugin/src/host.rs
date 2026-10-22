@@ -171,6 +171,8 @@ pub(crate) struct Inner {
     pub(crate) hooks_installed: std::sync::atomic::AtomicBool,
     /// The same for the auth parser (`auth_parser`) and cpa-core's auth-parser flag.
     pub(crate) auth_parser_installed: std::sync::atomic::AtomicBool,
+    /// What `auth_parser` hands out.
+    pub(crate) auth_parser: std::sync::OnceLock<Arc<dyn cpa_core::config::credentials::PluginAuthParser>>,
 }
 
 /// The plugin host. Cheap to clone.
@@ -221,6 +223,7 @@ impl Host {
             callbacks: Callbacks::new(me.clone()),
             hooks_installed: Default::default(),
             auth_parser_installed: Default::default(),
+            auth_parser: Default::default(),
         });
         Self { inner }
     }

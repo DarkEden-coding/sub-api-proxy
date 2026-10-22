@@ -19,6 +19,8 @@
 // file exists: the file is the complete response envelope, written by the test before
 // the call.
 // <method>.once.json, when present, answers the next call instead and is then removed.
+// In an envelope's host_calls, the string "$seq" in a request becomes the number of
+// host_calls made so far, so a repeated call can send different content each time.
 // While <method>.hold exists, calls of that method wait (up to 10s) before answering, so a
 // test can change host state between the call's record and its answer.
 // executor.execute_stream.script.once.json, {"chunks":["..."],"error":"..."}, makes the
@@ -113,6 +115,8 @@ var (
 	serial  = false
 	// turn serializes calls while serial is set.
 	turn sync.Mutex
+	// seq counts the canned host_calls made.
+	seq int
 )
 
 type envelope struct {
@@ -314,6 +318,11 @@ func handle(method string, request []byte) ([]byte, int) {
 				_ = json.Unmarshal(call.Request, &fields)
 				fields["host_callback_id"] = parent.HostCallbackID
 				payload, _ := json.Marshal(fields)
+				mu.Lock()
+				seq++
+				n := seq
+				mu.Unlock()
+				payload = []byte(strings.ReplaceAll(string(payload), `"$seq"`, strconv.Itoa(n)))
 				response, _ := callHost(call.Method, payload)
 				record("host_callback", response)
 			}

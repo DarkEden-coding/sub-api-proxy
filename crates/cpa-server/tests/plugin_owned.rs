@@ -2265,6 +2265,22 @@ async fn a_file_changed_after_its_parse_keeps_its_credentials_until_the_next_rel
     env.finish().await;
 }
 
+/// Asserts that, with nothing changing, the plugin auth epoch and `label`'s parse count
+/// stay put over a second of watcher ticks: a reload and its config sync must not
+/// retire the cached answers and reload again forever.
+async fn settles(env: &Env, label: &str) {
+    let now = || {
+        (
+            cpa_core::config::credentials::plugin_auth_epoch(),
+            calls(&env.records, label, "auth.parse").len(),
+        )
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = now();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(now(), before, "the auth reloads never settle (epoch, parses)");
+}
+
 /// Unloading an auth provider changes what its file loads to with no file changing:
 /// the watcher reloads the auth folder on its own. Here P parsed `p.json` into two
 /// credentials and Q, another auth provider, keeps plugin auth parsing on, so a reload
@@ -2300,8 +2316,8 @@ async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
         store.get("p1").is_some() && store.get("p2").is_some()
     })
     .await;
-    // Settled: nothing changes on disk from here.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Nothing changes from here: the reloads and syncs settle.
+    settles(&env, "pp").await;
     assert!(env.rt.plugins().unload_plugin("pp", None).await);
     eventually("P's credentials outlived P", || {
         store.get("p1").is_none() && store.get("p2").is_none()
@@ -2309,6 +2325,50 @@ async fn unloading_an_auth_provider_reloads_its_files_without_a_file_change() {
     .await;
     // No plugin owns the type now: the built-in synthesizer loads the file.
     eventually("the file never loaded", || store.get("p.json").is_some()).await;
+    settles(&env, "qq").await;
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// A plugin that saves the file it is parsing on every parse (`host.auth.save` of new
+/// bytes each time): the parse's answer stands for what it wrote, so its credentials are
+/// published, as Go publishes every parse, and the file is not parsed again forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auth_provider_saving_its_own_file_on_every_parse_converges() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-own-save",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme"}"#)],
+        |records| {
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = json!({
+                "ok": true,
+                "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]},
+                "host_calls": [{
+                    "method": "host.auth.save",
+                    "request": {"name": "acme.json", "json": {"type": "acme", "n": "$seq"}}
+                }]
+            });
+            std::fs::write(dir.join("auth.parse.json"), envelope.to_string()).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    let watcher = cpa_server::watching::start(&management);
+    eventually("the parsed credential was never published", || {
+        env.rt.store().get("acme-a").is_some()
+    })
+    .await;
+    settles(&env, "acme").await;
+    assert!(env.rt.store().get("acme-a").is_some());
     watcher.abort();
     drop(management);
     env.finish().await;

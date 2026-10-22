@@ -972,7 +972,8 @@ fn store_file(state: &Management, name: &str, data: &[u8], v8: bool) -> Result<(
             fallbacks.remove(&dst);
         }
     }
-    state.publish_upload((*state.rt.config()).clone(), None, synthesized);
+    let written: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+    state.publish_upload((*state.rt.config()).clone(), None, synthesized.map(|c| (c, written)));
     Ok(())
 }
 
@@ -2455,11 +2456,42 @@ mod tests {
             &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
         );
         credentials::set_plugin_auth_parser(Some(Arc::new(Nothing)));
-        credentials::set_plugin_auth_parser_active(true);
+        credentials::set_plugin_auth_providers(Some(1));
         let token = |state: &Management| state.rt.store().get("a.json").unwrap().metadata["access_token"].clone();
         assert_eq!(token(&state), "fake-0");
         store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
         assert_eq!(token(&state), "fake-1");
+        credentials::set_plugin_auth_parser(None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A token refresh that commits between an upload's write and its publication
+    /// changed the file: the refreshed credential stays, on disk and in the store.
+    #[tokio::test]
+    async fn a_refresh_between_an_upload_and_its_publication_survives() {
+        use cpa_core::config::credentials::{ParseRequest, Parsed, PluginAuthParser};
+        struct Nothing;
+        impl PluginAuthParser for Nothing {
+            fn parse_auths(&self, _: &ParseRequest<'_>) -> Parsed {
+                Parsed::NotHandled
+            }
+        }
+        let (state, dir) = management(
+            "upload-refresh",
+            &[("a.json", r#"{"type":"claude","access_token":"fake-0"}"#)],
+        );
+        credentials::set_plugin_auth_parser(Some(Arc::new(Nothing)));
+        credentials::set_plugin_auth_providers(Some(1));
+        let refreshing = state.clone();
+        crate::management::BEFORE_RECONCILE.lock().unwrap().push((
+            state.rt.config().auth_dir.clone(),
+            Box::new(move || refresh(&refreshing, "a.json", "fake-refreshed")),
+        ));
+        store_file(&state, "a.json", br#"{"type":"claude","access_token":"fake-1"}"#, true).unwrap();
+        let stored = state.rt.store().get("a.json").unwrap();
+        assert_eq!(stored.provider, "claude");
+        assert_eq!(stored.metadata["access_token"], "fake-refreshed");
+        assert_eq!(on_disk(&dir, "a.json")["access_token"], "fake-refreshed");
         credentials::set_plugin_auth_parser(None);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -246,7 +246,14 @@ impl Management {
     /// providers have not parsed the new bytes, the uploaded credential is registered as
     /// built, as Go's upload registers it (`buildAuthFromFileData`, no plugin parser),
     /// replacing one with the same ID; the watcher's next reload asks the plugins.
-    pub(crate) fn publish_upload(&self, cfg: Config, files: Option<credentials::AuthScan>, upload: Option<Credential>) {
+    /// `upload` carries the SHA-256 of the bytes written: a write committed since (a
+    /// token refresh) changed the file, and the current credential is kept.
+    pub(crate) fn publish_upload(
+        &self,
+        cfg: Config,
+        files: Option<credentials::AuthScan>,
+        upload: Option<(Credential, [u8; 32])>,
+    ) {
         let mut cfg = cfg;
         self.lock_auth_dir(&mut cfg);
         use sha2::{Digest, Sha256};
@@ -300,12 +307,22 @@ impl Management {
         self.rt.usage_queue().configure(self.access.available(), &cfg);
         let policy = policy(&cfg);
         self.rt.publish_config_and_policy(cfg, policy);
+        let upload = upload.filter(|(c, _)| {
+            matches!(&c.source, Source::File(path) if scan.deferred.iter().any(|p| absolute(p) == absolute(path)))
+        });
+        if let Some((
+            Credential {
+                source: Source::File(path),
+                ..
+            },
+            written,
+        )) = &upload
+        {
+            read.insert(path.clone(), *written);
+        }
         let rejected = self.rt.store().reconcile_scanned_with(all, &read, |current, all| {
             crate::plugins::keep_deferred(current, all, &scan.deferred);
-            if let Some(upload) = upload
-                && let Source::File(path) = &upload.source
-                && scan.deferred.iter().any(|p| absolute(p) == absolute(path))
-            {
+            if let Some((upload, _)) = upload {
                 all.retain(|c| c.id != upload.id);
                 all.push(upload);
             }

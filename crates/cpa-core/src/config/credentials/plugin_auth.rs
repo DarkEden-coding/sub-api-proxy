@@ -67,9 +67,10 @@ pub trait PluginAuthParser: Send + Sync {
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PARSER: RwLock<Option<Arc<dyn PluginAuthParser>>> = RwLock::new(None);
 
-/// One cached answer: for the file bytes with this SHA-256, asked at this epoch.
+/// One cached answer: for the file bytes with one of these SHA-256 (what was parsed,
+/// then what `host.auth.save` wrote to the file during the parse), asked at this epoch.
 struct Answer {
-    hash: [u8; 32],
+    hashes: Vec<[u8; 32]>,
     epoch: u64,
     parsed: Parsed,
 }
@@ -109,13 +110,25 @@ pub fn plugin_auth_epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
 }
 
+/// The [`set_plugin_auth_providers`] signature last set.
+static PROVIDERS: Mutex<Option<u64>> = Mutex::new(None);
+
 /// Go `RegisterPluginAuthParser` / `Watcher.SetPluginAuthParser`. Clearing it also
-/// clears the activity flag.
+/// clears the auth providers. Setting the parser already installed changes nothing.
 pub fn set_plugin_auth_parser(parser: Option<Arc<dyn PluginAuthParser>>) {
     let mut slot = PARSER.write().unwrap_or_else(PoisonError::into_inner);
+    let same = match (&*slot, &parser) {
+        (Some(old), Some(new)) => std::ptr::addr_eq(Arc::as_ptr(old), Arc::as_ptr(new)),
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        return;
+    }
     let was = ACTIVE.load(Ordering::Acquire);
     if parser.is_none() {
         ACTIVE.store(false, Ordering::Release);
+        *PROVIDERS.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
     *slot = parser;
     drop(slot);
@@ -124,13 +137,54 @@ pub fn set_plugin_auth_parser(parser: Option<Arc<dyn PluginAuthParser>>) {
     }
 }
 
-/// Set by the parser's owner whenever its plugins change (a load, unload or fuse), so
-/// answers cached before are asked again. Nothing happens while no plugin offers an
-/// auth provider before or after.
-pub fn set_plugin_auth_parser_active(active: bool) {
-    let was = ACTIVE.swap(active, Ordering::AcqRel);
-    if was || active {
-        retire();
+/// Set by the parser's owner whenever its plugins change: `providers` identifies the
+/// loaded, unfused plugins offering an auth provider (`None`: there is none), and
+/// answers cached before are asked again only when it differs from the last one set.
+/// A sync that changes nothing therefore changes nothing here.
+pub fn set_plugin_auth_providers(providers: Option<u64>) {
+    let mut last = PROVIDERS.lock().unwrap_or_else(PoisonError::into_inner);
+    ACTIVE.store(providers.is_some(), Ordering::Release);
+    if *last == providers {
+        return;
+    }
+    *last = providers;
+    drop(last);
+    retire();
+}
+
+/// Paths auth providers are parsing now (by parse), with the SHA-256 of the bytes
+/// `host.auth.save` wrote to them during the parse ([`note_plugin_auth_write`]).
+/// One parse in progress: its ID, the file and the hashes of its own writes.
+type Parsing = (u64, PathBuf, Vec<[u8; 32]>);
+static PARSING: Mutex<Vec<Parsing>> = Mutex::new(Vec::new());
+static NEXT_PARSE: AtomicU64 = AtomicU64::new(0);
+
+fn parsing() -> std::sync::MutexGuard<'static, Vec<Parsing>> {
+    PARSING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// Tells credential loading that a plugin's `host.auth.save` wrote `data` to `path`. A
+/// save to the file an auth provider is parsing counts as that parse's own write: the
+/// parse's answer stands for those bytes too, so the next scan publishes it (Go
+/// publishes every parse's answer) instead of parsing the file again forever.
+pub fn note_plugin_auth_write(path: &Path, data: &[u8]) {
+    if !ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let path = absolute(path);
+    let mut parsing = parsing();
+    if parsing.is_empty() {
+        return;
+    }
+    let hash: [u8; 32] = Sha256::digest(data).into();
+    for (_, parsed, writes) in parsing.iter_mut() {
+        if *parsed == path {
+            writes.push(hash);
+        }
     }
 }
 
@@ -180,9 +234,17 @@ impl Ask<'_> {
         }
         // The epoch before asking: a change during the call retires the answer.
         let epoch = EPOCH.load(Ordering::Acquire);
+        let id = NEXT_PARSE.fetch_add(1, Ordering::Relaxed);
+        parsing().push((id, absolute(req.path), Vec::new()));
         let parsed = parser.parse_auths(req);
+        let mut hashes = vec![hash];
+        let mut parsing = parsing();
+        if let Some(at) = parsing.iter().position(|(p, ..)| *p == id) {
+            hashes.extend(parsing.swap_remove(at).2);
+        }
+        drop(parsing);
         let answer = Answer {
-            hash,
+            hashes,
             epoch,
             parsed: parsed.clone(),
         };
@@ -194,7 +256,7 @@ impl Ask<'_> {
 fn cached(path: &Path, hash: &[u8; 32]) -> Option<Parsed> {
     let answers = answers();
     let answer = answers.as_ref()?.get(path)?;
-    (answer.hash == *hash && answer.epoch == EPOCH.load(Ordering::Acquire)).then(|| answer.parsed.clone())
+    (answer.hashes.contains(hash) && answer.epoch == EPOCH.load(Ordering::Acquire)).then(|| answer.parsed.clone())
 }
 
 /// Asks plugin auth providers about every auth file in `cfg`'s folder whose current
@@ -710,8 +772,14 @@ mod tests {
         );
         assert_eq!(ids(&scan_with(&cfg, Some(Ask::Cached))), ["a.json", "b.json", "c.json"]);
 
-        // A plugin change retires every answer.
-        set_plugin_auth_parser_active(true);
+        // A plugin change retires every answer; setting the same providers again does not.
+        set_plugin_auth_providers(Some(1));
+        let scan = scan_with(&cfg, Some(Ask::Cached));
+        assert!(scan.credentials.is_empty());
+        scan_with(&cfg, Some(Ask::Fill(&parser)));
+        set_plugin_auth_providers(Some(1));
+        assert_eq!(scan_with(&cfg, Some(Ask::Cached)).credentials.len(), 3);
+        set_plugin_auth_providers(Some(2));
         let scan = scan_with(&cfg, Some(Ask::Cached));
         assert!(scan.credentials.is_empty());
         assert_eq!(scan.deferred.len(), 3);

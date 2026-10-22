@@ -300,7 +300,23 @@ impl Host {
             cpa_translate::hooks::set_plugin_hooks_active(offers(translator_hook));
         }
         if self.inner.auth_parser_installed.load(Ordering::Acquire) {
-            cpa_core::config::credentials::set_plugin_auth_parser_active(offers(|r| r.plugin.caps.auth_provider));
+            // Which plugins parse auth files, as loaded and configured: the same set
+            // publishes the same signature, so an unchanged sync keeps cached answers.
+            use std::hash::{Hash, Hasher};
+            let mut providers = records
+                .iter()
+                .filter(|r| r.plugin.caps.auth_provider && !state.fused.contains_key(&r.id))
+                .peekable();
+            let signature = providers.peek().is_some().then(|| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for r in providers {
+                    r.id.hash(&mut hasher);
+                    (Arc::as_ptr(&r.client) as usize).hash(&mut hasher);
+                    state.loaded.get(&r.id).map(|lp| &lp.config_yaml).hash(&mut hasher);
+                }
+                hasher.finish()
+            });
+            cpa_core::config::credentials::set_plugin_auth_providers(signature);
         }
     }
 

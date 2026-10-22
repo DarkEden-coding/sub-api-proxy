@@ -815,7 +815,11 @@ impl Host {
         let state = self.state();
         self.publish_hook_activity(&state, &self.snapshot().records);
         drop(state);
-        std::sync::Arc::new(AuthParser(std::sync::Arc::downgrade(&self.inner)))
+        // The same parser every time, so installing it again changes nothing.
+        self.inner
+            .auth_parser
+            .get_or_init(|| std::sync::Arc::new(AuthParser(std::sync::Arc::downgrade(&self.inner))))
+            .clone()
     }
 }
 

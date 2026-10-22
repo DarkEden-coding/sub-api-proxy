@@ -25,8 +25,8 @@ use crate::gostr::GoStr;
 mod plugin_auth;
 use plugin_auth::Ask;
 pub use plugin_auth::{
-    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, on_plugin_auth_change, plugin_auth_epoch,
-    plugin_auth_parser_active, preparse_auth_dir, set_plugin_auth_parser, set_plugin_auth_parser_active,
+    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, note_plugin_auth_write, on_plugin_auth_change,
+    plugin_auth_epoch, plugin_auth_parser_active, preparse_auth_dir, set_plugin_auth_parser, set_plugin_auth_providers,
 };
 
 const WEIGHT_MAX: i64 = 1_000_000;
