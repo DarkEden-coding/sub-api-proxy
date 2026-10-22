@@ -51,6 +51,9 @@ pub struct Management {
     /// Uploaded files no synthesizer claims, kept listed until restart like Go's
     /// fallback auths (see `credentials::upload_fallback`).
     pub(crate) fallbacks: Mutex<std::collections::BTreeSet<PathBuf>>,
+    /// The bytes and document of each auth file's last management save: Go keeps the
+    /// numbers a fields patch sent in its in-memory metadata until the file reloads.
+    pub(crate) saved: Mutex<std::collections::HashMap<PathBuf, (Vec<u8>, cpa_common::json::GoValue)>>,
     /// Credentials disabled through the status or fields endpoints: Go's in-memory
     /// auth then reports `disabled via management API` until re-enabled.
     pub(crate) disabled_via_api: Mutex<std::collections::BTreeSet<String>>,
@@ -179,6 +182,7 @@ impl Management {
             path,
             disk: Mutex::new(()),
             fallbacks: Mutex::default(),
+            saved: Mutex::default(),
             disabled_via_api: Mutex::default(),
             runtime_seen: Mutex::default(),
             clients: cpa_exec::proxy::GoClients::new(cpa_exec::proxy::Hooks::default()),

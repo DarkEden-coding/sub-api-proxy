@@ -1934,21 +1934,39 @@ fn save_file_backed(
     metadata: &Map<String, Value>,
     literals: &[(Vec<String>, GoValue)],
 ) -> Result<(), PatchError> {
-    let as_go = |bytes: &[u8]| GoValue::parse_f64(bytes).and_then(|v| v.into_object().ok());
+    let as_go = |bytes: &[u8]| GoValue::parse_f64(bytes).filter(|v| matches!(v, GoValue::Object(_)));
     let converted = serde_json::to_vec(metadata).map_err(|e| PatchError::Io(e.to_string()))?;
     let mut doc = as_go(&converted).ok_or_else(|| PatchError::Io("metadata is not a JSON object".into()))?;
+    let path = path_of(target).map(Path::to_path_buf);
+    let existing = path.as_deref().and_then(|path| std::fs::read(path).ok());
+    let mut saved = state.saved.lock().unwrap_or_else(PoisonError::into_inner);
+    // While the file is what the last save wrote, Go's metadata still holds what that
+    // save held.
+    if let Some((bytes, prior)) = path.as_ref().and_then(|p| saved.get(p))
+        && existing.as_ref() == Some(bytes)
+    {
+        keep_number_forms(&mut doc, prior);
+    }
+    let Ok(mut doc) = doc.into_object() else {
+        unreachable!("parsed as an object")
+    };
     for (parts, value) in literals {
         go_set_path(&mut doc, parts, value.clone());
     }
-    let existing = path_of(target).and_then(|path| std::fs::read(path).ok());
-    let disk = existing.as_deref().and_then(as_go).filter(|m| !m.is_empty());
+    // Go's Save ends with `Metadata["disabled"] = auth.Disabled`: a patched
+    // `disabled` never reaches the file as sent.
+    if let Some(Value::Bool(disabled)) = metadata.get("disabled") {
+        doc.insert("disabled".into(), GoValue::Bool(*disabled));
+    }
+    let disk = existing.as_deref().and_then(as_go).and_then(|d| d.into_object().ok());
     let codex = target.provider.go_eq_fold("codex")
         || matches!(doc.get("type"), Some(GoValue::String(t)) if t.trim().go_eq_fold("codex"));
-    if codex && let Some(disk) = &disk {
+    if codex && let Some(disk) = disk.as_ref().filter(|d| !d.is_empty()) {
         merge_codex_from_disk(disk, &mut doc);
     }
     normalize_go(&mut doc);
-    let bytes = GoValue::Object(doc).marshal();
+    let doc = GoValue::Object(doc);
+    let bytes = doc.marshal();
     // Go compares Codex bytes exactly and other records as decoded documents.
     let unchanged = match &existing {
         Some(old) if codex => *old == bytes,
@@ -1959,7 +1977,36 @@ fn save_file_backed(
         Some(old) if unchanged => old,
         _ => bytes,
     };
-    save_bytes(state, target, bytes)
+    save_bytes(state, target, bytes.clone())?;
+    if let Some(path) = path {
+        saved.insert(path, (bytes, doc));
+    }
+    Ok(())
+}
+
+/// Puts back the form `prior` gave each number whose value is unchanged: Go holds a
+/// patched `json.Number` as sent, a number read from the file as float64.
+fn keep_number_forms(doc: &mut GoValue, prior: &GoValue) {
+    match (doc, prior) {
+        (GoValue::Number(now), GoValue::Number(then)) => {
+            if cpa_common::json::json_float(cpa_common::json::parse_float(then.as_bytes())).as_ref() == Some(now) {
+                now.clone_from(then);
+            }
+        }
+        (GoValue::Object(now), GoValue::Object(then)) => {
+            for (key, value) in now.iter_mut() {
+                if let Some(then) = then.get(key) {
+                    keep_number_forms(value, then);
+                }
+            }
+        }
+        (GoValue::Array(now), GoValue::Array(then)) => {
+            for (value, then) in now.iter_mut().zip(then) {
+                keep_number_forms(value, then);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Go `NormalizeCredentialMetadata`: aliases move to their canonical key unless it is

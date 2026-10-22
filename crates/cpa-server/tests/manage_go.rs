@@ -1183,9 +1183,9 @@ mod creds {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
-        assert_eq!(compared, 206);
+        assert_eq!(compared, 211);
         eprintln!("credentials: {bytes_compared} of {compared} steps compared byte for byte");
-        assert_eq!(bytes_compared, 156, "steps compared byte for byte");
+        assert_eq!(bytes_compared, 161, "steps compared byte for byte");
     }
 
     /// Pending v8.0.35 drift outside the config saver. Each pin names its scenario and

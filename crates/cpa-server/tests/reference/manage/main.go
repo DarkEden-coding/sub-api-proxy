@@ -1640,6 +1640,14 @@ func credScenarios() []credScenario {
 			call(http.MethodPatch, "/credentials/status", `{"name":"raw-codex.json","disabled":true}`),
 			call(http.MethodPatch, "/credentials/fields", `{"name":"raw-codex-blank.json","access_token":"fake-new","id_token":"fake-id","note":"y"}`),
 			call(http.MethodPatch, "/credentials/status", `{"name":"raw-same.json","disabled":true}`),
+			// The record's flag is what the file gets, whatever the patch sent.
+			call(http.MethodPatch, "/credentials/fields", `{"name":"raw-plain.json","disabled":"false"}`),
+			call(http.MethodPatch, "/credentials/fields", `{"name":"raw-same.json","disabled":null}`),
+			call(http.MethodPatch, "/credentials/fields", `{"name":"raw-codex-blank.json","disabled.x":1}`),
+			// Patched numbers keep the form they were sent in through later saves, until
+			// a new patch sends the same value in another form.
+			call(http.MethodPatch, "/credentials/fields", `{"name":"raw-plain.json","num":100}`),
+			call(http.MethodPatch, "/credentials/status", `{"name":"raw-plain.json","disabled":true}`),
 		},
 	}, {
 		Name: "api_call_and_usage", Echo: true,
