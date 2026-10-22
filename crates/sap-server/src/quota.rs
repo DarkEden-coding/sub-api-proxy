@@ -8,6 +8,12 @@ use sap_core::{
     routing::Outcome,
 };
 use std::collections::BTreeMap;
+pub(crate) struct Signals {
+    pub at: DateTime<Utc>,
+    pub values: BTreeMap<String, String>,
+    pub source: ObservationSource,
+}
+
 fn timestamp(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<i64>()
         .ok()
@@ -23,6 +29,30 @@ impl Node {
         at: DateTime<Utc>,
         signals: BTreeMap<String, String>,
     ) -> anyhow::Result<()> {
+        self.quota_observation(
+            state,
+            Some(request),
+            account,
+            Signals {
+                at,
+                values: signals,
+                source: ObservationSource::Passive,
+            },
+        )
+    }
+
+    pub(crate) fn quota_observation(
+        &self,
+        state: &mut State,
+        request: Option<&SapRequest>,
+        account: &AccountId,
+        observation: Signals,
+    ) -> anyhow::Result<()> {
+        let Signals {
+            at,
+            values: signals,
+            source,
+        } = observation;
         let local = state.accounts.entry(account.clone()).or_default();
         if local.quota_at.is_some_and(|previous| at < previous) {
             return Ok(());
@@ -44,7 +74,7 @@ impl Node {
                     reset_at: get(&format!("{prefix}-reset")).and_then(timestamp),
                     window_minutes: Some(minutes),
                     observed_at: at,
-                    source: ObservationSource::Passive,
+                    source,
                 });
             }
         }
@@ -72,7 +102,7 @@ impl Node {
                     reset_at: reset,
                     window_minutes: minutes,
                     observed_at: at,
-                    source: ObservationSource::Passive,
+                    source,
                 });
             }
         }
@@ -102,15 +132,17 @@ impl Node {
             local.exhausted = Some(reset_at);
             local.exhausted_window = Some(window.clone());
             let outcome = Outcome::Exhausted { window, reset_at };
-            state
-                .failures
-                .entry(request.identity.key.clone())
-                .and_modify(|f| f.0 = outcome.clone())
-                .or_insert((outcome, at));
+            if let Some(request) = request {
+                state
+                    .failures
+                    .entry(request.identity.key.clone())
+                    .and_modify(|f| f.0 = outcome.clone())
+                    .or_insert((outcome, at));
+            }
             if state_changed {
                 self.event(
                     sap_core::api::EventKind::AccountState,
-                    Some(request.identity.key.clone()),
+                    request.map(|r| r.identity.key.clone()),
                     Some(account.clone()),
                     "Account quota exhausted",
                 );
@@ -123,6 +155,19 @@ impl Node {
             let local = state.accounts.entry(account.clone()).or_default();
             local.exhausted = None;
             local.exhausted_window = None;
+            if source == ObservationSource::Probe {
+                // A fresh successful usage probe supersedes old exhaustion failures
+                // for threads still assigned to this account. It says nothing about
+                // short rate limits, model entitlement or revoked credentials.
+                let registry = &state.registry;
+                state.failures.retain(|key, (outcome, _)| {
+                    !matches!(outcome, Outcome::Exhausted { .. })
+                        || !registry
+                            .get(key)
+                            .and_then(|r| r.assignment.as_ref())
+                            .is_some_and(|assignment| &assignment.account == account)
+                });
+            }
         }
         if let Some(seconds) = get("retry-after")
             .and_then(|v| v.parse::<i64>().ok())
@@ -162,7 +207,9 @@ impl Node {
         let old = self.store.latest_windows(account)?;
         let changed = windows.iter().any(|w| {
             old.iter().find(|o| o.kind == w.kind).is_none_or(|o| {
-                o.used_percent != w.used_percent
+                source == ObservationSource::Probe
+                    || o.source != w.source
+                    || o.used_percent != w.used_percent
                     || o.reset_at != w.reset_at
                     || at.signed_duration_since(o.observed_at).num_seconds() >= 300
             })

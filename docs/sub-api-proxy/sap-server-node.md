@@ -110,7 +110,10 @@ appears as `login_needed_on` this node.
 - Claude rejected unified claims/windows, or Codex `limit_reached`, produce
   `Exhausted` with the observed limiting window and reset. Its `Use` excludes the
   failed account. Unknown reset times remain unknown.
-- 401/403 produce local `Revoked`, then `Use` moves to another account.
+- Explicit upstream model-support or model-access failures produce typed
+  `ModelIneligible`, moving the affected thread without revoking the account.
+  Other 401/403 failures produce local `Revoked`, then `Use` moves to another
+  account. Generic 403 and quota exhaustion are not model-entitlement evidence.
 - Successful compaction is counted once per request. The next selection uses
   `CompactionCompleted`; Codex window advancement can also infer this event.
   `Use` records the policy's kept/moved reason and account.
@@ -152,9 +155,25 @@ No real provider endpoint or LLM was contacted.
 - Added only the default `SapHooks::routes() -> Option<axum::Router>` method to
   the public hook contract. `cpa_server::router` merges its already state-bound
   routes after binding runtime state. No `control.rs` changes.
-- Active quota probing is not implemented. `reset_aware_refresh` returns the
-  latest passive status and `polling` is false. The executors need a public,
-  test-guarded usage-probe API before this can meet Control's refresh promise.
+- `reset_aware_refresh` actively reads Claude `/api/oauth/usage` and Codex
+  `/backend-api/wham/usage` through executor-owned transports. Concurrent callers
+  join one refresh, which continues if a caller disconnects. At most four local,
+  enabled accounts are probed concurrently, with a ten-second deadline and 1 MiB
+  response limit per account. No inference or token refresh is sent. API keys are
+  reported as unsupported; peer-only and disabled accounts are skipped.
+  Executor-owned first-party origins and explicit loopback mock origins are
+  accepted. Credential base URLs and declarative probes are ignored, redirects
+  are rejected, and tokens cannot cross provider boundaries.
+- Successful active observations are stored and replicated with source `probe`;
+  passive observations keep source `passive`. Fresh allowed usage clears stale
+  exhaustion for threads still assigned to that account, without clearing
+  revocation, model failures or short rate limits. Partial Claude windows cannot
+  clear exhaustion for an unseen window. Polling reflects an active refresh;
+  last-poll timestamps record attempts and errors contain only fixed messages
+  and HTTP status codes. Failed probes retain prior observations.
+  Poll attempt/error metadata is process-local and resets on restart; quota
+  history and account exhaustion persist. Refresh is on demand, with no periodic
+  usage traffic. Expired OAuth tokens require the normal credential refresh path.
 - `SapPick` cannot express delayed selection or `Retry-After` headers. Future
   retry times therefore use 429 plus body `retry_at`, rather than waiting inside
   synchronous `select`.
@@ -162,9 +181,13 @@ No real provider endpoint or LLM was contacted.
   selection before closing. It does not close before dispatch or pin that final
   attempt to the newly assigned account. This behavior is inherited, not changed
   here. Real Codex reconnect/full-history recovery remains unverified.
-- There is no hook error kind identifying model entitlement failures. Explicit
-  `ModelIneligible` classification needs a typed upstream signal; model changes
-  already use `Account::serves_model` through the routing policy.
+- `AttemptError::ModelIneligible` carries explicit model-support/access evidence
+  from upstream error bodies without exposing their text to SAP. The existing Go
+  model-support classifier applies on 400/404/422, with explicit model evidence
+  additionally accepted on 403. Quota 429s and generic 403s do not produce this
+  signal. This moves the affected thread; it does not discover or persist a
+  complete per-account model-entitlement catalog. Model changes also use
+  `Account::serves_model` through the routing policy.
 - The hook has no attempt ID. Usage deduplication is per request/credential;
   multiple cumulative counters restarted for the same credential within one
   request cannot be distinguished reliably. An attempt ID is needed for that case.
@@ -250,3 +273,28 @@ alarms of 300 seconds for tests/clippy and 60 seconds for formatting:
 - `cargo test -p sap-sync -p sap-core -p sap-server`: 30 tests passed.
 - `cargo clippy -p sap-sync -p sap-core -p sap-server --all-targets -- -D warnings`.
 - `cargo fmt -p sap-core -p sap-sync -p sap-server --check`.
+## Active refresh and classification validation, October 22, 2026
+
+The active refresh changes touch `reset_aware.rs`, `quota.rs`, `hooks.rs`, the
+executor usage-probe API, and upstream hook classification. Small `node.rs`
+changes add refresh state and a weak self-reference so an HTTP caller dropping
+its future does not cancel the shared refresh. `views.rs`, peer telemetry,
+`sap-sync`, `sap-core`, packaging, and UI are unchanged.
+
+Local checks use `CARGO_BUILD_JOBS=2 nice -n 19`, with subprocess alarms.
+
+- `cargo fmt -p sap-server -p cpa-exec -p cpa-server -- --check`: passed.
+- `cargo clippy -p sap-server -p cpa-exec -p cpa-server --all-targets -- -D warnings`: passed.
+- `cargo test -p sap-server`: 5 API tests and 13 node-routing tests passed.
+- `cargo test -p cpa-exec --lib usage_probe`: 3 probe tests passed.
+- `cargo test -p cpa-server --lib sap_hooks`: 7 hook tests passed.
+
+Mock tests use loopback upstreams and private auth directories. They cover
+singleflight after caller cancellation, real polling status, observation sources,
+sanitized errors and recovery, usage headers, redirect and wrong-provider refusal,
+body-read timeout, Codex exhaustion recovery including stale thread failures,
+and entitlement classification without account revocation.
+No real provider, login, running proxy replacement, push, or deployment is part
+of this validation. An earlier debug binary was staged under
+`target/active-quota-install/bin/cliproxy`; its final rebuild was cancelled at
+parent request. Parent integration owns the final binary build and local install.

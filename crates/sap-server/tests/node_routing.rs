@@ -27,6 +27,9 @@ impl Fixture {
         Self::new_at(provider, "http://127.0.0.1:9")
     }
     fn new_at(provider: Provider, upstream: &str) -> Self {
+        Self::with_auth(provider, upstream, false)
+    }
+    fn with_auth(provider: Provider, upstream: &str, oauth: bool) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "sap-node-{}-{}-{}",
@@ -39,6 +42,11 @@ impl Fixture {
         config.auth_dir = dir.join("auth");
         let mut credentials = cpa_core::config::credentials::load(&config);
         for (i, c) in credentials.iter_mut().enumerate() {
+            if oauth {
+                c.attributes.remove("api_key");
+                c.metadata
+                    .insert("access_token".into(), serde_json::json!(format!("private-test-{i}")));
+            }
             c.metadata.insert(
                 if provider == Provider::Claude {
                     "account_uuid"
@@ -62,7 +70,7 @@ impl Fixture {
             credentials,
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new(upstream).unwrap(),
-                codex: Default::default(),
+                codex: cpa_exec::codex::CodexExecutor::default().with_alpha_base_url(upstream),
                 devices: Default::default(),
                 openai: Default::default(),
                 google: Default::default(),
@@ -580,5 +588,159 @@ async fn installed_node_serves_management_api_and_dashboard() {
     assert!(body.to_ascii_lowercase().contains("<html"), "dashboard index is served");
     let (status, _) = http_get(addr, sap_core::health::HEALTH_PATH, None).await;
     assert_eq!(status, 200);
+    server.abort();
+}
+
+#[tokio::test]
+async fn active_refresh_is_singleflight_and_reports_probe_sources_and_sanitized_errors() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let status = Arc::new(AtomicUsize::new(200));
+    let app = axum::Router::new().route("/api/oauth/usage", axum::routing::get({
+        let calls = calls.clone();
+        let status = status.clone();
+        move |headers: http::HeaderMap| {
+            let calls = calls.clone();
+            let status = status.clone();
+            async move {
+                assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer private-test-"));
+                assert_eq!(headers["anthropic-beta"], "oauth-2025-04-20");
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                (http::StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
+                    axum::Json(serde_json::json!({"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"},"seven_day":{"utilization":45},"error":"secret upstream body"})))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let f = Fixture::with_auth(Provider::Claude, &format!("http://{address}"), true);
+    let first = tokio::spawn({
+        let node = f.node.clone();
+        async move { node.reset_aware_refresh().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.node.reset_aware_status().polling);
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let first = f.node.reset_aware_refresh().await;
+    assert!(!first.polling);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    for account in &first.accounts {
+        assert_eq!(account.five_hour.as_ref().unwrap().source.as_deref(), Some("probe"));
+        assert_eq!(account.five_hour.as_ref().unwrap().used_percent, 25.0);
+        assert!(account.last_poll_at.is_some());
+        assert!(account.last_poll_error.is_none());
+    }
+    assert_eq!(f.node.reset_aware_history(1).accounts[0].samples.len(), 1);
+    status.store(403, Ordering::SeqCst);
+    let failed = f.node.reset_aware_refresh().await;
+    for account in &failed.accounts {
+        assert_eq!(
+            account.last_poll_error.as_deref(),
+            Some("Usage endpoint returned HTTP 403")
+        );
+        assert_eq!(account.five_hour.as_ref().unwrap().used_percent, 25.0);
+    }
+    status.store(200, Ordering::SeqCst);
+    assert!(
+        f.node
+            .reset_aware_refresh()
+            .await
+            .accounts
+            .iter()
+            .all(|a| a.last_poll_error.is_none())
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn model_entitlement_moves_thread_without_revoking_account() {
+    let f = Fixture::new(Provider::Codex);
+    let request = f.request("entitlement", false, false, false);
+    let first = f.pick(&request);
+    f.node.on_outcome(
+        &request,
+        &first,
+        &AttemptResult {
+            status: Some(403),
+            error: Some(cpa_server::sap_hooks::AttemptError::ModelIneligible),
+        },
+    );
+    assert_ne!(f.pick(&request), first);
+    assert!(
+        f.node
+            .accounts()
+            .iter()
+            .all(|a| a.state != sap_core::api::AccountState::LoginNeeded)
+    );
+}
+
+#[tokio::test]
+async fn active_refresh_codex_exhaustion_recovers_from_usage_endpoint() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let exhausted = Arc::new(AtomicBool::new(true));
+    let app = axum::Router::new().route(
+        "/backend-api/wham/usage",
+        axum::routing::get({
+            let exhausted = exhausted.clone();
+            move || {
+                let exhausted = exhausted.load(Ordering::SeqCst);
+                async move {
+                    axum::Json(serde_json::json!({
+                        "rate_limit": {"allowed":!exhausted,"limit_reached":exhausted,
+                            "primary_window":{"used_percent":if exhausted {100} else {10},
+                                "limit_window_seconds":18000,"reset_at":1900000000},
+                            "secondary_window":{"used_percent":20,"limit_window_seconds":604800}}
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let f = Fixture::with_auth(Provider::Codex, &format!("http://{address}"), true);
+    let request = f.request("refresh-recovery", false, false, false);
+    let first = f.pick(&request);
+    f.node.on_observation(
+        &request,
+        &first,
+        Observation::Quota {
+            observed_at: std::time::SystemTime::now(),
+            signals: [("x-codex-limit-reached".into(), "true".into())].into(),
+        },
+    );
+    let guarded = f.node.reset_aware_refresh().await;
+    assert!(guarded.accounts.iter().all(|a| a.state == "guarded"));
+    exhausted.store(false, Ordering::SeqCst);
+    let recovered = f.node.reset_aware_refresh().await;
+    assert!(
+        recovered
+            .accounts
+            .iter()
+            .all(|a| a.state == "normal" && a.last_poll_error.is_none())
+    );
+    assert_eq!(
+        f.pick(&request),
+        first,
+        "fresh allowed usage supersedes the thread's old exhaustion"
+    );
+    // Passive observations cannot claim a successful usage poll.
+    let keys = Fixture::new(Provider::Claude);
+    let unsupported = keys.node.reset_aware_refresh().await;
+    assert!(
+        unsupported
+            .accounts
+            .iter()
+            .all(|a| a.last_poll_error.as_deref() == Some("Usage probe requires a subscription OAuth credential"))
+    );
     server.abort();
 }

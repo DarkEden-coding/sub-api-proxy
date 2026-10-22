@@ -85,6 +85,17 @@ impl CodexExecutor {
         self
     }
 
+    /// Fetch subscription usage without inference or credential refresh.
+    pub async fn probe_usage(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+    ) -> Result<std::collections::BTreeMap<String, String>, crate::usage_probe::ProbeError> {
+        let proxy = crate::proxy::Proxy::effective(credential, cfg);
+        let client = self.transport.for_url(&self.alpha_base_url, &proxy, false, None);
+        crate::usage_probe::fetch(client, &self.alpha_base_url, credential, false).await
+    }
+
     /// Passive quota snapshots per credential (M4-0016), for the management API.
     pub fn quota(&self) -> &QuotaSignals {
         &self.quota

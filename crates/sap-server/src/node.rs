@@ -37,6 +37,8 @@ pub(crate) struct State {
     pub upstream_at: BTreeMap<sap_core::ids::Provider, DateTime<Utc>>,
 }
 pub struct Node {
+    pub(crate) self_weak: Weak<Node>,
+    pub(crate) refresh: Mutex<crate::reset_aware::Refresh>,
     pub(crate) config: Config,
     pub(crate) telemetry: Mutex<crate::telemetry::Metrics>,
     pub(crate) management: Mutex<Option<(Weak<cpa_server::management::Management>, String)>>,
@@ -207,7 +209,10 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             accounts.insert(account.id, serde_json::from_value(value)?);
         }
     }
-    let node = Arc::new(Node {
+    let learner = sap_routing::CapacityLearner::new(0.25, 3, 1000.0).map_err(anyhow::Error::msg)?;
+    let node = Arc::new_cyclic(|weak| Node {
+        self_weak: weak.clone(),
+        refresh: Mutex::default(),
         config,
         telemetry: Mutex::default(),
         management: Mutex::new(None),
@@ -228,7 +233,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             resend: BTreeSet::new(),
             persisted: BTreeMap::new(),
             // ponytail: fixed EWMA defaults and baseline; expose learner tunables after replay calibration.
-            learner: sap_routing::CapacityLearner::new(0.25, 3, 1000.0).map_err(anyhow::Error::msg)?,
+            learner,
         })),
         changes: tokio::sync::broadcast::channel(256).0,
         started: Utc::now(),

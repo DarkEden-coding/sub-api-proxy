@@ -51,12 +51,73 @@ pub struct AttemptResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptError {
+    ModelIneligible,
     RateLimited,
     Unauthorized,
     Overloaded,
     Request,
     Upstream,
     Cancelled,
+}
+
+// Keep entitlement evidence separate from status codes and generic permission errors.
+fn model_ineligible(error: &ExecError) -> bool {
+    if !matches!(error.status, 400 | 403 | 404 | 422) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&error.body) else {
+        return false;
+    };
+    let detail = value.get("error").unwrap_or(&value);
+    let code = detail
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let kind = detail
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if [code, kind].iter().any(|code| {
+        matches!(
+            *code,
+            "insufficient_quota"
+                | "quota_exceeded"
+                | "usage_limit_reached"
+                | "rate_limit_exceeded"
+                | "rate_limit_error"
+        )
+    }) {
+        return false;
+    }
+    if [code, kind]
+        .iter()
+        .any(|code| matches!(*code, "model_not_found" | "model_not_supported" | "model_access_denied"))
+    {
+        return true;
+    }
+    let message = detail
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    use cpa_core::gostr::GoStr;
+    // Go sdk/cliproxy/auth/conductor_cooldown.go recognizes model-support
+    // errors on 400/404/422. SAP additionally requires explicit model evidence
+    // for 403, preserving generic permissions as Unauthorized.
+    if crate::classify::is_model_support(error.status, message) {
+        return true;
+    }
+    let message = message.go_lower();
+    message.contains("model")
+        && [
+            "not supported for your account",
+            "not supported for this account",
+            "not available for your plan",
+            "not available for your account",
+            "do not have access to model",
+            "does not have access to model",
+        ]
+        .iter()
+        .any(|text| message.contains(text))
 }
 
 #[derive(Debug, Clone)]
@@ -188,12 +249,16 @@ impl Context {
             },
             Outcome::Failure(e) | Outcome::Neutral(e) => {
                 let status = crate::classify::response_status(e);
-                let error = match status {
-                    401 | 403 => AttemptError::Unauthorized,
-                    429 => AttemptError::RateLimited,
-                    503 | 529 => AttemptError::Overloaded,
-                    400..=499 => AttemptError::Request,
-                    _ => AttemptError::Upstream,
+                let error = if model_ineligible(e) {
+                    AttemptError::ModelIneligible
+                } else {
+                    match status {
+                        401 | 403 => AttemptError::Unauthorized,
+                        429 => AttemptError::RateLimited,
+                        503 | 529 => AttemptError::Overloaded,
+                        400..=499 => AttemptError::Request,
+                        _ => AttemptError::Upstream,
+                    }
                 };
                 AttemptResult {
                     status: Some(status),
@@ -889,5 +954,36 @@ mod tests {
                 .any(|o| matches!(o, Observation::ResponseId(id) if id == "resp_test"))
         );
         assert!(observed.iter().any(|o| matches!(o, Observation::Usage(u) if u.input_tokens == 6 && u.cache_read_tokens == 4 && u.output_tokens == 2)));
+    }
+}
+
+#[cfg(test)]
+mod entitlement_tests {
+    use super::*;
+    #[test]
+    fn explicit_model_errors_are_distinct_from_permissions_and_exhaustion() {
+        let error = |status, body: &str| ExecError::local(status, FailureScope::Model, body);
+        for (status, body) in [
+            (403, r#"{"error":{"code":"model_access_denied"}}"#),
+            (
+                400,
+                r#"{"error":{"message":"This model is not available for your plan"}}"#,
+            ),
+            (404, r#"{"error":{"code":"model_not_found"}}"#),
+        ] {
+            assert!(model_ineligible(&error(status, body)));
+        }
+        for (status, body) in [
+            (403, r#"{"error":{"message":"permission denied"}}"#),
+            (403, r#"{"error":{"message":"quota exhausted"}}"#),
+            (
+                403,
+                r#"{"error":{"code":"insufficient_quota","message":"This model is not available for your plan"}}"#,
+            ),
+            (429, r#"{"error":{"code":"model_not_supported"}}"#),
+            (500, r#"{"error":{"code":"model_not_found"}}"#),
+        ] {
+            assert!(!model_ineligible(&error(status, body)));
+        }
     }
 }

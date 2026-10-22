@@ -2,13 +2,28 @@ use crate::{
     control::{BoxFuture, Control},
     node::Node,
 };
+use futures_util::{StreamExt, stream};
 use sap_core::{Utc, api::AccountState, ids::Provider, reset_aware as ra};
+use std::collections::BTreeMap;
+
+#[derive(Default)]
+pub(crate) struct Refresh {
+    error: Option<&'static str>,
+    running: Option<tokio::sync::watch::Receiver<bool>>,
+    // ponytail: attempt metadata lasts for this process; persist it separately if
+    // poll diagnostics must survive restart. Quota observations already persist.
+    polls: BTreeMap<sap_core::ids::AccountId, (sap_core::DateTime<Utc>, Option<String>)>,
+}
 
 impl Node {
     pub(crate) fn visualizer_status(&self) -> ra::StatusResponse {
+        let refresh = self.refresh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         ra::StatusResponse {
             now: Utc::now(),
-            polling: false,
+            polling: refresh
+                .running
+                .as_ref()
+                .is_some_and(|r| r.has_changed().is_ok() && !*r.borrow()),
             settings: ra::RoutingSettings {
                 strategy: "thread-affinity".into(),
                 active: true,
@@ -27,7 +42,13 @@ impl Node {
                         a.windows.iter().find(|w| w.kind == kind).map(|w| ra::WindowStatus {
                             used_percent: w.used_percent,
                             reset_at: w.reset_at,
-                            source: Some("passive".into()),
+                            source: Some(
+                                match w.source {
+                                    sap_core::quota::ObservationSource::Passive => "passive",
+                                    sap_core::quota::ObservationSource::Probe => "probe",
+                                }
+                                .into(),
+                            ),
                             observed_at: Some(w.observed_at),
                         })
                     };
@@ -53,8 +74,11 @@ impl Node {
                         share_percent: a.weight_percent,
                         weekly: window(sap_core::quota::WindowKind::Weekly),
                         five_hour: window(sap_core::quota::WindowKind::FiveHour),
-                        last_poll_at: a.windows.iter().map(|w| w.observed_at).max(),
-                        last_poll_error: None,
+                        last_poll_at: refresh.polls.get(&a.id).map(|p| p.0),
+                        last_poll_error: refresh
+                            .error
+                            .map(str::to_owned)
+                            .or_else(|| refresh.polls.get(&a.id).and_then(|p| p.1.clone())),
                         reason: None,
                     }
                 })
@@ -148,7 +172,106 @@ impl Node {
         }
     }
     pub(crate) fn visualizer_refresh(&self) -> BoxFuture<'_, ra::StatusResponse> {
-        // ponytail: refresh currently returns passive observations only. Add an executor usage-probe API before enabling active account polling.
-        Box::pin(async { self.reset_aware_status() })
+        Box::pin(async move {
+            let mut receiver = {
+                let mut refresh = self.refresh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(receiver) = refresh
+                    .running
+                    .as_ref()
+                    .filter(|r| r.has_changed().is_ok() && !*r.borrow())
+                {
+                    receiver.clone()
+                } else {
+                    let (done, receiver) = tokio::sync::watch::channel(false);
+                    refresh.running = Some(receiver.clone());
+                    refresh.error = None;
+                    self.changed();
+                    let weak = self.self_weak.clone();
+                    tokio::spawn(async move {
+                        if let Some(node) = weak.upgrade() {
+                            node.refresh_usage().await;
+                            let _ = done.send(true);
+                            node.changed();
+                        }
+                    });
+                    receiver
+                }
+            };
+            let _ = receiver.wait_for(|done| *done).await;
+            self.reset_aware_status()
+        })
+    }
+
+    async fn refresh_usage(&self) {
+        let Some(rt) = self.runtime.upgrade() else {
+            self.refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .error = Some("Proxy runtime unavailable");
+            return;
+        };
+        let Ok(mapping) = self.discover() else {
+            self.refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .error = Some("Credential discovery failed");
+            return;
+        };
+        let enabled: std::collections::BTreeSet<_> = match self.store.accounts() {
+            Ok(accounts) => accounts.into_iter().filter(|a| !a.disabled).map(|a| a.id).collect(),
+            Err(_) => {
+                self.refresh
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .error = Some("Quota state unavailable");
+                return;
+            }
+        };
+        // One local credential per enabled logical account; never probe peer-only accounts.
+        let mut credentials = BTreeMap::new();
+        for credential in rt.store().snapshot() {
+            if let Some(account) = mapping.get(&credential.id).filter(|id| enabled.contains(*id)) {
+                credentials.entry(account.clone()).or_insert(credential);
+            }
+        }
+        let config = rt.config();
+        let mut pending = stream::iter(credentials.into_iter().map(|(account, credential)| {
+            let rt = &rt;
+            let config = &config;
+            async move {
+                let result = match credential.provider.as_str() {
+                    "claude" => rt.executors.claude.probe_usage(&credential, config).await,
+                    "codex" => rt.executors.codex.probe_usage(&credential, config).await,
+                    _ => return (account, Err("Usage probe is unsupported".to_owned())),
+                };
+                (account, result.map_err(|e| e.to_string()))
+            }
+        }))
+        .buffer_unordered(4);
+        while let Some((account, result)) = pending.next().await {
+            let at = Utc::now();
+            let error = match result {
+                Ok(signals) => self
+                    .quota_observation(
+                        &mut self.lock(),
+                        None,
+                        &account,
+                        crate::quota::Signals {
+                            at,
+                            values: signals,
+                            source: sap_core::quota::ObservationSource::Probe,
+                        },
+                    )
+                    .err()
+                    .map(|_| "Quota persistence failed".to_owned()),
+                Err(error) => Some(error),
+            };
+            self.refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .polls
+                .insert(account, (at, error));
+            self.changed();
+        }
     }
 }

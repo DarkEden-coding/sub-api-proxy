@@ -198,6 +198,19 @@ impl ClaudeExecutor {
         oauth::needs_prepare(credential, now)
     }
 
+    /// Fetch subscription usage without inference or credential refresh.
+    pub async fn probe_usage(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+    ) -> Result<std::collections::BTreeMap<String, String>, crate::usage_probe::ProbeError> {
+        let proxy = crate::proxy::Proxy::effective(credential, cfg);
+        let client = self
+            .native_client(&proxy, None)
+            .map_err(|_| crate::usage_probe::ProbeError::Transport)?;
+        crate::usage_probe::fetch(client, &self.base_url, credential, true).await
+    }
+
     pub async fn prepare(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
         self.oauth.prepare(credential, &Proxy::effective(credential, cfg)).await
     }

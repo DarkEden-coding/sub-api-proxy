@@ -140,12 +140,16 @@ impl SapHooks for Node {
                 tracing::warn!("SAP quota persistence failed");
             }
         }
-        let mut outcome = match result.status {
-            Some(401 | 403) => Outcome::Revoked,
-            Some(429) => Outcome::RateLimited { retry_after: None },
-            Some(503 | 529) => Outcome::Overloaded { retry_after: None },
-            Some(200..=299) if result.error.is_none() => Outcome::Success,
-            _ => return,
+        let mut outcome = if result.error == Some(cpa_server::sap_hooks::AttemptError::ModelIneligible) {
+            Outcome::ModelIneligible
+        } else {
+            match result.status {
+                Some(401 | 403) => Outcome::Revoked,
+                Some(429) => Outcome::RateLimited { retry_after: None },
+                Some(503 | 529) => Outcome::Overloaded { retry_after: None },
+                Some(200..=299) if result.error.is_none() => Outcome::Success,
+                _ => return,
+            }
         };
         if result.status == Some(429)
             && let Some(local) = state.accounts.get(account)
