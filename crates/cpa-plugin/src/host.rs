@@ -1088,11 +1088,14 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         *lock(&UNLOAD_HOOK) = Some({
             let (host, seen) = (host.clone(), seen.clone());
-            ("fence", Box::new(move || {
-                let stale = host.snapshot().records.iter().any(|r| r.id == "fence");
-                let lock_free = host.inner.state.try_lock().is_ok();
-                *lock(&seen) = Some((stale, lock_free));
-            }))
+            (
+                "fence",
+                Box::new(move || {
+                    let stale = host.snapshot().records.iter().any(|r| r.id == "fence");
+                    let lock_free = host.inner.state.try_lock().is_ok();
+                    *lock(&seen) = Some((stale, lock_free));
+                }),
+            )
         });
         assert!(host.unload_plugin("fence", None).await);
         *lock(&UNLOAD_HOOK) = None;
