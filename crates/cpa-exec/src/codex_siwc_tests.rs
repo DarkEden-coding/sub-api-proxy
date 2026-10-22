@@ -167,17 +167,22 @@ async fn exchange_sends_the_issued_client_and_validates_the_grant() {
     assert!(mock.take().is_empty());
 }
 
-/// Go `SIWCExpirationTime` / `expirationFromMap` and `CodexSIWCNeedsRefresh` on a fixed
-/// clock: relative expiries after their issue time, nested token maps, and Go's zero time
-/// ending a key search.
+/// Go `CodexSIWCNeedsRefresh` at two fixed clocks for every expiry shape Go reads:
+/// `time.Parse`'s grammar, `normaliseUnix`, relative expiries with Go's wrapping
+/// `Duration` product, nested token maps, the JWT `exp` and Go's zero time; see
+/// tests/reference/codex_siwc_expiry.
 #[test]
-fn refresh_due_reads_every_go_expiry_shape() {
-    use chrono::{TimeZone, Utc};
-    let now = Utc.with_ymd_and_hms(2026, 10, 22, 10, 0, 0).unwrap();
-    let minutes = |m: i64| now + TimeDelta::minutes(m);
-    let due = |extra: Value, at| {
-        let mut siwc = serde_json::json!({"access_token": "opaque", "refresh_token": "rt", "client_id": "c"});
-        siwc.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+fn refresh_due_matches_go_expiry_parsing() {
+    let go: Value = serde_json::from_str(include_str!("../tests/fixtures/codex_siwc_expiry_go.json")).unwrap();
+    let clocks: Vec<chrono::DateTime<chrono::Utc>> = go["clocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().parse().unwrap())
+        .collect();
+    let mut wrong = vec![];
+    for case in go["cases"].as_array().unwrap() {
+        let siwc: Value = serde_json::from_str(case["siwc"].as_str().unwrap()).unwrap();
         let credential = cpa_core::credential::Credential::from_file(
             std::path::Path::new("/fake"),
             std::path::Path::new("/fake/c.json"),
@@ -187,41 +192,19 @@ fn refresh_due_reads_every_go_expiry_shape() {
                 .clone(),
         )
         .unwrap();
-        refresh_due(&credential, at).unwrap()
-    };
-    let relative = serde_json::json!({"expires_in": 3600, "timestamp": "2026-10-22T10:00:00Z"});
-    assert!(!due(relative.clone(), now), "an hour left");
-    assert!(!due(relative.clone(), minutes(54)));
-    assert!(due(relative, minutes(56)), "inside the 5-minute lead");
-    let unix = now.timestamp();
-    assert!(!due(
-        serde_json::json!({"expiresIn": "3600", "issued_at": unix}),
-        minutes(54)
-    ));
-    assert!(due(
-        serde_json::json!({"expiresIn": "3600", "issued_at": unix}),
-        minutes(56)
-    ));
-    assert!(!due(
-        serde_json::json!({"token": {"expiry": "2026-10-22T11:00:00Z"}}),
-        now
-    ));
-    let millis = serde_json::json!({"Token": {"expires_in": 600, "issuedAt": now.timestamp_millis()}});
-    assert!(!due(millis.clone(), minutes(4)));
-    assert!(due(millis, minutes(6)));
-    // Go's zero time from `expired: 0` ends the search: no expiry, no last refresh, due now.
-    assert!(due(
-        serde_json::json!({"expired": 0, "expires_in": 3600, "timestamp": unix}),
-        now
-    ));
-    assert!(due(serde_json::json!({"expires_in": 3600}), now), "no issue time");
-    assert!(
-        due(serde_json::json!({"expired": "2026-10-22t11:00:00Z"}), now),
-        "Go's layout needs T"
-    );
-    assert!(!due(serde_json::json!({"last_refresh": "2026-10-22T09:58:00Z"}), now));
-    assert!(due(
-        serde_json::json!({"last_refresh": "2026-10-22T09:58:00Z"}),
-        minutes(4)
-    ));
+        let ours: Vec<Value> = clocks
+            .iter()
+            .map(|at| refresh_due(&credential, *at).unwrap().into())
+            .collect();
+        let mut want = case["due"].clone();
+        if case["name"] == "out-of-range float" && !cfg!(target_arch = "x86_64") {
+            // Recorded on amd64 (`math.MinInt64`, the zero time); Go on arm64 saturates to
+            // a far-future time.
+            want = serde_json::json!([false, false]);
+        }
+        if ours != want.as_array().unwrap()[..] {
+            wrong.push(format!("{}: {ours:?}, Go {want}", case["name"]));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
