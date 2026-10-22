@@ -74,8 +74,12 @@ pub fn resolve(auth_dir: &Path, target: &str) -> Result<PathBuf, String> {
     if auth_dir.to_string_lossy().trim().is_empty() {
         return Err("siwc-bind: auth-dir is not configured".into());
     }
-    let dir =
-        std::fs::canonicalize(auth_dir).map_err(|e| format!("siwc-bind: failed to resolve real auth-dir: {e}"))?;
+    // Go `util.ResolveAuthDir` cleans lexically and `filepath.Abs` joins the working
+    // directory before `EvalSymlinks`: `link/../auth` is a sibling of `link`, never the
+    // parent of its target.
+    let dir = go_abs(auth_dir)
+        .and_then(std::fs::canonicalize)
+        .map_err(|e| format!("siwc-bind: failed to resolve real auth-dir: {e}"))?;
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else if raw.contains(['/', '\\']) || raw == "." || raw == ".." {
@@ -143,7 +147,7 @@ pub fn save(path: &Path, tokens: &Tokens) -> Result<(), String> {
 // ponytail: Go also serializes callers in one process with a mutex per path; the CLI is
 // the only caller here, and the server's refresh writer does not take this lock yet.
 pub fn with_file_lock<T>(path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    let mut lock_path = path.as_os_str().to_owned();
+    let mut lock_path = lock_base(path).into_os_string();
     lock_path.push(".lock");
     let lock_path = PathBuf::from(lock_path);
     let mut options = std::fs::OpenOptions::new();
@@ -202,6 +206,42 @@ fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn lock_exclusive(_: &std::fs::File) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Go `filepath.Clean`, lexically.
+fn go_clean(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(component),
+            },
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() {
+        return PathBuf::from(".");
+    }
+    out.iter().collect()
+}
+
+/// Go `filepath.Abs` of a cleaned path: joined with the working directory, cleaned.
+fn go_abs(path: &Path) -> std::io::Result<PathBuf> {
+    std::path::absolute(go_clean(path)).map(|p| go_clean(&p))
+}
+
+/// Go `canonicalLockPath`: the path trimmed of surrounding white space, cleaned and made
+/// absolute. The lock file is this plus `.lock`, so a file named with trailing spaces
+/// shares its lock with Go's.
+fn lock_base(path: &Path) -> PathBuf {
+    let trimmed = path.to_str().map_or(path, |s| Path::new(s.trim()));
+    go_abs(trimmed).unwrap_or_else(|_| go_clean(trimmed))
 }
 
 /// `-siwc-bind <file>`: the browser flow on the callback port (`-oauth-callback-port`,

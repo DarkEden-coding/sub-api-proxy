@@ -33,6 +33,8 @@ type rsfixBindCase struct {
 	Cause bool   `json:"cause,omitempty"`
 	// Device is ensureSIWCDeviceIDFromFile's result, or "generated" for a fresh UUID.
 	Device string `json:"device,omitempty"`
+	// Listing is the auth-dir's entries after a save (the lock file included).
+	Listing []string `json:"listing,omitempty"`
 }
 
 func rsfixBindErr(c *rsfixBindCase, err error, dir, out string) {
@@ -61,6 +63,7 @@ func rsfixBindSetup(t *testing.T, c *rsfixBindCase) (string, string) {
 			case content == "/":
 				_ = os.MkdirAll(path, 0o700)
 			default:
+				_ = os.MkdirAll(filepath.Dir(path), 0o700)
 				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -88,6 +91,8 @@ func TestRSFixSIWCBind(t *testing.T) {
 		{Name: "symlink_inside", Files: map[string]string{"c.json": rsfixBindCodex, "l.json": "->$DIR/c.json"}, AuthDir: "$DIR", Target: "l.json"},
 		{Name: "auth_dir_alias_bare", Outside: map[string]string{"alias": "->$DIR"}, Files: map[string]string{"c.json": rsfixBindCodex}, AuthDir: "$OUT/alias", Target: "c.json"},
 		{Name: "auth_dir_alias_absolute", Outside: map[string]string{"alias": "->$DIR"}, Files: map[string]string{"c.json": rsfixBindCodex}, AuthDir: "$OUT/alias", Target: "$OUT/alias/c.json"},
+		// Go cleans the auth-dir lexically first: link/.. is out, not the parent of link's target.
+		{Name: "auth_dir_lexical_dotdot", Outside: map[string]string{"link": "->$DIR/sub", "auth/c.json": rsfixBindCodex}, Files: map[string]string{"sub": "/", "auth/c.json": rsfixBindCodex}, AuthDir: "$OUT/link/../auth", Target: "c.json"},
 		{Name: "traversal", Outside: map[string]string{"c.json": rsfixBindCodex}, AuthDir: "$DIR", Target: "../out/c.json"},
 		{Name: "no_type", Files: map[string]string{"c.json": `{"hello":"world","access_token":"a","refresh_token":"r"}`}, AuthDir: "$DIR", Target: "c.json"},
 		{Name: "empty", AuthDir: "$DIR", Target: "  "},
@@ -120,7 +125,7 @@ func TestRSFixSIWCBind(t *testing.T) {
 		if err != nil {
 			rsfixBindErr(&c, err, dir, out)
 		} else {
-			c.Result = strings.ReplaceAll(path, dir, "$DIR")
+			c.Result = strings.ReplaceAll(strings.ReplaceAll(path, dir, "$DIR"), out, "$OUT")
 		}
 		resolve = append(resolve, c)
 	}
@@ -174,15 +179,25 @@ func TestRSFixSIWCBind(t *testing.T) {
 		{Name: "not_codex", Files: map[string]string{"c.json": `{"type":"gemini","access_token":"a","refresh_token":"r"}`}},
 		{Name: "null", Files: map[string]string{"c.json": `null`}},
 		{Name: "missing", Files: map[string]string{}},
+		// canonicalLockPath trims the path: the lock of "c.json " is "c.json.lock".
+		{Name: "trailing_space", Target: "c.json ", Files: map[string]string{"c.json ": rsfixBindCodex}},
 	}
 	for _, c := range saveCases {
 		dir, out := rsfixBindSetup(t, &c)
-		path := filepath.Join(dir, "c.json")
+		name := "c.json"
+		if c.Target != "" {
+			name = c.Target
+		}
+		path := filepath.Join(dir, name)
 		if err := saveSIWCToCodexCredentialFile(path, tokens); err != nil {
 			rsfixBindErr(&c, err, dir, out)
 		} else {
 			data, _ := os.ReadFile(path)
 			c.Result = string(data)
+		}
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			c.Listing = append(c.Listing, e.Name())
 		}
 		save = append(save, c)
 	}

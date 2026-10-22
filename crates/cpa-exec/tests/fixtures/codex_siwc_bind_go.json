@@ -182,6 +182,20 @@
       "result": "$DIR/c.json"
     },
     {
+      "name": "auth_dir_lexical_dotdot",
+      "files": {
+        "auth/c.json": "{\"type\":\"codex\",\"access_token\":\"at\",\"refresh_token\":\"rt\"}",
+        "sub": "/"
+      },
+      "outside": {
+        "auth/c.json": "{\"type\":\"codex\",\"access_token\":\"at\",\"refresh_token\":\"rt\"}",
+        "link": "-\u003e$DIR/sub"
+      },
+      "auth_dir": "$OUT/link/../auth",
+      "target": "c.json",
+      "result": "$OUT/auth/c.json"
+    },
+    {
       "name": "traversal",
       "outside": {
         "c.json": "{\"type\":\"codex\",\"access_token\":\"at\",\"refresh_token\":\"rt\"}"
@@ -387,7 +401,11 @@
       },
       "auth_dir": "",
       "target": "",
-      "result": "{\"access_token\":\"at\",\"dup\":2,\"email\":\"a\\u003cb\\u003e\\u0026c@x.io\",\"line\":\"\\u2028\",\"n_big\":12345678901234567000,\"n_exp\":1000,\"n_frac\":1.5,\"n_huge\":1e+21,\"n_neg\":-0,\"n_tiny\":1e-7,\"nested\":{\"a\":[true,null,{\"b\":3,\"y\":\"2\"}],\"z\":1},\"refresh_token\":\"rt\",\"siwc\":{\"access_token\":\"siwc-at\",\"client_id\":\"issued-client\",\"device_id\":\"e61bbe28-07ef-466d-8e5d-a344f94ab305\",\"expired\":\"2026-10-22T18:00:00Z\",\"id_token\":\"siwc-id\",\"last_refresh\":\"2026-10-22T17:00:00Z\",\"refresh_token\":\"siwc-rt\",\"scope\":\"openid chatgpt.tokens.use.direct\",\"scopes\":[\"openid\",\"chatgpt.tokens.use.direct\"]},\"type\":\"codex\",\"use_siwc\":true}"
+      "result": "{\"access_token\":\"at\",\"dup\":2,\"email\":\"a\\u003cb\\u003e\\u0026c@x.io\",\"line\":\"\\u2028\",\"n_big\":12345678901234567000,\"n_exp\":1000,\"n_frac\":1.5,\"n_huge\":1e+21,\"n_neg\":-0,\"n_tiny\":1e-7,\"nested\":{\"a\":[true,null,{\"b\":3,\"y\":\"2\"}],\"z\":1},\"refresh_token\":\"rt\",\"siwc\":{\"access_token\":\"siwc-at\",\"client_id\":\"issued-client\",\"device_id\":\"e61bbe28-07ef-466d-8e5d-a344f94ab305\",\"expired\":\"2026-10-22T18:00:00Z\",\"id_token\":\"siwc-id\",\"last_refresh\":\"2026-10-22T17:00:00Z\",\"refresh_token\":\"siwc-rt\",\"scope\":\"openid chatgpt.tokens.use.direct\",\"scopes\":[\"openid\",\"chatgpt.tokens.use.direct\"]},\"type\":\"codex\",\"use_siwc\":true}",
+      "listing": [
+        "c.json",
+        "c.json.lock"
+      ]
     },
     {
       "name": "invalid_json",
@@ -397,7 +415,11 @@
       "auth_dir": "",
       "target": "",
       "error": "failed to parse existing credential file",
-      "cause": true
+      "cause": true,
+      "listing": [
+        "c.json",
+        "c.json.lock"
+      ]
     },
     {
       "name": "not_codex",
@@ -406,7 +428,11 @@
       },
       "auth_dir": "",
       "target": "",
-      "error": "siwc-bind: credential type must be codex"
+      "error": "siwc-bind: credential type must be codex",
+      "listing": [
+        "c.json",
+        "c.json.lock"
+      ]
     },
     {
       "name": "null",
@@ -415,14 +441,34 @@
       },
       "auth_dir": "",
       "target": "",
-      "error": "siwc-bind: credential type must be codex"
+      "error": "siwc-bind: credential type must be codex",
+      "listing": [
+        "c.json",
+        "c.json.lock"
+      ]
     },
     {
       "name": "missing",
       "auth_dir": "",
       "target": "",
       "error": "failed to read existing credential file",
-      "cause": true
+      "cause": true,
+      "listing": [
+        "c.json.lock"
+      ]
+    },
+    {
+      "name": "trailing_space",
+      "files": {
+        "c.json ": "{\"type\":\"codex\",\"access_token\":\"at\",\"refresh_token\":\"rt\"}"
+      },
+      "auth_dir": "",
+      "target": "c.json ",
+      "result": "{\"access_token\":\"at\",\"refresh_token\":\"rt\",\"siwc\":{\"access_token\":\"siwc-at\",\"client_id\":\"issued-client\",\"device_id\":\"e61bbe28-07ef-466d-8e5d-a344f94ab305\",\"expired\":\"2026-10-22T18:00:00Z\",\"id_token\":\"siwc-id\",\"last_refresh\":\"2026-10-22T17:00:00Z\",\"refresh_token\":\"siwc-rt\",\"scope\":\"openid chatgpt.tokens.use.direct\",\"scopes\":[\"openid\",\"chatgpt.tokens.use.direct\"]},\"type\":\"codex\",\"use_siwc\":true}",
+      "listing": [
+        "c.json ",
+        "c.json.lock"
+      ]
     }
   ]
 }

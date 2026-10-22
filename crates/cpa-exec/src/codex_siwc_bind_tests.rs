@@ -29,6 +29,7 @@ fn write_files(base: &Path, files: &Value, expand: &dyn Fn(&str) -> String) -> b
         } else if content == "/" {
             std::fs::create_dir_all(&path).unwrap();
         } else {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, content).unwrap();
         }
     }
@@ -113,7 +114,7 @@ fn siwc_bind_matches_go() {
         let root = temp_root();
         let dir = root.join("auth");
         write_files(&dir, &case["files"], &|s| s.to_owned());
-        let path = dir.join("c.json");
+        let path = dir.join(case["target"].as_str().filter(|t| !t.is_empty()).unwrap_or("c.json"));
         match save(&path, &tokens) {
             Ok(()) => assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),
@@ -123,8 +124,13 @@ fn siwc_bind_matches_go() {
             ),
             Err(e) => assert_error(case, &e, &|s| s.to_owned()),
         }
-        // Go's lock file stays beside the credential.
-        assert!(dir.join("c.json.lock").is_file(), "{}", case["name"]);
+        // Go's lock file (`canonicalLockPath` + `.lock`) stays beside the credential.
+        let mut listing: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        listing.sort();
+        assert_eq!(serde_json::json!(listing), case["listing"], "{}", case["name"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
