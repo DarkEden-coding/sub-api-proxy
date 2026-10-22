@@ -632,6 +632,7 @@ fn translate_stream(
         sink,
         protocol: n.output.clone(),
         buffer: Vec::new(),
+        scan: JsonScan::default(),
         ended: false,
     });
     let state = StreamState {
@@ -702,7 +703,60 @@ struct StreamUsage {
     protocol: String,
     /// The part of the last line not yet ended by a newline.
     buffer: Vec<u8>,
+    /// Bracket and string state of `buffer`, advanced over each new byte only.
+    scan: JsonScan,
     ended: bool,
+}
+
+/// Incremental bracket and string tracking over a partial line, so a line arriving in
+/// many pieces is scanned once rather than revalidated as each piece lands.
+#[derive(Default)]
+struct JsonScan {
+    /// Bytes of the buffer already scanned.
+    offset: usize,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    opened: bool,
+    /// A close without an open, or a balanced value that failed validation: no
+    /// extension of the line can become one whole JSON value.
+    broken: bool,
+}
+
+impl JsonScan {
+    /// Scans the bytes added since the last call; true when the line may now hold one
+    /// whole object or array.
+    fn advance(&mut self, buffer: &[u8]) -> bool {
+        for &b in &buffer[self.offset..] {
+            if self.in_string {
+                match b {
+                    _ if self.escaped => self.escaped = false,
+                    b'\\' => self.escaped = true,
+                    b'"' => self.in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match b {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => {
+                    self.depth += 1;
+                    self.opened = true;
+                }
+                b'}' | b']' => match self.depth.checked_sub(1) {
+                    Some(depth) => self.depth = depth,
+                    None => self.broken = true,
+                },
+                _ => {}
+            }
+        }
+        self.offset = buffer.len();
+        !self.broken
+            && self.opened
+            && self.depth == 0
+            && !self.in_string
+            && matches!(buffer.trim_ascii_end().last(), Some(b'}' | b']'))
+    }
 }
 
 impl StreamUsage {
@@ -717,17 +771,22 @@ impl StreamUsage {
             let rest = self.buffer.split_off(start + end + 1);
             let lines = std::mem::replace(&mut self.buffer, rest);
             self.lines(&lines);
+            // The remainder is part of this payload, so rescanning it stays linear.
+            self.scan = JsonScan::default();
         }
-        // A complete JSON payload without its newline counts now, as Go's does. Only a
-        // remainder that can be a whole object or array is validated, so a long line
-        // arriving in many pieces is not rescanned for each one.
+        // A complete JSON payload without its newline counts now, as Go's does. Go
+        // revalidates the whole remainder on every chunk; here only a remainder whose
+        // brackets have just balanced is validated, once.
         // ponytail: a bare scalar payload without its newline waits for the next line
         // (Go flushes it); no usage line is a scalar.
-        if matches!(self.buffer.trim_ascii_end().last(), Some(b'}' | b']'))
-            && extract_stream_json(&self.buffer).is_some_and(cpa_common::json::std_valid)
-        {
-            let rest = std::mem::take(&mut self.buffer);
-            self.lines(&rest);
+        if self.scan.advance(&self.buffer) {
+            if extract_stream_json(&self.buffer).is_some_and(cpa_common::json::std_valid) {
+                let rest = std::mem::take(&mut self.buffer);
+                self.scan = JsonScan::default();
+                self.lines(&rest);
+            } else {
+                self.scan.broken = true;
+            }
         }
     }
 
@@ -851,6 +910,26 @@ mod tests {
     use cpa_core::credential::Credential;
 
     use super::*;
+
+    /// A line arriving in pieces is reported whole only once its outer brackets close;
+    /// brackets and escaped quotes inside strings do not count.
+    #[test]
+    fn a_partial_stream_line_is_whole_only_when_its_outer_value_closes() {
+        let mut scan = JsonScan::default();
+        let mut line = Vec::new();
+        let pieces: [&[u8]; 4] = [br#"data: {"usage":[{"t":"}\"]"}"#, br#",{"n":1}"#, b"]", b"}  "];
+        let whole: Vec<bool> = pieces
+            .iter()
+            .map(|piece| {
+                line.extend_from_slice(piece);
+                scan.advance(&line)
+            })
+            .collect();
+        assert_eq!(whole, [false, false, false, true]);
+
+        let mut stray = JsonScan::default();
+        assert!(!stray.advance(b"data: }{}"), "a close before any open never balances");
+    }
 
     /// A Home credential's dispatcher-set attributes stay out of the plugin request;
     /// one Home sent itself stays in, even under a name the dispatcher also uses.
