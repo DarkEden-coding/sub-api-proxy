@@ -496,21 +496,21 @@ impl Control {
     /// `None` when `frame` is not a `response.interrupt` (valid JSON, string `type`);
     /// otherwise its outcome, `Err` with the write error when its rejection cannot be
     /// written. The frame itself bypasses request normalization and the timeline's
-    /// request parts.
+    /// request parts, and goes upstream as received: Go's `json.Valid` accepts any
+    /// bytes inside a string, so a binary frame need not be UTF-8.
     async fn interrupt(&self, frame: &[u8]) -> Option<Result<(), String>> {
         if !cpa_common::json::std_valid(frame) {
             return None;
         }
-        let payload = String::from_utf8_lossy(frame);
-        if gjson::get(&payload, "type").str() != "response.interrupt" {
+        if &*cpa_common::json::get(frame, "type").bytes() != b"response.interrupt" {
             return None;
         }
-        self.diagnostic(&payload, "");
-        let outcome = match self.forward(&payload).await {
+        self.diagnostic(frame, "");
+        let outcome = match self.forward(frame).await {
             Ok(()) => "handled",
-            Err(InterruptError::NoActive) if self.local.deliver(&payload) => "local_http",
+            Err(InterruptError::NoActive) if self.local.deliver(&String::from_utf8_lossy(frame)) => "local_http",
             Err(error) => {
-                self.diagnostic(&payload, "rejected");
+                self.diagnostic(frame, "rejected");
                 // Only the sanitized outcome is logged: transport errors may carry
                 // credentials or URLs. The error event is not a timeline part.
                 let event = error_payload(400, &error.to_string(), None);
@@ -518,13 +518,13 @@ impl Control {
                 return Some(sent.map_err(|e| e.to_string()));
             }
         };
-        self.diagnostic(&payload, outcome);
+        self.diagnostic(frame, outcome);
         Some(Ok(()))
     }
 
-    async fn forward(&self, payload: &str) -> Result<(), InterruptError> {
-        let id = gjson::get(payload, "response_id");
-        if id.kind() != gjson::Kind::String || id.str().trim().is_empty() {
+    async fn forward(&self, payload: &[u8]) -> Result<(), InterruptError> {
+        let id = cpa_common::json::get(payload, "response_id");
+        if id.kind != cpa_common::json::Kind::String || cpa_common::gostr::trim_space(&id.bytes()).is_empty() {
             return Err(InterruptError::Rejected(
                 "response.interrupt requires response_id".into(),
             ));
@@ -541,12 +541,12 @@ impl Control {
 
     /// `appendResponsesInterruptDiagnostic`: the response ID hashed, every other field
     /// (mode, extensions) left out.
-    fn diagnostic(&self, payload: &str, outcome: &str) {
+    fn diagnostic(&self, payload: &[u8], outcome: &str) {
         use sha2::Digest;
         let Some(timeline) = self.timeline.as_deref() else {
             return;
         };
-        let hash = sha2::Sha256::digest(gjson::get(payload, "response_id").str().as_bytes());
+        let hash = sha2::Sha256::digest(cpa_common::json::get(payload, "response_id").bytes());
         let hex: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
         let mut data = format!(r#"{{"type":"response.interrupt","response_id_hash":"{hex}""#);
         if !outcome.is_empty() {

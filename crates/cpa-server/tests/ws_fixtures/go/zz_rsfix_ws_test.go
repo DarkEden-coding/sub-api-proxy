@@ -7,6 +7,7 @@ package openai
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -356,6 +358,8 @@ type rsfixWSStep struct {
 	// Send is written as a text frame; "{{last_response_id}}" is replaced by the id of
 	// the last completed response the client saw. Empty sends nothing.
 	Send string `json:"send,omitempty"`
+	// SendHex is written as a binary frame of these hex-decoded bytes instead.
+	SendHex string `json:"send_hex,omitempty"`
 	// Read: "completed" (until a completion event or close), "one", "close", "none"
 	// (send only), or "until:<type>[@<response id>]" (until that event type, optionally
 	// for that response.id).
@@ -368,6 +372,9 @@ type rsfixWSCaptured struct {
 	Kind    string            `json:"kind"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body,omitempty"`
+	// BodyHex holds a frame's exact bytes when they are not UTF-8 (Body then shows
+	// json.Marshal's replacement characters).
+	BodyHex string `json:"body_hex,omitempty"`
 }
 
 type rsfixWSScenario struct {
@@ -428,7 +435,11 @@ func (u *rsfixWSUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if errRead != nil {
 				return
 			}
-			u.record(rsfixWSCaptured{Kind: "ws_frame", Body: string(msg)})
+			frame := rsfixWSCaptured{Kind: "ws_frame", Body: string(msg)}
+			if !utf8.Valid(msg) {
+				frame.BodyHex = hex.EncodeToString(msg)
+			}
+			u.record(frame)
 			reply, ok := u.next()
 			if !ok {
 				continue
@@ -941,6 +952,17 @@ func rsfixWSScenarios() []rsfixWSScenario {
 			},
 		},
 		{
+			// A binary interrupt whose string holds a non-UTF-8 byte (0xff) passes
+			// json.Valid and goes upstream byte for byte.
+			Name: "interrupt_binary_frame", Config: cfg, Creds: []rsfixWSCred{ws},
+			Steps: []rsfixWSStep{
+				{Send: `{"type":"response.create","model":"gpt-fixture","input":[]}`, Read: "until:response.created",
+					Upstream: []rsfixWSReply{{Events: []string{created("r1")}}}},
+				{SendHex: hex.EncodeToString([]byte(`{"type":"response.interrupt","response_id":"r1","extension":"` + "\xff" + `"}`)), Read: "completed",
+					Upstream: []rsfixWSReply{{Events: []string{`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"output":[]}}`}}}},
+			},
+		},
+		{
 			Name: "interrupt_late_ws", Config: cfg, Creds: []rsfixWSCred{ws},
 			Steps: []rsfixWSStep{
 				{Send: `{"type":"response.create","model":"gpt-fixture","input":[]}`, Read: "until:response.completed",
@@ -1046,6 +1068,15 @@ func rsfixRunWSScenario(t *testing.T, sc *rsfixWSScenario) {
 				if _, err := manager.Update(context.Background(), enabled); err != nil {
 					t.Fatal(err)
 				}
+			}
+		}
+		if step.SendHex != "" {
+			raw, err := hex.DecodeString(step.SendHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, raw); err != nil {
+				t.Fatalf("%s: write: %v", sc.Name, err)
 			}
 		}
 		if step.Send != "" {

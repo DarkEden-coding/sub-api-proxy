@@ -141,7 +141,7 @@ impl CodexExecutor {
     pub async fn interrupt_session(
         &self,
         session: &str,
-        payload: &str,
+        payload: &[u8],
         enabled: impl FnOnce(&str) -> bool,
     ) -> Result<(), InterruptError> {
         self.ws.interrupt(session, payload, enabled).await

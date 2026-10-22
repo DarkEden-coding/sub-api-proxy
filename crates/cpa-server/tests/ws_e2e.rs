@@ -11,8 +11,6 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{CloseFrame, Message as AxMessage, WebSocket as AxSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cpa_core::config::Config;
@@ -20,6 +18,7 @@ use cpa_exec::Executors;
 use cpa_server::router;
 use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use wreq::ws::message::Message;
 
 static FIXTURE: LazyLock<Vec<Value>> = LazyLock::new(|| {
@@ -35,6 +34,8 @@ struct Captured {
     kind: String,
     headers: Vec<(String, String)>,
     body: String,
+    /// The exact bytes, for Go's `body_hex`.
+    raw: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -61,24 +62,41 @@ fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-async fn upstream_handler(
-    State(up): State<Arc<Upstream>>,
-    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Ok(ws) = ws {
+async fn upstream_handler(State(up): State<Arc<Upstream>>, mut req: axum::extract::Request) -> Response {
+    let headers = req.headers().clone();
+    let key = headers.get("sec-websocket-key").filter(|_| {
+        headers
+            .get("upgrade")
+            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"))
+    });
+    if let Some(key) = key {
         up.captured.lock().unwrap().push(Captured {
             kind: "ws_dial".into(),
             headers: header_pairs(&headers),
             body: String::new(),
+            raw: Vec::new(),
         });
-        return ws.on_upgrade(move |socket| upstream_socket(up, socket));
+        let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+        let upgrade = hyper::upgrade::on(&mut req);
+        tokio::spawn(async move {
+            if let Ok(upgraded) = upgrade.await {
+                upstream_socket(up, hyper_util::rt::TokioIo::new(upgraded)).await;
+            }
+        });
+        return Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header("upgrade", "websocket")
+            .header("connection", "Upgrade")
+            .header("sec-websocket-accept", accept)
+            .body(axum::body::Body::empty())
+            .unwrap();
     }
+    let body = axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
     up.captured.lock().unwrap().push(Captured {
         kind: "http".into(),
         headers: header_pairs(&headers),
         body: String::from_utf8_lossy(&body).into_owned(),
+        raw: body.to_vec(),
     });
     let Some(reply) = up.script.lock().unwrap().pop_front() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -116,43 +134,89 @@ async fn upstream_handler(
     ([("content-type", "text/event-stream")], sse).into_response()
 }
 
-async fn upstream_socket(up: Arc<Upstream>, mut socket: AxSocket) {
-    while let Some(Ok(message)) = socket.recv().await {
-        let AxMessage::Text(text) = message else {
-            continue;
-        };
+/// One frame from the proxy (a client, so masked): opcode and unmasked payload. The
+/// mock reads frames itself, like gorilla, so a text frame need not be UTF-8.
+async fn read_frame<S: AsyncRead + Unpin>(io: &mut S) -> Option<(u8, Vec<u8>)> {
+    let mut head = [0u8; 2];
+    io.read_exact(&mut head).await.ok()?;
+    let len = match head[1] & 0x7f {
+        126 => u64::from(io.read_u16().await.ok()?),
+        127 => io.read_u64().await.ok()?,
+        n => u64::from(n),
+    };
+    let mut mask = [0u8; 4];
+    if head[1] & 0x80 != 0 {
+        io.read_exact(&mut mask).await.ok()?;
+    }
+    let mut payload = vec![0u8; usize::try_from(len).ok()?];
+    io.read_exact(&mut payload).await.ok()?;
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b ^= mask[i % 4];
+    }
+    Some((head[0] & 0x0f, payload))
+}
+
+/// One unmasked, final server frame.
+async fn write_frame<S: AsyncWrite + Unpin>(io: &mut S, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
+    let mut frame = vec![0x80 | opcode];
+    match payload.len() {
+        n if n < 126 => frame.push(n as u8),
+        n if n <= 0xffff => {
+            frame.push(126);
+            frame.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            frame.push(127);
+            frame.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(payload);
+    io.write_all(&frame).await?;
+    io.flush().await
+}
+
+async fn upstream_socket<S: AsyncRead + AsyncWrite + Unpin>(up: Arc<Upstream>, mut socket: S) {
+    while let Some((opcode, payload)) = read_frame(&mut socket).await {
+        match opcode {
+            0x1 => {}
+            0x8 => {
+                let _ = write_frame(&mut socket, 0x8, &payload).await;
+                return;
+            }
+            0x9 => {
+                let _ = write_frame(&mut socket, 0xa, &payload).await;
+                continue;
+            }
+            _ => continue,
+        }
         up.captured.lock().unwrap().push(Captured {
             kind: "ws_frame".into(),
             headers: Vec::new(),
-            body: text.as_str().to_owned(),
+            body: String::from_utf8_lossy(&payload).into_owned(),
+            raw: payload,
         });
         let Some(reply) = up.script.lock().unwrap().pop_front() else {
             continue;
         };
         for event in reply["events"].as_array().into_iter().flatten() {
-            let _ = socket.send(AxMessage::Text(event.as_str().unwrap().into())).await;
+            let _ = write_frame(&mut socket, 0x1, event.as_str().unwrap().as_bytes()).await;
         }
         let then = reply["then"].as_str().unwrap_or_default();
         if !then.is_empty() {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let close = |code, reason: &str| {
-            AxMessage::Close(Some(CloseFrame {
-                code,
-                reason: reason.into(),
-            }))
-        };
+        let close = |code: u16, reason: &str| [&code.to_be_bytes()[..], reason.as_bytes()].concat();
         match then {
             "close" => {
-                let _ = socket.send(close(1000, "bye")).await;
+                let _ = write_frame(&mut socket, 0x8, &close(1000, "bye")).await;
                 return;
             }
             "close1009" => {
-                let _ = socket.send(close(1009, "too big")).await;
+                let _ = write_frame(&mut socket, 0x8, &close(1009, "too big")).await;
                 return;
             }
             "close1009_spaced" => {
-                let _ = socket.send(close(1009, " oversized ")).await;
+                let _ = write_frame(&mut socket, 0x8, &close(1009, " oversized ")).await;
                 return;
             }
             "drop" => return,
@@ -361,6 +425,13 @@ async fn run(name: &str) {
                 }
             }
         }
+        if let Some(hex) = step["send_hex"].as_str() {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            socket.send(Message::binary(bytes)).await.unwrap();
+        }
         if let Some(send) = step["send"].as_str() {
             let send = send.replace("{{last_response_id}}", &last_id);
             socket.send(Message::text(send)).await.unwrap();
@@ -437,6 +508,10 @@ async fn run(name: &str) {
             mask(go["body"].as_str().unwrap_or_default()),
             "{name}: upstream body #{i}"
         );
+        if let Some(hex) = go["body_hex"].as_str() {
+            let rust_hex: String = rust.raw.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(rust_hex, hex, "{name}: upstream bytes #{i}");
+        }
         let go_headers = go["headers"]
             .as_object()
             .into_iter()
@@ -715,6 +790,13 @@ async fn interrupt_cancels_an_http_turn_locally() {
     run("interrupt_http_local").await;
 }
 
+/// A binary `response.interrupt` holding a non-UTF-8 byte in a string is valid JSON
+/// to Go and reaches upstream byte for byte.
+#[tokio::test]
+async fn binary_interrupt_reaches_upstream_byte_for_byte() {
+    run("interrupt_binary_frame").await;
+}
+
 /// Go `TestResponsesLateInterruptDoesNotPoisonNextCreate`: an interrupt for a finished
 /// response is a silent no-op, before and during the next turn, and never reaches upstream.
 #[tokio::test]
@@ -773,6 +855,7 @@ fn every_go_scenario_has_a_test() {
             "interrupt_in_flight",
             "interrupt_in_flight_steering",
             "interrupt_http_local",
+            "interrupt_binary_frame",
             "interrupt_late_ws",
         ]
     );

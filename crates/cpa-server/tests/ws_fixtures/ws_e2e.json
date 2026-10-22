@@ -3883,6 +3883,83 @@
     "http_canceled": 1
   },
   {
+    "name": "interrupt_binary_frame",
+    "config": "host: \"\"\n",
+    "credentials": [
+      {
+        "id": "codex-ws.json",
+        "attributes": {
+          "api_key": "sk-fake-ws",
+          "websockets": "true"
+        },
+        "models": [
+          "gpt-fixture"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "send": "{\"type\":\"response.create\",\"model\":\"gpt-fixture\",\"input\":[]}",
+        "read": "until:response.created",
+        "upstream": [
+          {
+            "events": [
+              "{\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\",\"output\":[]}}"
+            ]
+          }
+        ],
+        "frames": [
+          {
+            "text": "{\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\",\"output\":[]}}"
+          }
+        ]
+      },
+      {
+        "send_hex": "7b2274797065223a22726573706f6e73652e696e74657272757074222c22726573706f6e73655f6964223a227231222c22657874656e73696f6e223a22ff227d",
+        "read": "completed",
+        "upstream": [
+          {
+            "events": [
+              "{\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"interrupted\"},\"output\":[]}}"
+            ]
+          }
+        ],
+        "frames": [
+          {
+            "text": "{\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"interrupted\"},\"output\":[]}}"
+          }
+        ]
+      }
+    ],
+    "upstream": [
+      {
+        "kind": "ws_dial",
+        "headers": {
+          "authorization": "Bearer sk-fake-ws",
+          "connection": "Upgrade",
+          "conversation_id": "668441af-ad7b-5f2f-9272-48276efbf41a",
+          "openai-beta": "responses_websockets=2026-02-06",
+          "originator": "codex-tui",
+          "sec-websocket-extensions": "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+          "sec-websocket-key": "ptD3RBLJ687otwGdz1pENg==",
+          "sec-websocket-version": "13",
+          "session_id": "668441af-ad7b-5f2f-9272-48276efbf41a",
+          "upgrade": "websocket",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
+        }
+      },
+      {
+        "kind": "ws_frame",
+        "body": "{\"model\":\"gpt-fixture\",\"input\":[],\"stream\":true,\"store\":false,\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"tools\":[{\"type\":\"image_generation\",\"output_format\":\"png\"}],\"prompt_cache_key\":\"668441af-ad7b-5f2f-9272-48276efbf41a\",\"type\":\"response.create\"}"
+      },
+      {
+        "kind": "ws_frame",
+        "body": "{\"type\":\"response.interrupt\",\"response_id\":\"r1\",\"extension\":\"\ufffd\"}",
+        "body_hex": "7b2274797065223a22726573706f6e73652e696e74657272757074222c22726573706f6e73655f6964223a227231222c22657874656e73696f6e223a22ff227d"
+      }
+    ]
+  },
+  {
     "name": "interrupt_late_ws",
     "config": "host: \"\"\n",
     "credentials": [

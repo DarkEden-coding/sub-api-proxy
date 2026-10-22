@@ -1182,13 +1182,17 @@ async fn interrupt_needs_a_turn_reading_on_the_socket() {
     let (up, url) = upstream(vec![]).await;
     let executor = CodexExecutor::new().unwrap();
     assert_eq!(
-        executor.interrupt_session("conn-1", INTERRUPT_R1, |_| true).await,
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
+            .await,
         Err(InterruptError::NoActive),
         "no session"
     );
     let conn = pooled(&executor, &url).await;
     assert_eq!(
-        executor.interrupt_session("conn-1", INTERRUPT_R1, |_| true).await,
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
+            .await,
         Err(InterruptError::NoActive),
         "idle socket"
     );
@@ -1202,7 +1206,9 @@ async fn interrupt_needs_a_turn_reading_on_the_socket() {
         false
     };
     assert_eq!(
-        executor.interrupt_session("conn-1", INTERRUPT_R1, check).await,
+        executor
+            .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), check)
+            .await,
         Err(InterruptError::Rejected(
             "websocket credential is no longer enabled".into()
         )),
@@ -1210,7 +1216,7 @@ async fn interrupt_needs_a_turn_reading_on_the_socket() {
     );
     assert_eq!(checked, ["codex-ws.json"], "the check gets the socket's credential");
     executor
-        .interrupt_session("conn-1", INTERRUPT_R1, |_| true)
+        .interrupt_session("conn-1", INTERRUPT_R1.as_bytes(), |_| true)
         .await
         .unwrap();
     assert_eq!(received(&up, 1).await, [INTERRUPT_R1]);
@@ -1234,7 +1240,7 @@ async fn interrupt_for_a_response_finished_during_the_auth_check_is_done() {
         true
     };
     executor
-        .interrupt_session("conn-1", r#"{"type":"response.interrupt","response_id":"r1"}"#, |_| {
+        .interrupt_session("conn-1", br#"{"type":"response.interrupt","response_id":"r1"}"#, |_| {
             finish()
         })
         .await
@@ -1268,7 +1274,11 @@ async fn late_interrupts_for_finished_responses_are_done() {
         let interrupt = |id: &str| format!(r#"{{"type":"response.interrupt","response_id":"{id}"}}"#);
         let send = |id: &'static str| {
             let executor = &executor;
-            async move { executor.interrupt_session("conn-1", &interrupt(id), |_| true).await }
+            async move {
+                executor
+                    .interrupt_session("conn-1", interrupt(id).as_bytes(), |_| true)
+                    .await
+            }
         };
         let mut reads = conn.activate();
         conn.send(r#"{"type":"response.create"}"#.into()).await.unwrap();

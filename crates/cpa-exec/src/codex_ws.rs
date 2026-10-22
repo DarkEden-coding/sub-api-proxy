@@ -202,11 +202,28 @@ impl Upstream {
     /// socket, so a partly written frame is never followed by another. Cost: one timer
     /// entry while a write is in flight.
     pub(crate) async fn send(&self, frame: String) -> Result<(), ExecError> {
-        let deadline = self.write.deadline(frame.len());
-        let sent = tokio::time::timeout(deadline, async {
-            self.sink.lock().await.send(Message::text(frame)).await
-        })
-        .await;
+        let len = frame.len();
+        self.write_message(Message::text(frame), len).await
+    }
+
+    /// [`Self::send`] for a client's own bytes: one text frame holding them unchanged,
+    /// UTF-8 or not, as gorilla writes a `TextMessage`.
+    pub(crate) async fn send_raw(&self, payload: Bytes) -> Result<(), ExecError> {
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+        let len = payload.len();
+        self.write_message(
+            Message::Frame(Frame::message(payload, OpCode::Data(Data::Text), true)),
+            len,
+        )
+        .await
+    }
+
+    async fn write_message(&self, message: Message, len: usize) -> Result<(), ExecError> {
+        let deadline = self.write.deadline(len);
+        let sent = tokio::time::timeout(deadline, async { self.sink.lock().await.send(message).await }).await;
         match sent {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(write_error(
@@ -419,7 +436,7 @@ impl Pool {
     pub async fn interrupt(
         &self,
         id: &str,
-        payload: &str,
+        payload: &[u8],
         enabled: impl FnOnce(&str) -> bool,
     ) -> Result<(), InterruptError> {
         let session = Some(id.trim())
@@ -428,7 +445,7 @@ impl Pool {
             .ok_or(InterruptError::NoActive)?;
         let conn = session.current().ok_or(InterruptError::NoActive)?;
         let auth_enabled = enabled(&conn.target.credential);
-        let response_id = gjson::get(payload, "response_id");
+        let response_id = cpa_common::json::get(payload, "response_id").bytes();
         {
             // One snapshot of the socket's state: a completion landing between the
             // checks would otherwise turn a late interrupt into a stale error.
@@ -442,7 +459,7 @@ impl Pool {
                     String::from_utf8_lossy(&lost.body).into_owned(),
                 ));
             }
-            if link.terminal.contains(response_id.str()) {
+            if std::str::from_utf8(&response_id).is_ok_and(|id| link.terminal.contains(id)) {
                 return Ok(());
             }
             // A socket kept from an earlier turn is not the current upstream.
@@ -457,7 +474,7 @@ impl Pool {
         }
         // A failed or timed-out write may leave a partial frame: the socket is dropped
         // like after any failed turn write (Go leaves that to its reader).
-        if let Err(error) = conn.send(payload.to_owned()).await {
+        if let Err(error) = conn.send_raw(Bytes::copy_from_slice(payload)).await {
             session.invalidate(&conn, &error, true);
             return Err(InterruptError::Rejected(
                 String::from_utf8_lossy(&error.body).into_owned(),
