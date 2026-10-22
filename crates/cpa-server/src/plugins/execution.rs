@@ -348,6 +348,11 @@ pub(crate) async fn execute_credential(
     let stream = req.stream && !count;
     let source = handler_type(call);
     let response = if count { source } else { response_type(call) };
+    // Go creates the attempt's reporter before `prepareExecutorCall`, so a failure to
+    // negotiate or translate is recorded as the plugin executor's; counting has none.
+    if !count {
+        req.usage.plugin_executor(&adapter.provider);
+    }
     let negotiated = adapter
         .negotiate(source, response, host.has_response_translator())
         .map_err(|e| attempt_error(0, e))?;
@@ -406,7 +411,6 @@ pub(crate) async fn execute_credential(
     // Go `SetTranslatedReasoningEffort` and `StartResponseTTFT`; counting has no
     // reporter.
     if !count {
-        req.usage.plugin_executor(&adapter.provider);
         req.usage.request_for(&negotiated.input, &request.payload);
         req.usage.round_trip_started();
     }

@@ -1609,7 +1609,8 @@ async fn a_plugin_executor_stream_publishes_its_usage_even_when_it_fails() {
 /// Claude output (the client's chat format misses its cache reads) and the reasoning effort
 /// of the translated payload (`max` becomes a 128000-token budget, which reads back as
 /// `xhigh`). A stream the client drops publishes one 499 "context canceled" record
-/// keeping the usage seen so far. Counting tokens and the model router's credential-less
+/// keeping the usage seen so far, and a request that fails before the plugin is called
+/// (no translator into its input format) one failure record of the same type. Counting tokens and the model router's credential-less
 /// attempts create no reporter, so they publish nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
@@ -1619,16 +1620,24 @@ async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
             ("catalog", "model_provider"),
             ("acme", "executor\n      inputs: claude\n      outputs: claude"),
             ("rt", "model_router,executor"),
+            ("privcat", "model_provider"),
+            ("priv", "executor\n      inputs: private-v1\n      outputs: private-v1"),
         ],
         USAGE_ON,
-        &[("acme.json", r#"{"type":"acme"}"#)],
+        &[("acme.json", r#"{"type":"acme"}"#), ("priv.json", r#"{"type":"priv"}"#)],
         |records| {
             canned(
                 records,
                 "catalog",
                 "model.static",
                 json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
-            )
+            );
+            canned(
+                records,
+                "privcat",
+                "model.static",
+                json!({"Provider":"priv","Models":[{"ID":"priv-1"}]}),
+            );
         },
     )
     .await
@@ -1763,6 +1772,19 @@ async fn a_plugin_executor_records_each_attempt_once_in_its_own_format() {
     assert_eq!(response.status().as_u16(), 200, "{}", response.text().await.unwrap());
     assert_eq!(calls(&env.records, "acme", "executor.count_tokens").len(), 1);
     no_more_records().await;
+
+    // A request the plugin cannot take (no translator to `private-v1`) fails before
+    // the plugin is called, still as the plugin executor's attempt.
+    let (got, body) = env.chat_stream("priv-1").await;
+    assert_ne!(got, 200, "{body}");
+    assert!(calls(&env.records, "priv", "executor.execute_stream").is_empty());
+    let record = &usage_records(&env.rt, 1).await[0];
+    no_more_records().await;
+    assert_eq!(
+        (&record["failed"], &record["provider"], &record["executor_type"]),
+        (&json!(true), &json!("priv"), &json!("executorAdapter")),
+        "{record}"
+    );
 
     // The model router's own executor, without a credential.
     std::fs::create_dir_all(env.records.join("respond").join("rt")).unwrap();
