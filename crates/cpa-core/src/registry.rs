@@ -212,7 +212,7 @@ pub fn go_model_json(raw: &Map<String, Value>) -> Result<Value, String> {
     fn decode(
         fields: &[(&'static str, Kind, bool)],
         obj: &Map<String, Value>,
-        out: &mut Vec<Option<Value>>,
+        out: &mut [Option<Value>],
     ) -> Result<(), String> {
         for (key, v) in obj {
             let Some(i) = field(fields, key) else { continue };
