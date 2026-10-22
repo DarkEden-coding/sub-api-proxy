@@ -8,9 +8,9 @@
 //! `excluded_models` (Go: comma-joined `attributes.excluded_models`) and
 //! `model_aliases` (Go: the model registry). Config-backed metadata is never persisted.
 //!
-//! ponytail: the `models_hash`/`excluded_models_hash` change-detection attributes,
-//! plugin auth parsers and Kimi domain resolution are not reproduced; nothing in the
-//! management API exposes them. Port them with the registry/Kimi executors.
+//! ponytail: the `models_hash`/`excluded_models_hash` change-detection attributes and
+//! Kimi domain resolution are not reproduced; nothing in the management API exposes
+//! them. Port them with the registry/Kimi executors.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,12 @@ use sha2::{Digest, Sha256};
 use super::Config;
 use crate::credential::{Credential, Source};
 use crate::gostr::GoStr;
+
+mod plugin_auth;
+pub use plugin_auth::{
+    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, set_plugin_auth_parser,
+    set_plugin_auth_parser_active,
+};
 
 const WEIGHT_MAX: i64 = 1_000_000;
 
@@ -1024,8 +1030,28 @@ pub fn parse_weight(value: &Json) -> Result<i64, String> {
 /// Builds one auth-file credential as Go's `FileSynthesizer` does. `Ok(None)` is a
 /// silently ignored file; `Err` is a skipped file worth a warning. The config (Go's
 /// synthesis context) no longer shapes a file credential: global excluded models apply
-/// at registration (Go b015f208).
+/// at registration (Go b015f208). Like Go's management upload synthesis, this does not
+/// ask plugin auth providers; only [`scan_auth_dir`] does.
 pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Result<Option<Credential>, String> {
+    Ok(match file_credentials(None, auth_dir, path, data)? {
+        Some(FileCredentials::One(c)) => Some(c),
+        Some(FileCredentials::Plugin(_)) | None => None,
+    })
+}
+
+/// What one auth file synthesizes to.
+enum FileCredentials {
+    One(Credential),
+    /// What a plugin parsed: possibly none (the plugin suppresses the file) or several.
+    Plugin(Vec<Credential>),
+}
+
+fn file_credentials(
+    parser: Option<&dyn PluginAuthParser>,
+    auth_dir: &Path,
+    path: &Path,
+    data: &[u8],
+) -> Result<Option<FileCredentials>, String> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -1043,6 +1069,13 @@ pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Re
         .unwrap_or_default()
         .trim()
         .go_lower();
+    // Go asks the plugin auth parser before the built-in synthesizer, which a plugin
+    // owning the type (or, without one, any auth provider) replaces.
+    if let Some(parser) = parser
+        && let Some(parsed) = plugin_auth::credentials(parser, &meta, &provider, path, data)
+    {
+        return parsed.map(|all| Some(FileCredentials::Plugin(all)));
+    }
     if provider.is_empty() || provider == "gemini" || provider == "gemini-cli" {
         return Ok(None);
     }
@@ -1149,7 +1182,7 @@ pub fn from_file(_cfg: &Config, auth_dir: &Path, path: &Path, data: &[u8]) -> Re
         revision: 0,
     };
     cred.refresh_derived();
-    Ok(Some(cred))
+    Ok(Some(FileCredentials::One(cred)))
 }
 
 /// Go `buildAuthFromFileData`'s fallback for an uploaded file no synthesizer claims:
@@ -1353,6 +1386,10 @@ pub struct AuthScan {
 /// [`from_auth_dir`], with the files it found incomplete and the hashes of what it read.
 /// A file that cannot be read is skipped, as in Go's full scan.
 pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
+    scan_with(cfg, plugin_auth::current().as_deref())
+}
+
+fn scan_with(cfg: &Config, parser: Option<&dyn PluginAuthParser>) -> AuthScan {
     let mut scan = AuthScan::default();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
@@ -1363,7 +1400,19 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
             return scan;
         }
     };
-    for entry in entries.flatten() {
+    // With a plugin parser, Go's traversal: file-name order (`os.ReadDir`), and the last
+    // auth read under an ID wins. Without one, nothing changes.
+    let (mut plain, mut sorted);
+    let entries: &mut dyn Iterator<Item = std::fs::DirEntry> = if parser.is_some() {
+        let mut all: Vec<_> = entries.flatten().collect();
+        all.sort_by_key(std::fs::DirEntry::file_name);
+        sorted = all.into_iter();
+        &mut sorted
+    } else {
+        plain = entries.flatten();
+        &mut plain
+    };
+    for entry in entries {
         let path: PathBuf = entry.path();
         if !entry.file_name().to_string_lossy().go_lower().ends_with(".json") {
             continue;
@@ -1374,13 +1423,24 @@ pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
             scan.incomplete.insert(path);
             continue;
         }
-        match from_file(cfg, &cfg.auth_dir, &path, &data) {
-            Ok(Some(c)) => scan.credentials.push(c),
+        match file_credentials(parser, &cfg.auth_dir, &path, &data) {
+            Ok(Some(FileCredentials::One(c))) => scan.credentials.push(c),
+            Ok(Some(FileCredentials::Plugin(all))) => scan.credentials.extend(all),
             Ok(None) => {}
             Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping auth file"),
         }
     }
     scan.credentials.sort_by(|a, b| a.id.cmp(&b.id));
+    if parser.is_some() {
+        // The sort is stable: of equal IDs, the last read is last.
+        let all = std::mem::take(&mut scan.credentials);
+        for c in all {
+            if scan.credentials.last().is_some_and(|last| last.id == c.id) {
+                scan.credentials.pop();
+            }
+            scan.credentials.push(c);
+        }
+    }
     scan
 }
 

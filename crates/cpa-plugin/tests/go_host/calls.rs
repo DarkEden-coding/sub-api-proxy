@@ -186,7 +186,7 @@ pub async fn call(host: &Host, args: &Value) -> Value {
             }
         }
         "parse_auths" => {
-            let res = host.parse_auths(decode(req)).await;
+            let res = host.parse_auths(decode(req));
             let resp = res
                 .handled
                 .then(|| Value::Array(res.auths.iter().map(auth_json).collect()));

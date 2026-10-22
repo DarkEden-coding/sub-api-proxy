@@ -1939,3 +1939,305 @@ async fn plugin_response_hooks_run_once_per_openai_compatible_stream_frame() {
     );
     env.finish().await;
 }
+
+/// Go's file synthesizer asks the plugin auth provider whose identifier is the file's
+/// type before the built-in path. Credentials load before plugins start, so they load
+/// again once plugins are up, before serving: here two credentials from one file,
+/// served by the plugin executor. Of two auth providers with the same identifier,
+/// only the first in priority order is asked; a type no plugin owns stays built-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_parsed_auth_files_load_through_the_first_matching_auth_provider() {
+    let parsed = |id: &str, token: &str| json!({"Provider":"acme","ID":id,"Metadata":{"type":"acme","token":token}});
+    let Some(env) = env(
+        "plugin-owned-auth-parse",
+        &[
+            ("catalog", "model_provider"),
+            ("acme", "auth_provider,executor"),
+            ("other", "auth_provider"),
+        ],
+        "",
+        &[
+            ("acme.json", r#"{"type":"acme","wrapped":"material","priority":4}"#),
+            ("claude.json", r#"{"type":"claude","access_token":"fake"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "catalog",
+                "model.static",
+                json!({"Provider":"acme","Models":[{"ID":"acme-1"}]}),
+            );
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("acme-a", "tok-a"), parsed("acme-b", "tok-b")]}),
+            );
+            canned(records, "other", "auth.identifier", json!({"identifier":"acme"}));
+            canned(
+                records,
+                "other",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[parsed("other-a", "tok-o")]}),
+            );
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let ids = |rt: &cpa_server::Runtime| {
+        let mut ids: Vec<String> = rt.store().snapshot().iter().map(|c| c.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(&env.rt),
+        ["acme.json", "claude.json"],
+        "loaded before plugins start"
+    );
+    cpa_server::plugins::reload_plugin_auth_files(&env.rt);
+    assert_eq!(ids(&env.rt), ["acme-a", "acme-b", "claude.json"]);
+    let asked = calls(&env.records, "acme", "auth.parse");
+    assert!(!asked.is_empty());
+    for req in &asked {
+        assert_eq!(req["Provider"], "acme", "only the file whose type it owns: {req}");
+        assert!(req["Path"].as_str().unwrap().ends_with("acme.json"), "{req}");
+    }
+    assert!(
+        calls(&env.records, "other", "auth.parse").is_empty(),
+        "the second provider with the same identifier is never asked"
+    );
+    let store = env.rt.store();
+    let a = store.get("acme-a").unwrap();
+    assert_eq!(a.provider, "acme");
+    assert_eq!(a.attributes["plugin_virtual"], "true");
+    assert_eq!(a.attributes["priority"], "4", "the file's priority");
+    assert_eq!(a.metadata["token"], "tok-a");
+    let (status, body) = env.chat("acme-1").await;
+    assert_eq!(status, 200, "{body}");
+    let executed = calls(&env.records, "acme", "executor.execute");
+    assert_eq!(executed.len(), 1);
+    let auth = executed[0]["AuthID"].as_str().unwrap();
+    let token = if auth == "acme-a" { "tok-a" } else { "tok-b" };
+    assert!(["acme-a", "acme-b"].contains(&auth), "{auth}");
+    assert_eq!(executed[0]["AuthMetadata"]["token"], token);
+    // Go `Manager.persist` skips plugin-virtual auths: the result never rewrites the
+    // shared source file with one credential's document.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        std::fs::read_to_string(env.rt.config().auth_dir.join("acme.json")).unwrap(),
+        r#"{"type":"acme","wrapped":"material","priority":4}"#
+    );
+    env.finish().await;
+}
+
+/// An auth provider that saves a credential (`host.auth.save`) while it parses a file
+/// for a reload: the reload holds the management disk lock the save takes and waits
+/// for the plugin, so the save is refused with an error (Go allows it; see
+/// DIFFERENCES-FROM-GO.md) and the reload completes instead of deadlocking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auth_provider_saving_while_it_parses_is_refused_and_the_reload_completes() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-save",
+        &[("acme", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme","wrapped":"material"}"#)],
+        |records| {
+            // The recorder makes the envelope's `host_calls` before it answers.
+            let dir = records.join("respond").join("acme");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = json!({
+                "ok": true,
+                "result": {"Handled": true, "Auths": [{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]},
+                "host_calls": [{
+                    "method": "host.auth.save",
+                    "request": {"name": "saved.json", "json": {"type": "claude", "access_token": "fake"}}
+                }]
+            });
+            std::fs::write(dir.join("auth.parse.json"), envelope.to_string()).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    // The watcher's first observation reloads the auth folder under the disk lock.
+    let watcher = cpa_server::watching::start(&management);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while env.rt.store().get("acme-a").is_none() {
+        assert!(std::time::Instant::now() < deadline, "the reload stalled");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let saved = calls(&env.records, "acme", "host_callback");
+    assert!(!saved.is_empty());
+    for response in &saved {
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(
+            response["error"]["message"], "host.auth.save is not available while this plugin is parsing an auth file",
+            "{response}"
+        );
+    }
+    assert!(!env.rt.config().auth_dir.join("saved.json").exists());
+    assert!(env.rt.store().get("saved.json").is_none());
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}
+
+/// The startup reload publishes its scan the way the watcher does (Go c4c1d43e): a token
+/// refresh that commits while a slow plugin parse holds the scan keeps its token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_committed_during_the_startup_reload_survives_it() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-refresh",
+        &[("acme", "auth_provider")],
+        "",
+        &[
+            // Read before the plugin's file, which sorts after it.
+            ("a-claude.json", r#"{"type":"claude","access_token":"old"}"#),
+            ("acme.json", r#"{"type":"acme","wrapped":"material"}"#),
+        ],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+            std::fs::write(records.join("respond/acme/auth.parse.hold"), "").unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let hold = env.records.join("respond/acme/auth.parse.hold");
+    // Reopens the parse even if an assertion fails first.
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let release = Release(hold);
+    let reload = tokio::task::spawn_blocking({
+        let rt = env.rt.clone();
+        move || cpa_server::plugins::reload_plugin_auth_files(&rt)
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while calls(&env.records, "acme", "auth.parse").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the parse never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The scan has read a-claude.json; a refresh commits now.
+    let store = env.rt.store();
+    let current = store.get("a-claude.json").unwrap();
+    let mut patch = cpa_core::credential::MetadataPatch::default();
+    patch.set.insert("access_token".into(), "refreshed".into());
+    store.apply_patch("a-claude.json", current.revision, &patch).unwrap();
+    drop(release);
+    reload.await.unwrap();
+    assert!(
+        store.get("acme-a").is_some(),
+        "the reload published the plugin credential"
+    );
+    assert_eq!(
+        store.get("a-claude.json").unwrap().metadata["access_token"],
+        "refreshed"
+    );
+    env.finish().await;
+}
+
+/// A save by another plugin while a reload waits on an auth provider's parse waits for
+/// the management disk lock and writes only once the reload has released it: no write
+/// happens without the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_plugins_save_during_a_parse_waits_for_the_disk_lock() {
+    let Some(env) = env(
+        "plugin-owned-auth-parse-other-save",
+        &[("acme", "auth_provider"), ("other", "auth_provider")],
+        "",
+        &[("acme.json", r#"{"type":"acme","wrapped":"material"}"#)],
+        |records| {
+            canned(
+                records,
+                "acme",
+                "auth.parse",
+                json!({"Handled":true,"Auths":[{"Provider":"acme","ID":"acme-a","Metadata":{"type":"acme"}}]}),
+            );
+            std::fs::write(records.join("respond/acme/auth.parse.hold"), "").unwrap();
+            // `other` saves whenever it is asked to parse.
+            let dir = records.join("respond").join("other");
+            std::fs::create_dir_all(&dir).unwrap();
+            let envelope = json!({
+                "ok": true,
+                "result": {"Handled": false},
+                "host_calls": [{
+                    "method": "host.auth.save",
+                    "request": {"name": "other-saved.json", "json": {"type": "claude", "access_token": "fake"}}
+                }]
+            });
+            std::fs::write(dir.join("auth.parse.json"), envelope.to_string()).unwrap();
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let release = Release(env.records.join("respond/acme/auth.parse.hold"));
+    let path = env.dir.join("config.yaml");
+    std::fs::write(&path, &env.yaml).unwrap();
+    let management = cpa_server::management::Management::new(env.rt.clone(), path);
+    // The watcher's first reload holds the disk lock and waits on acme's held parse.
+    let watcher = cpa_server::watching::start(&management);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while calls(&env.records, "acme", "auth.parse").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the reload never parsed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let saved = env.rt.config().auth_dir.join("other-saved.json");
+    let asked = tokio::task::spawn_blocking({
+        let host = env.rt.plugins().clone();
+        move || {
+            host.parse_auths(cpa_plugin::api::AuthParseRequest {
+                provider: "other".into(),
+                ..Default::default()
+            })
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while calls(&env.records, "other", "auth.parse").is_empty() {
+        assert!(std::time::Instant::now() < deadline, "other was never asked");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The save is waiting for the lock the held reload owns.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!saved.exists(), "written while the reload held the disk lock");
+    assert!(!asked.is_finished());
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(10), asked)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.exists());
+    let response = &calls(&env.records, "other", "host_callback")[0];
+    assert_eq!(response["ok"], true, "{response}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while env.rt.store().get("acme-a").is_none() {
+        assert!(std::time::Instant::now() < deadline, "the reload never finished");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    watcher.abort();
+    drop(management);
+    env.finish().await;
+}

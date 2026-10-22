@@ -345,3 +345,62 @@ async fn the_host_as_translator_hooks_normalizes_requests() {
     assert!(calls(&log).is_empty());
     cpa_translate::hooks::set_plugin_hooks(None);
 }
+
+/// Go `RegisterPluginAuthParser(host)`: auth files go to the auth provider owning their
+/// type while one is loaded; unloading the last one restores the built-in synthesizer
+/// behind cpa-core's flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_as_auth_parser_owns_its_plugins_auth_files() {
+    use cpa_core::config::credentials;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("live-auth-dir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("acme.json"), br#"{"type":"acme","material":"m"}"#).unwrap();
+    let cfg = cpa_core::config::Config {
+        auth_dir: dir.clone(),
+        ..Default::default()
+    };
+    let load = || {
+        let mut all = credentials::scan_auth_dir(&cfg).credentials;
+        assert_eq!(all.len(), 1);
+        all.remove(0)
+    };
+    let none = Script {
+        caps: r#""usage_plugin":true"#,
+        results: BTreeMap::new(),
+        fuse_on: None,
+    };
+    let (quiet, quiet_log) = host_with("auth-parse-quiet", [("q", none)].into()).await;
+    credentials::set_plugin_auth_parser(Some(quiet.auth_parser()));
+    assert!(
+        !credentials::plugin_auth_parser_active(),
+        "no plugin offers an auth provider"
+    );
+    assert_eq!(load().id, "acme.json");
+    assert!(calls(&quiet_log).is_empty());
+
+    let a = Script {
+        caps: r#""auth_provider":true"#,
+        results: [
+            ("auth.identifier", r#"{"identifier":"acme"}"#),
+            (
+                "auth.parse",
+                r#"{"Handled":true,"Auths":[{"Provider":"acme","ID":"from-plugin","Metadata":{"token":"t"}}]}"#,
+            ),
+        ]
+        .into(),
+        fuse_on: None,
+    };
+    let (host, log) = host_with("auth-parse", [("a", a)].into()).await;
+    credentials::set_plugin_auth_parser(Some(host.auth_parser()));
+    assert!(credentials::plugin_auth_parser_active());
+    let parsed = load();
+    assert_eq!((parsed.id.as_str(), parsed.provider.as_str()), ("from-plugin", "acme"));
+    assert_eq!(parsed.metadata["token"], "t");
+    assert!(calls(&log).contains(&"a auth.parse".to_owned()));
+    assert!(host.unload_plugin("a", None).await);
+    assert!(!credentials::plugin_auth_parser_active());
+    assert_eq!(load().id, "acme.json");
+    assert!(calls(&log).is_empty());
+    credentials::set_plugin_auth_parser(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

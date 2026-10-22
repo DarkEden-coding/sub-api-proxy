@@ -121,7 +121,38 @@ pub async fn sync(rt: &Runtime, cfg: Arc<Config>) {
     // Go `sdktranslator.SetPluginHooks(s.pluginHost)`: the hooks are skipped while no
     // plugin offers one.
     cpa_translate::hooks::set_plugin_hooks(Some(host.translator_hooks()));
+    // Go `registerPluginAuthParser`: auth files go to plugin auth providers first; the
+    // next auth-folder reload picks up what a newly loaded plugin parses.
+    cpa_core::config::credentials::set_plugin_auth_parser(Some(host.auth_parser()));
     sync_models(rt).await;
+}
+
+/// Go loads plugins while it builds the service, so its first auth-folder load already
+/// asks plugin auth providers (sdk/cliproxy/builder.go `ApplyConfig`, then
+/// `coreManager.Load` in `Service.Run`). Credentials load before plugins start here, so
+/// the binary calls this once they have: while a plugin offers an auth provider, the
+/// auth folder and config credentials load again, before serving. Not in Home mode,
+/// whose credentials come from Home. Published as the watcher publishes a scan: a file
+/// changed after the scan read it (a token refresh committed meanwhile) keeps its
+/// current credential, and so does a file the scan read half-written.
+pub fn reload_plugin_auth_files(rt: &Runtime) {
+    use cpa_core::config::credentials;
+    if !credentials::plugin_auth_parser_active() {
+        return;
+    }
+    let cfg = rt.config();
+    let scan = credentials::scan_auth_dir(&cfg);
+    let mut all = scan.credentials;
+    for existing in rt.store().snapshot() {
+        if let cpa_core::credential::Source::File(path) = &existing.source
+            && scan.incomplete.contains(path)
+            && !all.iter().any(|c| c.id == existing.id)
+        {
+            all.push(cpa_core::credential::Credential::clone(&existing));
+        }
+    }
+    all.extend(credentials::from_config(&cfg));
+    rt.store().reconcile_scanned(all, &scan.read);
 }
 
 /// Go `syncPluginModelRuntime`: collects plugin catalogs, lets plugin executors claim
