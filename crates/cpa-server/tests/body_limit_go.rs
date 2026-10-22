@@ -98,54 +98,8 @@ const STATUS_ONLY: &[&str] = &[
     "management_chunked PUT /v0/management/debug",
     "management_chunked PUT /v0/management/config.yaml",
     "management_chunked PUT /v0/management/api-keys",
-    "management_multipart_chunked /v0/management/auth-files",
-    "management_multipart_chunked /v0/management/vertex/import",
-    "management_multipart_chunked /v8/management/oauth/import?provider=vertex",
     // The answer carries a per-run bcrypt hash and temporary path; Go reads no body.
     "management_chunked GET /v8/management/config",
-];
-
-/// Where Go and cliproxy-rs differ on purpose (docs/DIFFERENCES-FROM-GO.md), with
-/// cliproxy-rs's status and body, compared after [`normalize`], not as wire bytes. Go's first-value JSON decoders decode the first value
-/// from the permitted prefix; Go's multipart reader reports the limit or a parse error
-/// depending on where the limit falls in the form. cliproxy-rs reads these bodies whole
-/// first.
-const DIFFERS: &[(&str, u16, &str)] = &[
-    (
-        "json_first_value_within_limit /v0/management/plugins/demo/quota",
-        413,
-        r#"{"error":"invalid request body"}"#,
-    ),
-    (
-        "multipart_file_data_over_limit /v0/management/auth-files",
-        400,
-        r#"{"error":"invalid multipart form: http: request body too large"}"#,
-    ),
-    (
-        "multipart_file_data_over_limit /v8/management/credentials",
-        400,
-        r#"{"error":"invalid multipart form: http: request body too large"}"#,
-    ),
-    (
-        "multipart_file_data_over_limit /v0/management/vertex/import",
-        400,
-        "Failed to buffer the request body: http: request body too large",
-    ),
-    (
-        "multipart_file_data_over_limit /v8/management/oauth/import?provider=vertex",
-        400,
-        "Failed to buffer the request body: http: request body too large",
-    ),
-    (
-        "multipart_headers_over_limit /v1/images/edits",
-        413,
-        r#"{"error":{"message":"Invalid request: http: request body too large","type":"invalid_request_error"}}"#,
-    ),
-    (
-        "multipart_headers_over_limit /openai/v1/videos",
-        413,
-        r#"{"object":"video","status":"failed","progress":0,"id":"video_<id>","model":"grok-imagine-video","error":{"code":"invalid_request_error","message":"Invalid request: http: request body too large"}}"#,
-    ),
 ];
 
 #[tokio::test]
@@ -202,12 +156,7 @@ async fn body_limit_answers_match_go() {
         // failure is a plain-text 400 where gin's handlers write their own JSON 400
         // (docs/DIFFERENCES-FROM-GO.md).
         let status_only = STATUS_ONLY.contains(&name);
-        if let Some(&(_, status, body)) = DIFFERS.iter().find(|(n, ..)| *n == name) {
-            assert_ne!(want.0, status, "{name}: Go now agrees; drop it from DIFFERS");
-            if (got.0, got.2.as_str()) != (status, normalize(body).as_str()) {
-                failures.push(format!("{name}: got {got:?}, want our documented {status} {body}"));
-            }
-        } else if status_only && got.0 != want.0 || !status_only && got != want {
+        if status_only && got.0 != want.0 || !status_only && got != want {
             failures.push(format!("{name}: got {got:?}, want {want:?}"));
         }
         // Go reads at most the limit plus one byte; frames arrive whole here.

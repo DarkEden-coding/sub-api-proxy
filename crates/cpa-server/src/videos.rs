@@ -863,9 +863,15 @@ pub async fn create(
     if let Some(reason) = refused {
         return failed(400, XAI_MODEL, &format!("Invalid request: {reason}"));
     }
-    let body = Bytes::from_request(client_request, &()).await;
+    use crate::management::multipart::Failed;
+    let Ok(read) = crate::body_limit::Read::from_request(client_request, &()).await;
+    let body = match content_type(&headers).as_str() {
+        "multipart/form-data" => crate::management::multipart::body(read, &raw_type),
+        _ => read.body.map_err(Failed::Read),
+    };
     let raw = match (content_type(&headers).as_str(), body) {
-        (_, Err(rejection)) => Err(crate::claude::read_error(&rejection)),
+        (_, Err(Failed::Read(rejection))) => Err(crate::claude::read_error(&rejection)),
+        (_, Err(Failed::Form(status, e))) => Err((status, e)),
         ("multipart/form-data" | "application/x-www-form-urlencoded", Ok(body)) => {
             create_request_from_form(&headers, uri.query(), &body, limit.0).map_err(|e| (400, e))
         }

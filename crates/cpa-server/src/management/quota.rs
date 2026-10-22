@@ -242,7 +242,10 @@ pub(crate) async fn providers(State(state): State<Arc<Management>>) -> Response 
 }
 
 /// `POST /v0/management/quota/fetch` (Go `FetchCredentialQuota`).
-pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn fetch(
+    State(state): State<Arc<Management>>,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
+) -> Response {
     let Some(body) = QuotaBody::decode(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
@@ -287,7 +290,10 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
 }
 
 /// `POST /v0/management/quota/reset` (Go `ResetCredentialQuota`).
-pub(crate) async fn reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn reset(
+    State(state): State<Arc<Management>>,
+    crate::body_limit::FirstJson(body): crate::body_limit::FirstJson,
+) -> Response {
     let Some(body) = QuotaBody::decode(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid request body");
     };
@@ -388,10 +394,10 @@ pub(crate) async fn get_plugin(
 pub(crate) async fn fetch_plugin(
     State(state): State<Arc<Management>>,
     UrlPath(id): UrlPath<String>,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+    body: Result<crate::body_limit::FirstJson, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let body = match body {
-        Ok(body) => body,
+        Ok(crate::body_limit::FirstJson(body)) => body,
         Err(rejection) => return fail(super::read_status(&rejection), "invalid request body"),
     };
     let Some(body) = QuotaBody::decode(&body) else {
@@ -437,7 +443,7 @@ pub(crate) async fn reset_plugin(
     if index.is_empty() {
         // Go reads the body only here and ignores binding errors, keeping whatever
         // fields did bind.
-        let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        let body = match crate::body_limit::first_json_body(req).await {
             Ok(body) => body,
             // dd7b4334: the configured body limit is the one read error Go reports.
             Err(error) if crate::body_limit::is_too_large(&error) => {

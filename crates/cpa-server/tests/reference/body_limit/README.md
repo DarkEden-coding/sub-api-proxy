@@ -7,7 +7,7 @@ the model lookup. It opens no sockets and calls no provider. Each case records t
 status, `Content-Type`, body and how many body bytes the server read. `tests/body_limit_go.rs`
 replays it through the binary's middleware stack.
 
-Regenerate with a temporary module inside the reference module's internal-package
+The fixture is recorded with Go 1.26.4, the toolchain of the v8.0.35 release build (`GO_VERSION` in the reference's `.github/workflows/release.yaml`); Go 1.26.4 quotes `textproto` MIME header diagnostics with `%q`, where 1.26.0 did not. Regenerate with a temporary module inside the reference module's internal-package
 boundary, as for `../manage` (the reference checkout is not modified):
 
 ```sh
@@ -22,7 +22,7 @@ cp "$crate/tests/reference/body_limit/main.go" "$tmp/main.go"
   go mod edit -replace=github.com/router-for-me/CLIProxyAPI/v8="$reference"
   cp "$reference/go.sum" .
   go mod tidy
-  TZ=UTC GOFLAGS=-mod=mod go run . "$crate/tests/fixtures/body_limit_go.json"
+  TZ=UTC GOFLAGS=-mod=mod GOTOOLCHAIN=local /path/to/go1.26.4/bin/go run . "$crate/tests/fixtures/body_limit_go.json"
 )
 rm -rf "$tmp"
 ```

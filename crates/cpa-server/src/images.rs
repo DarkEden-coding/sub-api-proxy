@@ -734,7 +734,7 @@ pub async fn edits(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     limit: crate::body_limit::Limit,
-    body: Result<Bytes, BytesRejection>,
+    read: crate::body_limit::Read,
 ) -> Response {
     if disabled(&rt) {
         return not_found();
@@ -752,13 +752,21 @@ pub async fn edits(
         ));
     }
     // Go decodes Content-Encoding for JSON edits only (`ReadRequestBody`).
-    let body = match body {
-        Ok(body) if json => match crate::openai::read_body(&headers, body, limit.0) {
+    let body = if json {
+        match read.body.map(|body| crate::openai::read_body(&headers, body, limit.0)) {
+            Ok(Ok(body)) => body,
+            Ok(Err(response)) => return *response,
+            Err(rejection) => return read_failed(&rejection),
+        }
+    } else {
+        use crate::management::multipart::{Failed, body};
+        match body(read, &content_type) {
             Ok(body) => body,
-            Err(response) => return *response,
-        },
-        Ok(body) => body,
-        Err(rejection) => return read_failed(&rejection),
+            Err(Failed::Read(rejection)) => return read_failed(&rejection),
+            Err(Failed::Form(status, e)) => {
+                return respond::error_detail(status, &format!("Invalid request: {e}"), "invalid_request_error");
+            }
+        }
     };
     let p = Prepared {
         rt,
