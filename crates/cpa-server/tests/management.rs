@@ -5111,7 +5111,7 @@ async fn plugin_virtual_credentials_change_only_through_their_source_file() {
     let f = Fixture::new("plugin-virtual");
     let dir = f.dir.join("auth");
     let source = dir.join("acme.json");
-    let original = r#"{"type":"acme","proxy-url":"http://proxy.invalid"}"#;
+    let original = r#"{"type":"acme","proxy-url":"http://proxy.invalid","openapi-location":"https://alias.invalid","openapi_location":"https://canonical.invalid","openapi-models":["m"]}"#;
     std::fs::write(&source, original).unwrap();
     let full = source.display().to_string();
     let child = |id: &str, token: &str| {
@@ -5171,7 +5171,7 @@ async fn plugin_virtual_credentials_change_only_through_their_source_file() {
     );
     assert_eq!(
         std::fs::read_to_string(&source).unwrap(),
-        r#"{"disabled":true,"proxy_url":"http://proxy.invalid","type":"acme"}"#
+        r#"{"disabled":true,"openapi_location":"https://canonical.invalid","openapi_models":["m"],"proxy_url":"http://proxy.invalid","type":"acme"}"#
     );
     for id in ["acme-a", "acme-b"] {
         let c = f.rt.store().get(id).unwrap();

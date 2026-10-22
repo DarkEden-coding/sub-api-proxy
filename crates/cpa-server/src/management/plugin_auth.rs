@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, TryLockError, Weak};
+use std::sync::{Arc, PoisonError, Weak};
 use std::time::SystemTime;
 
 use cpa_core::config::credentials;
@@ -62,18 +62,7 @@ impl AuthManager for PluginAuthManager {
         let Some(state) = self.0.upgrade() else {
             return write();
         };
-        // A plugin may save while it parses an auth file for a scan that holds the disk
-        // lock and waits for it; Go's synthesizer holds no lock the save needs. While a
-        // parse runs, a busy lock is that scan's, so the save goes ahead without it.
-        // ponytail: the scan's freshness check (`reconcile_scanned`) keeps a file
-        // written here over the scan's older read, and the watcher reloads it; a save
-        // racing a different scan's parse relies on the same check.
-        let _disk = match state.disk.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-            Err(TryLockError::WouldBlock) if credentials::plugin_auth_parsing() => None,
-            Err(TryLockError::WouldBlock) => Some(state.disk.lock().unwrap_or_else(PoisonError::into_inner)),
-        };
+        let _disk = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
         write()?;
         let path = PathBuf::from(auth.attributes.get("path").cloned().unwrap_or_default());
         let bytes = persist(&path, &auth)?;

@@ -1546,7 +1546,13 @@ fn virtual_source_status(state: &Management, target: &Credential, disabled: bool
             }
         }
     };
-    for (alias, canon) in ALIASES {
+    // Go `NormalizeCredentialMetadata`, whose aliases include the OpenAPI pair the field
+    // edits do not take: the alias goes, and a canonical spelling already there wins.
+    let openapi = [
+        ("openapi-location", "openapi_location"),
+        ("openapi-models", "openapi_models"),
+    ];
+    for (alias, canon) in ALIASES.iter().chain(openapi.iter()) {
         if let Some(v) = meta.remove(*alias) {
             meta.entry(*canon).or_insert(v);
         }

@@ -565,17 +565,23 @@ impl Host {
     /// every auth provider in order until one handles the material or fails. Blocking:
     /// credential loading is synchronous, as Go's synthesizer is.
     pub fn parse_auths(&self, req: AuthParseRequest) -> ParseAuthsResult {
+        self.parse_auths_with(req, false)
+    }
+
+    /// [`Host::parse_auths`]; `scan` marks each asked plugin as parsing for an
+    /// auth-folder scan while its call runs (see [`Host::parsing_for_scan`]).
+    fn parse_auths_with(&self, req: AuthParseRequest, scan: bool) -> ParseAuthsResult {
         if !req.provider.trim().is_empty() {
             let Some(record) = self.auth_provider_record(&req.provider) else {
                 return ParseAuthsResult::default();
             };
-            return self.call_parse_auths(&record, req);
+            return self.call_parse_auths(&record, req, scan);
         }
         for record in self.active_records() {
             if !record.plugin.caps.auth_provider || self.is_fused(&record.id) {
                 continue;
             }
-            let result = self.call_parse_auths(&record, req.clone());
+            let result = self.call_parse_auths(&record, req.clone(), scan);
             if result.error.is_some() || result.handled {
                 return result;
             }
@@ -585,7 +591,7 @@ impl Host {
 
     /// Go `callParseAuths`: an RPC failure is not handled; invalid auth data in a handled
     /// answer is.
-    fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest) -> ParseAuthsResult {
+    fn call_parse_auths(&self, record: &Record, mut req: AuthParseRequest, scan: bool) -> ParseAuthsResult {
         if self.is_fused(&record.id) || !self.record_current(record) {
             return ParseAuthsResult::default();
         }
@@ -597,7 +603,10 @@ impl Host {
         if req.provider.is_empty() {
             req.provider = identifier.clone();
         }
-        let resp: AuthParseResponse = match self.call_blocking(record, method::AUTH_PARSE, &req) {
+        let parsing = scan.then(|| ParsingForScan::new(self, &record.id));
+        let resp = self.call_blocking::<AuthParseResponse, _>(record, method::AUTH_PARSE, &req);
+        drop(parsing);
+        let resp: AuthParseResponse = match resp {
             Ok(resp) => resp,
             Err(e) => return ParseAuthsResult::failed(false, e),
         };
@@ -803,7 +812,43 @@ impl ParseAuthsResult {
     }
 }
 
+/// Marks a plugin as parsing an auth file for an auth-folder scan while it lives.
+struct ParsingForScan<'a> {
+    host: &'a Host,
+    id: String,
+}
+
+impl<'a> ParsingForScan<'a> {
+    fn new(host: &'a Host, id: &str) -> Self {
+        lock(&host.inner.parsing_for_scan).push(id.to_owned());
+        Self {
+            host,
+            id: id.to_owned(),
+        }
+    }
+}
+
+impl Drop for ParsingForScan<'_> {
+    fn drop(&mut self) {
+        let mut parsing = lock(&self.host.inner.parsing_for_scan);
+        if let Some(at) = parsing.iter().position(|id| *id == self.id) {
+            parsing.swap_remove(at);
+        }
+    }
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl Host {
+    /// Whether plugin `id` is answering `auth.parse` for an auth-folder scan right now.
+    /// Scans run under the management disk lock, which `host.auth.save` takes, and wait
+    /// for the plugin: a save it makes meanwhile would wait for its own scan.
+    pub(crate) fn parsing_for_scan(&self, id: &str) -> bool {
+        lock(&self.inner.parsing_for_scan).iter().any(|p| p == id)
+    }
+
     /// This host as Go's `PluginAuthParser` for credential loading
     /// (`RegisterPluginAuthParser(pluginHost)`), held weakly. From then on, this host
     /// keeps cpa-core's auth-parser flag current, so without an auth provider loading
@@ -830,13 +875,16 @@ impl cpa_core::config::credentials::PluginAuthParser for AuthParser {
         let Some(inner) = self.0.upgrade() else {
             return Parsed::NotHandled;
         };
-        let result = Host::from_inner(inner).parse_auths(AuthParseRequest {
-            provider: req.provider.to_owned(),
-            path: req.path.display().to_string(),
-            file_name: req.file_name.to_owned(),
-            raw_json: Bytes::copy_from_slice(req.raw_json),
-            ..Default::default()
-        });
+        let result = Host::from_inner(inner).parse_auths_with(
+            AuthParseRequest {
+                provider: req.provider.to_owned(),
+                path: req.path.display().to_string(),
+                file_name: req.file_name.to_owned(),
+                raw_json: Bytes::copy_from_slice(req.raw_json),
+                ..Default::default()
+            },
+            true,
+        );
         // Go falls back to the built-in synthesizer on any parse error.
         if result.error.is_some() || !result.handled {
             return Parsed::NotHandled;

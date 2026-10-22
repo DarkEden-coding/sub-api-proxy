@@ -24,8 +24,8 @@ use crate::gostr::GoStr;
 
 mod plugin_auth;
 pub use plugin_auth::{
-    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, plugin_auth_parsing,
-    set_plugin_auth_parser, set_plugin_auth_parser_active,
+    ParseRequest, Parsed, ParsedAuth, PluginAuthParser, plugin_auth_parser_active, set_plugin_auth_parser,
+    set_plugin_auth_parser_active,
 };
 
 const WEIGHT_MAX: i64 = 1_000_000;

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde_json::{Map, Value as Json};
@@ -73,17 +73,6 @@ pub fn set_plugin_auth_parser_active(active: bool) {
     ACTIVE.store(active, Ordering::Release);
 }
 
-/// Plugin parses in progress: see [`plugin_auth_parsing`].
-static PARSING: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether a plugin is parsing an auth file right now. Auth-folder scans run under the
-/// management disk lock, and a plugin may save a credential (`host.auth.save`, which
-/// takes that lock) while it parses; the save checks this instead of waiting for the
-/// scan that waits for it.
-pub fn plugin_auth_parsing() -> bool {
-    PARSING.load(Ordering::Acquire) > 0
-}
-
 /// Whether auth files go to the installed parser first.
 pub fn plugin_auth_parser_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -121,21 +110,12 @@ pub(super) fn credentials(
 ) -> Option<Result<Vec<Credential>, String>> {
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let provider = if provider == "gemini" { "gemini-cli" } else { provider };
-    struct Parsing;
-    impl Drop for Parsing {
-        fn drop(&mut self) {
-            PARSING.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-    PARSING.fetch_add(1, Ordering::AcqRel);
-    let parsing = Parsing;
     let parsed = parser.parse_auths(&ParseRequest {
         provider,
         path,
         file_name: &file_name,
         raw_json: data,
     });
-    drop(parsing);
     let Parsed::Handled(auths) = parsed else {
         return None;
     };
