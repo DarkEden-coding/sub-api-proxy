@@ -207,12 +207,13 @@ fn translate_pair(
     model: &str,
     compat: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), ExecError> {
-    let working = translate(req, cfg, target, model, &req.body, req.stream, compat)?;
+    // Go translates the original first; equal payloads once.
     let source = original_request(req);
-    if *source == req.body {
-        return Ok((working.clone(), working));
-    }
     let original = translate(req, cfg, target, model, source, req.stream, compat)?;
+    if *source == req.body {
+        return Ok((original.clone(), original));
+    }
+    let working = translate(req, cfg, target, model, &req.body, req.stream, compat)?;
     Ok((original, working))
 }
 

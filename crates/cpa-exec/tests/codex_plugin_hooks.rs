@@ -1,9 +1,11 @@
-//! Plugin request normalizers through the Codex executor: Go's
+//! Plugin request normalizers through the executors: Go's
 //! helps/configuration_update_plugin_test.go, helps/codex_multi_agent_v2_test.go and
-//! codex_executor_tokens_test.go plugin cases. The hooks are process-wide, so this binary
-//! runs its tests one at a time.
+//! codex_executor_tokens_test.go plugin cases, and the order in which the Meta and Gemini
+//! executors translate. The hooks are process-wide, so this binary runs its tests one at
+//! a time.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::Bytes;
@@ -98,12 +100,16 @@ async fn upstream() -> (String, Arc<Mutex<Vec<Bytes>>>) {
 }
 
 fn credential(base_url: &str) -> Credential {
+    provider_credential("codex", base_url)
+}
+
+fn provider_credential(provider: &str, base_url: &str) -> Credential {
     let mut credential = Credential {
-        id: "codex-hooks.json".into(),
-        provider: "codex".into(),
-        source: Source::File(PathBuf::from("/fake/codex-hooks.json")),
+        id: format!("{provider}-hooks.json"),
+        provider: provider.into(),
+        source: Source::File(PathBuf::from(format!("/fake/{provider}-hooks.json"))),
         disabled: false,
-        label: "codex".into(),
+        label: provider.into(),
         attributes: Default::default(),
         metadata: Default::default(),
         revision: 0,
@@ -288,5 +294,49 @@ async fn count_tokens_normalizes_the_translated_tool_schemas() {
                 "{source:?} compat={compat}: {hooked}"
             );
         }
+    }
+}
+
+/// Go's counting test hook (helps/codex_multi_agent_v2_test.go): each call sets
+/// `plugin_call` to its own number, so the body sent upstream shows which translation
+/// ran last. Go translates the original request before the working one, so the working
+/// body carries the higher number: the Meta executor translates both even when they are
+/// equal, and the Gemini executor's pair translates distinct payloads once each.
+#[tokio::test]
+async fn executors_translate_the_original_request_before_the_working_one() {
+    let claude = r#"{"model":"opaque-route","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}"#;
+    let changed = r#"{"model":"opaque-route","max_tokens":64,"messages":[{"role":"user","content":"changed"}]}"#;
+    for (provider, original) in [("meta", claude), ("gemini", changed)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let fake = Arc::new(Fake {
+            edit: Some(Box::new(move |body: &[u8]| {
+                let mut v: Value = serde_json::from_slice(body).unwrap();
+                v["plugin_call"] = Value::from(counter.fetch_add(1, Ordering::SeqCst) + 1);
+                serde_json::to_vec(&v).unwrap()
+            })),
+            ..Default::default()
+        });
+        let _hooks = install(Some(fake), true);
+        let (url, bodies) = upstream().await;
+        let req = request(Format::Claude, "opaque-route", claude, original, true);
+        let credential = provider_credential(provider, &url);
+        // Only the upstream request matters; the reply need not suit the provider.
+        let _ = match provider {
+            "meta" => {
+                cpa_exec::meta::MetaExecutor::with_client(wreq::Client::new())
+                    .execute(&credential, req, &Config::default())
+                    .await
+            }
+            _ => {
+                cpa_exec::gemini::GeminiExecutor::with_client(wreq::Client::new())
+                    .execute(&credential, req, &Config::default())
+                    .await
+            }
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "{provider}");
+        let body = bodies.lock().unwrap().pop().expect("one upstream request");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["plugin_call"], 2, "{provider}: {body}");
     }
 }
