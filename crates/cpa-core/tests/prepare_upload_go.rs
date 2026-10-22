@@ -3,11 +3,12 @@
 //! the file was left alone, the prepared file's content (bcrypt hashes masked) and
 //! whether its secret is the hash of the expected plaintext.
 //!
-//! Rust refuses three kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
+//! Rust refuses four kinds of file that Go prepares (docs/DIFFERENCES-FROM-GO.md):
 //! where re-emitting the alias-expanded tree would change another setting, and where
 //! the secret's tag depends on a `%TAG` directive or the secret is reached through an
 //! alias or merge in a file with a tag that could be binary, and any file with a
-//! Unicode line separator. Those cases expect Rust's refusal.
+//! Unicode line separator, and a `!!binary` value that is not UTF-8, which the config
+//! decoder refuses. Those cases expect Rust's refusal.
 use serde_json::Value as Json;
 use serde_yaml_ng::Value;
 
@@ -49,6 +50,8 @@ const LINE_REFUSED: &[&str] = &[
     "line separator in a string",
 ];
 const LINE_REFUSAL: &str = "the config file contains a Unicode line separator yaml-edit cannot read";
+const NOT_UTF8_REFUSED: &[&str] = &["binary secret that is not UTF-8"];
+const NOT_UTF8_REFUSAL: &str = "failed to parse config file: a !!binary value in the config file is not UTF-8 text";
 
 #[test]
 fn prepare_for_upload_matches_go() {
@@ -80,6 +83,8 @@ fn prepare_for_upload_matches_go() {
             Some(TAG_REFUSAL)
         } else if LINE_REFUSED.contains(&name) {
             Some(LINE_REFUSAL)
+        } else if NOT_UTF8_REFUSED.contains(&name) {
+            Some(NOT_UTF8_REFUSAL)
         } else {
             None
         };

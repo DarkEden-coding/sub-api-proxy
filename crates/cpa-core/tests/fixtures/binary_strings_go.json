@@ -1,0 +1,276 @@
+[
+  {
+    "name": "plain secret",
+    "yaml": "management:\n  secret-key: secret\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary v8 secret",
+    "yaml": "management:\n  secret-key: !!binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary legacy secret",
+    "yaml": "remote-management:\n  secret-key: !!binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "quoted binary secret",
+    "yaml": "management:\n  secret-key: !!binary 'c2VjcmV0'\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "block binary secret",
+    "yaml": "management:\n  secret-key: !!binary |\n    c2Vj\n    cmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "verbatim binary secret",
+    "yaml": "management:\n  secret-key: !\u003ctag:yaml.org,2002:binary\u003e c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "escaped binary secret",
+    "yaml": "management:\n  secret-key: !!bin%61ry c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "short-form binary secret",
+    "yaml": "management:\n  secret-key: !\u003c!!binary\u003e c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "escaped primary binary secret",
+    "yaml": "management:\n  secret-key: !%21binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "named handle binary secret",
+    "yaml": "%TAG !e! tag:yaml.org,2002:\n---\nmanagement:\n  secret-key: !e!binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "redefined secondary handle secret",
+    "yaml": "%TAG !! tag:example.com,2000:\n---\nmanagement:\n  secret-key: !!binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "c2VjcmV0",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "custom-tagged secret",
+    "yaml": "management:\n  secret-key: !keep c2VjcmV0\n",
+    "error": "",
+    "secret_key": "c2VjcmV0",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "non-specific tagged secret",
+    "yaml": "management:\n  secret-key: ! secret\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "custom-tagged number secret",
+    "yaml": "management:\n  secret-key: !keep 0x1F\n",
+    "error": "",
+    "secret_key": "0x1F",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "custom-tagged port",
+    "yaml": "port: !keep 8317\n",
+    "error": "parse config payload: yaml: unmarshal errors:\n  line 1: cannot unmarshal !keep `8317` into int",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "aliased custom-tagged secret",
+    "yaml": "proxy-url: \u0026a !keep secret\nmanagement:\n  secret-key: *a\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "secret",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary proxy-url",
+    "yaml": "proxy-url: !!binary aHR0cDovL3Byb3h5Lmxhbjo4MA==\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "http://proxy.lan:80",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary api key",
+    "yaml": "api-keys: [plain, !!binary a2V5]\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": [
+      "plain",
+      "key"
+    ]
+  },
+  {
+    "name": "aliased binary secret",
+    "yaml": "proxy-url: \u0026a !!binary c2VjcmV0\nmanagement:\n  secret-key: *a\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "secret",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary secret through a merge",
+    "yaml": "defaults: \u0026d\n  secret-key: !!binary c2VjcmV0\nmanagement:\n  \u003c\u003c: *d\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary secret through an aliased section",
+    "yaml": "defaults: \u0026d\n  secret-key: !!binary c2VjcmV0\nmanagement: *d\n",
+    "error": "",
+    "secret_key": "secret",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "unused bits",
+    "yaml": "management:\n  secret-key: !!binary YR==\n",
+    "error": "",
+    "secret_key": "a",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "invalid base64",
+    "yaml": "management:\n  secret-key: !!binary 'c2VjcmV0!'\n",
+    "error": "yaml: !!binary value contains invalid base64 data",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "missing padding",
+    "yaml": "management:\n  secret-key: !!binary YQ\n",
+    "error": "yaml: !!binary value contains invalid base64 data",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "space in base64",
+    "yaml": "management:\n  secret-key: !!binary 'c2Vj cmV0'\n",
+    "error": "yaml: !!binary value contains invalid base64 data",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "invalid base64 in an unknown setting",
+    "yaml": "extra: !!binary '!!!'\n",
+    "error": "yaml: !!binary value contains invalid base64 data",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary unknown setting",
+    "yaml": "extra: !!binary c2VjcmV0\n",
+    "error": "",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "not UTF-8",
+    "yaml": "management:\n  secret-key: !!binary /w==\n",
+    "error": "",
+    "secret_key": "",
+    "secret_bytes": "/w==",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary port",
+    "yaml": "port: !!binary ODMxNw==\n",
+    "error": "parse config payload: yaml: unmarshal errors:\n  line 1: cannot unmarshal !!binary `ODMxNw==` into int",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  },
+  {
+    "name": "binary boolean",
+    "yaml": "debug: !!binary dHJ1ZQ==\n",
+    "error": "parse config payload: yaml: unmarshal errors:\n  line 1: cannot unmarshal !!binary `dHJ1ZQ==` into bool",
+    "secret_key": "",
+    "proxy_url": "",
+    "port": 0,
+    "api_keys": null
+  }
+]
