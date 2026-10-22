@@ -10,7 +10,7 @@ import urllib.request
 def collect(key_file, output):
     key = key_file.read_text().strip()
     request = urllib.request.Request(
-        'http://127.0.0.1:8318/v0/management/observability/usage/queue?count=100',
+        'http://127.0.0.1:8318/v8/management/observability/usage/queue?count=100',
         headers={'Authorization': 'Bearer ' + key})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=10) as response:
