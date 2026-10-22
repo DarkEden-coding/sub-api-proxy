@@ -58,6 +58,10 @@ const NO_READ_DEADLINE: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
 pub(crate) struct Ws {
     pool: Pool,
     states: Mutex<HashMap<String, Arc<IdState>>>,
+    /// Test hook: the next turn signals once it holds its session and waits before it
+    /// takes the ID state.
+    #[cfg(test)]
+    pause: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
 }
 
 impl Default for Ws {
@@ -67,6 +71,8 @@ impl Default for Ws {
         Self {
             pool,
             states: Mutex::default(),
+            #[cfg(test)]
+            pause: Mutex::default(),
         }
     }
 }
@@ -95,10 +101,24 @@ impl Ws {
     /// `closeXAIWebsocketSessionsInStoreForAuthID`: ends a removed credential's sessions
     /// and drops their ID state.
     pub(crate) fn close_credential(&self, credential: &str) {
-        let closed = self.pool.close_credential(credential);
-        let mut states = self.states.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for id in closed {
-            states.remove(&id);
+        self.pool.close_credential_with(credential, |id| {
+            self.states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
+        });
+    }
+
+    #[cfg(test)]
+    async fn paused(&self) {
+        let pause = self
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((reached, resume)) = pause {
+            let _ = reached.send(());
+            let _ = resume.await;
         }
     }
 
@@ -1093,7 +1113,9 @@ impl XaiExecutor {
         if state_id.is_empty() {
             state_id.clone_from(&exec_id);
         }
-        let state = self.ws.state(&state_id);
+        // The ID state is taken after the session and its turn lock, as Go builds the
+        // mapper: a credential removal drops both together, so a replacement session
+        // never shares a state that was already dropped.
         if crate::xai::input_has_item_type(&req.body, "compaction_trigger") {
             if exec_session.continuation {
                 req.usage.discard();
@@ -1101,7 +1123,7 @@ impl XaiExecutor {
             }
             let session = self.ws.pool.session(&exec_id);
             let _turn = session.turn.clone().lock_owned().await;
-            let mapper = state.map(|s| IdMapper::new(s, &req.body));
+            let mapper = self.ws.state(&state_id).map(|s| IdMapper::new(s, &req.body));
             return self.ws_compaction(credential, &req, cfg, mapper).await;
         }
 
@@ -1123,6 +1145,9 @@ impl XaiExecutor {
 
         let session = self.ws.pool.session(&exec_id);
         let guard = session.turn.clone().lock_owned().await;
+        #[cfg(test)]
+        self.ws.paused().await;
+        let state = self.ws.state(&state_id);
         let mut mapper = state.clone().map(|s| IdMapper::new(s, &req.body));
         if let Some(m) = &mut mapper {
             let live = session

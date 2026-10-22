@@ -478,6 +478,58 @@ async fn a_global_proxy_reload_keeps_the_open_socket() {
     assert_eq!(up.dials.lock().unwrap().len(), 1);
 }
 
+/// Go `websocketSessionTargetMatches` compares the trimmed proxy settings, not parsed
+/// proxies: `direct` and `none`, or two unparseable settings, are different targets. A
+/// continuation that changes `(global, own)` after the first turn keeps the socket or
+/// needs a replay as Go decides.
+#[tokio::test]
+async fn proxy_settings_match_as_go_compares_them() {
+    type Row = (
+        &'static str,
+        Option<&'static str>,
+        &'static str,
+        Option<&'static str>,
+        bool,
+    );
+    let rows: [Row; 6] = [
+        ("", None, "http://127.0.0.1:1", None, true),
+        ("direct", Some("none"), "http://127.0.0.1:1", None, false),
+        ("", Some("direct"), "", Some("none"), false),
+        ("", Some("bogus://a"), "", Some("bogus://b"), false),
+        ("", Some("direct"), "", Some(" direct "), true),
+        ("none", None, "NONE", None, true),
+    ];
+    for (dial_global, dial_own, global, own, reuse) in rows {
+        let row = format!("{dial_global:?} {dial_own:?} -> {global:?} {own:?}");
+        let (up, url) = upstream(vec![Act::Send(vec![CREATED, COMPLETED]); 2]).await;
+        let executor = CodexExecutor::new().unwrap();
+        let turn = |global: &str, own: Option<&str>, continuation: bool| {
+            let cfg = Config::parse(&format!("requests:\n  proxy-url: {global:?}\n")).unwrap();
+            let mut cred = credential(&url);
+            if let Some(own) = own {
+                cred.attributes.insert("proxy_url".into(), own.into());
+            }
+            let executor = &executor;
+            async move {
+                let response = executor
+                    .execute_in_session(&cred, request(BODY), &cfg, &session(continuation))
+                    .await?;
+                let events = collect(response).await;
+                assert!(events.len() == 2 && events.iter().all(Result::is_ok), "{events:?}");
+                Ok::<(), ExecError>(())
+            }
+        };
+        turn(dial_global, dial_own, false)
+            .await
+            .unwrap_or_else(|e| panic!("{row}: first turn {e:?}"));
+        match turn(global, own, true).await {
+            Ok(()) => assert!(reuse, "{row}: kept the socket"),
+            Err(e) => assert!(!reuse && e.is_replay_required(), "{row}: {e:?}"),
+        }
+        assert_eq!(up.dials.lock().unwrap().len(), 1, "{row}");
+    }
+}
+
 /// A rejected handshake reports the upstream status with Go's classification and the
 /// quota headers are observed.
 #[tokio::test]

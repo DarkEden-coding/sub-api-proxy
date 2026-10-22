@@ -82,22 +82,28 @@ const MAX_UPSTREAM_MESSAGE: usize = 64 * 1024 * 1024;
 pub(crate) struct Target {
     pub(crate) credential: String,
     pub(crate) url: String,
-    /// The effective proxy: the credential's own, else `requests.proxy-url`.
+    /// The proxy to dial with, parsed from `setting`.
     pub(crate) proxy: Proxy,
-    /// `requests.proxy-url` when the target was resolved.
-    global: Proxy,
-    /// Whether `proxy` came from `requests.proxy-url` (the credential sets none).
+    /// The trimmed effective setting: the credential's own, else `requests.proxy-url`.
+    /// Go compares these strings (`websocketSessionTargetMatches`), not parsed proxies:
+    /// `direct` and `none` are different targets.
+    setting: String,
+    /// The trimmed `requests.proxy-url` when the target was resolved.
+    global: String,
+    /// Whether `setting` came from `requests.proxy-url` (the credential sets none).
     inherited: bool,
 }
 
 impl Target {
     pub(crate) fn new(credential: &Credential, url: String, cfg: &Config) -> Self {
         let own = Proxy::own_url(credential);
-        let global = Proxy::parse(&Proxy::global_url(cfg));
+        let global = Proxy::global_url(cfg);
+        let setting = own.map_or_else(|| global.clone(), str::to_owned);
         Self {
             credential: credential.id.clone(),
             url,
-            proxy: own.map_or_else(|| global.clone(), Proxy::parse),
+            proxy: Proxy::parse(&setting),
+            setting,
             global,
             inherited: own.is_none(),
         }
@@ -105,7 +111,7 @@ impl Target {
 
     /// `websocketSessionTargetMatches` under the current config.
     pub(crate) fn same(&self, want: &Target) -> bool {
-        self.credential == want.credential && self.url == want.url && self.proxy == want.proxy
+        self.credential == want.credential && self.url == want.url && self.setting == want.setting
     }
 
     /// Whether the live socket dialed for `self` still serves `want`. Go 1e37b52b
@@ -113,8 +119,8 @@ impl Target {
     /// socket dialed with, so a reload that changes only `requests.proxy-url` keeps the
     /// socket. New sockets dial with the new setting.
     pub(crate) fn serves(&self, want: &Target) -> bool {
-        let proxy = if want.inherited { &self.global } else { &want.proxy };
-        self.credential == want.credential && self.url == want.url && self.proxy == *proxy
+        let setting = if want.inherited { &self.global } else { &want.setting };
+        self.credential == want.credential && self.url == want.url && self.setting == *setting
     }
 }
 
@@ -474,31 +480,42 @@ impl Pool {
 
     /// `closeCodexWebsocketSessionsInStoreForAuthID`: ends the sessions whose last socket
     /// was dialed for `credential` (a removed credential), like [`Self::close`] for each,
-    /// and leaves every other session open. Returns the closed session ids.
-    pub(crate) fn close_credential(&self, credential: &str) -> Vec<String> {
+    /// and leaves every other session open.
+    pub(crate) fn close_credential(&self, credential: &str) {
+        self.close_credential_with(credential, |_| {});
+    }
+
+    /// [`Self::close_credential`]; `detached(id)` runs under the pool lock as each session
+    /// leaves it, so state keyed by the session id goes with it before the id can be
+    /// reused (Go deletes xAI's ID state under the session-store mutex). Sockets shut down
+    /// after the lock is released.
+    pub(crate) fn close_credential_with(&self, credential: &str, mut detached: impl FnMut(&str)) {
         let sessions: Vec<_> = {
             let sessions = self.sessions.lock().expect("sessions");
             sessions.iter().map(|(id, s)| (id.clone(), s.clone())).collect()
         };
-        let mut closed = Vec::new();
-        for (id, session) in sessions {
-            if *session.credential.lock().expect("session credential") != credential {
-                continue;
-            }
-            {
-                let mut sessions = self.sessions.lock().expect("sessions");
+        let matching: Vec<_> = sessions
+            .into_iter()
+            .filter(|(_, s)| *s.credential.lock().expect("session credential") == credential)
+            .collect();
+        let mut closing = Vec::new();
+        {
+            let mut sessions = self.sessions.lock().expect("sessions");
+            for (id, session) in matching {
                 // A session closed or replaced since the snapshot is not this one.
                 if !sessions.get(&id).is_some_and(|s| Arc::ptr_eq(s, &session)) {
                     continue;
                 }
                 sessions.remove(&id);
+                detached(&id);
+                closing.push(session);
             }
+        }
+        for session in closing {
             if let Some(conn) = session.conn.lock().expect("session conn").take() {
                 conn.shutdown();
             }
-            closed.push(id);
         }
-        closed
     }
 
     /// The error that lost the session's upstream socket, if it was lost.
