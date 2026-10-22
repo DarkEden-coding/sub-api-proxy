@@ -1167,6 +1167,8 @@ pub struct CredentialStore {
     activity: Mutex<HashMap<String, CredentialActivity>>,
     /// Credential revisions whose file already holds Go's persisted form.
     persisted: Mutex<HashMap<String, u64>>,
+    /// What each file credential's metadata was built from, by ID ([`Provenance`]).
+    provenance: Mutex<HashMap<String, Provenance>>,
     /// Where failed attempts publish Go's error events (set by the runtime).
     error_events: std::sync::OnceLock<Arc<crate::usage::UsageQueue>>,
     /// Marked on every epoch bump, so background loops sleep until the set changes.
@@ -1203,6 +1205,40 @@ fn marked(credential: &Credential, key: &str) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
+/// What a file credential's metadata was built from at one revision. Go holds a loaded
+/// file's numbers as float64 read from its text, and a saved record's numbers as that
+/// save held them; a management save reproduces them only from this, never from the
+/// file as it is now, which may have changed since without a reload.
+#[derive(Clone)]
+pub struct Provenance {
+    pub revision: u64,
+    /// SHA-256 of the file bytes the revision was loaded from or committed as.
+    pub sha256: [u8; 32],
+    /// The document a management save committed (Go's metadata after that save); `None`
+    /// for a load, where Go's metadata is the float64 reading of those bytes.
+    pub doc: Option<Arc<cpa_common::json::GoValue>>,
+}
+
+/// How [`CredentialStore::commit_file_backed`] commits a management save.
+pub struct Commit {
+    /// The bytes the file holds after the save (and the re-synthesized `next` read).
+    pub bytes: Vec<u8>,
+    /// `false` when the file already holds an equal document: nothing is written, but
+    /// the credential is published from `bytes` all the same (Go's store skips the
+    /// write, its manager still publishes the auth).
+    pub write: bool,
+    /// What the file must still hold under the write lock, else `Stale`: `Some(None)`
+    /// for no file, `Some(Some(hash))` for those bytes; `None` skips the check.
+    pub disk: Option<Option<[u8; 32]>>,
+    /// Go's metadata after the save, recorded as the new revision's [`Provenance`].
+    pub doc: Option<Arc<cpa_common::json::GoValue>>,
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
 impl CredentialStore {
     pub fn new(credentials: Vec<Credential>) -> Arc<Self> {
         let mut inner = Inner {
@@ -1229,6 +1265,7 @@ impl CredentialStore {
             cooldown_write: Mutex::default(),
             activity: Mutex::default(),
             persisted: Mutex::default(),
+            provenance: Mutex::default(),
             error_events: std::sync::OnceLock::new(),
             changed: tokio::sync::watch::Sender::new(()),
             unauthorized: Mutex::default(),
@@ -1372,7 +1409,7 @@ impl CredentialStore {
                 if go(&existing).as_ref() == Some(&target) {
                     return Ok(None);
                 }
-                Ok(Some((path.clone(), target.marshal(), ())))
+                Ok(Some((Some(path.clone()), target.marshal(), ())))
             },
             |inner, index, bytes, ()| {
                 // Same revision: the file now says what memory already meant (absent
@@ -1382,6 +1419,18 @@ impl CredentialStore {
                     let mut next = Credential::clone(&inner.creds[index]);
                     next.metadata = written;
                     inner.creds[index] = Arc::new(next);
+                }
+                // A save's document stays Go's metadata, now held by these bytes. A load's
+                // float64 reading is not provably these bytes' (they come from serde's
+                // values), so it is forgotten.
+                let id = &inner.creds[index].id;
+                let mut provenance = self.provenance.lock().unwrap_or_else(PoisonError::into_inner);
+                match provenance.get_mut(id) {
+                    Some(p) if p.doc.is_some() => p.sha256 = sha256(bytes),
+                    Some(_) => {
+                        provenance.remove(id);
+                    }
+                    None => {}
                 }
             },
         );
@@ -1854,11 +1903,14 @@ impl CredentialStore {
                 // Go's `json.NewEncoder(f).Encode`: compact JSON and a newline.
                 let mut bytes = serde_json::to_vec(&next.metadata).map_err(|e| PatchError::Io(e.to_string()))?;
                 bytes.push(b'\n');
-                Ok(Some((path.clone(), bytes, next)))
+                Ok(Some((Some(path.clone()), bytes, next)))
             },
-            |inner, index, _, mut next| {
+            |inner, index, bytes, mut next| {
                 inner.generation += 1;
                 next.revision = inner.generation;
+                // ponytail: Go's refresh keeps the refreshed values as it typed them; the
+                // next save here reads them back from the written file as float64.
+                self.note_provenance(&next.id, next.revision, sha256(bytes), None);
                 inner.creds[index] = Arc::new(next);
                 inner.epoch += 1;
                 self.changed.send_replace(());
@@ -1871,7 +1923,8 @@ impl CredentialStore {
     /// Go 8a01bc02 (`persistLocked`): writes a file-backed credential with `inner`
     /// unlocked, so a slow disk never stalls selection or reads of other credentials.
     /// `prepare` sees the credential at `expected_revision` (`Stale` otherwise) and
-    /// returns the file and bytes to write, or `None` for nothing to do; `publish` then
+    /// returns the file to write (`None` to write nothing) and the bytes, or `None` for
+    /// nothing to do; `publish` then
     /// puts the result in place under the write lock. The credential's write lock and
     /// the reload gate (shared) are held throughout, so neither another write of it nor
     /// a set replacement can land between the write and its publication. A publication
@@ -1882,7 +1935,7 @@ impl CredentialStore {
         id: &str,
         expected_revision: u64,
         exclusive: bool,
-        prepare: impl FnOnce(&Arc<Credential>) -> Result<Option<(std::path::PathBuf, Vec<u8>, T)>, PatchError>,
+        prepare: impl FnOnce(&Arc<Credential>) -> Result<Option<(Option<std::path::PathBuf>, Vec<u8>, T)>, PatchError>,
         publish: impl FnOnce(&mut Inner, usize, &[u8], T) -> R,
     ) -> Result<Option<R>, PatchError> {
         // Acquired once, before the check and the write: re-taking the gate while holding
@@ -1915,7 +1968,7 @@ impl CredentialStore {
         // Go `Manager.persist` never writes a plugin-virtual credential (one of several a
         // plugin parsed from one file): its document is not the file's. A refresh or
         // patch of one is kept in memory.
-        if !marked(&current, "plugin_virtual") {
+        if let Some(path) = path.filter(|_| !marked(&current, "plugin_virtual")) {
             write_bytes_atomic(&path, &bytes).map_err(|e| PatchError::Io(e.to_string()))?;
         }
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
@@ -1970,23 +2023,6 @@ impl CredentialStore {
     /// One write lock covers the check, the file and the swap, so a concurrent token
     /// refresh ([`Self::apply_patch`]) lands either before (`Stale`) or after, never
     /// under it, and nothing else in the set is re-read or replaced.
-    /// [`Self::replace_file_backed`] for a save whose document the file already holds:
-    /// Go's store skips the write, so the file, the credential and its revision stay as
-    /// they are, under the same lock and revision check.
-    pub fn confirm_file_backed(&self, id: &str, expected_revision: u64) -> Result<(), PatchError> {
-        self.write_unlocked(
-            id,
-            expected_revision,
-            false,
-            |current| match current.source {
-                Source::File(_) => Ok(None::<(std::path::PathBuf, Vec<u8>, ())>),
-                _ => Err(PatchError::ConfigBacked),
-            },
-            |_, _, _, ()| (),
-        )
-        .map(drop)
-    }
-
     pub fn replace_file_backed(
         &self,
         id: &str,
@@ -1994,6 +2030,31 @@ impl CredentialStore {
         bytes: &[u8],
         next: Option<Credential>,
     ) -> Result<(), PatchError> {
+        let commit = Commit {
+            bytes: bytes.to_vec(),
+            write: true,
+            disk: None,
+            doc: None,
+        };
+        self.commit_file_backed(id, expected_revision, commit, next)
+    }
+
+    /// [`Self::replace_file_backed`] for a management save ([`Commit`]): the file check
+    /// and the optional write run under the same lock and revision check, and the new
+    /// revision records the save's [`Provenance`].
+    pub fn commit_file_backed(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        commit: Commit,
+        next: Option<Credential>,
+    ) -> Result<(), PatchError> {
+        let Commit {
+            bytes,
+            write,
+            disk,
+            doc,
+        } = commit;
         // A new ID can replace another credential, whose own write lock is not held here.
         let exclusive = next.as_ref().is_some_and(|n| n.id != id);
         let removed = self.write_unlocked(
@@ -2004,13 +2065,30 @@ impl CredentialStore {
                 let Source::File(path) = &current.source else {
                     return Err(PatchError::ConfigBacked);
                 };
-                Ok(Some((path.clone(), bytes.to_vec(), next)))
+                if let Some(want) = disk {
+                    let now = std::fs::read(path).ok().map(|b| sha256(&b));
+                    if now != want {
+                        return Err(PatchError::Stale {
+                            current: current.revision,
+                        });
+                    }
+                }
+                // The file's hash after the commit.
+                let held = if write { Some(sha256(&bytes)) } else { disk.flatten() };
+                Ok(Some((write.then(|| path.clone()), bytes, (next, held))))
             },
-            |inner, index, _, next| {
+            |inner, index, _, (next, held)| {
                 let previous = inner.creds.remove(index);
+                self.provenance
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&previous.id);
                 if let Some(mut next) = next {
                     inner.generation += 1;
                     next.revision = inner.generation;
+                    if let Some(held) = held {
+                        self.note_provenance(&next.id, next.revision, held, doc);
+                    }
                     inner.creds.retain(|c| c.id != next.id);
                     let at = index.min(inner.creds.len());
                     inner.creds.insert(at, Arc::new(next));
@@ -2028,6 +2106,50 @@ impl CredentialStore {
         self.clear_disabled_cooldowns();
         self.persist_cooldowns();
         Ok(())
+    }
+
+    /// The [`Provenance`] of credential `id`, if one is known.
+    pub fn provenance(&self, id: &str) -> Option<Provenance> {
+        self.provenance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    fn note_provenance(&self, id: &str, revision: u64, sha256: [u8; 32], doc: Option<Arc<cpa_common::json::GoValue>>) {
+        self.provenance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_owned(), Provenance { revision, sha256, doc });
+    }
+
+    /// Records that the current file credentials were loaded from the bytes `read`
+    /// hashed (an auth-folder scan's [`AuthScan::read`]). A credential whose recorded
+    /// save already holds those bytes at its revision keeps that save's document.
+    ///
+    /// [`AuthScan::read`]: cpa_core::config::credentials::AuthScan
+    pub fn note_loaded(&self, read: &std::collections::BTreeMap<std::path::PathBuf, [u8; 32]>) {
+        let creds = self.snapshot();
+        let mut provenance = self.provenance.lock().unwrap_or_else(PoisonError::into_inner);
+        provenance.retain(|id, _| creds.iter().any(|c| c.id == *id));
+        for c in creds.iter() {
+            let Source::File(path) = &c.source else { continue };
+            let Some(&hash) = read.get(path) else { continue };
+            let same = provenance
+                .get(&c.id)
+                .is_some_and(|p| p.revision == c.revision && p.sha256 == hash);
+            if !same {
+                provenance.insert(
+                    c.id.clone(),
+                    Provenance {
+                        revision: c.revision,
+                        sha256: hash,
+                        doc: None,
+                    },
+                );
+            }
+        }
     }
 
     /// Go `Service.removeAuth` (1e37b52b): a credential that left the set ends only the
@@ -2135,6 +2257,10 @@ impl CredentialStore {
             .unwrap_or_else(PoisonError::into_inner)
             .reconcile(&inner.creds);
         drop(guard);
+        // Under the gate still: no save lands between the scan's publication and this.
+        let mut loaded = read.clone();
+        loaded.retain(|path, _| !rejected.contains(path));
+        self.note_loaded(&loaded);
         drop(reload);
         self.close_sessions(removed);
         self.clear_disabled_cooldowns();

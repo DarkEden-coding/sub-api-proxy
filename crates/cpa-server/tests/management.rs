@@ -138,9 +138,12 @@ impl Fixture {
         let hash = bcrypt::hash("fake-management-only", 4).unwrap();
         std::fs::write(&path, yaml(&dir.join("auth"), &hash)).unwrap();
         let cfg = Config::load(&path).unwrap();
+        let scan = cpa_core::config::credentials::scan_auth_dir(&cfg);
+        let mut loaded = scan.credentials;
+        loaded.extend(cpa_core::config::credentials::from_config(&cfg));
         let rt = Arc::new(cpa_server::testing::runtime(
             cfg.clone(),
-            cpa_core::config::credentials::load(&cfg),
+            loaded,
             Executors {
                 claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
                 codex: Default::default(),
@@ -149,6 +152,8 @@ impl Fixture {
                 google: Default::default(),
             },
         ));
+        // As the binary records what it loaded.
+        rt.store().note_loaded(&scan.read);
         let state = Management::new(rt.clone(), path);
         Self { dir, state, rt }
     }
@@ -1389,6 +1394,46 @@ async fn fields_refuses_values_its_auth_loader_cannot_read() {
             }
         }
     }
+    server.abort();
+}
+
+/// Go's `PersistCodexAuthFile` keeps the disk's `siwc` subtree, and Go saves it at any
+/// depth its decoder reads. A subtree added behind the watcher's back deeper than the
+/// auth loader reads (127 levels) would make the saved file unreadable here, so the save
+/// is refused (DIFFERENCES-FROM-GO.md, "Auth file saves") and nothing changes.
+#[tokio::test]
+async fn a_codex_save_refuses_a_disk_subtree_its_loader_cannot_read() {
+    let f = Fixture::from_yaml("codex-deep", |auth, hash| {
+        std::fs::write(auth.join("codex.json"), r#"{"type":"codex","access_token":"fake-a"}"#).unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let file = f.dir.join("auth").join("codex.json");
+    let nested = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    let edited = format!(
+        r#"{{"type":"codex","access_token":"fake-a","siwc":{{"x":{}}}}}"#,
+        nested(200)
+    );
+    std::fs::write(&file, &edited).unwrap();
+    let before = f.rt.store().get("codex.json").unwrap();
+    let (base, server) = f.server().await;
+    let r = wreq::Client::new()
+        .patch(format!("{base}/v8/management/credentials/status"))
+        .bearer_auth("fake-management-only")
+        .body(r#"{"name":"codex.json","disabled":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 500);
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"error": "failed to update auth: Io(\"the saved auth file could not be read back\")"})
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), edited);
+    let after = f.rt.store().get("codex.json").unwrap();
+    assert_eq!((after.revision, after.disabled), (before.revision, false));
     server.abort();
 }
 

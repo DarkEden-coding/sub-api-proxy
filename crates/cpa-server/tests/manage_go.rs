@@ -940,9 +940,12 @@ mod creds {
                 .replace("$AUTH", &auth.display().to_string());
             std::fs::write(&path, yaml).unwrap();
             let cfg = Config::load(&path).unwrap();
+            let scan = credentials::scan_auth_dir(&cfg);
+            let mut loaded = scan.credentials;
+            loaded.extend(credentials::from_config(&cfg));
             let rt = Arc::new(cpa_server::testing::runtime(
                 cfg.clone(),
-                credentials::load(&cfg),
+                loaded,
                 Executors {
                     claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
                     codex: Default::default(),
@@ -951,6 +954,8 @@ mod creds {
                     google: Default::default(),
                 },
             ));
+            // As the binary records what it loaded.
+            rt.store().note_loaded(&scan.read);
             // Runtime-only credentials, registered as the `/v1/ws` relay does.
             for id in scenario["runtime_auths"].as_array().into_iter().flatten() {
                 let id = id.as_str().unwrap();
