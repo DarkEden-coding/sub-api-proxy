@@ -28,4 +28,5 @@ tokio-postgres = { version = "0.7.18", default-features = false, features = ["ru
 
 [dev-dependencies]
 axum.workspace = true
+bcrypt = "0.19"
 tokio = { workspace = true, features = ["test-util"] }

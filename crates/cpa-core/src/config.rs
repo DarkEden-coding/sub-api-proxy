@@ -259,17 +259,25 @@ const V8_PARENTS: &[&str] = &[
     "upstream.xai",
 ];
 
-/// Writes `hash` over the plaintext `secret-key`: in place when the key is written
-/// literally, else (inherited through a merge) the merge-expanded tree, as Go's
-/// `SaveConfigPreserveCommentsUpdateNestedScalar` does. ponytail: that fallback
-/// re-emits without comments; Go keeps the node comments.
+/// Writes `hash` over the plaintext `secret-key` (see [`with_secret_hash`]).
 fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()> {
-    let mut root: Value = serde_yaml_ng::from_str(text)?;
-    expand_merges(&mut root)?;
-    let mapping = root.as_mapping().context("config must be a mapping")?;
+    ConfigDocument::write(path, &with_secret_hash(text, hash)?)
+}
+
+/// `text` with `hash` over the effective `secret-key`: in place when the key is written
+/// literally and nothing else shares it, else the merge- and alias-expanded tree, as
+/// Go's `updateNestedScalarYAML` writes it. ponytail: that fallback re-emits without
+/// comments; Go keeps the node comments.
+fn with_secret_hash(text: &str, hash: &str) -> anyhow::Result<String> {
+    let expanded = |t: &str| -> anyhow::Result<Value> {
+        let mut root: Value = serde_yaml_ng::from_str(t)?;
+        expand_merges(&mut root)?;
+        Ok(root)
+    };
+    let mut want = expanded(text)?;
+    let mapping = want.as_mapping().context("config must be a mapping")?;
     let v8 = lookup(mapping, "management.secret-key").is_some();
     let parent = if v8 { "management" } else { "remote-management" };
-    let loads_hash = |t: &str| Config::parse(t).is_ok_and(|c| c.management.secret_key == hash);
     // In place only over a literal key: an inherited one would stay in the merge.
     let literal = serde_yaml_ng::from_str::<Value>(text)
         .ok()
@@ -280,18 +288,310 @@ fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()
         file.document()?.get_mapping(parent)?.set("secret-key", hash);
         Some(file.to_string())
     });
-    let updated = match in_place.flatten().filter(|t| loads_hash(t)) {
+    want.get_mut(parent)
+        .and_then(Value::as_mapping_mut)
+        .context("management must be a mapping")?
+        .insert(Value::from("secret-key"), Value::from(hash));
+    // An anchored key edited in place would also change every alias of it.
+    let updated = match in_place.flatten().filter(|t| expanded(t).is_ok_and(|v| v == want)) {
         Some(t) => t,
         None => {
-            root.get_mut(parent)
-                .and_then(Value::as_mapping_mut)
-                .context("management must be a mapping")?
-                .insert(Value::from("secret-key"), Value::from(hash));
-            serde_yaml_ng::to_string(&root)?
+            let t = serde_yaml_ng::to_string(&want)?;
+            // The re-emitted tree writes parsed values (`0x1F` becomes `31`) and drops
+            // tags; Go keeps each node's text and tag. Refuse rather than change
+            // another setting: on any explicit tag, any key that is not a string, or
+            // any other scalar whose text would change.
+            fn plain_keys(v: &Value) -> bool {
+                match v {
+                    Value::Mapping(m) => m.iter().all(|(k, v)| matches!(k, Value::String(_)) && plain_keys(v)),
+                    Value::Sequence(items) => items.iter().all(plain_keys),
+                    Value::Tagged(_) => false,
+                    _ => true,
+                }
+            }
+            let tagged = yaml_edit::lex(text)
+                .iter()
+                .any(|(kind, _)| *kind == yaml_edit::SyntaxKind::TAG);
+            anyhow::ensure!(
+                !tagged && plain_keys(&want),
+                "rewriting the config file would change the text of another setting"
+            );
+            let others = |t: &str| -> anyhow::Result<Value> {
+                let mut tree = scalar_texts(t)?;
+                expand_merges(&mut tree)?;
+                if let Some(m) = tree.get_mut(parent).and_then(Value::as_mapping_mut) {
+                    m.remove("secret-key");
+                }
+                Ok(tree)
+            };
+            anyhow::ensure!(
+                others(text)? == others(&t)?,
+                "rewriting the config file would change the text of another setting"
+            );
+            t
         }
     };
-    anyhow::ensure!(loads_hash(&updated), "secret key not updated");
-    ConfigDocument::write(path, &updated)
+    let stored = scalar_texts(&updated).ok().map(|tree| effective_secret(&tree));
+    anyhow::ensure!(stored.as_deref() == Some(hash), "secret key not updated");
+    Ok(updated)
+}
+
+/// Go `PrepareConfigFileForUpload` (f9437700): applies the rewrites of a startup load
+/// before the file seeds a remote store, so a plaintext management secret never leaves
+/// the machine. The effective plaintext secret is hashed and the legacy fields a v8
+/// field overrides are dropped. Fails, leaving the file untouched, when the file does
+/// not decode, the secret cannot be hashed, or the effective or a legacy secret value
+/// would still be a scalar value elsewhere in it (a YAML anchor or a copy). A failure
+/// of the write itself can leave a partial file, as in Go.
+///
+/// Like Go, this only decodes the file: the validators of a startup load do not run,
+/// so their messages, which quote setting values, cannot carry a secret into the log.
+pub fn prepare_for_upload(path: &Path) -> anyhow::Result<()> {
+    let text = String::from_utf8(std::fs::read(path)?).context("failed to parse config file")?;
+    let prepared = prepared_for_upload(&text)?;
+    if prepared != text {
+        ConfigDocument::write(path, &prepared).context("failed to write prepared config file")?;
+    }
+    Ok(())
+}
+
+fn prepared_for_upload(text: &str) -> anyhow::Result<String> {
+    decode(text).context("failed to parse config file")?;
+    // yaml.v3 and libyaml end a line at NEL, LS and PS too; yaml-edit, which places
+    // the edits and reads the secret's tag, does not, so a comment would hide what
+    // follows it. Refuse rather than misread the file.
+    anyhow::ensure!(
+        !text.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+        "the config file contains a Unicode line separator yaml-edit cannot read"
+    );
+    let mut tree = scalar_texts(text).context("failed to parse config file")?;
+    expand_merges(&mut tree).context("failed to parse config file")?;
+    let mut secret = effective_secret(&tree).into_bytes();
+    if !secret.is_empty() && binary_secret(text, &tree)? {
+        // yaml.v3 decodes a `!!binary` scalar into a string field, any bytes, with Go's
+        // StdEncoding: padding required, unused bits ignored, line breaks skipped.
+        use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+        use base64::{Engine as _, alphabet};
+        let engine = GeneralPurpose::new(
+            &alphabet::STANDARD,
+            GeneralPurposeConfig::new()
+                .with_decode_allow_trailing_bits(true)
+                .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
+        );
+        let payload: Vec<u8> = secret.into_iter().filter(|b| !matches!(b, b'\r' | b'\n')).collect();
+        secret = engine
+            .decode(payload)
+            .ok()
+            .context("failed to parse config file: yaml: !!binary value contains invalid base64 data")?;
+    }
+    let mut prepared = text.to_owned();
+    if !secret.is_empty() && !looks_like_bcrypt(&secret) {
+        // bcrypt 0.19's non-truncating hash also refuses exactly 72 bytes; Go does not.
+        anyhow::ensure!(
+            secret.len() <= 72,
+            "failed to hash remote management key: bcrypt: password length exceeds 72 bytes"
+        );
+        let hash = bcrypt::hash(&secret, 10).context("failed to hash remote management key")?;
+        prepared = with_secret_hash(text, &hash).context("failed to update remote management key")?;
+    }
+    if let Some(cleaned) = ConfigDocument::without_conflicts(&prepared)? {
+        prepared = cleaned;
+    }
+    // Go `plaintextManagementSecrets`: the effective secret and the values of both
+    // secret keys, since an overridden legacy key still holds its own.
+    let mut plaintexts: Vec<String> = String::from_utf8(secret).into_iter().collect();
+    for path in ["remote-management.secret-key", "management.secret-key"] {
+        if let Some(Value::String(value)) = tree.as_mapping().and_then(|m| lookup(m, path)) {
+            plaintexts.push(value.clone());
+        }
+    }
+    plaintexts.retain(|p| !p.is_empty() && !is_bcrypt(p));
+    if !plaintexts.is_empty() {
+        let doc = scalar_texts(&prepared).context("failed to parse prepared config")?;
+        if plaintexts.iter().any(|p| scalar_exists(&doc, p)) {
+            bail!(
+                "plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value"
+            );
+        }
+    }
+    Ok(prepared)
+}
+
+/// The management secret as Go's `Config` decodes it from a [`scalar_texts`] tree
+/// with merges expanded: `management.secret-key` when present (presence wins, even
+/// when null), else `remote-management.secret-key`.
+fn effective_secret(tree: &Value) -> String {
+    let root = tree.as_mapping();
+    let at = |path| root.and_then(|m| lookup(m, path));
+    match at("management.secret-key").or_else(|| at("remote-management.secret-key")) {
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Whether the effective `secret-key` of a [`scalar_texts`] tree carries yaml.v3's
+/// binary tag, resolved as its scanner does: `!!` expands to `tag:yaml.org,2002:`
+/// and `%XX` escapes are decoded, so `!!bin%61ry` and `!<tag:yaml.org,2002:binary>`
+/// are binary too, as are the tags that resolve to the short spelling `!!binary`
+/// (`!<!!binary>`, `!%21binary`), which yaml.v3 also decodes. Fails closed where that
+/// resolution is not followed: a `%TAG` directive beside a tagged secret, a named
+/// handle, a malformed escape, or a file the syntax tree cannot read. A secret
+/// reached through an alias or merge is not resolved: it is refused when any tag in
+/// the file could be binary, since the anchor holding the base64 may be dropped by the
+/// layout cleanup.
+fn binary_secret(text: &str, tree: &Value) -> anyhow::Result<bool> {
+    let v8 = tree
+        .as_mapping()
+        .and_then(|m| lookup(m, "management.secret-key"))
+        .is_some();
+    let parent = if v8 { "management" } else { "remote-management" };
+    let unresolved = || anyhow::anyhow!("the management key's YAML tag cannot be resolved for upload");
+    let file: yaml_edit::YamlFile = text.parse().map_err(|_| unresolved())?;
+    let tokens = yaml_edit::lex(text);
+    let directives = tokens
+        .iter()
+        .any(|(kind, token)| *kind == yaml_edit::SyntaxKind::DIRECTIVE && token.starts_with("%TAG"));
+    let binary = |raw: &str| -> anyhow::Result<bool> {
+        anyhow::ensure!(!directives, unresolved());
+        let tag = if let Some(uri) = raw.strip_prefix("!<").and_then(|t| t.strip_suffix('>')) {
+            uri.to_owned()
+        } else if let Some(suffix) = raw.strip_prefix("!!") {
+            format!("tag:yaml.org,2002:{suffix}")
+        } else if raw[1..].contains('!') {
+            anyhow::bail!(unresolved());
+        } else {
+            raw.to_owned()
+        };
+        let mut bytes = Vec::with_capacity(tag.len());
+        let mut rest = tag.as_bytes();
+        while let Some((&b, tail)) = rest.split_first() {
+            if b == b'%' {
+                let hex = tail.get(..2).and_then(|h| std::str::from_utf8(h).ok());
+                bytes.push(
+                    hex.and_then(|h| u8::from_str_radix(h, 16).ok())
+                        .ok_or_else(unresolved)?,
+                );
+                rest = &tail[2..];
+            } else {
+                bytes.push(b);
+                rest = tail;
+            }
+        }
+        Ok(bytes == b"tag:yaml.org,2002:binary" || bytes == b"!!binary")
+    };
+    match file.document().and_then(|d| d.get_mapping(parent)?.get("secret-key")) {
+        Some(yaml_edit::YamlNode::TaggedNode(node)) => binary(&node.tag().ok_or_else(unresolved)?),
+        Some(yaml_edit::YamlNode::Scalar(_)) => Ok(false),
+        // Through an alias, a merge or an aliased section.
+        _ => {
+            for (kind, token) in &tokens {
+                if *kind == yaml_edit::SyntaxKind::TAG && binary(token).unwrap_or(true) {
+                    anyhow::bail!(unresolved());
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
+/// `text` as a tree whose scalars are their decoded text, as yaml.v3's `Node.Value`
+/// holds it (`0x1F` stays `0x1F`, `'31'` is `31`, `!!binary c2VjcmV0` is `c2VjcmV0`),
+/// and whose nulls stay null. Custom tags are dropped. Keys are kept as parsed;
+/// aliases are expanded, merges are not.
+fn scalar_texts(text: &str) -> anyhow::Result<Value> {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct Shaped<'a>(&'a Value);
+    struct Entries<'a>(&'a Mapping);
+    struct Items<'a>(&'a [Value]);
+    impl<'de> DeserializeSeed<'de> for Shaped<'_> {
+        type Value = Value;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+            match self.0 {
+                Value::Mapping(map) => d.deserialize_map(Entries(map)),
+                Value::Sequence(items) => d.deserialize_seq(Items(items)),
+                Value::Null => IgnoredAny::deserialize(d).map(|_| Value::Null),
+                // A custom tag reaches serde as an enum variant; Go reads the node.
+                Value::Tagged(tagged) => d.deserialize_any(Untagged(&tagged.value)),
+                _ => String::deserialize(d).map(Value::String),
+            }
+        }
+    }
+    struct Untagged<'a>(&'a Value);
+    impl<'de> Visitor<'de> for Untagged<'_> {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a tagged node")
+        }
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<Value, A::Error> {
+            use serde::de::VariantAccess as _;
+            let (IgnoredAny, variant) = access.variant()?;
+            match self.0 {
+                Value::Mapping(_) | Value::Sequence(_) => variant.newtype_variant_seed(Shaped(self.0)),
+                // Text even when spelled `null` or `~`: only a `!!null` node is null.
+                _ => variant.newtype_variant::<String>().map(Value::String),
+            }
+        }
+    }
+    impl<'de> Visitor<'de> for Entries<'_> {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a mapping")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut out = Mapping::new();
+            for (key, value) in self.0 {
+                access.next_key::<IgnoredAny>()?;
+                out.insert(key.clone(), access.next_value_seed(Shaped(value))?);
+            }
+            Ok(Value::Mapping(out))
+        }
+    }
+    impl<'de> Visitor<'de> for Items<'_> {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut out = Vec::with_capacity(self.0.len());
+            for item in self.0 {
+                out.push(access.next_element_seed(Shaped(item))?.unwrap_or(Value::Null));
+            }
+            Ok(Value::Sequence(out))
+        }
+    }
+    use serde::Deserialize as _;
+    let shape: Value = serde_yaml_ng::from_str(text)?;
+    Ok(Shaped(&shape).deserialize(serde_yaml_ng::Deserializer::from_str(text))?)
+}
+
+/// Go `yamlScalarExists`: a non-null scalar whose text is `value` anywhere below `node`
+/// (a [`scalar_texts`] tree). Mapping keys only name settings and are skipped.
+fn scalar_exists(node: &Value, value: &str) -> bool {
+    match node {
+        Value::Mapping(map) => map.values().any(|v| scalar_exists(v, value)),
+        Value::Sequence(items) => items.iter().any(|v| scalar_exists(v, value)),
+        Value::String(text) => text == value,
+        _ => false,
+    }
+}
+
+/// The decoding part of [`Config::parse`]: the YAML, its layout and the setting types,
+/// before the validators. Its errors name settings, not their values.
+fn decode(text: &str) -> anyhow::Result<(Mapping, ConfigDocument)> {
+    let mut parsed = serde_yaml_ng::from_str::<Value>(text)?;
+    // Before any migration, as Go expands aliases first.
+    expand_merges(&mut parsed)?;
+    let root = match parsed {
+        Value::Null if text.trim().is_empty() => Mapping::new(),
+        Value::Mapping(m) => m,
+        _ => bail!("config must be a mapping"),
+    };
+    validate_shape(&root)?;
+    let mut document = ConfigDocument::from_mapping(root.clone())?;
+    document.coerce_typed_scalars();
+    schema::validate(document.value(), false)?;
+    validate::decoded(document.value())?;
+    Ok((root, document))
 }
 
 impl Config {
@@ -316,18 +616,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        let mut parsed = serde_yaml_ng::from_str::<Value>(text)?;
-        // Before any migration, as Go expands aliases first.
-        expand_merges(&mut parsed)?;
-        let root = match parsed {
-            Value::Null if text.trim().is_empty() => Mapping::new(),
-            Value::Mapping(m) => m,
-            _ => bail!("config must be a mapping"),
-        };
-        validate_shape(&root)?;
-        let mut document = ConfigDocument::from_mapping(root.clone())?;
-        document.coerce_typed_scalars();
-        schema::validate(document.value(), false)?;
+        let (root, document) = decode(text)?;
         let canonical = document.value().as_mapping().expect("document is a mapping");
         let routing = decode_section::<RoutingConfig>(canonical, "routing")?;
         let mut routing = routing;
@@ -402,8 +691,13 @@ impl Config {
     }
 }
 
+/// Go `looksLikeBcrypt`.
 pub fn is_bcrypt(key: &str) -> bool {
-    key.starts_with("$2a$") || key.starts_with("$2b$") || key.starts_with("$2y$")
+    looks_like_bcrypt(key.as_bytes())
+}
+
+fn looks_like_bcrypt(key: &[u8]) -> bool {
+    key.len() > 4 && [b"$2a$", b"$2b$", b"$2y$"].iter().any(|p| key.starts_with(*p))
 }
 
 fn decode_section<T: serde::de::DeserializeOwned + Default>(root: &Mapping, name: &str) -> anyhow::Result<T> {
@@ -502,6 +796,27 @@ fn resolve_auth_dir(dir: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Go `TestPrepareConfigFileForUploadReportsSecretItCannotHash` "read-only file";
+    /// tests/prepare_upload_go.rs replays the other Go cases.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_for_upload_refuses_a_file_it_cannot_write() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("cpa-prepare-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let content = "remote-management:\n  secret-key: upload-plaintext-secret\n";
+        std::fs::write(&path, content).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        // Root can write anyway; Go skips there too.
+        if std::fs::OpenOptions::new().write(true).open(&path).is_err() {
+            assert!(prepare_for_upload(&path).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn home() -> PathBuf {
         PathBuf::from(std::env::var("HOME").unwrap())
