@@ -19,17 +19,27 @@ impl ThreadAffinityPolicy {
         Self { config }
     }
 
+    /// Pick an account by weight. An excluded account is rescored as ineligible, so
+    /// its share is redistributed instead of leaving the others at zero.
     fn select(
         &self,
         input: &RoutingInput,
         scores: &[Scored],
         exclude: Option<&AccountId>,
-        reason: impl FnOnce(&Scored) -> Reason,
+        reason: impl FnOnce(&Scored, &[Scored]) -> Reason,
     ) -> Decision {
-        match scoring::best(scores, input, exclude) {
-            Some(best) => Decision::Use {
-                account: best.public.account.clone(),
-                reason: reason(best),
+        let rescored;
+        let scores = match exclude {
+            Some(id) => {
+                rescored = scoring::score(input, &self.config, None, Some(id));
+                &rescored[..]
+            }
+            None => scores,
+        };
+        match scoring::pick(scores, input) {
+            Some(chosen) => Decision::Use {
+                account: chosen.public.account.clone(),
+                reason: reason(chosen, scores),
             },
             None => reject(input, None),
         }
@@ -40,7 +50,7 @@ impl ThreadAffinityPolicy {
         if let Some(account) = runtime.filter(|a| scoring::ineligible(a, input, false).is_none()) {
             if compacted {
                 // Include the current account even when cooling, so it has a comparable score.
-                let comparison = scoring::score(input, &self.config, Some(current));
+                let comparison = scoring::score(input, &self.config, Some(current), None);
                 let current_score = comparison
                     .iter()
                     .find(|s| &s.public.account == current)
@@ -75,7 +85,7 @@ impl ThreadAffinityPolicy {
                 .as_ref()
                 .is_some_and(|until| until.is_none_or(|at| at > input.now))
         });
-        self.select(input, scores, Some(current), |_| {
+        self.select(input, scores, Some(current), |_, _| {
             if exhausted {
                 Reason::MovedExhausted {
                     from: current.clone(),
@@ -90,10 +100,10 @@ impl ThreadAffinityPolicy {
 
 impl RoutingPolicy for ThreadAffinityPolicy {
     fn decide(&self, input: &RoutingInput) -> Decision {
-        let scores = scoring::score(input, &self.config, None);
+        let scores = scoring::score(input, &self.config, None, None);
         match &input.event {
-            RoutingEvent::NewThread => self.select(input, &scores, None, |best| Reason::BestScore {
-                detail: scoring::detail(best, &scores, &self.config, input),
+            RoutingEvent::NewThread => self.select(input, &scores, None, |chosen, scores| Reason::BestScore {
+                detail: scoring::detail(chosen, scores, &self.config, input),
             }),
             RoutingEvent::ChildStart { parent_account } => {
                 if let Some(parent) = parent_account
@@ -105,8 +115,8 @@ impl RoutingPolicy for ThreadAffinityPolicy {
                         reason: Reason::ParentAffinity,
                     };
                 }
-                self.select(input, &scores, None, |best| Reason::ParentUnavailable {
-                    detail: scoring::detail(best, &scores, &self.config, input),
+                self.select(input, &scores, None, |chosen, scores| Reason::ParentUnavailable {
+                    detail: scoring::detail(chosen, scores, &self.config, input),
                 })
             }
             RoutingEvent::Continue { current } => self.continue_on(input, &current.account, &scores, false),
@@ -145,7 +155,7 @@ impl RoutingPolicy for ThreadAffinityPolicy {
                     }
                 }
                 Outcome::Exhausted { window, reset_at } => {
-                    let decision = self.select(input, &scores, Some(&current.account), |_| Reason::MovedExhausted {
+                    let decision = self.select(input, &scores, Some(&current.account), |_, _| Reason::MovedExhausted {
                         from: current.account.clone(),
                         window: window.clone(),
                     });
@@ -156,7 +166,7 @@ impl RoutingPolicy for ThreadAffinityPolicy {
                     }
                 }
                 Outcome::Revoked | Outcome::ModelIneligible => {
-                    self.select(input, &scores, Some(&current.account), |_| Reason::MovedIneligible {
+                    self.select(input, &scores, Some(&current.account), |_, _| Reason::MovedIneligible {
                         from: current.account.clone(),
                     })
                 }
@@ -165,7 +175,7 @@ impl RoutingPolicy for ThreadAffinityPolicy {
     }
 
     fn scores(&self, input: &RoutingInput) -> Vec<AccountScore> {
-        scoring::score(input, &self.config, None)
+        scoring::score(input, &self.config, None, None)
             .into_iter()
             .map(|s| s.public)
             .collect()

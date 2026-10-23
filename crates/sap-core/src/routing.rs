@@ -128,6 +128,10 @@ pub struct RoutingInput {
     pub event: RoutingEvent,
     /// Accounts of `provider`, including ineligible ones (the policy filters them).
     pub accounts: Vec<AccountRuntime>,
+    /// Uniform sample in `[0, 1)` that picks an account in proportion to the weights.
+    /// The server supplies randomness so the policy stays a pure function of its input.
+    #[serde(default)]
+    pub pick: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,8 +158,9 @@ pub struct AccountScore {
     pub eligible: bool,
     /// Why the account is not eligible, if it is not.
     pub ineligible_reason: Option<String>,
+    /// Share of new threads as a fraction (0 to 1); compaction moves compare it.
     pub score: f64,
-    /// Share of new threads this account would receive, 0 to 100, summing to 100 over
+    /// Share of new threads this account receives, 0 to 100, summing to 100 over
     /// eligible accounts of a provider.
     pub weight_percent: f64,
     /// Windows with no observation or an observation older than `RoutingConfig::stale_after_secs`.
@@ -173,14 +178,23 @@ pub trait RoutingPolicy: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
+    /// Weight of weekly allowance left divided by time to the weekly reset.
     pub urgency_weight: f64,
+    /// Weight of weekly allowance left, regardless of reset time.
     pub headroom_weight: f64,
+    /// Penalty for an account's share of active threads.
     pub load_weight: f64,
     /// Lower bound for time-to-reset in the urgency term, in seconds.
     pub reset_floor_secs: u64,
+    /// An account this close to its weekly reset, with allowance left, takes every
+    /// new thread (the earliest reset first) so the allowance is not wasted.
+    pub drain_window_secs: u64,
+    /// Above this five-hour usage percentage, an account's share of new threads falls
+    /// linearly, reaching zero at 100 percent.
+    pub five_hour_taper_start_percent: f64,
     /// Observations older than this count as stale.
     pub stale_after_secs: u64,
-    /// Score multiplier for accounts with stale or missing windows (0 to 1).
+    /// Score multiplier for accounts whose weekly window is stale or missing (0 to 1).
     pub stale_penalty: f64,
     /// How long a temporary limit is retried on the same account before giving up.
     pub retry_deadline_secs: u64,
@@ -195,9 +209,11 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             urgency_weight: 1.0,
-            headroom_weight: 1.0,
-            load_weight: 0.5,
+            headroom_weight: 0.0,
+            load_weight: 0.0,
             reset_floor_secs: 600,
+            drain_window_secs: 36 * 3600,
+            five_hour_taper_start_percent: 90.0,
             stale_after_secs: 1800,
             stale_penalty: 0.7,
             retry_deadline_secs: 60,

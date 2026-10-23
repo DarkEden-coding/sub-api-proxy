@@ -271,13 +271,6 @@ impl SapHooks for Node {
                 if delta == ThreadUsage::default() {
                     return;
                 }
-                let local = state.accounts.entry(account.clone()).or_default();
-                local.tokens = local
-                    .tokens
-                    .saturating_add(delta.input_tokens)
-                    .saturating_add(delta.output_tokens)
-                    .saturating_add(delta.cache_read_tokens)
-                    .saturating_add(delta.cache_write_tokens);
                 state.registry.record_usage(key, delta.clone());
                 let now = Utc::now();
                 let bucket =

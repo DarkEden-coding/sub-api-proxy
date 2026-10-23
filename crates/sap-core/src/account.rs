@@ -14,7 +14,8 @@ pub enum CapacitySource {
     Default,
     /// From the plan table in config.
     Plan,
-    /// Refined from observed tokens per percentage point of usage.
+    /// Retired capacity learner. Kept so stored and synced records still load;
+    /// routing ignores it and the next quota observation replaces it.
     Learned,
     /// Set by the user.
     Override,

@@ -179,28 +179,21 @@ impl Node {
         let plan = get("x-codex-plan-type")
             .or_else(|| get("anthropic-ratelimit-unified-rate-limit-tier"))
             .map(str::to_owned);
-        let tokens = state.accounts.get(account).map_or(0, |a| a.tokens);
         if let Some(mut a) = self.store.accounts()?.into_iter().find(|a| &a.id == account) {
             if plan.is_some() {
                 a.plan = plan.clone();
             }
+            // Capacity follows the plan unless overridden. This also replaces values
+            // from the retired capacity learner.
             if a.capacity.source != CapacitySource::Override {
-                if matches!(a.capacity.source, CapacitySource::Default | CapacitySource::Plan)
-                    && let Some(multiplier) = a
-                        .plan
-                        .as_deref()
-                        .and_then(|p| sap_routing::plan_capacity(p, &self.config.routing))
-                {
-                    a.capacity = Capacity {
+                a.capacity = a
+                    .plan
+                    .as_deref()
+                    .and_then(|p| sap_routing::plan_capacity(p, &self.config.routing))
+                    .map_or_else(Capacity::default, |multiplier| Capacity {
                         multiplier,
                         source: CapacitySource::Plan,
-                    };
-                }
-                for w in &windows {
-                    if let Some(capacity) = state.learner.observe(account, w, tokens) {
-                        a.capacity = capacity;
-                    }
-                }
+                    });
             }
             self.store.upsert_account(a)?;
         }

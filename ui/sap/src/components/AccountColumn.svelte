@@ -10,7 +10,7 @@
 
 <div class="col">
   <h2>Accounts</h2>
-  <div class="lede">weights follow quota left, reset time and plan size · greyed accounts take no new threads</div>
+  <div class="lede">weights follow weekly quota left ÷ time to reset · accounts within 36 h of reset take every new thread · greyed accounts take none</div>
   {#each providers as p (p.id)}
     {@const list = store.accountsOf(p.id)}
     {#if list.length}

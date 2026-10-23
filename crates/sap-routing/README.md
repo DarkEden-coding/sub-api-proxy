@@ -2,7 +2,8 @@
 
 Implements Workstream B's pure thread-affinity policy. It performs no I/O, reads no
 wall clock, and never mutates assignments. The server applies the returned decision.
-Only `RoutingInput::now` determines time-dependent behavior.
+Only `RoutingInput::now` determines time-dependent behavior, and
+`RoutingInput::pick` supplies the randomness for weighted choice.
 
 ## Public API
 
@@ -14,64 +15,57 @@ fn decide(&self, input: &RoutingInput) -> Decision;
 fn scores(&self, input: &RoutingInput) -> Vec<AccountScore>;
 
 plan_capacity(plan: &str, cfg: &RoutingConfig) -> Option<f64>
-
-CapacityLearner::new(
-    alpha: f64,
-    min_samples: usize,
-    baseline_tokens_per_percent: f64,
-) -> Result<CapacityLearner, &'static str>
-
-CapacityLearner::observe(
-    &mut self,
-    account: &AccountId,
-    window: &QuotaWindow,
-    cumulative_tokens: u64,
-) -> Option<Capacity>
-
-CapacityLearner::forget_account(&mut self, account: &AccountId)
 ```
 
 Import `sap_core::routing::RoutingPolicy` to call the trait methods. Domain types
 come from `sap-core`; no new dependencies or changes to that contract are needed.
 Plan lookup is an ASCII case-insensitive substring search in table order. Routing
-uses the account's resolved capacity, so the caller applies plan discovery, learning
-and manual override precedence before constructing its input.
+scales an account by its manual override, otherwise by its plan's capacity, otherwise
+by 1. A stored value from the retired capacity learner is ignored.
 
 ## Scoring
 
-For every valid reported window:
+Weights follow the weekly window. The five-hour window only tapers an account's
+share near its limit.
 
 ```text
-remaining_w = capacity.multiplier * (1 - used_percent_w / 100)
-urgency_w = remaining_w / max(seconds_to_reset_w, max(reset_floor_secs, 1))
-U = sum(urgency_w)
-H = min(remaining_w)
+remaining = capacity * (1 - weekly_used_percent / 100)
+U = remaining / max(seconds_to_weekly_reset, max(reset_floor_secs, 1))
+H = remaining
 L = active_threads / sum(active_threads of eligible accounts)
-score = urgency_weight * U/max(U) + headroom_weight * H/max(H) - load_weight * L
-score *= stale_penalty, once, if any window is stale or missing
+raw = urgency_weight * U/max(U) + headroom_weight * H/max(H) - load_weight * L
+taper = 1 below five_hour_taper_start_percent (90), falling linearly to 0 at 100
+share = max(raw, 0) * taper
 ```
 
-Both maxima are over eligible accounts. A zero denominator contributes zero.
-An unknown reset contributes zero urgency without inventing a reset. An account
-with no usable window observations contributes zero quota terms, rather than
-assuming zero usage. Missing five-hour or weekly observations, invalid percentages,
-or observations older than `stale_after_secs` mark the account stale. Additional
-reported windows also participate. Stale observations retain their measured usage.
-A reset in the past uses the configured urgency floor; this policy does not infer
-new usage after a reset.
+Defaults are `urgency_weight` 1 and the other weights 0, so an account's share is
+its weekly allowance left divided by its time to reset: the rate at which it must
+be used so that none of it is wasted. Maxima are over eligible accounts; a zero
+denominator contributes zero. A stale weekly window (missing, older than
+`stale_after_secs`, or past its reset) multiplies the quota and load terms by
+`stale_penalty`. A weekly window past its reset counts as a full allowance with a
+full window to go. An unknown weekly reset contributes no urgency. The `stale`
+flag also reports a missing or old five-hour window, without a penalty.
 
-Scores use active threads, as required by the workstream brief, rather than the
-older implementation plan's active streams. Negative scores remain negative.
-Positive scores determine proportional display weights. If none are positive,
-eligible accounts get equal display weights to satisfy the contract's sum of 100.
-Ineligible accounts get zero score and weight, with an explanation. Score ties
-prefer higher priority, then lexicographically smaller account ID.
+Drain: an eligible account whose weekly reset is within `drain_window_secs` (36
+hours) and has allowance left takes every new thread. With several, the earliest
+reset drains first. Its share is its five-hour taper; the remainder is split over
+the other accounts in proportion to their shares, so a draining account hands over
+gradually between 90 and 100 percent of its five-hour window. If nothing is
+positive, eligible accounts get equal shares. Shares sum to 1 over eligible
+accounts. `score` is the share and `weight_percent` is 100 times it.
 
-The deciding `ScoreDetail` is the largest weighted contribution advantage over the
-runner-up, including the stale multiplier. Exact ties use `ResetSoon`; the current
-contract has no priority, ID-tie, or freshness detail. A sole candidate is `OnlyChoice`.
+New threads sample an account in proportion to its share using
+`RoutingInput::pick`, a uniform number the server supplies. Accounts are ordered
+heaviest first, then by higher priority, then by smaller account ID, so a pick near
+zero takes the best account. Outcome-driven moves rescore with the failing account
+excluded, so its share is redistributed.
 
-## Decisions and learning
+The deciding `ScoreDetail` is `ResetSoon` for a draining account; otherwise it is
+the largest positive weighted contribution advantage over the runner-up, with
+`ResetSoon` for ties and five-hour hand-overs. A sole candidate is `OnlyChoice`.
+
+## Decisions
 
 New threads select the best score; children prefer an eligible parent. Cooling
 blocks new assignments but does not break existing affinity. Continuations stay
@@ -85,21 +79,12 @@ or `now` when neither has a future hint. At the deadline the policy rejects with
 moving. The caller must enforce the deadline and re-evaluate before sending a retry,
 including when a provider's retry hint extends beyond the deadline.
 
-Compaction moves only when `other > current + abs(current) * margin`. This agrees
-with the relative margin for positive scores and requires a positive improvement
-for zero or negative scores. Hard-ineligible current accounts move immediately.
-Rejections report the earliest future reset or cooldown known among accounts of
+Compaction moves only when `other > current + abs(current) * margin`, comparing
+shares. A compacted thread therefore moves onto a draining account and off an
+account whose five-hour taper has clearly handed over. Hard-ineligible current
+accounts move immediately. Rejections report the earliest future reset or cooldown known among accounts of
 the requested provider serving the model, including an exhaustion outcome's reset.
 No unknown time is replaced by a guessed reset.
-
-Learning is isolated by account and window kind. Each positive sample is
-`delta_cumulative_tokens / delta_used_percent`, followed by
-`EWMA = alpha * sample + (1 - alpha) * previous_EWMA`. After `min_samples`, the
-capacity multiplier is `EWMA / baseline_tokens_per_percent`, with source `Learned`.
-Unchanged percentages accumulate token deltas until the next percentage increase.
-Duplicate and older observations are ignored. Reset changes, usage decreases, and
-token counter restarts establish a new baseline without discarding the learned
-estimate. Unknown resets and invalid samples never train the learner.
 
 ## Validation and remaining integration
 
@@ -111,8 +96,7 @@ CARGO_BUILD_JOBS=4 cargo clippy -p sap-routing --all-targets -- -D warnings
 CARGO_BUILD_JOBS=4 cargo test -p sap-routing
 ```
 
-Tests exercise every decision-table row, scoring edge cases, plan lookup, and
-learning. They use in-memory contract objects and do not open a network connection
+Tests exercise every decision-table row, scoring edge cases, and plan lookup. They use in-memory contract objects and do not open a network connection
 or read credentials. Provider/executor wiring, persistence, full-history resend,
 and real-client mock-upstream integration belong to the integrating server.
 
@@ -121,14 +105,9 @@ Contract requests:
 - Add the confirmed exhausted `WindowKind` to `AccountRuntime`. Until then,
   continuation labels use the highest observed percentage's kind, or
   `Other("unknown")`; `AfterOutcome` uses the exact supplied kind.
-- Add learner tunables and a documented account-scoped cumulative-token counter
-  convention. The caller currently supplies these through the API above. The
-  learner returns per-window estimates; the caller chooses which to apply.
 - Consider `ScoreDetail` variants for freshness and deterministic ties, and an
   explicit unknown-weight representation for the all-nonpositive case.
 
 Known limits: five-hour and weekly are the expected windows because the contract
-has no provider-specific required-window list. The learner keeps one entry per
-observed account/window pair; callers must remove deleted accounts with
-`forget_account`. Defaults have not been calibrated against replayed production
+has no provider-specific required-window list. Defaults have not been calibrated against replayed production
 usage. No provider behavior or cache sharing is established by these pure tests.

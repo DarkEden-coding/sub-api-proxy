@@ -22,7 +22,6 @@ pub(crate) struct AccountState {
     pub quota_at: Option<DateTime<Utc>>,
     pub cooling: Option<DateTime<Utc>>,
     pub revoked: bool,
-    pub tokens: u64,
 }
 pub(crate) struct State {
     pub registry: sap_threads::Registry,
@@ -32,7 +31,6 @@ pub(crate) struct State {
     pub compacted: BTreeSet<ThreadKey>,
     pub resend: BTreeSet<ThreadKey>,
     pub persisted: BTreeMap<ThreadKey, DateTime<Utc>>,
-    pub learner: sap_routing::CapacityLearner,
     pub revisions: BTreeMap<String, u64>,
     pub upstream_at: BTreeMap<sap_core::ids::Provider, DateTime<Utc>>,
 }
@@ -145,6 +143,7 @@ impl Node {
             model,
             event,
             accounts,
+            pick: uniform_sample(),
         })
     }
     pub(crate) fn event(
@@ -172,6 +171,14 @@ impl Node {
             self.changed();
         }
     }
+}
+
+/// Uniform sample in `[0, 1)` for weighted account choice. Each `RandomState` is
+/// randomly keyed, which spreads load well enough without a random-number dependency.
+fn uniform_sample() -> f64 {
+    use std::hash::BuildHasher;
+    let bits = std::collections::hash_map::RandomState::new().hash_one(0u8);
+    (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 
 pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<Node>> {
@@ -209,7 +216,6 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             accounts.insert(account.id, serde_json::from_value(value)?);
         }
     }
-    let learner = sap_routing::CapacityLearner::new(0.25, 3, 1000.0).map_err(anyhow::Error::msg)?;
     let node = Arc::new_cyclic(|weak| Node {
         self_weak: weak.clone(),
         refresh: Mutex::default(),
@@ -232,8 +238,6 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             compacted: BTreeSet::new(),
             resend: BTreeSet::new(),
             persisted: BTreeMap::new(),
-            // ponytail: fixed EWMA defaults and baseline; expose learner tunables after replay calibration.
-            learner,
         })),
         changes: tokio::sync::broadcast::channel(256).0,
         started: Utc::now(),
