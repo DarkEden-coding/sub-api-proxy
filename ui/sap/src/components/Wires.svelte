@@ -10,10 +10,71 @@
     selected: ThreadView | null;
   } = $props();
 
-  interface Wire { d: string; color: string; width: number; opacity: number; dashed?: boolean }
+  /** The animated numbers of a wire. */
+  interface Geometry { x1: number; y1: number; x2: number; y2: number; width: number; opacity: number }
+  /** `dest` names what the wire ends at, so a wire that appears or leaves can slide to or from a sibling. */
+  interface Wire extends Geometry { key: string; dest: string; color: string; dashed?: boolean }
+  interface Shown { wire: Wire; from: Geometry; now: Geometry; dying: boolean }
   interface Dot { x: number; y: number; color: string }
-  let wires = $state.raw<Wire[]>([]);
+  let shown = $state.raw<Shown[]>([]);
   let dots = $state.raw<Dot[]>([]);
+
+  const DURATION = 260;
+  const geometryKeys = ["x1", "y1", "x2", "y2", "width", "opacity"] as const;
+  const ease = (p: number) => 1 - (1 - p) ** 3;
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const entries = new Map<string, Shown>();
+  let started = 0;
+  let frame = 0;
+
+  const geometry = (w: Geometry): Geometry => ({ x1: w.x1, y1: w.y1, x2: w.x2, y2: w.y2, width: w.width, opacity: w.opacity });
+  /** The wire with the same destination whose start is nearest, for entering and leaving wires to move toward. */
+  const sibling = (w: Wire, pool: Iterable<{ wire: Wire; now: Geometry }>) => {
+    let best: Geometry | undefined;
+    for (const o of pool) {
+      if (o.wire.dest !== w.dest || o.wire.key === w.key) continue;
+      if (!best || Math.abs(o.now.y1 - w.y1) < Math.abs(best.y1 - w.y1)) best = o.now;
+    }
+    return best;
+  };
+
+  /** Moves every wire from where it is drawn now to its new target. */
+  function retarget(next: Wire[]) {
+    const keys = new Set(next.map((w) => w.key));
+    const before = [...entries.values()];
+    for (const e of before) if (!keys.has(e.wire.key)) e.dying = true;
+    for (const w of next) {
+      const old = entries.get(w.key);
+      const near = old ? undefined : sibling(w, before.filter((e) => !e.dying));
+      const from = old ? { ...old.now } : { ...(near ?? w), width: w.width, opacity: 0 };
+      entries.set(w.key, { wire: w, from, now: { ...from }, dying: false });
+    }
+    for (const e of before) {
+      if (!e.dying) continue;
+      const near = sibling(e.wire, next.map((wire) => ({ wire, now: wire })));
+      e.from = { ...e.now };
+      e.wire = { ...e.wire, ...(near ?? geometry(e.wire)), opacity: 0 };
+    }
+    started = performance.now();
+    cancelAnimationFrame(frame);
+    step(started);
+  }
+
+  function step(time: number) {
+    const raw = reduceMotion.matches ? 1 : Math.min(1, Math.max(0, (time - started) / DURATION));
+    const p = ease(raw);
+    for (const [key, e] of entries) {
+      if (raw === 1 && e.dying) {
+        entries.delete(key);
+        continue;
+      }
+      for (const k of geometryKeys) e.now[k] = e.from[k] + (e.wire[k] - e.from[k]) * p;
+    }
+    shown = [...entries.values()].map((e) => ({ ...e, now: { ...e.now } }));
+    if (raw < 1) frame = requestAnimationFrame(step);
+  }
+
+  const path = (g: Geometry) => curve({ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 });
 
   const providerColor = (p: string) => (p === "claude" ? "var(--claude)" : p === "codex" ? "var(--openai)" : "var(--muted)");
   const clientColor: Record<ClientKind, string> = { claude_code: "var(--claude)", codex_cli: "var(--openai)", other: "var(--muted)" };
@@ -40,20 +101,22 @@
     const { nodes, accounts, threads, node: self } = snapshot;
 
     const out: Wire[] = [];
+    const wire = (key: string, dest: string, a: { x: number; y: number }, b: { x: number; y: number }, rest: { color: string; dashed?: boolean; width: number; opacity: number }) =>
+      out.push({ key, dest, x1: a.x, y1: a.y, x2: b.x, y2: b.y, ...rest });
     const circles: Dot[] = [];
     const perNode = new Map<string, number>();
 
     // Threads (or a collapsed group of them) to the server that serves them.
-    const anchors: { el: Element | undefined; threads: ThreadView[]; client: ClientKind }[] = [];
+    const anchors: { id: string; el: Element | undefined; threads: ThreadView[]; client: ClientKind }[] = [];
     for (const g of groups) {
       if (collapsed[g.id]) {
-        anchors.push({ el: unitEls.get(g.id), threads: g.machines.flatMap((m) => m.roots.flatMap(flatten)), client: g.id });
+        anchors.push({ id: g.id, el: unitEls.get(g.id), threads: g.machines.flatMap((m) => m.roots.flatMap(flatten)), client: g.id });
         continue;
       }
       for (const m of g.machines) {
         const all = m.roots.flatMap(flatten);
-        if (collapsed[m.id]) anchors.push({ el: unitEls.get(m.id), threads: all, client: g.id });
-        else for (const t of all) anchors.push({ el: threadEls.get(t.key), threads: [t], client: g.id });
+        if (collapsed[m.id]) anchors.push({ id: m.id, el: unitEls.get(m.id), threads: all, client: g.id });
+        else for (const t of all) anchors.push({ id: t.key, el: threadEls.get(t.key), threads: [t], client: g.id });
       }
     }
     for (const a of anchors) {
@@ -72,8 +135,7 @@
         const to = pt(server, "l");
         to.y += inOffset[a.client];
         const sel = ts.length === 1 && ts[0].key === selected?.key;
-        out.push({
-          d: curve(from, to),
+        wire(`${a.id}>${nodeId}`, nodeId, from, to, {
           color: clientColor[a.client],
           width: ts.length > 1 ? 1 + ts.length : sel ? 2.4 : 1.4,
           opacity: sel ? 0.95 : ts.length > 1 ? 0.35 : 0.32,
@@ -99,11 +161,11 @@
         const from = pt(server, "r");
         from.y += acct.provider === "claude" ? -12 : 12;
         const sel = selected?.account === acct.id && selNode === n.id;
-        out.push({ d: curve(from, to), color: providerColor(acct.provider), width: (sel ? 1.5 : 1) + c * 1.2, opacity: sel ? 0.9 : 0.3 });
+        wire(`${n.id}:${acct.id}`, acct.id, from, to, { color: providerColor(acct.provider), width: (sel ? 1.5 : 1) + c * 1.2, opacity: sel ? 0.9 : 0.3 });
       }
       if (!served) {
         const server = serverEls.get(activeNode);
-        if (server) out.push({ d: curve(pt(server, "r"), to), color: "var(--faint)", width: 1, opacity: 0.45, dashed: true });
+        if (server) wire(`idle:${acct.id}`, acct.id, pt(server, "r"), to, { color: "var(--faint)", width: 1, opacity: 0.45, dashed: true });
       }
       circles.push({ x: to.x, y: to.y, color: served ? providerColor(acct.provider) : "var(--faint)" });
     }
@@ -113,9 +175,9 @@
       const server = serverEls.get(n.id);
       if (!server || perNode.has(n.id)) continue;
       const l = pt(server, "l");
-      out.push({ d: `M${l.x - 40},${l.y} L${l.x},${l.y}`, color: "var(--faint)", width: 1, opacity: 0.6, dashed: true });
+      wire(`stub:${n.id}`, `stub:${n.id}`, { x: l.x - 40, y: l.y }, l, { color: "var(--faint)", width: 1, opacity: 0.6, dashed: true });
     }
-    wires = out;
+    retarget(out);
     dots = circles;
   }
 
@@ -132,11 +194,13 @@
     ro.observe(host);
     return () => ro.disconnect();
   });
+
+  $effect(() => () => cancelAnimationFrame(frame));
 </script>
 
 <svg aria-hidden="true">
-  {#each wires as w}
-    <path d={w.d} fill="none" stroke={w.color} stroke-width={w.width} stroke-opacity={w.opacity} stroke-dasharray={w.dashed ? "2 4" : undefined} />
+  {#each shown as { wire: w, now } (w.key)}
+    <path d={path(now)} fill="none" stroke={w.color} stroke-width={now.width} stroke-opacity={now.opacity} stroke-dasharray={w.dashed ? "2 4" : undefined} />
   {/each}
   {#each dots as d}<circle cx={d.x} cy={d.y} r="2.5" fill={d.color} />{/each}
 </svg>

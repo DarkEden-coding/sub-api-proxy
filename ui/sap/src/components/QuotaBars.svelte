@@ -8,8 +8,8 @@
 <div class="bars {provider}">
   {#each windows as w (w.name)}
     <span>{w.name}</span>
-    <div class="bar"><i class={level(w.used)} style:width="{Math.min(100, w.used)}%"></i></div>
-    <span class="pct">{Math.round(w.used)}%</span>
+    <div class="bar"><i class={level(w.left)} style:width="{w.left}%"></i></div>
+    <span class="pct">{Math.round(w.left)}%</span>
     <span class="reset">{w.reset}</span>
   {:else}
     <span class="reset none">no quota data yet</span>

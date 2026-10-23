@@ -29,6 +29,9 @@ class Store {
     return threads.find((t) => t.key === this.selected) ?? threads.find((t) => t.streaming) ?? threads[0] ?? null;
   });
 
+  /** The thread the user clicked, if any. Unlike `selectedThread` it has no fallback, so wires and rows highlight only a deliberate choice. */
+  chosenThread = $derived(this.selected ? (this.snapshot?.threads.find((t) => t.key === this.selected) ?? null) : null);
+
   accountById = $derived(new Map((this.snapshot?.accounts ?? []).map((a) => [a.id, a])));
 
   accountLabel(id: string | null): string {

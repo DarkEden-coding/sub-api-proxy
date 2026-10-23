@@ -4,6 +4,9 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/** Percent of a limit still available, from the API's used percent. Clamped to 0-100. */
+export const remaining = (usedPercent: number): number => Math.min(100, Math.max(0, 100 - usedPercent));
+
 /** "2 h 14 m", "48 m", "3 d 4 h", "<1 m". */
 export function duration(ms: number): string {
   const m = Math.round(ms / MINUTE);

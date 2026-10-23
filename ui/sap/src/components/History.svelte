@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HistoryPoint } from "../api/types.ts";
+  import { remaining } from "../model/format.ts";
 
   let { samples }: { samples: HistoryPoint[] } = $props();
 
@@ -10,7 +11,7 @@
       const v = pick(p);
       if (v === null) return;
       const x = samples.length > 1 ? (i / (samples.length - 1)) * W : 0;
-      d += `${d ? "L" : "M"}${x.toFixed(1)},${(H - 4 - (Math.min(v, 100) / 100) * (H - 8)).toFixed(1)} `;
+      d += `${d ? "L" : "M"}${x.toFixed(1)},${(H - 4 - (remaining(v) / 100) * (H - 8)).toFixed(1)} `;
     });
     return d;
   };
@@ -22,7 +23,7 @@
   <path d={line((p) => p.weekly_used_percent)} stroke="#9a9083" fill="none" stroke-width="1.5" vector-effect="non-scaling-stroke" />
   <path d={line((p) => p.five_hour_used_percent)} stroke="#cf8a66" fill="none" stroke-width="1.5" vector-effect="non-scaling-stroke" />
 </svg>
-<div class="legend"><span style:color="var(--claude)">5 h used</span><span style:color="var(--muted)">week used</span></div>
+<div class="legend"><span style:color="var(--claude)">5 h left</span><span style:color="var(--muted)">week left</span></div>
 
 <style>
   svg { display: block; }

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dayKey, duration, headerClock, shortKey, when } from "./format.ts";
+import { dayKey, duration, headerClock, remaining, shortKey, when } from "./format.ts";
+
+test("remaining percent counts down from used and stays within 0-100", () => {
+  assert.equal(remaining(0), 100);
+  assert.equal(remaining(38), 62);
+  assert.equal(remaining(100), 0);
+  assert.equal(remaining(130), 0);
+  assert.equal(remaining(-5), 100);
+});
 
 test("durations", () => {
   assert.equal(duration(20_000), "<1 m");

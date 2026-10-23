@@ -1,11 +1,12 @@
 import type { AccountState, AccountView, WindowView } from "../api/types.ts";
-import { when, windowLimit, windowName } from "./format.ts";
+import { remaining, when, windowLimit, windowName } from "./format.ts";
 
 export type Tone = "live" | "idle" | "blocked";
 
 export interface WindowRow {
   name: string;
-  used: number;
+  /** Percent of the window still available. */
+  left: number;
   /** "in 48 m", "Mon 09:00" or "". */
   reset: string;
 }
@@ -49,7 +50,7 @@ function flagFor(a: AccountView, now: string, tz?: string): string | null {
 
 const rowOf = (w: WindowView, now: string, tz?: string): WindowRow => ({
   name: windowName(w.kind),
-  used: w.used_percent,
+  left: remaining(w.used_percent),
   reset: when(w.reset_at, now, tz),
 });
 
@@ -63,5 +64,5 @@ export function presentAccount(a: AccountView, now: string, tz?: string): Accoun
   };
 }
 
-/** Bar colour class for a used percentage. */
-export const level = (used: number): "ok" | "warn" | "bad" => (used >= 90 ? "bad" : used >= 70 ? "warn" : "ok");
+/** Bar colour class for a remaining percentage (same cut-offs as 90% and 70% used). */
+export const level = (left: number): "ok" | "warn" | "bad" => (left <= 10 ? "bad" : left <= 30 ? "warn" : "ok");

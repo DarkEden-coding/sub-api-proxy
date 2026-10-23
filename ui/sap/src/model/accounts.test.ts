@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AccountView } from "../api/types.ts";
-import { presentAccount } from "./accounts.ts";
+import { level, presentAccount } from "./accounts.ts";
 import { fixture } from "./fixture.ts";
 
 const snap = fixture();
@@ -12,7 +12,21 @@ test("an account with active threads is not greyed", () => {
   const p = present(acct("claude-max-work"));
   assert.equal(p.greyed, false);
   assert.equal(p.tone, "live");
-  assert.deepEqual(p.windows.map((w) => [w.name, w.used, w.reset]), [["5 h", 38, "in 2 h 14 m"], ["week", 41, "Mon 09:24"]]);
+  assert.deepEqual(p.windows.map((w) => [w.name, w.left, w.reset]), [["5 h", 62, "in 2 h 14 m"], ["week", 59, "Mon 09:24"]]);
+});
+
+test("quota bars warn as the remaining share runs low", () => {
+  assert.equal(level(100), "ok");
+  assert.equal(level(31), "ok");
+  assert.equal(level(30), "warn");
+  assert.equal(level(11), "warn");
+  assert.equal(level(10), "bad");
+  assert.equal(level(0), "bad");
+});
+
+test("an exhausted window has 0% left", () => {
+  const p = present(acct("codex-plus-alt"));
+  assert.equal(p.windows[0].left, 0);
 });
 
 test("an idle account is greyed and keeps its reset times", () => {

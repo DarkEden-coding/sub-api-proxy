@@ -11,7 +11,7 @@
     { thread: node.thread, depth },
     ...node.children.flatMap((c) => rows(c, depth + 1)),
   ];
-  const selectedKey = $derived(store.selectedThread?.key);
+  const selectedKey = $derived(store.chosenThread?.key);
 </script>
 
 <div class="col">

@@ -12,10 +12,17 @@
   const snap = $derived(store.snapshot!);
   const groups = $derived(groupThreads(snap.threads));
   let host = $state<HTMLElement>();
+
+  /** Clicking anywhere that is not a thread or a control clears the highlight. */
+  const clickOff = (e: MouseEvent) => {
+    if (!(e.target as Element).closest("[data-thread], button, a, input, select, textarea")) store.selected = null;
+  };
 </script>
 
+<svelte:window onclick={clickOff} />
+
 <section class="flow" bind:this={host}>
-  <Wires {host} snapshot={snap} {groups} collapsed={store.collapsed} selected={store.selectedThread} />
+  <Wires {host} snapshot={snap} {groups} collapsed={store.collapsed} selected={store.chosenThread} />
   <ThreadColumn {groups} />
   <div></div>
   <ServerColumn />

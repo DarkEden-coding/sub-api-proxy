@@ -17,7 +17,11 @@ final class MenuBar: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Sub-Api-Proxy")
+            // Bundle.main.image picks MenuBarIconTemplate@2x.png on Retina displays.
+            let image = Bundle.main.image(forResource: "MenuBarIconTemplate")
+                ?? NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
+            image?.size = NSSize(width: 18, height: 18)
+            image?.accessibilityDescription = "Sub-Api-Proxy"
             image?.isTemplate = true
             button.image = image
             button.toolTip = "Sub-Api-Proxy • Click to open admin panel"

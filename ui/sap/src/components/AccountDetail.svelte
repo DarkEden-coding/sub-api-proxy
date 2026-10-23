@@ -11,6 +11,8 @@
 
   $effect(() => {
     const id = account.id;
+    // A new quota observation adds a history sample, so refetch when one arrives.
+    void account.windows.map((w) => w.observed_at).join();
     void fetchHistory(id, 24).then((h) => (history = h.samples)).catch(() => (history = []));
   });
 
