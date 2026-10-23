@@ -249,13 +249,29 @@ struct Sum {
     output: u64,
     cache_read: u64,
     cache_write: u64,
-    cost: f64,
-    cost_without_cache: f64,
+    cost: Cost,
     unpriced: u64,
 }
 
+/// Dollars for one request or a group, split by token type.
+#[derive(Default, Clone, Copy)]
+struct Cost {
+    input: f64,
+    cache_read: f64,
+    cache_write: f64,
+    output: f64,
+    /// What the same tokens would cost with every input token at the plain input rate.
+    without_cache: f64,
+}
+
+impl Cost {
+    fn total(&self) -> f64 {
+        self.input + self.cache_read + self.cache_write + self.output
+    }
+}
+
 impl Sum {
-    fn add(&mut self, e: &Entry, cost: Option<(f64, f64)>) {
+    fn add(&mut self, e: &Entry, cost: Option<Cost>) {
         self.requests += 1;
         self.failed += u64::from(e.failed);
         self.input += e.i;
@@ -263,9 +279,12 @@ impl Sum {
         self.cache_read += e.r;
         self.cache_write += e.w;
         match cost {
-            Some((cost, without)) => {
-                self.cost += cost;
-                self.cost_without_cache += without;
+            Some(c) => {
+                self.cost.input += c.input;
+                self.cost.cache_read += c.cache_read;
+                self.cost.cache_write += c.cache_write;
+                self.cost.output += c.output;
+                self.cost.without_cache += c.without_cache;
             }
             None if e.i + e.r + e.w + e.o > 0 => self.unpriced += 1,
             None => {}
@@ -280,21 +299,31 @@ impl Sum {
             "output_tokens": self.output,
             "cache_read_tokens": self.cache_read,
             "cache_write_tokens": self.cache_write,
-            "cost_usd": self.cost,
-            "cost_without_cache_usd": self.cost_without_cache,
-            "savings_usd": self.cost_without_cache - self.cost,
+            "cost_usd": self.cost.total(),
+            "cost_by_type_usd": {
+                "input": self.cost.input,
+                "cache_read": self.cost.cache_read,
+                "cache_write": self.cost.cache_write,
+                "output": self.cost.output,
+            },
+            "cost_without_cache_usd": self.cost.without_cache,
+            "savings_usd": self.cost.without_cache - self.cost.total(),
             "unpriced_requests": self.unpriced,
         })
     }
 }
 
-/// What the request costs, and what it would cost if every input token were billed at the
-/// plain input rate.
-fn price(e: &Entry, rate: Rate) -> (f64, f64) {
+/// What the request costs by token type, and what it would cost if every input token were
+/// billed at the plain input rate.
+fn price(e: &Entry, rate: Rate) -> Cost {
     let (i, r, w, o) = (e.i as f64, e.r as f64, e.w as f64, e.o as f64);
-    let cost = i * rate.input + r * rate.cache_read + w * rate.cache_write + o * rate.output;
-    let without = (i + r + w) * rate.input + o * rate.output;
-    (cost, without)
+    Cost {
+        input: i * rate.input,
+        cache_read: r * rate.cache_read,
+        cache_write: w * rate.cache_write,
+        output: o * rate.output,
+        without_cache: (i + r + w) * rate.input + o * rate.output,
+    }
 }
 
 fn summarize(entries: &[Entry], prices: &Snapshot, since_ms: i64, prices_at_ms: Option<i64>) -> Value {
@@ -326,7 +355,12 @@ fn summarize(entries: &[Entry], prices: &Snapshot, since_ms: i64, prices_at_ms: 
         })
         .collect();
     let mut models: Vec<(String, String, Sum)> = models.into_iter().map(|((m, p), s)| (m, p, s)).collect();
-    models.sort_by(|a, b| b.2.cost.total_cmp(&a.2.cost).then(b.2.requests.cmp(&a.2.requests)));
+    models.sort_by(|a, b| {
+        b.2.cost
+            .total()
+            .total_cmp(&a.2.cost.total())
+            .then(b.2.requests.cmp(&a.2.requests))
+    });
     let models: Vec<Value> = models
         .into_iter()
         .map(|(model, provider, s)| {
@@ -350,8 +384,8 @@ fn summarize(entries: &[Entry], prices: &Snapshot, since_ms: i64, prices_at_ms: 
                 "output_tokens": e.o,
                 "cache_read_tokens": e.r,
                 "cache_write_tokens": e.w,
-                "cost_usd": cost.map(|c| c.0),
-                "savings_usd": cost.map(|c| c.1 - c.0),
+                "cost_usd": cost.map(|c| c.total()),
+                "savings_usd": cost.map(|c| c.without_cache - c.total()),
             })
         })
         .collect();
@@ -421,6 +455,8 @@ mod tests {
         // Without caching the 1M cached tokens would be billed at $2.
         assert!((v["totals"]["savings_usd"].as_f64().unwrap() - 1.8).abs() < 1e-9);
         assert_eq!(v["totals"]["unpriced_requests"], 1);
+        assert!((v["totals"]["cost_by_type_usd"]["cache_read"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!((v["totals"]["cost_by_type_usd"]["output"].as_f64().unwrap() - 10.0).abs() < 1e-9);
         assert_eq!(v["prices"]["source"], "built-in");
         assert_eq!(v["models"][1]["priced"], false);
         assert_eq!(v["days"][0]["date"], "2026-10-22");

@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { fetchUsage, isDemo } from "../api/client.ts";
+  import { fetchUsage } from "../api/client.ts";
   import type { UsageHistory, UsageSum } from "../api/types.ts";
+  import Donut from "../components/Donut.svelte";
+  import StackedColumns from "../components/StackedColumns.svelte";
   import { cacheShare, compact, usd } from "../model/format.ts";
+  import { fillDays, percent, SAVED_COLOR, SPENT_COLOR, TOKEN_TYPES, tokenCounts } from "../model/usage.ts";
 
   const RANGES = [7, 30, 90];
   let days = $state(30);
@@ -14,27 +17,37 @@
     const load = () =>
       fetchUsage(period).then(
         (d) => ((data = d), (message = "")),
-        (e: Error & { status?: number }) => (message = e.status === 404 || e.status === 501 ? "This server does not keep usage history." : e.message),
+        (e: Error & { status?: number }) =>
+          (message = e.status === 404 || e.status === 501 ? "This server does not keep usage history." : e.message),
       );
     void load();
     const timer = setInterval(load, 30_000);
     return () => clearInterval(timer);
   });
 
-  const tokens = (s: UsageSum) => s.input_tokens + s.output_tokens + s.cache_read_tokens + s.cache_write_tokens;
-  const spend = (s: UsageSum) => (s.unpriced_requests && s.unpriced_requests === s.requests ? "—" : usd(s.cost_usd));
-  const mix = $derived(
-    data
-      ? [
-          { name: "Input", n: data.totals.input_tokens, color: "var(--muted)" },
-          { name: "Cache read", n: data.totals.cache_read_tokens, color: "var(--ok)" },
-          { name: "Cache write", n: data.totals.cache_write_tokens, color: "var(--warn)" },
-          { name: "Output", n: data.totals.output_tokens, color: "var(--claude)" },
-        ]
-      : [],
+  const tokens = (s: UsageSum) => tokenCounts(s).reduce((a, b) => a + b, 0);
+  const dayLabel = (date: string) =>
+    new Date(`${date}T00:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
+  const time = (at: number) =>
+    new Date(at).toLocaleString("en-GB", { hourCycle: "h23", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const money = (n: number) => (n === 0 ? "$0" : usd(n));
+
+  const filled = $derived(data ? fillDays(data.days, days, Date.now()) : []);
+  const spendColumns = $derived(
+    filled.map((d) => ({ label: dayLabel(d.date), values: "empty" in d ? [0, 0] : [d.cost_usd, Math.max(0, d.savings_usd)] })),
   );
-  const day = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
-  const time = (at: number) => new Date(at).toLocaleString("en-GB", { hourCycle: "h23", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const tokenColumns = $derived(
+    filled.map((d) => ({ label: dayLabel(d.date), values: "empty" in d ? [0, 0, 0, 0] : tokenCounts(d) })),
+  );
+  const tokenParts = $derived(
+    data ? TOKEN_TYPES.map((t, i) => ({ label: t.label, color: t.color, value: tokenCounts(data!.totals)[i] })) : [],
+  );
+  const spendParts = $derived(
+    data ? TOKEN_TYPES.map((t) => ({ label: t.label, color: t.color, value: data!.totals.cost_by_type_usd[t.key] })) : [],
+  );
+  const activeDays = $derived(data?.days.filter((d) => d.requests > 0).length ?? 0);
+  const topSpend = $derived(Math.max(0, ...(data?.models.map((m) => m.cost_usd) ?? [0])));
+  const savedShare = $derived(data && data.totals.cost_without_cache_usd > 0 ? data.totals.savings_usd / data.totals.cost_without_cache_usd : 0);
 </script>
 
 <div class="page">
@@ -43,8 +56,8 @@
       <h2>Usage</h2>
       <div class="lede">tokens, and what the same traffic would cost at pay-per-token API prices</div>
     </div>
-    <div class="range">
-      {#each RANGES as d}<button class="btn" class:primary={days === d} onclick={() => (days = d)}>{d} days</button>{/each}
+    <div class="range" role="group" aria-label="Period">
+      {#each RANGES as d}<button class="btn" class:primary={days === d} aria-pressed={days === d} onclick={() => (days = d)}>{d} days</button>{/each}
     </div>
   </div>
 
@@ -54,103 +67,137 @@
     {#if !data.statistics_enabled}
       <p class="warnline"><span class="dot warn"></span>Usage statistics are off, so nothing new is recorded. Set <span class="mono">observability.usage.usage-statistics-enabled</span> to <span class="mono">true</span>.</p>
     {/if}
-    <div class="cards">
-      <div class="card">
-        <div class="k">Tokens</div>
-        <div class="v">{compact(tokens(t))}</div>
-        <div class="s">{compact(t.input_tokens)} in · {compact(t.output_tokens)} out · {compact(t.cache_read_tokens)} cached</div>
-      </div>
-      <div class="card">
+
+    <section class="tiles">
+      <div class="tile hero">
         <div class="k">At API prices</div>
         <div class="v">{usd(t.cost_usd)}</div>
-        <div class="s">{usd(t.cost_without_cache_usd)} without caching{t.unpriced_requests ? ` · ${t.unpriced_requests} unpriced` : ""}</div>
+        <div class="s">
+          {usd(t.cost_without_cache_usd)} without caching{#if activeDays} · {usd(t.cost_usd / activeDays)} per active day{/if}
+        </div>
       </div>
-      <div class="card">
-        <div class="k">Cache savings</div>
+      <div class="tile">
+        <div class="k">Saved by caching</div>
         <div class="v">{usd(t.savings_usd)}</div>
-        <div class="s">{cacheShare(t)}% of input read from cache</div>
+        <div class="s">{percent(savedShare)} off the uncached price</div>
       </div>
-      <div class="card">
+      <div class="tile">
+        <div class="k">Tokens</div>
+        <div class="v">{compact(tokens(t))}</div>
+        <div class="s">{cacheShare(t)}% of input from cache</div>
+      </div>
+      <div class="tile">
         <div class="k">Requests</div>
-        <div class="v">{t.requests.toLocaleString()}</div>
-        <div class="s">{t.failed ? `${t.failed} failed` : "none failed"}</div>
+        <div class="v">{t.requests.toLocaleString("en-US")}</div>
+        <div class="s">{t.failed ? `${t.failed.toLocaleString("en-US")} failed` : "none failed"}{t.unpriced_requests ? ` · ${t.unpriced_requests} unpriced` : ""}</div>
       </div>
-    </div>
+    </section>
 
-    {#if tokens(t)}
-      <div class="mix" role="img" aria-label={mix.map((m) => `${m.name} ${compact(m.n)}`).join(", ")}>
-        {#each mix as m}<span style:flex-grow={m.n} style:background={m.color}></span>{/each}
+    <section class="card">
+      <div class="card-head">
+        <div><h3>Daily spend</h3><div class="lede">API-equivalent cost, and what caching took off it</div></div>
+        <div class="legend">
+          <span><i style:background={SPENT_COLOR}></i>Spent</span>
+          <span><i style:background={SAVED_COLOR}></i>Saved by caching</span>
+        </div>
       </div>
-      <div class="key faint">
-        {#each mix as m}<span><i style:background={m.color}></i>{m.name} {compact(m.n)}</span>{/each}
-      </div>
-    {/if}
-    <div class="lede src">
-      prices {data.prices.source === "online" && data.prices.updated_at ? `from the online list, ${time(data.prices.updated_at)}` : "built in; the online list has not loaded yet"}
-    </div>
+      <StackedColumns
+        series={[{ label: "Spent", color: SPENT_COLOR }, { label: "Saved by caching", color: SAVED_COLOR }]}
+        columns={spendColumns}
+        format={money}
+        axisFormat={(n) => `$${compact(n)}`}
+        totalLabel="Without caching"
+      />
+    </section>
 
-    {#if data.days.length}
-      <h2 class="sec">By day</h2>
-      <table class="table">
-        <thead><tr><th>Day</th><th class="n">Tokens</th><th class="n">Spend</th><th class="n">Saved</th><th class="n">Requests</th></tr></thead>
-        <tbody>
-          {#each [...data.days].reverse() as d (d.date)}
-            <tr><td>{day(d.date)}</td><td class="n">{compact(tokens(d))}</td><td class="n">{spend(d)}</td><td class="n">{usd(d.savings_usd)}</td><td class="n">{d.requests.toLocaleString()}</td></tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
+    <section class="card">
+      <div class="card-head">
+        <div><h3>Daily tokens</h3><div class="lede">by type; cache reads are billed at a fraction of the input price</div></div>
+        <div class="legend">
+          {#each TOKEN_TYPES as tt}<span><i style:background={tt.color}></i>{tt.label}</span>{/each}
+        </div>
+      </div>
+      <StackedColumns series={TOKEN_TYPES.map((tt) => ({ label: tt.label, color: tt.color }))} columns={tokenColumns} format={compact} />
+    </section>
+
+    <div class="pair">
+      <section class="card">
+        <h3>Token mix</h3>
+        <div class="lede">share of all tokens in the period</div>
+        <Donut parts={tokenParts} format={compact} caption="tokens" />
+      </section>
+      <section class="card">
+        <h3>Where the money goes</h3>
+        <div class="lede">API-equivalent spend by token type</div>
+        <Donut parts={spendParts} format={money} caption="spent" />
+      </section>
+    </div>
 
     {#if data.models.length}
-      <h2 class="sec">By model</h2>
-      <table class="table">
-        <thead><tr><th>Model</th><th class="n">Tokens</th><th class="n">Spend</th><th class="n">Saved</th><th class="n">Requests</th></tr></thead>
-        <tbody>
-          {#each data.models as m (m.model + m.provider)}
-            <tr>
-              <td class="mono">{m.model}{#if !m.priced}<span class="faint"> · no price known</span>{/if}</td>
-              <td class="n">{compact(tokens(m))}</td><td class="n">{spend(m)}</td><td class="n">{usd(m.savings_usd)}</td><td class="n">{m.requests.toLocaleString()}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      <section class="card">
+        <h3>By model</h3>
+        <div class="lede">ordered by spend</div>
+        <table class="table models">
+          <thead><tr><th>Model</th><th class="barcol">Spend</th><th class="n">Saved</th><th class="n">Tokens</th><th class="n">Cached</th><th class="n">Requests</th></tr></thead>
+          <tbody>
+            {#each data.models as m (m.model + m.provider)}
+              <tr>
+                <td><span class="mono">{m.model}</span><span class="faint prov">{m.provider}</span></td>
+                <td class="barcol">
+                  {#if m.priced}
+                    <div class="hbar"><span style:width="{topSpend ? (m.cost_usd / topSpend) * 100 : 0}%"></span></div>
+                    <b>{usd(m.cost_usd)}</b>
+                  {:else}<span class="faint">no price known</span>{/if}
+                </td>
+                <td class="n">{m.priced ? usd(m.savings_usd) : "—"}</td>
+                <td class="n">{compact(tokens(m))}</td>
+                <td class="n">{cacheShare(m)}%</td>
+                <td class="n">{m.requests.toLocaleString("en-US")}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </section>
+    {:else}
+      <div class="empty">No requests recorded in the last {days} days.</div>
     {/if}
 
-    {#if data.recent.length}
-      <h2 class="sec">Latest requests</h2>
-      <table class="table">
-        <thead><tr><th>Time</th><th>Model</th><th class="n">In</th><th class="n">Cached</th><th class="n">Out</th><th class="n">Cost</th></tr></thead>
-        <tbody>
-          {#each data.recent.slice(0, 30) as r (r.request_id + r.at)}
-            <tr>
-              <td class="faint">{time(r.at)}</td><td class="mono">{r.model}</td>
-              <td class="n">{compact(r.input_tokens)}</td><td class="n">{compact(r.cache_read_tokens)}</td><td class="n">{compact(r.output_tokens)}</td>
-              <td class="n">{r.failed ? "failed" : usd(r.cost_usd)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    {/if}
-    {#if !data.recent.length}<div class="empty">No requests recorded in this period{isDemo() ? "" : " yet"}.</div>{/if}
+    <div class="foot faint">
+      Prices {data.prices.source === "online" && data.prices.updated_at ? `from the public price list, updated ${time(data.prices.updated_at)}` : "from the built-in table; the public list has not loaded yet"}.
+      Days are UTC.
+    </div>
   {:else if !message}
     <div class="empty">Loading…</div>
   {/if}
 </div>
 
 <style>
-  .head { display: flex; justify-content: space-between; align-items: flex-end; }
+  .head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 4px; }
   .range { display: flex; gap: 8px; margin-bottom: 14px; }
-  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
-  .card { background: var(--panel); border: 1px solid var(--rule-soft); border-radius: 8px; padding: 16px 18px; }
-  .k { color: var(--faint); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
-  .v { font-family: var(--serif); font-size: 34px; letter-spacing: -0.5px; margin: 6px 0 4px; font-variant-numeric: tabular-nums; }
-  .s { color: var(--muted); font-size: 12px; }
-  .mix { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--panel-2); }
-  .mix span { flex-basis: 0; min-width: 2px; }
-  .key { display: flex; gap: 20px; margin-top: 8px; font-size: 12px; }
-  .key i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .src { margin-top: 10px; }
-  .sec { font-size: 19px; margin: 26px 0 10px; }
-  .n { text-align: right; font-variant-numeric: tabular-nums; }
   .warnline { color: var(--warn); font-size: 12px; }
+
+  .tiles { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .tile, .card { background: var(--panel); border: 1px solid var(--rule-soft); border-radius: 10px; }
+  .tile { padding: 18px 20px; }
+  .k { color: var(--faint); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+  .v { font-family: var(--serif); font-size: 34px; letter-spacing: -0.5px; margin: 8px 0 4px; }
+  .hero .v { font-size: 46px; color: var(--ink); }
+  .s { color: var(--muted); font-size: 12px; }
+
+  .card { padding: 18px 20px 16px; margin-bottom: 14px; }
+  .card h3 { font-size: 18px; }
+  .card .lede { margin-bottom: 12px; }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); padding-top: 4px; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: -0.5px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  .models td { padding-top: 11px; padding-bottom: 11px; }
+  .models .n, .models th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .prov { margin-left: 8px; font-size: 11.5px; }
+  .barcol { width: 34%; }
+  .barcol .hbar { display: inline-block; width: calc(100% - 80px); height: 8px; border-radius: 0 4px 4px 0; background: var(--panel-2); vertical-align: middle; overflow: hidden; }
+  .hbar span { display: block; height: 100%; min-width: 2px; background: var(--claude); border-radius: 0 4px 4px 0; }
+  .barcol b { display: inline-block; width: 72px; text-align: right; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .foot { font-size: 11.5px; margin-top: 4px; }
 </style>

@@ -226,6 +226,7 @@ export interface UsageSum {
   cache_read_tokens: number;
   cache_write_tokens: number;
   cost_usd: number;
+  cost_by_type_usd: { input: number; cache_read: number; cache_write: number; output: number };
   cost_without_cache_usd: number;
   savings_usd: number;
   unpriced_requests: number;

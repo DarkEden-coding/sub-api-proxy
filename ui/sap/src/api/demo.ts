@@ -94,26 +94,33 @@ export const demo: Backend = {
 function usageSample(days: number, now: string): UsageHistory {
   const sum = (requests: number, input: number, read: number, write: number, output: number, rate: [number, number, number, number]) => {
     const per = (n: number, r: number) => (n * r) / 1e6;
-    const cost = per(input, rate[0]) + per(read, rate[2]) + per(write, rate[3]) + per(output, rate[1]);
+    const byType = { input: per(input, rate[0]), cache_read: per(read, rate[2]), cache_write: per(write, rate[3]), output: per(output, rate[1]) };
+    const cost = byType.input + byType.cache_read + byType.cache_write + byType.output;
     const without = per(input + read + write, rate[0]) + per(output, rate[1]);
     return {
       requests, failed: 0, input_tokens: input, output_tokens: output, cache_read_tokens: read, cache_write_tokens: write,
-      cost_usd: cost, cost_without_cache_usd: without, savings_usd: without - cost, unpriced_requests: 0,
+      cost_usd: cost, cost_by_type_usd: byType, cost_without_cache_usd: without, savings_usd: without - cost, unpriced_requests: 0,
     };
   };
   const sonnet: [number, number, number, number] = [2, 10, 0.2, 2.5];
   const end = Date.parse(now);
-  const dayList = Array.from({ length: Math.min(days, 7) }, (_, i) => {
-    const t = new Date(end - (Math.min(days, 7) - 1 - i) * 86_400_000);
-    return { date: t.toISOString().slice(0, 10), ...sum(40 + i * 9, 30_000 + i * 4_000, 6_000_000 + i * 900_000, 300_000, 90_000 + i * 11_000, sonnet) };
-  });
+  const span = Math.min(days, 21);
+  const dayList = Array.from({ length: span }, (_, i) => {
+    const t = new Date(end - (span - 1 - i) * 86_400_000);
+    const k = 0.5 + Math.abs(Math.sin(i * 1.7)) * (i % 7 === 5 ? 0.15 : 1);
+    return { date: t.toISOString().slice(0, 10), ...sum(Math.round(60 * k), Math.round(40_000 * k), Math.round(7_000_000 * k), Math.round(350_000 * k), Math.round(120_000 * k), sonnet) };
+  }).filter((_, i) => i % 9 !== 4);
   const total = dayList.reduce((a, d) => sum(a.requests + d.requests, a.input_tokens + d.input_tokens, a.cache_read_tokens + d.cache_read_tokens, a.cache_write_tokens + d.cache_write_tokens, a.output_tokens + d.output_tokens, sonnet), sum(0, 0, 0, 0, 0, sonnet));
   return {
     prices: { source: "built-in", updated_at: null },
     statistics_enabled: true,
     totals: total,
     days: dayList,
-    models: [{ model: "claude-sonnet-5-5", provider: "claude", priced: true, ...total }],
+    models: [
+      { model: "claude-sonnet-5-5", provider: "claude", priced: true, ...total },
+      { model: "claude-haiku-5-5", provider: "claude", priced: true, ...sum(130, 22_000, 1_400_000, 90_000, 41_000, [0.1, 0.5, 0.01, 0.125]) },
+      { model: "gpt-5-codex", provider: "codex", priced: true, ...sum(48, 410_000, 2_100_000, 0, 96_000, [1.25, 10, 0.125, 1.25]) },
+    ],
     recent: Array.from({ length: 5 }, (_, i) => ({
       at: end - i * 420_000, request_id: `demo-${i}`, model: "claude-sonnet-5-5", provider: "claude", failed: false,
       input_tokens: 4, output_tokens: 300 + i * 40, cache_read_tokens: 180_000, cache_write_tokens: 500, cost_usd: 0.04, savings_usd: 0.33,
