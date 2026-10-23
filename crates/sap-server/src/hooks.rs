@@ -93,6 +93,13 @@ impl SapHooks for Node {
             || before.as_ref().is_some_and(|r| r.parent != observed.parent);
         let persistence_failed = self.persist(&mut state, &identity.key, force).is_err();
         state.registry.stream_opened(&identity.key);
+        // ponytail: temporary diagnostics for Codex streaming detection; remove once the cause is found.
+        tracing::info!(
+            "sap-diag identify provider={:?} key={:.8} class={:?}",
+            identity.provider(),
+            identity.key.to_string(),
+            identity.class
+        );
         let guard = RequestGuard {
             state: Arc::downgrade(&self.state),
             key: identity.key.clone(),
@@ -293,6 +300,10 @@ impl SapHooks for Node {
         self.changed();
     }
     fn on_stream(&self, request: &SapRequest, open: bool) {
+        tracing::info!(
+            "sap-diag stream open={open} key={:.8}",
+            request.identity.key.to_string()
+        );
         let mut state = self.lock();
         let count = state.streams.entry(request.identity.key.clone()).or_default();
         if open {

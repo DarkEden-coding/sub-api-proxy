@@ -30,6 +30,14 @@ impl Fixture {
         Self::with_auth(provider, upstream, false)
     }
     fn with_auth(provider: Provider, upstream: &str, oauth: bool) -> Self {
+        Self::build(provider, upstream, oauth, false)
+    }
+    /// Codex credentials that talk to `upstream` over WebSocket, as signed-in Codex does.
+    fn new_websocket(upstream: &str) -> Self {
+        Self::build(Provider::Codex, upstream, false, true)
+    }
+    fn build(provider: Provider, upstream: &str, oauth: bool, websockets: bool) -> Self {
+        let ws = if websockets { "    websockets: true\n" } else { "" };
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "sap-node-{}-{}-{}",
@@ -38,7 +46,7 @@ impl Fixture {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(dir.join("auth")).unwrap();
-        let mut config = Config::parse(&format!("{provider}-api-key:\n  - api-key: fake-a\n    base-url: {upstream}\n    models:\n      - name: test\n  - api-key: fake-b\n    base-url: {upstream}\n    models:\n      - name: test\n")).unwrap();
+        let mut config = Config::parse(&format!("{provider}-api-key:\n  - api-key: fake-a\n    base-url: {upstream}\n{ws}    models:\n      - name: test\n  - api-key: fake-b\n    base-url: {upstream}\n{ws}    models:\n      - name: test\n")).unwrap();
         config.auth_dir = dir.join("auth");
         let mut credentials = cpa_core::config::credentials::load(&config);
         for (i, c) in credentials.iter_mut().enumerate() {
@@ -743,4 +751,77 @@ async fn active_refresh_codex_exhaustion_recovers_from_usage_endpoint() {
             .all(|a| a.last_poll_error.as_deref() == Some("Usage probe requires a subscription OAuth credential"))
     );
     server.abort();
+}
+
+/// A Codex WebSocket turn shows as streaming while upstream events flow, every frame
+/// refreshes the thread's `last_seen`, and the stream closes with the turn.
+#[tokio::test]
+async fn node_codex_websocket_turns_stream_and_refresh_activity() {
+    use futures_util::StreamExt;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        async fn upstream_turns(mut socket: axum::extract::ws::WebSocket) {
+            use axum::extract::ws::Message;
+            while socket.recv().await.is_some() {
+                for event in [
+                    r#"{"type":"response.created","response":{"id":"resp_a","output":[]}}"#,
+                    r#"{"type":"response.completed","response":{"id":"resp_a","output":[],"usage":{"input_tokens":3,"output_tokens":1}}}"#,
+                ] {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let _ = socket.send(Message::Text(event.into())).await;
+                }
+            }
+        }
+        let upstream = axum::Router::new()
+            .fallback(|ws: axum::extract::ws::WebSocketUpgrade| async move { ws.on_upgrade(upstream_turns) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let f = Fixture::new_websocket(&format!("http://{}", listener.local_addr().unwrap()));
+        let _upstream = tokio::spawn(axum::serve(listener, upstream).into_future());
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let _proxy = tokio::spawn(axum::serve(proxy, cpa_server::router(f.rt.clone())).into_future());
+        let mut socket = wreq::Client::new()
+            .websocket(format!("ws://{proxy_addr}/backend-api/codex/responses"))
+            .header("thread-id", "ws-thread")
+            .header("session-id", "ws-thread")
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        let thread = || f.node.threads(false).into_iter().find(|t| t.key.id == "ws-thread");
+        let frames = [
+            r#"{"type":"response.create","model":"test","generate":false,"input":[]}"#,
+            r#"{"type":"response.create","model":"test","previous_response_id":"resp_a","input":[]}"#,
+            r#"{"type":"response.create","model":"test","previous_response_id":"resp_a","input":[]}"#,
+        ];
+        let mut seen = Vec::new();
+        for (turn, frame) in frames.into_iter().enumerate() {
+            socket.send(wreq::ws::message::Message::text(frame)).await.unwrap();
+            loop {
+                let wreq::ws::message::Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                    continue;
+                };
+                if text.contains("response.created") {
+                    let t = thread().unwrap();
+                    assert!(t.streaming, "turn {turn} streams after response.created: {t:?}");
+                    seen.push(t.last_seen);
+                }
+                if text.contains("response.completed") {
+                    break;
+                }
+            }
+        }
+        assert!(seen.windows(2).all(|w| w[1] > w[0]), "every frame refreshed last_seen: {seen:?}");
+        drop(socket);
+        for _ in 0..100 {
+            if !thread().unwrap().streaming {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("stream stayed open after the socket closed");
+    })
+    .await
+    .unwrap();
 }

@@ -30,3 +30,4 @@ tower = { version = "0.5", features = ["util"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 cpa-exec.workspace = true
+wreq = { workspace = true, features = ["ws"] }

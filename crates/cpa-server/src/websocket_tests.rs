@@ -1329,3 +1329,160 @@ async fn removal_closes_only_its_sockets(section: &str) {
     drop((kept, dropped));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Counts requests whose `SapRequest` is still alive, like the node's per-thread stream guard.
+struct LiveRequests(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for LiveRequests {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct CountingHooks {
+    live: Arc<std::sync::atomic::AtomicUsize>,
+    identified: Arc<std::sync::atomic::AtomicUsize>,
+    streams: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::sap_hooks::SapHooks for CountingHooks {
+    fn identify(&self, _: &str, _: &axum::http::HeaderMap, _: &[u8]) -> Option<Arc<crate::sap_hooks::SapRequest>> {
+        use sap_core::thread::{ClientKind, Continuation, LineageKind, RequestClass, ThreadIdentity};
+        self.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.identified.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(Arc::new(crate::sap_hooks::SapRequest {
+            identity: ThreadIdentity {
+                key: sap_core::ids::ThreadKey::new(sap_core::ids::Provider::Codex, "t"),
+                client: ClientKind::CodexCli,
+                class: RequestClass::Turn,
+                lineage: LineageKind::Root,
+                root_session: "t".into(),
+                parent: None,
+                forked_from: None,
+                previous_message_id: None,
+                continuation: Continuation::FullHistory,
+                compaction: None,
+                window_number: None,
+                agent_label: None,
+                turn_id: None,
+                model: None,
+                client_host: None,
+            },
+            data: Box::new(LiveRequests(self.live.clone())),
+        }))
+    }
+    fn select(
+        &self,
+        _: &crate::sap_hooks::SapRequest,
+        _: &[crate::sap_hooks::SapCandidate],
+    ) -> crate::sap_hooks::SapPick {
+        crate::sap_hooks::SapPick::Configured
+    }
+    fn on_outcome(&self, _: &crate::sap_hooks::SapRequest, _: &str, _: &crate::sap_hooks::AttemptResult) {}
+    fn on_observation(&self, _: &crate::sap_hooks::SapRequest, _: &str, _: crate::sap_hooks::Observation) {}
+    fn on_stream(&self, _: &crate::sap_hooks::SapRequest, open: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if open {
+            self.streams.fetch_add(1, SeqCst);
+        } else {
+            self.streams.fetch_sub(1, SeqCst);
+        }
+    }
+    fn health(&self) -> sap_core::health::HealthReport {
+        unreachable!("not requested")
+    }
+}
+
+/// A Codex turn over an upstream WebSocket keeps its request alive while events flow, and
+/// every client frame is identified, so the dashboard shows the thread as streaming.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hooked_websocket_turns_stay_open_while_upstream_events_flow() {
+    use futures_util::StreamExt;
+    use std::sync::atomic::Ordering::SeqCst;
+    async fn two_turns(mut socket: AxSocket) {
+        while socket.recv().await.is_some() {
+            let created = r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#;
+            let done = r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#;
+            let _ = socket.send(AxMessage::Text(created.into())).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = socket.send(AxMessage::Text(done.into())).await;
+        }
+    }
+    let upstream =
+        serve(axum::Router::new().fallback(|ws: WebSocketUpgrade| async move { ws.on_upgrade(two_turns) })).await;
+    let cfg = Config::parse(&format!(
+        "codex:\n  response-steering: true\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-fixture\n"
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let (live, identified, streams) = (
+        Arc::new(Default::default()),
+        Arc::new(Default::default()),
+        Arc::new(Default::default()),
+    );
+    rt.set_sap_hooks(Arc::new(CountingHooks {
+        live: Arc::clone(&live),
+        identified: Arc::clone(&identified),
+        streams: Arc::clone(&streams),
+    }));
+    let proxy = serve(router(rt)).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    let create =
+        r#"{"type":"response.create","model":"gpt-fixture","input":[{"type":"message","role":"user","content":"hi"}]}"#;
+    let follow = r#"{"type":"response.create","model":"gpt-fixture","previous_response_id":"r1","input":[]}"#;
+    for turn in 1..=3 {
+        socket
+            .send(wreq::ws::message::Message::text(if turn == 1 {
+                create
+            } else {
+                follow
+            }))
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while !text.contains("response.created") {
+            text = format!(
+                "{:?}",
+                tokio::time::timeout(Duration::from_secs(10), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            );
+        }
+        assert_eq!(live.load(SeqCst), 1, "turn {turn} holds its request");
+        assert_eq!(streams.load(SeqCst), 1, "turn {turn} is streaming");
+        while !text.contains("response.completed") {
+            text = format!(
+                "{:?}",
+                tokio::time::timeout(Duration::from_secs(10), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            );
+        }
+        assert_eq!(identified.load(SeqCst), turn);
+    }
+    drop(socket);
+    let started = Instant::now();
+    while live.load(SeqCst) != 0 || streams.load(SeqCst) != 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "request leaked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
