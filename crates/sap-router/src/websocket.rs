@@ -2,9 +2,12 @@ use crate::proxy::Body;
 use http::{Request, header};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
-use tokio::sync::watch;
+use std::sync::Arc;
 
-use crate::{failover, proxy::Connection};
+use crate::{
+    health::{Health, Lease},
+    proxy::Connection,
+};
 
 pub fn is_upgrade(request: &Request<Body>) -> bool {
     request
@@ -23,13 +26,15 @@ pub fn is_upgrade(request: &Request<Body>) -> bool {
 pub async fn relay(
     client: OnUpgrade,
     server: OnUpgrade,
-    mut down: watch::Receiver<u64>,
-    generation: u64,
+    health: Arc<Health>,
+    mut lease: Lease,
     _connection: Connection,
 ) {
     tokio::select! {
         biased;
-        _ = failover::down(&mut down, generation) => {},
+        _ = health.lost(&mut lease) => {
+            tracing::warn!(server = %health.name(lease.index), "websocket closed: server down, another server available");
+        },
         _ = async {
             let (Ok(client), Ok(server)) = tokio::join!(client, server) else { return; };
             let mut client = TokioIo::new(client);

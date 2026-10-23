@@ -1,7 +1,10 @@
 # sap-router
 
 A client-local HTTP/1.1 router. It streams request and response bodies, and tunnels
-WebSocket wire frames unchanged. It does not parse inference bodies or log traffic.
+WebSocket wire frames unchanged. It does not parse inference bodies or log traffic;
+it logs server state changes and failed requests (method and path, never the query
+or headers) to stderr, which the launchd and systemd units send to the router log.
+`RUST_LOG` overrides the default `info` level.
 `Authorization` passes through, `Host` identifies the selected server, and
 `x-sap-client-host` is overwritten with the configured machine name. Hop-by-hop
 headers are removed and the required WebSocket upgrade headers are restored.
@@ -36,13 +39,12 @@ failure thresholds are rejected.
 `GET /sap/router/status` is always local and has no authentication:
 
 ```json
-{"preferred":"primary","servers":[{"name":"primary","state":"healthy","consecutive_failures":0}]}
+{"preferred":"primary","servers":[{"name":"primary","state":"healthy","consecutive_failures":0,"stable":true}]}
 ```
 
-`preferred` is null when no server is eligible. States are `healthy`, `suspect`,
-and `down`. A recovered server can report `healthy` while its stability period
-still excludes it from selection. Even if all servers recover together, requests
-receive 503 until one completes that period. Initial successful probes need no
+`preferred` is the first stable server, or null when none is stable. States are
+`healthy`, `suspect`, and `down`. A recovered server reports `healthy` with
+`stable: false` until its stability period ends. Initial successful probes need no
 stability delay.
 
 ## Failover
@@ -52,21 +54,29 @@ Only a successful HTTP response decoding as `sap_core::health::HealthReport` wit
 configured interval, overlapping when timeout exceeds interval. Responses are
 limited to 64 KiB; obsolete probe results cannot overwrite newer ones.
 
-One failure makes a server suspect and excludes it from new requests. The
+One failure makes a server suspect and moves it behind every stable server. The
 configured consecutive failure threshold marks it down. Recovery requires
-continuous successful probes for `stable_secs` before it becomes eligible again.
+continuous successful probes for `stable_secs` before it is preferred again.
 Existing streams stay with their server during failback.
 
+When no server is stable, requests still try the others: recovering servers
+first, then suspect, then down, each in configured order. A server that cannot
+accept the connection costs at most `connect_timeout_ms` before the next one is
+tried. With a single server, a slow probe or a laptop waking from sleep therefore
+no longer refuses every request for the stability period.
+
 Each request establishes its server connection before consuming its body.
-Connection refusal or timeout tries the next healthy server without replaying
-bytes. Once transmission starts, an error or a Down transition before response
-headers produces HTTP 503 with this body:
+Connection refusal or timeout tries the next server without replaying bytes.
+Once transmission starts, an error before response headers, or the server going
+down while another server is stable, produces HTTP 503 with this body:
 
 ```json
 {"type":"error","error":{"type":"overloaded_error","message":"Server unavailable; retry through the local router"}}
 ```
 
-A Down transition aborts an open HTTP stream or closes a WebSocket transport.
+A Down transition aborts an open HTTP stream or closes a WebSocket transport
+only when another server is stable to take the retry. Without one, the transfer
+stays on its server and ends only if that connection itself fails.
 The router never replays a transmitted request. Healthy inference connections
 have no silence timeout. WebSockets use bounded bidirectional copy buffers and
 preserve masking, fragmentation, control frames, and negotiated extensions.
@@ -95,10 +105,11 @@ cargo clippy -p sap-router --all-targets -- -D warnings
 cargo test -p sap-router
 ```
 
-Six tests cover configuration, exact binary bodies and raw paths, duplex request
+Eight tests cover configuration, exact binary bodies and raw paths, duplex request
 streaming, healthy silence, killed/refused servers, blackholes, ambiguous requests,
-continuous recovery, retained backup streams on failback, and WebSocket
-text/binary/control traffic and forced closure. Servers bind only localhost and
+continuous recovery, retained backup streams on failback, a single server that
+keeps serving through probe failures, and WebSocket text/binary/control traffic
+and forced closure. Servers bind only localhost and
 never load credentials or contact providers. Every asynchronous scenario has an
 outer timeout. `cargo test -p sap-router -- --nocapture` prints failover measurements.
 

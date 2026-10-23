@@ -413,6 +413,48 @@ async fn recovery_requires_continuous_stability() {
 }
 
 #[tokio::test]
+async fn single_server_keeps_serving_through_probe_failures() {
+    timeout(Duration::from_secs(6), async {
+        let only = Fake::start().await;
+        let local = Local::start(&[&only], false).await;
+        let mut stream = local.request("/stream", full("")).await.into_body();
+        stream.frame().await.unwrap().unwrap();
+        // Probes fail long enough to mark the server down, then recover.
+        only.behavior.not_serving.store(true, Ordering::SeqCst);
+        timeout(Duration::from_secs(2), async {
+            while local.status().await["servers"][0]["state"] != "down" {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // With no server to fail over to, a down server is still tried, not refused.
+        let response = local.request("/echo", full("while down")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        only.behavior.not_serving.store(false, Ordering::SeqCst);
+        timeout(Duration::from_secs(2), async {
+            while local.status().await["servers"][0]["state"] != "healthy" {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Healthy again but inside the stability period: no preference, still served.
+        let status = local.status().await;
+        assert_eq!(status["preferred"], serde_json::Value::Null);
+        assert_eq!(status["servers"][0]["stable"], false);
+        let response = local.request("/echo", full("recovering")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), "recovering");
+        // The stream opened before the outage was never cut off.
+        assert!(timeout(Duration::from_millis(100), stream.frame()).await.is_err());
+        local.wait_preferred("server0").await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn websocket_frames_and_down_close() {
     timeout(Duration::from_secs(6), async {
         let primary = Fake::start().await;

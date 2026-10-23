@@ -10,7 +10,7 @@ use tokio::{net::TcpStream, task::JoinHandle};
 use crate::{
     config::{Config, Server},
     failover,
-    health::Health,
+    health::{Health, Lease},
     websocket,
 };
 
@@ -95,18 +95,27 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
             .unwrap();
     }
     let upgrade = websocket::is_upgrade(&request);
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let mut last_error = String::from("no server configured");
     for index in proxy.health.candidates() {
-        let Some((mut down, generation)) = proxy.health.subscribe(index) else {
-            continue;
-        };
-        let mut connection = match tokio::select! {
-            biased;
-            _ = failover::down(&mut down, generation) => continue,
-            result = connect(&proxy.config.servers[index], proxy.config.connect_timeout_ms) => result,
-        } {
+        let name = proxy.health.name(index).to_owned();
+        if !proxy.health.is_preferred(index) {
+            tracing::info!(
+                server = %name,
+                state = ?proxy.health.state(index),
+                "{method} {path}: no stable server, trying this one anyway"
+            );
+        }
+        let mut lease = proxy.health.lease(index);
+        let mut connection = match connect(&proxy.config.servers[index], proxy.config.connect_timeout_ms).await {
             Ok(connection) => connection,
-            Err(_) => {
-                proxy.health.observe(index, false);
+            Err(error) => {
+                last_error = format!("connect to {name} failed: {error:#}");
+                tracing::warn!(server = %name, "{method} {path}: {last_error}");
+                proxy
+                    .health
+                    .observe(index, Err(format!("request connect failed: {error:#}")));
                 continue;
             }
         };
@@ -142,17 +151,25 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut request));
         let response = tokio::select! {
             biased;
-            _ = failover::down(&mut down, generation) => return failover::overloaded(),
+            _ = proxy.health.lost(&mut lease) => {
+                return failover::overloaded(&method, &path, &format!("{name} went down before response headers"));
+            }
             response = connection.sender.send_request(request) => response,
         };
         let mut response = match response {
             Ok(response) => response,
             // Transmission began: never replay an ambiguous request, including a GET.
-            Err(_) => return failover::overloaded(),
+            Err(error) => {
+                return failover::overloaded(
+                    &method,
+                    &path,
+                    &format!("{name} failed before response headers: {error}"),
+                );
+            }
         };
         if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
             let Some(client_upgrade) = client_upgrade else {
-                return failover::overloaded();
+                return failover::overloaded(&method, &path, &format!("{name} upgraded a non-upgrade request"));
             };
             let server_upgrade = hyper::upgrade::on(&mut response);
             strip_hop_headers(response.headers_mut());
@@ -165,8 +182,8 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
             tokio::spawn(websocket::relay(
                 client_upgrade,
                 server_upgrade,
-                down,
-                generation,
+                proxy.health.clone(),
+                lease,
                 connection,
             ));
             let (parts, _) = response.into_parts();
@@ -174,22 +191,55 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
         }
         strip_hop_headers(response.headers_mut());
         let (parts, body) = response.into_parts();
-        // The stream owns the upstream connection until EOF or a Down transition.
-        return Response::from_parts(parts, streamed(body, down, generation, connection));
+        // The stream owns the upstream connection until EOF or until its server is lost.
+        let transfer = Transfer {
+            health: proxy.health.clone(),
+            lease,
+            connection,
+            label: format!("{method} {path}"),
+        };
+        return Response::from_parts(parts, streamed(body, transfer));
     }
-    failover::overloaded()
+    failover::overloaded(&method, &path, &last_error)
 }
 
-fn streamed(body: Incoming, down: tokio::sync::watch::Receiver<u64>, generation: u64, connection: Connection) -> Body {
-    let stream = futures_util::stream::unfold(Some((body, down, connection)), move |state| async move {
-        let (mut body, mut down, connection) = state?;
-        tokio::select! {
-            biased;
-            _ = failover::down(&mut down, generation) => Some((Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "server down")), None)),
-            frame = body.frame() => match frame {
-                Some(Ok(frame)) => Some((Ok(frame), Some((body, down, connection)))),
-                Some(Err(_)) => Some((Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "upstream stream ended")), None)),
-                None => None,
+/// What a response stream holds on to: its upstream connection and server lease.
+struct Transfer {
+    health: Arc<Health>,
+    lease: Lease,
+    connection: Connection,
+    label: String,
+}
+
+fn streamed(body: Incoming, transfer: Transfer) -> Body {
+    let stream = futures_util::stream::unfold(Some((body, transfer)), |state| async move {
+        let (mut body, mut transfer) = state?;
+        let next = {
+            let Transfer { health, lease, .. } = &mut transfer;
+            tokio::select! {
+                biased;
+                _ = health.lost(lease) => None,
+                frame = body.frame() => Some(frame),
+            }
+        };
+        let aborted = |reason: &str| {
+            let server = transfer.health.name(transfer.lease.index);
+            tracing::warn!(server = %server, "{}: response stream aborted: {reason}", transfer.label);
+            Some((
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    reason.to_owned(),
+                )),
+                None,
+            ))
+        };
+        match next {
+            None => aborted("server down, another server available"),
+            Some(Some(Ok(frame))) => Some((Ok(frame), Some((body, transfer)))),
+            Some(Some(Err(error))) => aborted(&format!("upstream stream failed: {error}")),
+            Some(None) => {
+                drop(transfer.connection);
+                None
             }
         }
     });
