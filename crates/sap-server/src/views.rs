@@ -196,7 +196,10 @@ impl Control for Node {
         records
             .into_iter()
             .map(|record| {
-                let streaming = state.streams.get(&record.key).is_some_and(|n| *n > 0);
+                // A request in flight counts as streaming from the moment it is identified:
+                // Codex reasoning models send no upstream bytes for seconds, and tool-call
+                // responses finish within a second, so bytes alone almost never show.
+                let streaming = record.open_streams > 0 || state.streams.get(&record.key).is_some_and(|n| *n > 0);
                 let mut view = thread(record);
                 view.streaming = streaming;
                 view
