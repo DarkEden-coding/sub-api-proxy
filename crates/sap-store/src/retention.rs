@@ -191,6 +191,15 @@ impl Store {
             Ok(report)
         })?;
         let conn = self.connection()?;
+        let pages: u64 = conn.pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let free: u64 = conn.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        // VACUUM rewrites the whole file while holding the connection, which stalls every
+        // store user (health included) for seconds on a large store. Reclaim only when at
+        // least a quarter of the file is free; otherwise SQLite reuses the free pages.
+        if free == 0 || free.saturating_mul(4) < pages {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            return Ok(report);
+        }
         // VACUUM rebuilds live pages; checkpoint also reclaims the WAL file.
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
         let pages: u64 = conn.pragma_query_value(None, "page_count", |r| r.get(0))?;

@@ -262,7 +262,9 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
                 tracing::warn!("SAP credential discovery failed");
             }
             if std::time::Instant::now() >= compact_at {
-                if node.store.compact().is_err() {
+                // Compaction scans the op log and may VACUUM: keep it off the async workers.
+                let store = node.store.clone();
+                if !matches!(tokio::task::spawn_blocking(move || store.compact()).await, Ok(Ok(_))) {
                     tracing::warn!("SAP store compaction failed");
                 }
                 compact_at = std::time::Instant::now() + Duration::from_secs(60);

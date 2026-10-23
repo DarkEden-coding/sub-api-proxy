@@ -266,6 +266,11 @@ impl SapHooks for Node {
                 old.output_tokens = old.output_tokens.max(usage.output_tokens);
                 old.cache_read_tokens = old.cache_read_tokens.max(usage.cache_read_tokens);
                 old.cache_write_tokens = old.cache_write_tokens.max(usage.cache_write_tokens);
+                // Streams repeat the cumulative usage on every event; an unchanged report
+                // must not append (and fsync) another op-log row.
+                if delta == ThreadUsage::default() {
+                    return;
+                }
                 let local = state.accounts.entry(account.clone()).or_default();
                 local.tokens = local
                     .tokens
@@ -279,7 +284,9 @@ impl SapHooks for Node {
                     sap_core::DateTime::from_timestamp(now.timestamp().div_euclid(900) * 900, 0).unwrap_or(now);
                 let mut tokens = delta;
                 tokens.requests = 0;
-                let _ = self.store.add_usage(account, bucket, tokens);
+                if tokens != ThreadUsage::default() {
+                    let _ = self.store.add_usage(account, bucket, tokens);
+                }
             }
             Observation::Quota { observed_at, signals } => {
                 if self

@@ -166,6 +166,27 @@ async fn node_affinity_children_usage_and_reopen() {
             }),
         );
     }
+    // Streams repeat the cumulative report on every event: no new op-log rows.
+    let log = sap_store::Store::open(
+        f.dir.join("state.sqlite"),
+        sap_core::ids::NodeId("local".into()),
+        Default::default(),
+    )
+    .unwrap();
+    let before = sap_core::sync::ChangeLog::cursor(&log).unwrap();
+    for _ in 0..3 {
+        f.node.on_observation(
+            &req,
+            &credential,
+            Observation::Usage(ThreadUsage {
+                requests: 1,
+                input_tokens: 15,
+                output_tokens: 2,
+                ..Default::default()
+            }),
+        );
+    }
+    assert_eq!(sap_core::sync::ChangeLog::cursor(&log).unwrap(), before);
     assert_eq!(f.pick(&f.request("parent", true, false, false)), credential);
     assert_eq!(f.pick(&f.request("parent", false, true, false)), credential);
     let parent = f
