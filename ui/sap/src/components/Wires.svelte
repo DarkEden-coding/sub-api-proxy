@@ -201,14 +201,6 @@
       }
       circles.push({ x: to.x, y: to.y, color: served ? providerColor(acct.provider) : "var(--faint)" });
     }
-
-    // Servers that carry nothing: a short dashed stub shows they are standing by.
-    for (const n of nodes) {
-      const server = serverEls.get(n.id);
-      if (!server || perNode.has(n.id)) continue;
-      const l = pt(server, "l");
-      wire(`stub:${n.id}`, `stub:${n.id}`, { x: l.x - 40, y: l.y }, l, { color: "var(--faint)", width: 1, opacity: 0.6, dashed: true });
-    }
     retarget(out);
     dots = circles;
     routes = uniqueRoutes(streaming);
