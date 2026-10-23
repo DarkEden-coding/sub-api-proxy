@@ -159,6 +159,26 @@ It returns a nonzero exit status when any check fails. It sends health requests
 to configured servers only and never makes provider requests.
 
 On another Linux client, configure only `router.yaml` and use `--role router`.
+
+## Updating
+
+On a server, from its checkout, after pulling: `packaging/sub-api-proxy/update-local.sh`.
+It builds the dashboards and binaries for the selected `--role` and runs `install.sh`.
+A router-only client builds just `sap-router` and `sap`:
+`packaging/sub-api-proxy/update-local.sh --role router`.
+
+A client keeps its own git checkout (default `~/Custom-Apps/Sub-Api-Proxy`). Push, then
+update it from the server's checkout:
+
+```sh
+packaging/sub-api-proxy/update-remote.sh             # remote_client from install.json
+packaging/sub-api-proxy/update-remote.sh dark@host   # or name the client
+```
+
+It fast-forwards the client to `origin/main` over SSH (key authentication), runs
+`update-local.sh --role router` there, and prints the router status. It warns when
+the local checkout differs from origin, since the client builds origin. Neither
+script edits configuration.
 Stop services with `systemctl --user disable --now sap-router sap-server` on Linux
 or `launchctl bootout gui/$(id -u)/io.sub-api-proxy.router` and the corresponding
 server label on macOS. Remove their user unit files to uninstall; keep config,
