@@ -35,7 +35,7 @@
     </dl>
   {:else}
     <h2>No thread selected</h2>
-    <div class="lede">Active threads show up here.</div>
+    <div class="lede">Pick an active thread to see its account, usage and lineage.</div>
   {/if}
 </div>
 

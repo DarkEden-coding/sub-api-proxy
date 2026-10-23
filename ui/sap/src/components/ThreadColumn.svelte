@@ -54,7 +54,18 @@
       {/if}
     </div>
   {:else}
-    <div class="empty">No active threads.</div>
+    <div class="idle">
+      <svg viewBox="0 0 120 64" aria-hidden="true">
+        <g fill="none" stroke="var(--rule)" stroke-width="1.4" stroke-dasharray="2 4" stroke-linecap="round">
+          <path d="M12 10C46 10 54 32 92 32" /><path d="M12 32H92" /><path d="M12 54C46 54 54 32 92 32" />
+        </g>
+        <g fill="var(--faint)"><circle cx="12" cy="10" r="3" /><circle cx="12" cy="32" r="3" /><circle cx="12" cy="54" r="3" /></g>
+        <circle class="pulse" cx="92" cy="32" r="7" fill="none" stroke="var(--muted)" stroke-width="1.2" />
+        <circle cx="92" cy="32" r="5" fill="var(--faint)" />
+      </svg>
+      <div class="title">Waiting for a session</div>
+      <p>Claude Code and Codex threads appear here as soon as they send a request, and leave a little after they go quiet.</p>
+    </div>
   {/each}
 </div>
 
@@ -73,4 +84,11 @@
   .mname { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
   .gmeta { margin-left: auto; color: var(--muted); font-size: 12px; }
   .machine { padding-bottom: 4px; }
+  .idle { margin: 18px 16px 0 0; padding: 28px 24px; border: 1px dashed var(--rule); border-radius: 10px; text-align: center; }
+  .idle svg { width: 120px; height: 64px; overflow: visible; }
+  .idle .title { margin-top: 12px; font-family: var(--serif); font-size: 17px; color: var(--ink-2); }
+  .idle p { margin: 6px auto 0; max-width: 300px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .pulse { transform-origin: 92px 32px; animation: pulse 2.8s ease-out infinite; }
+  @keyframes pulse { from { transform: scale(1); opacity: .7; } to { transform: scale(2.2); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation: none; opacity: 0; } }
 </style>
