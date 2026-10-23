@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ClientKind, FlowSnapshot, ThreadView } from "../api/types.ts";
+  import { dotsDue, LEG_MS, placeDot, uniqueRoutes, type Dot, type Placed, type Route } from "../model/dots.ts";
   import { linkKey, servingNode, threadCounts, flatten, type ClientGroup } from "../model/threads.ts";
 
   let { host, snapshot, groups, collapsed, selected }: {
@@ -15,9 +16,9 @@
   /** `dest` names what the wire ends at, so a wire that appears or leaves can slide to or from a sibling. */
   interface Wire extends Geometry { key: string; dest: string; color: string; dashed?: boolean }
   interface Shown { wire: Wire; from: Geometry; now: Geometry; dying: boolean }
-  interface Dot { x: number; y: number; color: string }
+  interface Circle { x: number; y: number; color: string }
   let shown = $state.raw<Shown[]>([]);
-  let dots = $state.raw<Dot[]>([]);
+  let dots = $state.raw<Circle[]>([]);
 
   const DURATION = 260;
   const geometryKeys = ["x1", "y1", "x2", "y2", "width", "opacity"] as const;
@@ -74,6 +75,33 @@
     if (raw < 1) frame = requestAnimationFrame(step);
   }
 
+  // Dots travel thread -> server -> account along the wires as currently drawn, while a thread streams.
+  let routes: Route[] = [];
+  let flight: Dot[] = [];
+  let flightFrame = 0;
+  const nextAt = new Map<string, number>();
+  let flying = $state.raw<Placed[]>([]);
+
+  const wake = () => {
+    if (!flightFrame && !document.hidden && !reduceMotion.matches) flightFrame = requestAnimationFrame(fly);
+  };
+  const stopFlight = () => {
+    cancelAnimationFrame(flightFrame);
+    flightFrame = 0;
+    flight = [];
+    flying = [];
+    nextAt.clear();
+  };
+  function fly(time: number) {
+    flightFrame = 0;
+    if (document.hidden || reduceMotion.matches) return stopFlight();
+    const wire = (key: string) => entries.get(key)?.now;
+    flight = flight.filter((d) => time - d.born < 2 * LEG_MS);
+    for (const route of dotsDue(nextAt, routes, time, flight.length)) flight.push({ route, born: time });
+    flying = flight.flatMap((d) => placeDot(d, time, wire) ?? []);
+    if (flight.length || routes.length) flightFrame = requestAnimationFrame(fly);
+  }
+
   const path = (g: Geometry) => curve({ x: g.x1, y: g.y1 }, { x: g.x2, y: g.y2 });
 
   const providerColor = (p: string) => (p === "claude" ? "var(--claude)" : p === "codex" ? "var(--openai)" : "var(--muted)");
@@ -103,7 +131,8 @@
     const out: Wire[] = [];
     const wire = (key: string, dest: string, a: { x: number; y: number }, b: { x: number; y: number }, rest: { color: string; dashed?: boolean; width: number; opacity: number }) =>
       out.push({ key, dest, x1: a.x, y1: a.y, x2: b.x, y2: b.y, ...rest });
-    const circles: Dot[] = [];
+    const circles: Circle[] = [];
+    const streaming: Route[] = [];
     const perNode = new Map<string, number>();
 
     // Threads (or a collapsed group of them) to the server that serves them.
@@ -135,6 +164,9 @@
         const to = pt(server, "l");
         to.y += inOffset[a.client];
         const sel = ts.length === 1 && ts[0].key === selected?.key;
+        for (const t of ts) {
+          if (t.streaming && t.account) streaming.push({ from: `${a.id}>${nodeId}`, to: `${nodeId}:${t.account}`, color: clientColor[a.client] });
+        }
         wire(`${a.id}>${nodeId}`, nodeId, from, to, {
           color: clientColor[a.client],
           width: ts.length > 1 ? 1 + ts.length : sel ? 2.4 : 1.4,
@@ -179,6 +211,8 @@
     }
     retarget(out);
     dots = circles;
+    routes = uniqueRoutes(streaming);
+    wake();
   }
 
   $effect(() => {
@@ -196,6 +230,15 @@
   });
 
   $effect(() => () => cancelAnimationFrame(frame));
+
+  $effect(() => {
+    const onVisibility = () => (document.hidden ? stopFlight() : wake());
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopFlight();
+    };
+  });
 </script>
 
 <svg aria-hidden="true">
@@ -203,6 +246,7 @@
     <path d={path(now)} fill="none" stroke={w.color} stroke-width={now.width} stroke-opacity={now.opacity} stroke-dasharray={w.dashed ? "2 4" : undefined} />
   {/each}
   {#each dots as d}<circle cx={d.x} cy={d.y} r="2.5" fill={d.color} />{/each}
+  {#each flying as d}<circle cx={d.x} cy={d.y} r="2" fill={d.color} opacity={d.opacity} />{/each}
 </svg>
 
 <style>

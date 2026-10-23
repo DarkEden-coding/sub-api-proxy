@@ -26,7 +26,7 @@ pub struct Config {
     pub registry_max: usize,
 }
 fn idle() -> u64 {
-    600
+    20
 }
 fn maximum() -> usize {
     10000

@@ -310,7 +310,7 @@ Neither may change `control.rs` without listing the change in its report.
    - `limits` (store retention and budget)
    - `peers` (`id`, `url`, `secret_file`)
    - `routing` (`sap_core::routing::RoutingConfig`)
-   - `idle_window_secs` (600) and `registry_max` (10000)
+   - `idle_window_secs` (20) and `registry_max` (10000)
 2. **Account discovery:**
    - Map cliproxy credentials to logical accounts automatically. The Claude identity is the account UUID or email from the credential. Codex uses the ChatGPT `account_id`.
    - Create the `Account` in the store on first sight, with `plan` from credential attributes or quota signals, and capacity from `sap_routing::plan_capacity`.

@@ -63,7 +63,7 @@ management instance and loopback password. Normal cliproxy startup does this.
 node: power-server
 role: primary                  # primary or fallback
 store_path: sap.sqlite          # relative to this YAML file
-idle_window_secs: 600
+idle_window_secs: 20
 registry_max: 10000
 allow_loopback_peers: false     # explicit development/test opt-in
 limits:
