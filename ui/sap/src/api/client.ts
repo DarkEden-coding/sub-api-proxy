@@ -35,3 +35,4 @@ export const fetchNodes = () => backend.nodes();
 export const fetchConflicts = () => backend.conflicts();
 export const resolveConflict = (id: string, req: ResolveRequest) => backend.resolveConflict(id, req);
 export const fetchEvents = (limit = 100) => backend.events(limit);
+export const fetchUsage = (days = 30) => backend.usage(days);

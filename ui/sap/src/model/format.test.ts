@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dayKey, duration, headerClock, remaining, shortKey, when } from "./format.ts";
+import { cacheShare, compact, dayKey, duration, headerClock, remaining, shortKey, usd, when } from "./format.ts";
 
 test("remaining percent counts down from used and stays within 0-100", () => {
   assert.equal(remaining(0), 100);
@@ -33,4 +33,18 @@ test("clock and day labels", () => {
 test("short keys", () => {
   assert.equal(shortKey("claude:7fe0a2c1-0d7e-4c1e-9b1a-16beb50f2bbb"), "7fe0·2bbb");
   assert.equal(shortKey("claude:7fe0a2c1-0d7e/6b98dc80"), "agent 6b98");
+});
+
+test("usage dollars and token counts", () => {
+  assert.equal(usd(12.345), "$12.35");
+  assert.equal(usd(1234.5), "$1,235");
+  assert.equal(usd(0.004), "<$0.01");
+  assert.equal(usd(0), "$0.00");
+  assert.equal(usd(null), "—");
+  assert.equal(compact(950), "950");
+  assert.equal(compact(1234), "1.2K");
+  assert.equal(compact(5_600_000), "5.6M");
+  assert.equal(compact(2_000_000_000), "2B");
+  assert.equal(cacheShare({ input_tokens: 100, cache_read_tokens: 900, cache_write_tokens: 0 }), 90);
+  assert.equal(cacheShare({ input_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 }), 0);
 });

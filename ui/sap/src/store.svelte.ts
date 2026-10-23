@@ -3,7 +3,7 @@ import { fetchFlow, isDemo, managementKey, RequestError, subscribe, useDemo } fr
 import type { AccountView, EventView, FlowSnapshot, ThreadKey, ThreadView } from "./api/types.ts";
 
 export type Status = "connecting" | "live" | "demo" | "offline" | "unauthorized";
-export const PAGES = ["flow", "accounts", "threads", "nodes", "events", "settings"] as const;
+export const PAGES = ["flow", "accounts", "threads", "usage", "nodes", "events", "settings"] as const;
 export type Page = (typeof PAGES)[number];
 
 const pageFromHash = (): Page => {

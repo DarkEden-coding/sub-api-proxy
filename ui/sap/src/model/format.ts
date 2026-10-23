@@ -84,3 +84,25 @@ export function shortKey(key: ThreadKey): string {
   if (slash >= 0) return `agent ${id.slice(slash + 1, slash + 5)}`;
   return id.length > 9 ? `${id.slice(0, 4)}·${id.slice(-4)}` : id;
 }
+
+/** Dollars: cents below $100, whole dollars above, "<$0.01" for a trace, "—" when unpriced. */
+export function usd(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  if (n !== 0 && Math.abs(n) < 0.01) return "<$0.01";
+  const places = Math.abs(n) >= 100 ? 0 : 2;
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: places, maximumFractionDigits: places });
+}
+
+/** Token counts: 1,234 -> "1.2K", 5,600,000 -> "5.6M". */
+export function compact(n: number): string {
+  for (const [size, suffix] of [[1e9, "B"], [1e6, "M"], [1e3, "K"]] as const) {
+    if (Math.abs(n) >= size) return `${(n / size).toFixed(Math.abs(n) >= size * 100 ? 0 : 1).replace(/\.0$/, "")}${suffix}`;
+  }
+  return String(Math.round(n));
+}
+
+/** Whole percent of input-side tokens that came from the cache. */
+export function cacheShare(t: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number }): number {
+  const all = t.input_tokens + t.cache_read_tokens + t.cache_write_tokens;
+  return all ? Math.round((t.cache_read_tokens / all) * 100) : 0;
+}

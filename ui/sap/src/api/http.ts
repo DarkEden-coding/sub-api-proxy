@@ -1,6 +1,6 @@
 import type {
   AccountHistory, AccountPatch, AccountView, ApiError, AssignRequest, Conflict, EventView,
-  FlowSnapshot, LoginRequest, LoginStart, NodeView, ResolveRequest, ThreadView,
+  FlowSnapshot, LoginRequest, LoginStart, NodeView, ResolveRequest, ThreadView, UsageHistory,
 } from "./types.ts";
 import { parseSse } from "../model/sse.ts";
 
@@ -33,10 +33,10 @@ async function failure(res: Response): Promise<RequestError> {
   return new RequestError(res.status, body?.message ?? `${res.status} ${res.statusText}`);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, root = API): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(API + path, {
+    res = await fetch(root + path, {
       method,
       headers: headers(body !== undefined),
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -110,6 +110,9 @@ export const http = {
   conflicts: () => request<Conflict[]>("GET", "/conflicts"),
   resolveConflict: (id: string, req: ResolveRequest) => request<Conflict>("POST", `/conflicts/${enc(id)}/resolve`, req),
   events: (limit: number) => request<EventView[]>("GET", `/events?limit=${limit}`),
+  // Served by the proxy's management API, not the /sap/api routes.
+  usage: (days: number) =>
+    request<UsageHistory>("GET", `/observability/usage/history?days=${days}`, undefined, "/v8/management"),
 };
 
 export type Backend = typeof http;

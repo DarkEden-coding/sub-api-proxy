@@ -1,6 +1,6 @@
 // Demo backend: serves the sap-core sample and applies actions to a local copy.
 import type {
-  AccountHistory, AccountPatch, AccountView, Conflict, EventView, FlowSnapshot, ThreadView,
+  AccountHistory, AccountPatch, AccountView, Conflict, EventView, FlowSnapshot, ThreadView, UsageHistory,
 } from "./types.ts";
 import type { Backend, StreamHandlers } from "./http.ts";
 
@@ -87,7 +87,39 @@ export const demo: Backend = {
     return { ...c, id, resolved: true, applied: { ...c.applied, node: req.keep } };
   },
   events: async (limit): Promise<EventView[]> => structuredClone((await load()).events.slice(0, limit)),
+  usage: async (days): Promise<UsageHistory> => usageSample(days, (await load()).now),
 };
+
+/** A small, plausible history so the Usage tab can be seen in `?demo=1`. */
+function usageSample(days: number, now: string): UsageHistory {
+  const sum = (requests: number, input: number, read: number, write: number, output: number, rate: [number, number, number, number]) => {
+    const per = (n: number, r: number) => (n * r) / 1e6;
+    const cost = per(input, rate[0]) + per(read, rate[2]) + per(write, rate[3]) + per(output, rate[1]);
+    const without = per(input + read + write, rate[0]) + per(output, rate[1]);
+    return {
+      requests, failed: 0, input_tokens: input, output_tokens: output, cache_read_tokens: read, cache_write_tokens: write,
+      cost_usd: cost, cost_without_cache_usd: without, savings_usd: without - cost, unpriced_requests: 0,
+    };
+  };
+  const sonnet: [number, number, number, number] = [2, 10, 0.2, 2.5];
+  const end = Date.parse(now);
+  const dayList = Array.from({ length: Math.min(days, 7) }, (_, i) => {
+    const t = new Date(end - (Math.min(days, 7) - 1 - i) * 86_400_000);
+    return { date: t.toISOString().slice(0, 10), ...sum(40 + i * 9, 30_000 + i * 4_000, 6_000_000 + i * 900_000, 300_000, 90_000 + i * 11_000, sonnet) };
+  });
+  const total = dayList.reduce((a, d) => sum(a.requests + d.requests, a.input_tokens + d.input_tokens, a.cache_read_tokens + d.cache_read_tokens, a.cache_write_tokens + d.cache_write_tokens, a.output_tokens + d.output_tokens, sonnet), sum(0, 0, 0, 0, 0, sonnet));
+  return {
+    prices: { source: "built-in", updated_at: null },
+    statistics_enabled: true,
+    totals: total,
+    days: dayList,
+    models: [{ model: "claude-sonnet-5-5", provider: "claude", priced: true, ...total }],
+    recent: Array.from({ length: 5 }, (_, i) => ({
+      at: end - i * 420_000, request_id: `demo-${i}`, model: "claude-sonnet-5-5", provider: "claude", failed: false,
+      input_tokens: 4, output_tokens: 300 + i * 40, cache_read_tokens: 180_000, cache_write_tokens: 500, cost_usd: 0.04, savings_usd: 0.33,
+    })),
+  };
+}
 
 export function demoStream(h: StreamHandlers): () => void {
   const push = (s: FlowSnapshot) => h.onSnapshot(s);

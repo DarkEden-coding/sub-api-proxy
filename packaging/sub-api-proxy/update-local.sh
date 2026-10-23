@@ -11,8 +11,11 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 cd "$repo"
 
-# The dashboard is embedded in the binary, so build it first.
-(cd ui && { [ -d node_modules ] || npm ci; } && npm run build)
+# Both dashboards (ui: management, ui/sap: Sub-Api-Proxy) are embedded in the binaries,
+# so build them first.
+for dir in ui ui/sap; do
+    (cd "$dir" && { [ -d node_modules ] || npm ci; } && npm run build)
+done
 
 cargo build --release -p cliproxy -p sap-router -p sap-cli 2>&1 | tail -5
 exec "$script_dir/install.sh" --bin-dir "$repo/target/release" "$@"

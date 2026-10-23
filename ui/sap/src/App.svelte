@@ -9,6 +9,7 @@
   import NodesPage from "./pages/NodesPage.svelte";
   import SettingsPage from "./pages/SettingsPage.svelte";
   import ThreadsPage from "./pages/ThreadsPage.svelte";
+  import UsagePage from "./pages/UsagePage.svelte";
   import { store } from "./store.svelte.ts";
 
   onMount(() => {
@@ -29,6 +30,7 @@
     {:else if store.page === "events"}<EventsPage />
     {/if}
   {/if}
+  {#if store.page === "usage"}<UsagePage />{/if}
   {#if store.page === "settings"}<SettingsPage />{/if}
 </div>
 

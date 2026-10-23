@@ -216,3 +216,52 @@ export interface Conflict {
   detected_at: Timestamp;
   resolved: boolean;
 }
+
+/** One group of `GET /v8/management/observability/usage/history`; dollars are API-equivalent. */
+export interface UsageSum {
+  requests: number;
+  failed: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  cost_without_cache_usd: number;
+  savings_usd: number;
+  unpriced_requests: number;
+}
+
+export interface UsageDay extends UsageSum {
+  date: string;
+}
+
+export interface UsageModel extends UsageSum {
+  model: string;
+  provider: string;
+  priced: boolean;
+}
+
+export interface UsageRequest {
+  /** Unix milliseconds. */
+  at: number;
+  request_id: string;
+  model: string;
+  provider: string;
+  failed: boolean;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /** Null when no price is known for the model. */
+  cost_usd: number | null;
+  savings_usd: number | null;
+}
+
+export interface UsageHistory {
+  prices: { source: "online" | "built-in"; updated_at: number | null };
+  statistics_enabled: boolean;
+  totals: UsageSum;
+  days: UsageDay[];
+  models: UsageModel[];
+  recent: UsageRequest[];
+}
