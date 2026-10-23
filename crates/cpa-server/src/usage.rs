@@ -28,6 +28,8 @@ pub struct UsageQueue {
     items: Mutex<VecDeque<(Instant, Vec<u8>)>>,
     usage_subscribers: std::sync::Arc<Subscribers>,
     error_subscribers: std::sync::Arc<Subscribers>,
+    /// Durable history of every accepted record (additive; not in Go).
+    history: std::sync::OnceLock<crate::usage_history::UsageHistory>,
 }
 
 /// Go `usageSubscriberBuffer` / `errorSubscriberBuffer`.
@@ -108,6 +110,7 @@ impl Default for UsageQueue {
             items: Mutex::default(),
             usage_subscribers: std::sync::Arc::default(),
             error_subscribers: std::sync::Arc::default(),
+            history: std::sync::OnceLock::new(),
         }
     }
 }
@@ -149,6 +152,16 @@ impl UsageQueue {
         }
     }
 
+    /// Starts keeping a durable history in the JSONL file at `path`. Call once, before
+    /// serving; later calls are ignored.
+    pub fn attach_history(&self, path: std::path::PathBuf) {
+        let _ = self.history.set(crate::usage_history::UsageHistory::open(path));
+    }
+
+    pub(crate) fn history(&self) -> Option<&crate::usage_history::UsageHistory> {
+        self.history.get()
+    }
+
     /// Whether a usage record would be kept; producers can skip building one.
     pub fn accepts(&self) -> bool {
         self.enabled.load(Ordering::SeqCst) && self.statistics.load(Ordering::SeqCst)
@@ -163,6 +176,9 @@ impl UsageQueue {
     pub fn enqueue(&self, payload: Vec<u8>) {
         if !self.accepts() || payload.is_empty() {
             return;
+        }
+        if let Some(history) = self.history.get() {
+            history.record(&payload);
         }
         // Go `Enqueue`: connected RESP subscribers take the record instead of the queue.
         if self.usage_subscribers.publish(&payload) {

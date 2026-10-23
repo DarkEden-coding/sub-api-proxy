@@ -1337,6 +1337,9 @@ async fn serve(
         google: Default::default(),
     };
     let rt = Arc::new(Runtime::new(config, credentials, executors).with_plugin_host(plugins));
+    // Dashboard usage page: per-request token history kept next to the config file.
+    rt.usage_queue()
+        .attach_history(config_path.with_file_name("usage-history.jsonl"));
     // sub-api-proxy: hooks must exist before router construction.
     let sap_node = sap_config
         .as_deref()

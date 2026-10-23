@@ -170,6 +170,70 @@ fn merge_buckets(dst: &mut Value, src: &Value) {
     }
 }
 
+/// Additive (not in Go): `GET /observability/usage/history?days=30`, token, spend and cache
+/// savings totals from the durable history, priced as pay-per-token API traffic. An
+/// out-of-date price list is refreshed in the background unless update checks are disabled.
+pub(crate) async fn usage_history(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery) -> Response {
+    let q = Query::parse(raw);
+    let days = match q.first("days").trim() {
+        "" => 30,
+        v => match v.parse::<i64>() {
+            Ok(n) if n > 0 => n,
+            _ => return fail(StatusCode::BAD_REQUEST, "days must be a positive integer"),
+        },
+    };
+    let rt = state.rt.clone();
+    if rt.usage_queue().history().is_none() {
+        return fail(StatusCode::NOT_FOUND, "usage history is not enabled");
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut summary = tokio::task::spawn_blocking({
+        let rt = rt.clone();
+        move || rt.usage_queue().history().map(|h| h.summary(days, now))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(Value::Null);
+    if let Some(object) = summary.as_object_mut() {
+        object.insert("statistics_enabled".into(), rt.usage_queue().accepts().into());
+        object.insert("price_refresh_allowed".into(), (!state.update_check_disabled).into());
+    }
+    if !state.update_check_disabled && rt.usage_queue().history().is_some_and(|h| h.pricing.refresh_due(now)) {
+        refresh_prices(rt);
+    }
+    respond(StatusCode::OK, &summary)
+}
+
+/// Fetches the public price list in the background through the configured proxy. A failure
+/// leaves the old prices in place and the next request tries again.
+fn refresh_prices(rt: Arc<crate::Runtime>) {
+    tokio::spawn(async move {
+        let proxy = Proxy::parse(
+            rt.config()
+                .document
+                .get("requests")
+                .and_then(|r| r.get("proxy-url"))
+                .and_then(serde_yaml_ng::Value::as_str)
+                .unwrap_or_default(),
+        );
+        let Ok(client) = proxy
+            .apply(wreq::Client::builder().redirect(wreq::redirect::Policy::none()), true)
+            .and_then(wreq::ClientBuilder::build)
+        else {
+            return;
+        };
+        if let Some(history) = rt.usage_queue().history()
+            && let Err(error) = history
+                .pricing
+                .refresh(&client, crate::usage_pricing::PRICE_LIST_URL)
+                .await
+        {
+            tracing::debug!(%error, "usage price list refresh failed");
+        }
+    });
+}
+
 /// Go `GetUsageQueue`: pops up to `count` (default 1) queued usage records. A record
 /// that is valid JSON is embedded as is, anything else as a JSON string.
 pub(crate) async fn usage_queue(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery) -> Response {

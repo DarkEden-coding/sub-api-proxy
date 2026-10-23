@@ -49,6 +49,8 @@ mod speech;
 #[doc(hidden)]
 pub mod testing;
 pub mod usage;
+mod usage_history;
+mod usage_pricing;
 mod usage_record;
 mod videos;
 pub mod watching;

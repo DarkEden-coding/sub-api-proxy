@@ -4,12 +4,15 @@ import { test } from "node:test";
 import {
   ago,
   buckets,
+  cacheShare,
+  compact,
   cleanEvent,
   credState,
   equal,
   fieldPath,
   level,
   lineDiff,
+  usd,
   otherSignals,
   quotaWindows,
   reconcile,
@@ -332,4 +335,18 @@ print(json.dumps({k.arg: k.value.value for n in ast.walk(ast.parse(sys.stdin.rea
   const odd = run("import json, sys, tomllib; print(json.dumps(tomllib.loads(sys.stdin.read())))",
     snippet("Codex CLI", `http://h/p"\\q`, key, model).split("# then")[0]);
   assert.equal(odd.model_providers.cliproxy.base_url, `http://h/p"\\q/v1`);
+});
+
+test("usage figures format for the spend cards", () => {
+  assert.equal(usd(12.345), "$12.35");
+  assert.equal(usd(1234.5), "$1,235");
+  assert.equal(usd(0.004), "<$0.01");
+  assert.equal(usd(0), "$0.00");
+  assert.equal(usd(null), "—");
+  assert.equal(compact(950), "950");
+  assert.equal(compact(1234), "1.2K");
+  assert.equal(compact(5_600_000), "5.6M");
+  assert.equal(compact(2_000_000_000), "2B");
+  assert.equal(cacheShare({ input_tokens: 100, cache_read_tokens: 900, cache_write_tokens: 0 }), 90);
+  assert.equal(cacheShare({ input_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 }), 0);
 });

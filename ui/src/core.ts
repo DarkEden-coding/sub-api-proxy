@@ -205,6 +205,24 @@ export function cleanEvent(raw: Data): Event {
     output: Number(raw.tokens?.output_tokens) || 0,
   };
 }
+/** Dollars for the usage page: cents under $100, whole dollars above; `—` when unpriced. */
+export function usd(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  if (n !== 0 && Math.abs(n) < 0.01) return "<$0.01";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: Math.abs(n) >= 100 ? 0 : 2, minimumFractionDigits: Math.abs(n) >= 100 ? 0 : 2 });
+}
+/** 1,234 -> 1.2K, 5,600,000 -> 5.6M. */
+export function compact(n: number): string {
+  const units: [number, string][] = [[1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  for (const [size, suffix] of units)
+    if (Math.abs(n) >= size) return `${(n / size).toFixed(Math.abs(n) >= size * 100 ? 0 : 1).replace(/\.0$/, "")}${suffix}`;
+  return String(Math.round(n));
+}
+/** Share of all input-side tokens that were served from cache, as a whole percent. */
+export const cacheShare = (t: Data) => {
+  const all = t.input_tokens + t.cache_read_tokens + t.cache_write_tokens;
+  return all ? Math.round((t.cache_read_tokens / all) * 100) : 0;
+};
 const median = (v: number[]) => {
   const s = v.filter((n) => n > 0).sort((a, b) => a - b);
   return s.length ? s[Math.floor((s.length - 1) / 2)] : null;

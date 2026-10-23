@@ -602,6 +602,10 @@ pub fn router(state: Arc<Management>) -> Router {
             "observability/usage/queue",
             methods().get(guarded!(s, observability::usage_queue)),
         ),
+        (
+            "observability/usage/history",
+            methods().get(guarded!(s, observability::usage_history)),
+        ),
         ("oauth/auth-url", methods().get(guarded!(s, oauth::auth_url))),
         ("oauth/status", methods().get(guarded!(s, oauth::status))),
         ("oauth/session", methods().delete(guarded!(s, oauth::cancel))),

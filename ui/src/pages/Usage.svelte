@@ -4,6 +4,7 @@
   import { buckets, sumBuckets, sum, label, provider, cleanEvent, usageStats, type Buckets, type Data, type Event } from "../core";
   import Grille from "../Grille.svelte";
   import Missing from "../Missing.svelte";
+  import UsageSpend from "../UsageSpend.svelte";
 
   const keys = new Res<Data>(() => api("/observability/usage/api-keys"));
   keys.load();
@@ -55,6 +56,8 @@
 
 <div class="head"><h1>Usage</h1></div>
 <Missing actions={[["GET", "/observability/usage/queue?count=0", "the live request view"]]} />
+
+<UsageSpend />
 
 <section class="section">
   <div class="section-head"><h2>Last 200 minutes</h2><span class="legend">Reported by the server · 10-minute buckets</span></div>
