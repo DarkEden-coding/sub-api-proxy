@@ -4,7 +4,7 @@
   import Donut from "../components/Donut.svelte";
   import StackedColumns from "../components/StackedColumns.svelte";
   import { cacheShare, compact, usd } from "../model/format.ts";
-  import { fillDays, percent, SAVED_COLOR, SPENT_COLOR, TOKEN_TYPES, tokenCounts } from "../model/usage.ts";
+  import { fillDays, percent, SAVED_COLOR, SPENT_COLOR, TOKEN_TYPES, tokenCounts, trimLeading } from "../model/usage.ts";
 
   const RANGES = [7, 30, 90];
   let days = $state(30);
@@ -32,7 +32,9 @@
     new Date(at).toLocaleString("en-GB", { hourCycle: "h23", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const money = (n: number) => (n === 0 ? "$0" : usd(n));
 
-  const filled = $derived(data ? fillDays(data.days, days, Date.now()) : []);
+  const filled = $derived(data ? trimLeading(fillDays(data.days, days, Date.now())) : []);
+  const peakSpend = $derived(data?.days.reduce<UsageSum & { date: string } | null>((a, d) => (!a || d.cost_usd > a.cost_usd ? d : a), null) ?? null);
+  const peakTokens = $derived(data?.days.reduce<UsageSum & { date: string } | null>((a, d) => (!a || tokens(d) > tokens(a) ? d : a), null) ?? null);
   const spendColumns = $derived(
     filled.map((d) => ({ label: dayLabel(d.date), values: "empty" in d ? [0, 0] : [d.cost_usd, Math.max(0, d.savings_usd)] })),
   );
@@ -93,44 +95,54 @@
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-head">
-        <div><h3>Daily spend</h3><div class="lede">API-equivalent cost, and what caching took off it</div></div>
-        <div class="legend">
-          <span><i style:background={SPENT_COLOR}></i>Spent</span>
-          <span><i style:background={SAVED_COLOR}></i>Saved by caching</span>
-        </div>
+    <div class="layout">
+      <div class="main">
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h3>Daily spend</h3>
+              <div class="lede">API-equivalent cost, and what caching took off it</div>
+              {#if activeDays}<div class="figs"><span><b>{usd(t.cost_usd / activeDays)}</b> per active day</span>{#if peakSpend}<span><b>{usd(peakSpend.cost_usd)}</b> peak, {dayLabel(peakSpend.date)}</span>{/if}</div>{/if}
+            </div>
+            <div class="legend">
+              <span><i style:background={SPENT_COLOR}></i>Spent</span>
+              <span><i style:background={SAVED_COLOR}></i>Saved by caching</span>
+            </div>
+          </div>
+          <StackedColumns
+            series={[{ label: "Spent", color: SPENT_COLOR }, { label: "Saved by caching", color: SAVED_COLOR }]}
+            columns={spendColumns}
+            format={money}
+            axisFormat={(n) => `$${compact(n)}`}
+            totalLabel="Without caching"
+          />
+        </section>
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h3>Daily tokens</h3>
+              <div class="lede">by type; cache reads are billed at a fraction of the input price</div>
+              {#if activeDays}<div class="figs"><span><b>{compact(tokens(t) / activeDays)}</b> per active day</span>{#if peakTokens}<span><b>{compact(tokens(peakTokens))}</b> peak, {dayLabel(peakTokens.date)}</span>{/if}</div>{/if}
+            </div>
+            <div class="legend">
+              {#each TOKEN_TYPES as tt}<span><i style:background={tt.color}></i>{tt.label}</span>{/each}
+            </div>
+          </div>
+          <StackedColumns series={TOKEN_TYPES.map((tt) => ({ label: tt.label, color: tt.color }))} columns={tokenColumns} format={compact} />
+        </section>
       </div>
-      <StackedColumns
-        series={[{ label: "Spent", color: SPENT_COLOR }, { label: "Saved by caching", color: SAVED_COLOR }]}
-        columns={spendColumns}
-        format={money}
-        axisFormat={(n) => `$${compact(n)}`}
-        totalLabel="Without caching"
-      />
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <div><h3>Daily tokens</h3><div class="lede">by type; cache reads are billed at a fraction of the input price</div></div>
-        <div class="legend">
-          {#each TOKEN_TYPES as tt}<span><i style:background={tt.color}></i>{tt.label}</span>{/each}
-        </div>
+      <div class="side">
+        <section class="card fill">
+          <h3>Token mix</h3>
+          <div class="lede">share of all tokens in the period</div>
+          <Donut parts={tokenParts} format={compact} caption="tokens" />
+        </section>
+        <section class="card fill">
+          <h3>Where the money goes</h3>
+          <div class="lede">API-equivalent spend by token type</div>
+          <Donut parts={spendParts} format={money} caption="spent" />
+        </section>
       </div>
-      <StackedColumns series={TOKEN_TYPES.map((tt) => ({ label: tt.label, color: tt.color }))} columns={tokenColumns} format={compact} />
-    </section>
-
-    <div class="pair">
-      <section class="card">
-        <h3>Token mix</h3>
-        <div class="lede">share of all tokens in the period</div>
-        <Donut parts={tokenParts} format={compact} caption="tokens" />
-      </section>
-      <section class="card">
-        <h3>Where the money goes</h3>
-        <div class="lede">API-equivalent spend by token type</div>
-        <Donut parts={spendParts} format={money} caption="spent" />
-      </section>
     </div>
 
     {#if data.models.length}
@@ -190,7 +202,13 @@
   .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
   .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); padding-top: 4px; }
   .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: -0.5px; }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(400px, 1fr); gap: 14px; margin-bottom: 14px; }
+  .main, .side { display: flex; flex-direction: column; gap: 14px; }
+  .main .card, .side .card { margin-bottom: 0; }
+  .side .card { flex: 1; display: flex; flex-direction: column; }
+  .side .card :global(.donut) { flex: 1; }
+  .figs { display: flex; gap: 18px; color: var(--muted); font-size: 12px; margin: -6px 0 10px; }
+  .figs b { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
 
   .models td { padding-top: 11px; padding-bottom: 11px; }
   .models .n, .models th.n { text-align: right; font-variant-numeric: tabular-nums; }

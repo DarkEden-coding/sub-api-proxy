@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { UsageDay } from "../api/types.ts";
-import { arc, fillDays, niceMax, percent, slices } from "./usage.ts";
+import { arc, fillDays, niceMax, percent, slices, trimLeading } from "./usage.ts";
 
 test("missing days are filled so the time axis is even", () => {
   const day = { date: "2026-10-21", requests: 3 } as UsageDay;
@@ -31,4 +31,12 @@ test("percent labels never round a sliver to zero", () => {
   assert.equal(percent(0.004), "<1%");
   assert.equal(percent(0.256), "26%");
   assert.equal(percent(0), "0%");
+});
+
+test("leading empty days are dropped, keeping a minimum span", () => {
+  const e = { empty: true as const };
+  const d = {};
+  assert.equal(trimLeading([e, e, e, d, e, d], 2).length, 3);
+  assert.equal(trimLeading([e, e, e, e, d], 3).length, 3, "never fewer than the minimum");
+  assert.equal(trimLeading([e, e, e], 2).length, 2, "all empty: the latest days");
 });

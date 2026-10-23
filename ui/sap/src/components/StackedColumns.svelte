@@ -17,7 +17,7 @@
     columns,
     format,
     axisFormat = format,
-    height = 190,
+    height = 170,
     total = (v: number[]) => v.reduce((a, b) => a + b, 0),
     totalLabel = "Total",
   }: {
@@ -41,7 +41,7 @@
   const max = $derived(niceMax(Math.max(0, ...columns.map((c) => c.values.reduce((a, b) => a + b, 0)))));
   const plot = $derived(Math.max(1, width - AXIS));
   const band = $derived(plot / Math.max(1, columns.length));
-  const bar = $derived(Math.max(3, Math.min(24, band * 0.62)));
+  const bar = $derived(Math.max(3, Math.min(24, band * 0.72)));
   const base = $derived(height - BOTTOM);
   const scale = $derived((v: number) => (v / max) * (base - TOP));
   const ticks = $derived([0, 0.5, 1].map((f) => ({ v: max * f, y: base - f * (base - TOP) })));

@@ -29,6 +29,16 @@ export function fillDays(rows: UsageDay[], days: number, now: number): (UsageDay
   });
 }
 
+/**
+ * Drops leading days with no traffic so a new install's chart is not mostly empty, keeping
+ * at least `min` days.
+ */
+export function trimLeading<T extends object>(rows: T[], min = 7): T[] {
+  const first = rows.findIndex((r) => !("empty" in r));
+  if (first < 0) return rows.slice(-min);
+  return rows.slice(Math.min(first, Math.max(0, rows.length - min)));
+}
+
 /** A round axis maximum at or above `max`: 1, 2 or 5 times a power of ten. */
 export function niceMax(max: number): number {
   if (max <= 0) return 1;

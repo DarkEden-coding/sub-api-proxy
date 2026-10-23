@@ -10,9 +10,9 @@
   }
   let { parts, format, caption }: { parts: Part[]; format: (n: number) => string; caption: string } = $props();
 
-  const SIZE = 168;
+  const SIZE = 140;
   const R = SIZE / 2;
-  const INNER = R - 22;
+  const INNER = R - 19;
   let hover = $state<number | null>(null);
 
   const total = $derived(parts.reduce((a, p) => a + p.value, 0));
@@ -55,13 +55,13 @@
 </div>
 
 <style>
-  .donut { display: flex; align-items: center; gap: 26px; }
+  .donut { display: flex; align-items: center; gap: 22px; }
   svg { flex: none; overflow: visible; }
   .slice { stroke: var(--panel); stroke-width: 2; transition: opacity 0.15s; }
   .slice.dim { opacity: 0.35; }
-  .big { fill: var(--ink); font-family: var(--serif); font-size: 22px; }
+  .big { fill: var(--ink); font-family: var(--serif); font-size: 19px; }
   .small { fill: var(--faint); font-size: 11px; }
-  table { border-collapse: collapse; flex: 0 1 300px; font-size: 12.5px; }
+  table { border-collapse: collapse; flex: 1; font-size: 12.5px; }
   td { padding: 5px 0; color: var(--ink-2); }
   tr.on td { color: var(--ink); }
   td i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 9px; vertical-align: -0.5px; }
