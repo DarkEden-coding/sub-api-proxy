@@ -23,7 +23,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// One request, as stored. Token counts are the normalized breakdown: `input` excludes
 /// cached tokens, and `output` includes reasoning.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Unix milliseconds.
     pub t: i64,
@@ -42,6 +42,18 @@ pub struct Entry {
     pub o: u64,
     #[serde(default)]
     pub failed: bool,
+    /// The credential's `auth_index`, which is also the dashboard's account id.
+    #[serde(default)]
+    pub a: String,
+    /// The record's `ttft_ms` and `latency_ms`; 0 when unknown (entries written before
+    /// they were kept, or no first token seen).
+    #[serde(default)]
+    pub ttft: u64,
+    #[serde(default)]
+    pub lat: u64,
+    /// The upstream response was streamed.
+    #[serde(default)]
+    pub s: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -58,6 +70,14 @@ struct RawRecord {
     request_id: String,
     #[serde(default)]
     failed: bool,
+    #[serde(default)]
+    auth_index: String,
+    #[serde(default)]
+    ttft_ms: i64,
+    #[serde(default)]
+    latency_ms: i64,
+    #[serde(default)]
+    stream: bool,
     #[serde(default)]
     tokens: RawTokens,
     token_breakdown: Option<RawBreakdown>,
@@ -141,6 +161,10 @@ pub fn entry_from_record(payload: &[u8]) -> Option<Entry> {
         w,
         o,
         failed: raw.failed,
+        a: raw.auth_index.trim().to_owned(),
+        ttft: u64::try_from(raw.ttft_ms).unwrap_or(0),
+        lat: u64::try_from(raw.latency_ms).unwrap_or(0),
+        s: raw.stream,
     })
 }
 
@@ -326,6 +350,96 @@ fn price(e: &Entry, rate: Rate) -> Cost {
     }
 }
 
+/// Fewer output tokens than this make the decode rate mostly noise (one network hiccup
+/// halves it), so such requests count for TTFT only.
+const MIN_TPS_TOKENS: u64 = 16;
+
+/// Time to first token and output tokens per second over one group's successful streams.
+/// A buffered response's first byte is its whole body, so it is left out of both.
+#[derive(Default)]
+struct Speed {
+    /// Every request in the group, including failed and buffered ones.
+    requests: u64,
+    ttft_ms: Vec<u64>,
+    tps: Vec<f64>,
+}
+
+impl Speed {
+    fn add(&mut self, e: &Entry) {
+        self.requests += 1;
+        if e.failed || !e.s || e.ttft == 0 {
+            return;
+        }
+        self.ttft_ms.push(e.ttft);
+        // ponytail: latency starts when the attempt begins and TTFT, for executors that
+        // mark it, when the upstream request is sent, so request preparation counts as
+        // decode time and slightly lowers TPS; storing the upstream start would fix it.
+        if e.o >= MIN_TPS_TOKENS && e.lat > e.ttft {
+            self.tps.push(e.o as f64 * 1000.0 / (e.lat - e.ttft) as f64);
+        }
+    }
+
+    fn json(mut self) -> Value {
+        self.ttft_ms.sort_unstable();
+        self.tps.sort_unstable_by(f64::total_cmp);
+        let spread = |p50: Option<f64>, p90: Option<f64>| match (p50, p90) {
+            (Some(p50), Some(p90)) => json!({ "p50": p50, "p90": p90 }),
+            _ => Value::Null,
+        };
+        let ttft = |p| percentile(&self.ttft_ms, p).map(|ms| *ms as f64);
+        let tps = |p| percentile(&self.tps, p).copied();
+        json!({
+            "requests": self.requests,
+            "samples": self.ttft_ms.len(),
+            "tps_samples": self.tps.len(),
+            "ttft_ms": spread(ttft(0.5), ttft(0.9)),
+            "tps": spread(tps(0.5), tps(0.9)),
+        })
+    }
+}
+
+/// Nearest-rank percentile of sorted values.
+fn percentile<T>(sorted: &[T], p: f64) -> Option<&T> {
+    let rank = (p * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.max(1) - 1)
+}
+
+/// Speed by provider and account, each with a per-model split. Groups with requests but no
+/// successful stream are kept so every account appears, with null figures.
+fn speed(entries: &[Entry]) -> Vec<Value> {
+    /// One account's speed, and its speed per model.
+    type Group<'a> = (Speed, BTreeMap<&'a str, Speed>);
+    let mut groups: BTreeMap<(&str, &str), Group> = BTreeMap::new();
+    for e in entries {
+        let (speed, models) = groups.entry((&e.p, &e.a)).or_default();
+        speed.add(e);
+        models.entry(&e.m).or_default().add(e);
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    // Grouped by provider, busiest account first within each.
+    groups.sort_by(|((p1, _), (s1, _)), ((p2, _), (s2, _))| p1.cmp(p2).then(s2.requests.cmp(&s1.requests)));
+    groups
+        .into_iter()
+        .map(|((provider, account), (speed, models))| {
+            let mut models: Vec<_> = models.into_iter().collect();
+            models.sort_by_key(|(_, s)| std::cmp::Reverse(s.requests));
+            let models: Vec<Value> = models
+                .into_iter()
+                .map(|(model, s)| {
+                    let mut v = s.json();
+                    v["model"] = model.into();
+                    v
+                })
+                .collect();
+            let mut v = speed.json();
+            v["provider"] = provider.into();
+            v["account"] = account.into();
+            v["models"] = models.into();
+            v
+        })
+        .collect()
+}
+
 fn summarize(entries: &[Entry], prices: &Snapshot, since_ms: i64, prices_at_ms: Option<i64>) -> Value {
     let mut total = Sum::default();
     let mut days: BTreeMap<String, Sum> = BTreeMap::new();
@@ -398,6 +512,7 @@ fn summarize(entries: &[Entry], prices: &Snapshot, since_ms: i64, prices_at_ms: 
         "totals": total.json(),
         "days": days,
         "models": models,
+        "speed": speed(entries),
         "recent": recent,
     })
 }
@@ -445,7 +560,7 @@ mod tests {
             r,
             w: 0,
             o: 1_000_000,
-            failed: false,
+            ..Entry::default()
         };
         let entries = [mk("claude-sonnet-5-5", 1_000_000), mk("unknown-model", 0)];
         let pricing = Pricing::default();
@@ -463,6 +578,69 @@ mod tests {
     }
 
     #[test]
+    fn groups_speed_by_account_and_model() {
+        let timed = entry_from_record(&record(
+            r#","auth_index":"acct-1","ttft_ms":400,"latency_ms":2400,"stream":true"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            (timed.a.as_str(), timed.ttft, timed.lat, timed.s),
+            ("acct-1", 400, 2400, true)
+        );
+        let mk = |a: &str, m: &str, ttft: u64, lat: u64, o: u64| Entry {
+            p: "claude".into(),
+            a: a.into(),
+            m: m.into(),
+            ttft,
+            lat,
+            o,
+            s: true,
+            ..Entry::default()
+        };
+        let entries = [
+            // 100 tokens over 2 s after the first: 50 tok/s.
+            mk("acct-1", "opus", 500, 2500, 100),
+            mk("acct-1", "opus", 300, 1300, 100),
+            mk("acct-1", "haiku", 100, 600, 100),
+            // Too few tokens for a rate, but still a TTFT sample.
+            mk("acct-1", "haiku", 200, 300, 3),
+            Entry {
+                failed: true,
+                ..mk("acct-1", "opus", 9_000, 9_500, 100)
+            },
+            Entry {
+                s: false,
+                ..mk("acct-1", "opus", 9_000, 9_500, 100)
+            },
+            // Written before timings were kept.
+            mk("", "opus", 0, 0, 100),
+        ];
+        let v = summarize(&entries, &Pricing::default().snapshot(), 0, None);
+        let speed = v["speed"].as_array().unwrap();
+        let acct = &speed[0];
+        assert_eq!(
+            (acct["account"].as_str(), acct["requests"].as_u64()),
+            (Some("acct-1"), Some(6))
+        );
+        assert_eq!(
+            (acct["samples"].as_u64(), acct["tps_samples"].as_u64()),
+            (Some(4), Some(3))
+        );
+        assert_eq!(acct["ttft_ms"]["p50"], 200.0);
+        assert_eq!(acct["ttft_ms"]["p90"], 500.0);
+        assert_eq!(acct["tps"]["p50"], 100.0);
+        assert_eq!(acct["tps"]["p90"], 200.0);
+        let opus = &acct["models"][0];
+        assert_eq!(
+            (opus["model"].as_str(), opus["requests"].as_u64()),
+            (Some("opus"), Some(4))
+        );
+        assert_eq!(opus["tps"]["p50"], 50.0);
+        assert_eq!(speed[1]["account"], "");
+        assert!(speed[1]["ttft_ms"].is_null() && speed[1]["tps"].is_null());
+    }
+
+    #[test]
     fn writes_reads_and_prunes() {
         let dir = std::env::temp_dir().join(format!("usage-history-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -476,7 +654,7 @@ mod tests {
             r: 0,
             w: 0,
             o: 1,
-            failed: false,
+            ..Entry::default()
         };
         let now = Utc::now().timestamp_millis();
         let new = Entry {

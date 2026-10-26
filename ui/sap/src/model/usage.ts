@@ -70,3 +70,16 @@ export function slices(values: number[]): { a0: number; a1: number; share: numbe
 
 /** "12%", "<1%" for a sliver, "0%" for nothing. */
 export const percent = (share: number): string => (share <= 0 ? "0%" : share < 0.01 ? "<1%" : `${Math.round(share * 100)}%`);
+
+/** "420 ms", "1.8 s", "12 s"; an em dash when unknown. */
+export function latency(ms: number | undefined): string {
+  if (ms === undefined) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return ms < 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms / 1000)} s`;
+}
+
+/** "52 tok/s", "8.4 tok/s"; an em dash when unknown. */
+export function rate(tps: number | undefined): string {
+  if (tps === undefined) return "—";
+  return `${tps < 10 ? tps.toFixed(1) : Math.round(tps)} tok/s`;
+}

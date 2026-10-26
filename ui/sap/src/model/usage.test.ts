@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { UsageDay } from "../api/types.ts";
-import { arc, fillDays, niceMax, percent, slices, trimLeading } from "./usage.ts";
+import { arc, fillDays, latency, niceMax, percent, rate, slices, trimLeading } from "./usage.ts";
 
 test("missing days are filled so the time axis is even", () => {
   const day = { date: "2026-10-21", requests: 3 } as UsageDay;
@@ -39,4 +39,14 @@ test("leading empty days are dropped, keeping a minimum span", () => {
   assert.equal(trimLeading([e, e, e, d, e, d], 2).length, 3);
   assert.equal(trimLeading([e, e, e, e, d], 3).length, 3, "never fewer than the minimum");
   assert.equal(trimLeading([e, e, e], 2).length, 2, "all empty: the latest days");
+});
+
+test("speed figures read at a glance", () => {
+  assert.equal(latency(420.4), "420 ms");
+  assert.equal(latency(1840), "1.8 s");
+  assert.equal(latency(12_400), "12 s");
+  assert.equal(latency(undefined), "—");
+  assert.equal(rate(8.44), "8.4 tok/s");
+  assert.equal(rate(52.4), "52 tok/s");
+  assert.equal(rate(undefined), "—");
 });

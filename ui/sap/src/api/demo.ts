@@ -1,6 +1,6 @@
 // Demo backend: serves the sap-core sample and applies actions to a local copy.
 import type {
-  AccountHistory, AccountPatch, AccountView, Conflict, EventView, FlowSnapshot, ThreadView, UsageHistory,
+  AccountHistory, AccountPatch, AccountView, Conflict, EventView, FlowSnapshot, ThreadView, UsageHistory, UsageSpeed,
 } from "./types.ts";
 import type { Backend, StreamHandlers } from "./http.ts";
 
@@ -87,7 +87,10 @@ export const demo: Backend = {
     return { ...c, id, resolved: true, applied: { ...c.applied, node: req.keep } };
   },
   events: async (limit): Promise<EventView[]> => structuredClone((await load()).events.slice(0, limit)),
-  usage: async (days): Promise<UsageHistory> => usageSample(days, (await load()).now),
+  usage: async (days): Promise<UsageHistory> => {
+    const s = await load();
+    return { ...usageSample(days, s.now), speed: speedSample(s.accounts) };
+  },
 };
 
 /** A small, plausible history so the Usage tab can be seen in `?demo=1`. */
@@ -126,6 +129,21 @@ function usageSample(days: number, now: string): UsageHistory {
       input_tokens: 4, output_tokens: 300 + i * 40, cache_read_tokens: 180_000, cache_write_tokens: 500, cost_usd: 0.04, savings_usd: 0.33,
     })),
   };
+}
+
+/** Speed rows for the sample's accounts, so the Usage tab's Speed card shows in demo mode. */
+function speedSample(accounts: AccountView[]): UsageSpeed[] {
+  const figures = (requests: number, ttft: number, tps: number) => ({
+    requests, samples: Math.round(requests * 0.9), tps_samples: Math.round(requests * 0.8),
+    ttft_ms: { p50: ttft, p90: ttft * 2.6 }, tps: { p50: tps, p90: tps * 1.4 },
+  });
+  return accounts.slice(0, 4).map((a, i) => {
+    const models = a.provider === "codex"
+      ? [{ model: "gpt-5-codex", ...figures(48 - i * 5, 1_900, 64) }]
+      : [{ model: "claude-sonnet-5-5", ...figures(210 - i * 30, 1_150 + i * 140, 58 - i * 4) }, { model: "claude-haiku-5-5", ...figures(90 - i * 10, 420, 140) }];
+    const top = models[0];
+    return { provider: a.provider, account: a.id, models, ...figures(models.reduce((n, m) => n + m.requests, 0), top.ttft_ms.p50, top.tps.p50) };
+  });
 }
 
 export function demoStream(h: StreamHandlers): () => void {

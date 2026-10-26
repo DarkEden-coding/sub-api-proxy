@@ -2,6 +2,7 @@
   import { fetchUsage } from "../api/client.ts";
   import type { UsageHistory, UsageSum } from "../api/types.ts";
   import Donut from "../components/Donut.svelte";
+  import SpeedTable from "../components/SpeedTable.svelte";
   import StackedColumns from "../components/StackedColumns.svelte";
   import { cacheShare, compact, usd } from "../model/format.ts";
   import { fillDays, percent, SAVED_COLOR, SPENT_COLOR, TOKEN_TYPES, tokenCounts, trimLeading } from "../model/usage.ts";
@@ -144,6 +145,14 @@
         </section>
       </div>
     </div>
+
+    {#if data.speed?.length}
+      <section class="card">
+        <h3>Speed</h3>
+        <div class="lede">time to first token and output tokens per second after it, over successful streamed requests; expand an account for its models</div>
+        <SpeedTable rows={data.speed} />
+      </section>
+    {/if}
 
     {#if data.models.length}
       <section class="card">

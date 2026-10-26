@@ -242,6 +242,32 @@ export interface UsageModel extends UsageSum {
   priced: boolean;
 }
 
+/** Median and 90th percentile; null when the group has no samples. */
+export interface Spread {
+  p50: number;
+  p90: number;
+}
+
+/** Speed over a group's successful streamed requests. */
+export interface UsageSpeedFigures {
+  /** Every request in the group, including failed and buffered ones. */
+  requests: number;
+  /** Requests with a time to first token. */
+  samples: number;
+  /** Of those, requests with enough output for a token rate. */
+  tps_samples: number;
+  ttft_ms: Spread | null;
+  /** Output tokens per second after the first token. */
+  tps: Spread | null;
+}
+
+export interface UsageSpeed extends UsageSpeedFigures {
+  provider: string;
+  /** The credential's auth index, the same value as `AccountView.id`; empty for older history. */
+  account: string;
+  models: (UsageSpeedFigures & { model: string })[];
+}
+
 export interface UsageRequest {
   /** Unix milliseconds. */
   at: number;
@@ -264,5 +290,7 @@ export interface UsageHistory {
   totals: UsageSum;
   days: UsageDay[];
   models: UsageModel[];
+  /** Absent from servers that predate speed tracking. */
+  speed?: UsageSpeed[];
   recent: UsageRequest[];
 }
