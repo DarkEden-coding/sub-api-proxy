@@ -433,38 +433,57 @@ async fn read_input(
 /// no upstream socket can take it, which ends an HTTP turn locally.
 #[derive(Default)]
 struct LocalInterrupt {
-    /// Whether a turn is forwarding, and the first interrupt delivered to it.
-    state: std::sync::Mutex<(bool, Option<String>)>,
+    state: std::sync::Mutex<LocalState>,
     ready: Notify,
 }
 
+#[derive(Default)]
+struct LocalState {
+    forwarding: bool,
+    /// The first interrupt delivered to the forwarding turn.
+    pending: Option<String>,
+    /// The last response whose terminal event went to the client. Codex sends its
+    /// interrupt before it reads that event, so one naming it can arrive afterwards.
+    finished: String,
+}
+
 impl LocalInterrupt {
-    fn state(&self) -> std::sync::MutexGuard<'_, (bool, Option<String>)> {
+    fn state(&self) -> std::sync::MutexGuard<'_, LocalState> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The turn starts forwarding; the returned guard ends it.
     fn begin(&self) -> LocalTurn<'_> {
-        self.state().0 = true;
+        self.state().forwarding = true;
         LocalTurn(self)
     }
 
-    fn deliver(&self, payload: &str) -> bool {
+    /// Called before the terminal event is written downstream.
+    fn finish(&self, response_id: &str) {
+        response_id.clone_into(&mut self.state().finished);
+    }
+
+    /// The interrupt's outcome when this connection answers it locally: a response it
+    /// already finished needs nothing more, a forwarding HTTP turn ends with it.
+    fn deliver(&self, payload: &str) -> Option<&'static str> {
         let mut state = self.state();
-        if !state.0 {
-            return false;
+        if !state.finished.is_empty() && field(payload, "response_id") == state.finished {
+            return Some("handled");
         }
-        if state.1.is_none() {
-            state.1 = Some(payload.to_owned());
+        if !state.forwarding {
+            return None;
+        }
+        if state.pending.is_none() {
+            state.pending = Some(payload.to_owned());
             self.ready.notify_one();
         }
-        true
+        Some("local_http")
     }
 
     async fn next(&self) -> String {
         loop {
             let ready = self.ready.notified();
-            if let Some(payload) = self.state().1.take() {
+            if let Some(payload) = self.state().pending.take() {
                 return payload;
             }
             ready.await;
@@ -477,7 +496,9 @@ struct LocalTurn<'a>(&'a LocalInterrupt);
 
 impl Drop for LocalTurn<'_> {
     fn drop(&mut self) {
-        *self.0.state() = (false, None);
+        let mut state = self.0.state();
+        state.forwarding = false;
+        state.pending = None;
     }
 }
 
@@ -506,10 +527,14 @@ impl Control {
             return None;
         }
         self.diagnostic(frame, "");
-        let outcome = match self.forward(frame).await {
-            Ok(()) => "handled",
-            Err(InterruptError::NoActive) if self.local.deliver(&String::from_utf8_lossy(frame)) => "local_http",
-            Err(error) => {
+        let result = self.forward(frame).await;
+        let local = matches!(result, Err(InterruptError::NoActive))
+            .then(|| self.local.deliver(&String::from_utf8_lossy(frame)))
+            .flatten();
+        let outcome = match (result, local) {
+            (_, Some(outcome)) => outcome,
+            (Ok(()), None) => "handled",
+            (Err(error), None) => {
                 self.diagnostic(frame, "rejected");
                 // Only the sanitized outcome is logged: transport errors may carry
                 // credentials or URLs. The error event is not a timeline part.
@@ -1318,6 +1343,7 @@ impl Connection {
                     completed = true;
                     completed_output = turn.completed_output(&payload);
                     completed_id = field(&payload, "response.id");
+                    self.local.finish(&completed_id);
                 }
                 if !send_text(socket, payload).await {
                     return Forwarded::End;

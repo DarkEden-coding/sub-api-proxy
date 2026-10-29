@@ -841,6 +841,63 @@ async fn uninterrupted_claude_turns_send_masters_bytes() {
     assert_eq!(seen, [FIRST, SECOND]);
 }
 
+/// Codex sends `response.interrupt` before it reads the `response.completed` already
+/// on its way; on an HTTP turn that interrupt arrives after the turn ended. It must not
+/// answer with an error, which Codex would read as the next request's provider error
+/// (DIFFERENCES-FROM-GO.md).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_interrupt_of_a_finished_http_turn_is_ignored() {
+    use wreq::ws::message::Message as WsMessage;
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"r-done","output":[]}}"#;
+    const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r-done","output":[]}}"#;
+    let upstream = serve(axum::Router::new().fallback(|| async {
+        let sse =
+            format!("event: response.created\ndata: {CREATED}\n\nevent: response.completed\ndata: {COMPLETED}\n\n");
+        ([("content-type", "text/event-stream")], sse)
+    }))
+    .await;
+    let dir = std::env::temp_dir().join(format!("cpa-ws-late-interrupt-{}", uuid::Uuid::new_v4()));
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n",
+        dir.join("auths").display()
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let proxy = serve(router(rt)).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    async fn turn(socket: &mut wreq::ws::WebSocket) {
+        let create = r#"{"type":"response.create","model":"gpt-fixture","input":[]}"#;
+        socket.send(WsMessage::text(create)).await.unwrap();
+        assert_eq!(gjson::get(&read_text(socket).await, "type").str(), "response.created");
+        assert_eq!(gjson::get(&read_text(socket).await, "type").str(), "response.completed");
+    }
+    turn(&mut socket).await;
+    socket
+        .send(WsMessage::text(
+            r#"{"type":"response.interrupt","response_id":"r-done","mode":"discard_partial_items"}"#,
+        ))
+        .await
+        .unwrap();
+    turn(&mut socket).await;
+    drop(socket);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Grants one Codex WebSocket credential that only this connection's session knows.
 struct HomeGrant(cpa_core::credential::Credential);
 
