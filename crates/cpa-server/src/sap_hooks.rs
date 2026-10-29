@@ -150,6 +150,7 @@ pub trait SapHooks: Send + Sync {
 pub(crate) struct Context {
     hooks: Arc<dyn SapHooks>,
     request: Arc<SapRequest>,
+    request_id: String,
     reply: Mutex<Option<(u16, &'static str, Bytes)>>,
     close: std::sync::atomic::AtomicBool,
 }
@@ -164,19 +165,28 @@ pub(crate) fn dispatch_context(rt: &Runtime, call: &crate::dispatch::Call) -> Op
     // A successful scope lookup includes identify returning None; never identify twice.
     CURRENT
         .try_with(Clone::clone)
-        .unwrap_or_else(|_| identify(rt, &call.request_path, &call.headers, &call.body))
+        .unwrap_or_else(|_| identify(rt, &call.request_path, &call.headers, &call.body, None))
 }
 
 pub(crate) async fn scope<T>(context: Option<Arc<Context>>, future: impl Future<Output = T>) -> T {
     CURRENT.scope(context, future).await
 }
 
-pub(crate) fn identify(rt: &Runtime, path: &str, headers: &HeaderMap, body: &[u8]) -> Option<Arc<Context>> {
+pub(crate) fn identify(
+    rt: &Runtime,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    request_id: Option<String>,
+) -> Option<Arc<Context>> {
     let hooks = rt.sap_hooks()?;
     let request = hooks.identify(path, headers, body)?;
     Some(Arc::new(Context {
         hooks,
         request,
+        request_id: request_id
+            .or_else(crate::observability::current_request_id)
+            .unwrap_or_default(),
         reply: Mutex::default(),
         close: Default::default(),
     }))
@@ -194,6 +204,9 @@ impl Context {
         &self,
         candidates: Result<Vec<Arc<cpa_core::credential::Credential>>, AcquireError>,
     ) -> Result<Pick, AcquireError> {
+        if let Err(error) = &candidates {
+            crate::sap_diagnostics::selection(&self.request.identity, &self.request_id, error);
+        }
         let visible = candidates
             .as_ref()
             .map(|v| {
@@ -210,6 +223,13 @@ impl Context {
             SapPick::Configured => candidates.map(|_| Pick::Configured),
             SapPick::Credential(id) => {
                 if !visible.iter().any(|c| c.credential == id) {
+                    crate::sap_diagnostics::failure(
+                        &self.request.identity,
+                        &self.request_id,
+                        "routing_hook",
+                        Some(visible.len()),
+                        &ExecError::local(400, FailureScope::Request, ""),
+                    );
                     return Err(AcquireError::Scheduler(ExecError::local(
                         400,
                         FailureScope::Request,
@@ -227,6 +247,13 @@ impl Context {
                 // where replacing the HTTP response with take_reply is no longer possible.
                 let mut error = ExecError::local(status, FailureScope::Request, "");
                 error.body = body.clone();
+                crate::sap_diagnostics::failure(
+                    &self.request.identity,
+                    &self.request_id,
+                    "routing_hook",
+                    Some(visible.len()),
+                    &error,
+                );
                 *self.reply.lock().unwrap_or_else(PoisonError::into_inner) = Some((status, content_type, body));
                 Err(AcquireError::Scheduler(error))
             }
@@ -248,6 +275,7 @@ impl Context {
                 error: Some(AttemptError::Cancelled),
             },
             Outcome::Failure(e) | Outcome::Neutral(e) => {
+                crate::sap_diagnostics::failure(&self.request.identity, &self.request_id, "executor", None, e);
                 let status = crate::classify::response_status(e);
                 let error = if model_ineligible(e) {
                     AttemptError::ModelIneligible
@@ -315,7 +343,7 @@ pub(crate) async fn identify_http(State(rt): State<Arc<Runtime>>, request: Reque
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    let context = identify(&rt, parts.uri.path(), &parts.headers, &body);
+    let context = identify(&rt, parts.uri.path(), &parts.headers, &body, None);
     let response = scope(context.clone(), next.run(Request::from_parts(parts, Body::from(body)))).await;
     context.and_then(|s| s.take_reply()).unwrap_or(response)
 }
@@ -604,6 +632,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sap_failure_logs_distinguish_stages_without_exposing_private_values() {
+        #[derive(Clone, Default)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let writer = Writer::default();
+        let output = writer.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let hooks = Arc::new(Fake::default());
+        let mut request = hooks.identify("/v1/responses", &HeaderMap::new(), b"").unwrap();
+        let identity = &mut Arc::get_mut(&mut request).unwrap().identity;
+        identity.model = Some("private-model-value".into());
+        identity.key.id = "private-thread-value".into();
+        let context = Context {
+            hooks: hooks.clone(),
+            request,
+            request_id: "test-request".into(),
+            reply: Default::default(),
+            close: Default::default(),
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(matches!(
+                context.select(Err(AcquireError::Unavailable {
+                    retry_after: None,
+                    cause: Some("private-selection-value".into()),
+                })),
+                Err(AcquireError::Unavailable { .. })
+            ));
+            let body = Bytes::from_static(
+                br#"{"error":{"type":"rate_limit_error","message":"No eligible account can serve this request"}}"#,
+            );
+            *hooks.pick.lock().unwrap() = Some(SapPick::Reply {
+                status: 429,
+                content_type: "application/json",
+                body: body.clone(),
+            });
+            let Err(AcquireError::Scheduler(error)) = context.select(Ok(vec![])) else {
+                panic!("expected hook rejection")
+            };
+            assert_eq!(error.body, body);
+            let error = ExecError::local(
+                429,
+                FailureScope::Model,
+                r#"{"error":{"type":"usage_limit_reached","code":"private-code-value","message":"private-message-value"}}"#,
+            );
+            context.outcome("private-credential-value", &Outcome::Failure(error));
+        });
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        for expected in [
+            "candidate_selection",
+            "routing_hook",
+            "executor",
+            "no_eligible_account",
+            "usage_limit_reached",
+            "test-request",
+            "candidate_count=Some(0)",
+        ] {
+            assert!(log.contains(expected), "missing {expected}: {log}");
+        }
+        assert!(!log.contains("private-"), "private data reached the process log: {log}");
+        assert_eq!(hooks.outcomes.lock().unwrap()[0].1.status, Some(429));
+    }
+
     struct Server {
         url: String,
         task: tokio::task::JoinHandle<()>,
@@ -771,7 +874,7 @@ mod tests {
             let fixture = runtime("http://127.0.0.1:9", false);
             let hooks = Arc::new(Fake::default());
             fixture.rt.set_sap_hooks(hooks.clone());
-            let context = identify(&fixture.rt, "/v1/messages", &HeaderMap::new(), BODY).unwrap();
+            let context = identify(&fixture.rt, "/v1/messages", &HeaderMap::new(), BODY, None).unwrap();
             let reply =
                 br#"{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"retry later"}}"#;
             let tail = futures_util::stream::once(async move {

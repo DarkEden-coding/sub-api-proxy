@@ -705,7 +705,13 @@ impl Connection {
             // closure: it drains acknowledgements and pending events in order first. A
             // client that went away cancels the turn (Go's reader cancels the request).
             // sub-api-proxy: identify each original frame before normalization/replay.
-            let sap = crate::sap_hooks::identify(&self.rt, &self.request_path, &self.headers, &frame);
+            let sap = crate::sap_hooks::identify(
+                &self.rt,
+                &self.request_path,
+                &self.headers,
+                &frame,
+                self.request_id.clone(),
+            );
             let flow = {
                 let turn = crate::sap_hooks::scope(sap.clone(), self.turn(&mut sink, payload));
                 tokio::pin!(turn);

@@ -42,6 +42,7 @@ mod respond;
 pub mod runtime;
 pub mod safe_mode;
 mod sanitize;
+mod sap_diagnostics;
 pub mod sap_hooks; // sub-api-proxy: optional thread routing hooks.
 pub mod scheduler;
 mod session;
