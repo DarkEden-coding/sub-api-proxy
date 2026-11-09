@@ -51,6 +51,8 @@ impl Control for Node {
     fn accounts(&self) -> Vec<AccountView> {
         let mapping = self.discover().unwrap_or_default();
         let available: BTreeSet<_> = mapping.into_values().collect();
+        // Taken before the state lock: the visualizer holds its own lock while reading accounts.
+        let mut resets = self.reset_views();
         let state = self.lock();
         let mut views = Vec::new();
         for provider in [Provider::Claude, Provider::Codex] {
@@ -73,6 +75,7 @@ impl Control for Node {
                 } else {
                     AccountState::Idle
                 };
+                let resets = resets.remove(&runtime.account.id);
                 views.push(AccountView {
                     id: runtime.account.id,
                     provider,
@@ -103,6 +106,7 @@ impl Control for Node {
                         vec![self.config.node.clone()]
                     },
                     stale: score.is_none_or(|s| s.stale),
+                    resets,
                 });
             }
         }
@@ -183,6 +187,9 @@ impl Control for Node {
                 })
                 .collect(),
         })
+    }
+    fn use_reset(&self, id: &AccountId) -> BoxFuture<'_, ControlResult<ResetResult>> {
+        self.use_reset_now(id)
     }
     fn threads(&self, active_only: bool) -> Vec<ThreadView> {
         let state = self.lock();

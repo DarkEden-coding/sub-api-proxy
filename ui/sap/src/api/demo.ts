@@ -52,6 +52,23 @@ export const demo: Backend = {
     }),
   startLogin: async () => ({ url: "about:blank#demo-login", login_id: "demo-login" }),
   refreshAccounts: async () => ({ accounts: [] }),
+  redeemReset: (id) =>
+    change((s) => {
+      const a = find(s, id);
+      const r = a.resets;
+      if (!r || r.available === 0 || r.blocked) throw new Error("No reset used: no reset is usable right now");
+      r.available -= 1;
+      const credit = r.credits.find((c) => c.left > 0);
+      if (credit && credit.total === null) r.credits.splice(r.credits.indexOf(credit), 1);
+      else if (credit) credit.left -= 1;
+      if (r.available === 0) r.blocked = "No resets left";
+      a.windows = a.windows.map((w) => ({ ...w, used_percent: 0 }));
+      if (a.state === "exhausted" || a.state === "cooling") {
+        a.state = a.active_threads ? "active" : "idle";
+        a.available_at = null;
+      }
+      return { outcome: "reset" as const, message: "Reset used. Usage limits are cleared.", account: structuredClone(a) };
+    }),
   history: async (id, hours): Promise<AccountHistory> => {
     const s = await load();
     const a = find(s, id);

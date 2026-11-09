@@ -1,6 +1,6 @@
 # Current deployment
 
-Updated October 23, 2026. power-server is the primary server for every client and
+Updated November 7, 2026. power-server is the primary server for every client and
 the Mac is the fallback. Each server holds its own provider logins; credentials and
 generated configuration stay outside this repository.
 
@@ -61,17 +61,45 @@ and sets `requires_openai_auth = false`; the router supplies authentication.
 
 ## Logging in on power-server
 
-The OAuth forwarder redirects the browser to `127.0.0.1:8318`, which on the Mac is
-the Mac's own server. To log in from the Mac, run a local redirector on ports
-54545 (Claude) and 1455 (Codex) that sends the browser to
-`http://100.107.192.39:8318/{anthropic,codex}/callback` with the same query, then
-run `sap login <provider> --router http://100.107.192.39:8318`. Start one Claude
-login at a time; they share the callback port.
+The automatic callback helper is deployed on the Mac and Scythe-Desktop. Both the
+Mac fallback proxy and power-server have the updated dashboard and login API.
+Existing launchd and systemd services run the new binaries persistently. Protected
+rollback copies are under `~/.local/state/sub-api-proxy/deployments/oauth-*` on
+each machine. Other browser devices need the updated router before signing in.
+
+Open either the power server's Tailscale dashboard directly or
+the local router's dashboard and use Add account or Sign in again. The dashboard
+hands the session to the browser device's local router before opening Claude or
+Codex. That helper returns the callback to the server that started the login,
+even if another server is preferred. No temporary redirector is needed.
+
+The helper's `router.yaml` must list every account server. Add any MagicDNS,
+Tailscale Serve or other dashboard address as an `oauth_origins` alias on its
+issuing server. See [automatic account sign-in](../../crates/sap-router/README.md#automatic-account-sign-in)
+for configuration, startup services and validation. Callback ports 54545 and 1455
+must be free on the browser device.
 
 ## Updating
 
-On each server, from its checkout: `packaging/sub-api-proxy/update-local.sh`
-(`--role server` on power-server). Update Scythe-Desktop's router from the Mac with
+On each server, from its checkout: `packaging/sub-api-proxy/update-local.sh`.
+Use the default role on power-server too: it also runs `sap-router`, and
+`--role server` leaves that router binary unchanged. Update Scythe-Desktop's router from the Mac with
 `packaging/sub-api-proxy/update-remote.sh`. The installers preserve configuration
 and account files and restart the services. Deployment checks use health, router
 status, and the authenticated model list without sending inference requests.
+
+## November 7 OAuth deployment checks
+
+Both proxies report serving, deliver the tested dashboard asset
+`index-Cj3T1aQJ.js`, and return their authenticated model lists. The Mac and Scythe
+helpers answer HTTP 200 and prefer power-server. Claude and Codex callback-helper
+session creation and cancellation passed on both deployed proxies without
+contacting either provider. A complete provider login still requires approval
+in the user's browser.
+
+Usage statistics and Claude cache telemetry remain explicitly enabled on both
+proxies. The Mac collector file is protected with mode 0600 and retains schema v2
+records with ordered timestamps and TTL buckets. Its latest observed record
+predates this restart; post-deployment checks on natural traffic remain pending.
+No synthetic inference requests were sent. Neither server's provider credentials
+were copied or changed during deployment.

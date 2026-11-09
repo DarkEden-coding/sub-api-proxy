@@ -17,6 +17,58 @@ struct Fixture {
     node: Arc<Node>,
     candidates: Vec<SapCandidate>,
 }
+
+#[tokio::test]
+async fn dashboard_callback_relay_does_not_start_a_server_listener() {
+    use sap_core::api::LoginRequest;
+    let f = Fixture::new(Provider::Claude);
+    // A zero main-listener port makes the legacy callback forwarder fail before
+    // binding anything. Relay logins must still start, with no upstream traffic.
+    let mut config = (*f.rt.config()).clone();
+    config.port = 0;
+    f.rt.publish_config(config);
+    let management = cpa_server::management::Management::with_options(
+        f.rt.clone(),
+        f.dir.join("config.yaml"),
+        cpa_server::management::Options {
+            local_password: "fake-local".into(),
+            standalone: true,
+            login_base: Some("http://127.0.0.1:9".into()),
+            auth_dir: Some(f.dir.join("auth")),
+            ..Default::default()
+        },
+    );
+    f.node.attach_management(&management, "fake-local".into());
+    for provider in [Provider::Claude, Provider::Codex] {
+        let started = f
+            .node
+            .start_login(LoginRequest {
+                provider,
+                account: None,
+                callback_relay: true,
+            })
+            .await
+            .unwrap();
+        assert!(started.callback_relay);
+        assert!(!started.login_id.is_empty());
+        assert!(
+            started.url.starts_with("https://claude.ai/oauth/authorize?")
+                || started.url.starts_with("https://auth.openai.com/oauth/authorize?")
+        );
+        assert!(started.url.contains("localhost"));
+        assert!(
+            f.node
+                .start_login(LoginRequest {
+                    provider,
+                    account: None,
+                    callback_relay: false
+                })
+                .await
+                .is_err()
+        );
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -628,13 +680,16 @@ async fn active_refresh_is_singleflight_and_reports_probe_sources_and_sanitized_
     let app = axum::Router::new().route("/api/oauth/usage", axum::routing::get({
         let calls = calls.clone();
         let status = status.clone();
-        move |headers: http::HeaderMap| {
+        move |headers: http::HeaderMap, query: axum::extract::RawQuery| {
             let calls = calls.clone();
             let status = status.clone();
             async move {
                 assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer private-test-"));
                 assert_eq!(headers["anthropic-beta"], "oauth-2025-04-20");
-                calls.fetch_add(1, Ordering::SeqCst);
+                // Reset-grant reads share the path; count usage reads only.
+                if query.0.is_none() {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 (http::StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
                     axum::Json(serde_json::json!({"five_hour":{"utilization":25,"resets_at":"2030-01-01T00:00:00Z"},"seven_day":{"utilization":45},"error":"secret upstream body"})))
@@ -771,6 +826,82 @@ async fn active_refresh_codex_exhaustion_recovers_from_usage_endpoint() {
             .iter()
             .all(|a| a.last_poll_error.as_deref() == Some("Usage probe requires a subscription OAuth credential"))
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn manual_reset_is_listed_spent_once_and_clears_exhaustion() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU16, Ordering},
+    };
+    let spent = Arc::new(AtomicBool::new(false));
+    let consume_status = Arc::new(AtomicU16::new(500));
+    let ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let app = axum::Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            axum::routing::get({
+                let spent = spent.clone();
+                move || {
+                    let limited = !spent.load(Ordering::SeqCst);
+                    async move {
+                        axum::Json(serde_json::json!({"rate_limit": {"allowed": !limited, "limit_reached": limited,
+                            "primary_window": {"used_percent": if limited {100} else {0}, "limit_window_seconds": 18000, "reset_at": 1900000000}}}))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/backend-api/wham/rate-limit-reset-credits",
+            axum::routing::get({
+                let spent = spent.clone();
+                move || {
+                    let left = u32::from(!spent.load(Ordering::SeqCst));
+                    async move { axum::Json(serde_json::json!({"available_count": left, "credits": []})) }
+                }
+            }),
+        )
+        .route(
+            "/backend-api/wham/rate-limit-reset-credits/consume",
+            axum::routing::post({
+                let (spent, consume_status, ids) = (spent.clone(), consume_status.clone(), ids.clone());
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    ids.lock().unwrap().push(body["redeem_request_id"].as_str().unwrap().to_owned());
+                    let status = consume_status.load(Ordering::SeqCst);
+                    if status == 200 {
+                        spent.store(true, Ordering::SeqCst);
+                    }
+                    async move {
+                        (http::StatusCode::from_u16(status).unwrap(), axum::Json(serde_json::json!({"code": "reset"})))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let f = Fixture::with_auth(Provider::Codex, &format!("http://{address}"), true);
+    f.node.reset_aware_refresh().await;
+    let account = f.node.accounts()[0].id.clone();
+    let view = |id: &sap_core::ids::AccountId| f.node.accounts().into_iter().find(|a| &a.id == id).unwrap();
+    let before = view(&account);
+    assert_eq!(before.state, sap_core::api::AccountState::Exhausted);
+    let resets = before.resets.expect("the refresh reads resets");
+    assert_eq!((resets.available, resets.blocked, resets.error), (1, None, None));
+
+    // An unanswered spend is retried with the same request ID.
+    let unanswered = f.node.use_reset(&account).await.unwrap_err();
+    assert_eq!(unanswered.status, 502);
+    consume_status.store(200, Ordering::SeqCst);
+    let result = f.node.use_reset(&account).await.unwrap();
+    assert_eq!(result.outcome, sap_core::api::ResetOutcome::Reset);
+    let ids = ids.lock().unwrap().clone();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], ids[1], "the retry reuses the request ID");
+    assert_ne!(result.account.state, sap_core::api::AccountState::Exhausted);
+    let after = result.account.resets.unwrap();
+    assert_eq!((after.available, after.blocked.as_deref()), (0, Some("No resets left")));
     server.abort();
 }
 

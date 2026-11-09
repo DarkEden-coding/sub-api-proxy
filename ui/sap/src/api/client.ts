@@ -29,6 +29,7 @@ export const refreshAccounts = () => backend.refreshAccounts();
 export const patchAccount = (id: string, patch: AccountPatch) => backend.patchAccount(id, patch);
 export const startLogin = (req: LoginRequest) => backend.startLogin(req);
 export const fetchHistory = (id: string, hours = 24) => backend.history(id, hours);
+export const redeemReset = (id: string) => backend.redeemReset(id);
 export const fetchThreads = (activeOnly = true) => backend.threads(activeOnly);
 export const assignThread = (key: string, req: AssignRequest) => backend.assignThread(key, req);
 export const fetchNodes = () => backend.nodes();

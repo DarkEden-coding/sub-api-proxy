@@ -27,6 +27,7 @@ pub fn full(bytes: impl Into<Bytes>) -> Body {
 pub struct Proxy {
     pub config: Arc<Config>,
     pub health: Arc<Health>,
+    pub(crate) oauth: Arc<crate::oauth::Relay>,
 }
 
 pub struct Connection {
@@ -88,6 +89,9 @@ fn strip_hop_headers(headers: &mut HeaderMap) {
 }
 
 pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body> {
+    if request.uri().path().starts_with("/sap/oauth/") {
+        return crate::oauth_helper::serve(proxy.config.clone(), proxy.oauth.clone(), request).await;
+    }
     if request.method() == http::Method::GET && request.uri().path() == "/sap/router/status" {
         return Response::builder()
             .header("content-type", "application/json")
@@ -191,6 +195,32 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
         }
         strip_hop_headers(response.headers_mut());
         let (parts, body) = response.into_parts();
+        if parts.status.is_success() && (path == "/sap/api/accounts/login" || path.ends_with("/oauth/auth-url")) {
+            let bytes = match http_body_util::Limited::new(body, 65536).collect().await {
+                Ok(body) => body.to_bytes(),
+                Err(_) => {
+                    return Response::builder()
+                        .status(502)
+                        .header("content-type", "application/json")
+                        .body(full(
+                            serde_json::json!({"message": "Invalid OAuth login response"}).to_string(),
+                        ))
+                        .unwrap();
+                }
+            };
+            if let Err(error) = proxy
+                .oauth
+                .register(&bytes, &proxy.config.servers[index].base_url)
+                .await
+            {
+                return Response::builder()
+                    .status(502)
+                    .header("content-type", "application/json")
+                    .body(full(serde_json::json!({"message": error.to_string()}).to_string()))
+                    .unwrap();
+            }
+            return Response::from_parts(parts, full(bytes));
+        }
         // The stream owns the upstream connection until EOF or until its server is lost.
         let transfer = Transfer {
             health: proxy.health.clone(),

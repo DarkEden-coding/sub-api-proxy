@@ -27,8 +27,8 @@ impl Node {
         }
         let mut req = http::Request::builder()
             .uri(format!(
-                "/v8/management/oauth/auth-url?provider={}&is_webui=true",
-                request.provider
+                "/v8/management/oauth/auth-url?provider={}&is_webui={}",
+                request.provider, !request.callback_relay
             ))
             .header("authorization", format!("Bearer {password}"))
             .body(axum::body::Body::empty())
@@ -48,6 +48,7 @@ impl Node {
             .map_err(internal)?;
         let value: serde_json::Value = serde_json::from_slice(&body).map_err(internal)?;
         Ok(LoginStart {
+            callback_relay: request.callback_relay,
             url: value["url"]
                 .as_str()
                 .ok_or_else(|| ControlError::internal("Missing login URL"))?

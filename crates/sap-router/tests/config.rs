@@ -35,3 +35,23 @@ fn yaml_defaults_and_validation() {
     assert!(Config::default().validate().is_err());
     assert!(serde_yaml_ng::from_str::<Config>("typo: true").is_err());
 }
+
+#[test]
+fn oauth_dashboard_origins_are_valid_and_unambiguous() {
+    let config: Config = serde_yaml_ng::from_str("servers:\n  - name: primary\n    base_url: http://127.0.0.1:8318\n    oauth_origins: [https://proxy.example.test]\n  - name: backup\n    base_url: http://127.0.0.1:8319\n").unwrap();
+    config.validate().unwrap();
+    for invalid in [
+        "file:///tmp/proxy",
+        "https://user:secret@proxy.example.test",
+        "https://proxy.example.test/path",
+        "https://proxy.example.test?key=secret",
+        "https://proxy.example.test/#fragment",
+    ] {
+        let mut config = config.clone();
+        config.servers[0].oauth_origins = vec![invalid.into()];
+        assert!(config.validate().is_err());
+    }
+    let mut ambiguous = config;
+    ambiguous.servers[1].oauth_origins = vec!["https://proxy.example.test".into()];
+    assert!(ambiguous.validate().is_err());
+}

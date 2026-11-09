@@ -1,6 +1,8 @@
 pub mod config;
 mod failover;
 mod health;
+mod oauth;
+mod oauth_helper;
 mod proxy;
 mod websocket;
 
@@ -21,6 +23,7 @@ pub async fn serve(
     config.validate()?;
     let config = Arc::new(config);
     let health = Health::new(config.clone());
+    let oauth = Arc::new(oauth::Relay::default());
     struct StopHealth(Arc<Health>);
     impl Drop for StopHealth {
         fn drop(&mut self) {
@@ -36,10 +39,11 @@ pub async fn serve(
         tokio::select! {
             _ = &mut shutdown => break Ok(()),
             accepted = listener.accept() => {
-                let (stream, _) = match accepted { Ok(pair) => pair, Err(error) => break Err(error) };
-                let proxy = proxy::Proxy { config: config.clone(), health: health.clone() };
+                let (stream, peer) = match accepted { Ok(pair) => pair, Err(error) => break Err(error) };
+                let proxy = proxy::Proxy { config: config.clone(), health: health.clone(), oauth: oauth.clone() };
                 connections.spawn(async move {
-                    let service = hyper::service::service_fn(move |request: http::Request<hyper::body::Incoming>| {
+                    let service = hyper::service::service_fn(move |mut request: http::Request<hyper::body::Incoming>| {
+                        request.extensions_mut().insert(peer);
                         let proxy = proxy.clone();
                         async move {
                             let request = request.map(|body| body.map_err(|error| -> proxy::BoxError { Box::new(error) }).boxed_unsync());

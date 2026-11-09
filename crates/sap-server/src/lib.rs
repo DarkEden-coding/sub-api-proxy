@@ -15,6 +15,7 @@ mod node;
 mod persistence;
 mod quota;
 mod reset_aware;
+mod resets;
 mod selection;
 mod telemetry;
 mod views;

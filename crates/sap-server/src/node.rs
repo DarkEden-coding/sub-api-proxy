@@ -37,6 +37,7 @@ pub(crate) struct State {
 pub struct Node {
     pub(crate) self_weak: Weak<Node>,
     pub(crate) refresh: Mutex<crate::reset_aware::Refresh>,
+    pub(crate) resets: Mutex<crate::resets::Resets>,
     pub(crate) config: Config,
     pub(crate) telemetry: Mutex<crate::telemetry::Metrics>,
     pub(crate) management: Mutex<Option<(Weak<cpa_server::management::Management>, String)>>,
@@ -219,6 +220,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
     let node = Arc::new_cyclic(|weak| Node {
         self_weak: weak.clone(),
         refresh: Mutex::default(),
+        resets: Mutex::default(),
         config,
         telemetry: Mutex::default(),
         management: Mutex::new(None),

@@ -96,6 +96,29 @@ impl CodexExecutor {
         crate::usage_probe::fetch(client, &self.alpha_base_url, credential, false).await
     }
 
+    /// The manual usage resets this subscription can spend (`reset_credits`).
+    pub async fn reset_credits(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+    ) -> Result<crate::reset_credits::ResetCredits, crate::usage_probe::ProbeError> {
+        let proxy = crate::proxy::Proxy::effective(credential, cfg);
+        let client = self.transport.for_url(&self.alpha_base_url, &proxy, false, None);
+        crate::reset_credits::read(client, &self.alpha_base_url, credential, false).await
+    }
+
+    /// Spends one manual usage reset (`reset_credits::redeem`).
+    pub async fn redeem_reset(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+        request_id: &str,
+    ) -> Result<(Option<String>, crate::reset_credits::Redeemed), crate::reset_credits::RedeemError> {
+        let proxy = crate::proxy::Proxy::effective(credential, cfg);
+        let client = self.transport.for_url(&self.alpha_base_url, &proxy, false, None);
+        crate::reset_credits::redeem(client, &self.alpha_base_url, credential, false, request_id, None).await
+    }
+
     /// Passive quota snapshots per credential (M4-0016), for the management API.
     pub fn quota(&self) -> &QuotaSignals {
         &self.quota

@@ -9,6 +9,7 @@
 //! | `GET /sap/api/accounts` | | `Vec<AccountView>` |
 //! | `PATCH /sap/api/accounts/{id}` | [`AccountPatch`] | [`AccountView`] |
 //! | `POST /sap/api/accounts/login` | [`LoginRequest`] | [`LoginStart`] |
+//! | `POST /sap/api/accounts/{id}/reset` | | [`ResetResult`] (spends one manual usage reset) |
 //! | `GET /sap/api/accounts/{id}/history?hours=N` | | [`AccountHistory`] |
 //! | `GET /sap/api/threads?active=true` | | `Vec<ThreadView>` |
 //! | `POST /sap/api/threads/{key}/assign` | [`AssignRequest`] | [`ThreadView`] |
@@ -83,6 +84,64 @@ pub struct AccountView {
     pub login_needed_on: Vec<NodeId>,
     /// Quota data is missing or stale.
     pub stale: bool,
+    /// Manual usage resets the provider offers this account, as last read by a quota
+    /// refresh on this node. Absent until the first read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets: Option<ResetsView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetsView {
+    pub checked_at: DateTime<Utc>,
+    /// Resets left across every grant or credit that has not expired.
+    pub available: u32,
+    /// Why no reset can be used now, in plain text. `None` when one can.
+    pub blocked: Option<String>,
+    pub credits: Vec<ResetCreditView>,
+    /// The last read failed. The other fields are from the read before it, if any.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetCreditView {
+    /// Provider display text, when it gives one.
+    pub label: Option<String>,
+    pub left: u32,
+    /// Resets the grant started with; `None` for single-use credits.
+    pub total: Option<u32>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// The provider's answer to `POST /sap/api/accounts/{id}/reset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetOutcome {
+    /// A reset was spent and the usage limits cleared.
+    Reset,
+    /// An earlier unanswered attempt had already spent it.
+    AlreadyUsed,
+    /// Nothing spent: the reset only applies once a limit is reached.
+    NotLimited,
+    /// Nothing spent: a reset was used recently.
+    Cooldown,
+    /// Nothing spent: the account cannot use resets.
+    Ineligible,
+    /// Nothing spent: no reset is available.
+    Unavailable,
+    /// Nothing spent: the provider refused for now (HTTP 429).
+    RateLimited,
+    /// Nothing spent: the login was refused (HTTP 401 or 403).
+    Unauthorized,
+    /// The provider answered without confirming a reset.
+    NotConfirmed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResetResult {
+    pub outcome: ResetOutcome,
+    /// One sentence for the operator.
+    pub message: String,
+    pub account: AccountView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,6 +263,9 @@ pub struct LoginRequest {
     pub provider: Provider,
     /// Re-login an existing logical account on this node; `None` adds a new account.
     pub account: Option<AccountId>,
+    /// A browser-device helper owns the callback listener instead of the server.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub callback_relay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,6 +274,8 @@ pub struct LoginStart {
     pub url: String,
     /// Poll `GET /sap/api/accounts` until an account with this login appears.
     pub login_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub callback_relay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

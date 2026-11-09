@@ -12,6 +12,7 @@ axum.workspace = true
 bytes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 cpa-core.workspace = true
+cpa-exec.workspace = true
 cpa-server.workspace = true
 futures-util.workspace = true
 http.workspace = true
@@ -29,5 +30,4 @@ tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-cpa-exec.workspace = true
 wreq = { workspace = true, features = ["ws"] }

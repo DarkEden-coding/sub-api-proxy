@@ -188,6 +188,7 @@ impl Local {
                 .map(|(i, s)| Server {
                     name: format!("server{i}"),
                     base_url: s.url.clone(),
+                    oauth_origins: vec![],
                 })
                 .collect(),
             client_host: "test-machine".into(),

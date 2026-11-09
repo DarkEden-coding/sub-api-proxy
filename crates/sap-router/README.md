@@ -133,3 +133,77 @@ launchd/systemd units, and Linux validation are not implemented here. The tests
 exercise client transport closure; actual Codex/Claude reconnection and full-history
 resend remain to be validated with their mock-provider harnesses. No real provider
 or deployment was used. No sap-core contract changes are requested.
+
+## Automatic account sign-in
+
+Run the updated `sap-router` on **each device where you use the browser**. The
+router is also the callback helper. The dashboard can be opened directly on any
+configured server over Tailscale, or through the local router.
+
+The dashboard opens the local helper before starting a login. The helper reserves
+Claude's registered `localhost:54545/callback` or Codex's registered
+`localhost:1455/auth/callback`, then opens the provider. It forwards the returned
+query unchanged to the issuing server's `/anthropic/callback` or `/codex/callback`
+over the configured transport, normally Tailscale. It never substitutes a
+Tailscale address into the provider's OAuth redirect URI. The token exchange and
+PKCE verifier stay on the issuing server.
+
+Dashboard logins send `callback_relay: true` to `/sap/api/accounts/login`. The
+server skips its own callback listener for those sessions. CLI and ordinary
+Management API logins keep their existing behavior. Update both the dashboard's
+proxy binary and the device's helper; an old proxy is rejected before opening
+the provider.
+
+The helper accepts only servers in its `router.yaml`. If you open a dashboard by
+a different address, add that exact origin under the corresponding server:
+
+```yaml
+listen: 127.0.0.1:8317
+servers:
+  - name: power-server
+    base_url: http://100.107.192.39:8318
+    oauth_origins:
+      - http://power-server:8318
+      - https://power-server.example.ts.net
+  - name: local-fallback
+    base_url: http://127.0.0.1:8318
+    oauth_origins:
+      - http://100.75.14.59:8318
+```
+
+`base_url` is automatically accepted as a dashboard origin. `oauth_origins` are
+optional browser-facing aliases, including HTTPS reverse proxies; the callback
+still goes to `base_url`. Each origin must identify exactly one server. Never
+map an origin to a different account server or to a router that can select other
+servers. Restart the helper after editing its configuration.
+
+The Accounts page's **Local sign-in helper** field defaults to
+`http://127.0.0.1:8317`. Change it if this device's router uses a different port;
+the value is saved in that browser. Only HTTP loopback addresses are accepted.
+The handoff uses a top-level helper window and origin-checked messages, avoiding
+cross-origin fetches to localhost from an HTTPS dashboard. Allow the dashboard's
+popup. If the helper is missing, no provider login is started and the dashboard
+shows an error.
+
+Install or update the persistent helper on macOS or Linux with
+`packaging/sub-api-proxy/update-local.sh --role router` from the updated checkout.
+This installs its launchd or systemd user service. The proxy hosting the dashboard
+also needs the updated embedded assets, built by the server/both update roles.
+
+Callback states are isolated by provider and pinned to the issuing server,
+including during failover. They expire after five minutes and are consumed once.
+The listener closes after its last callback or expiry. Ports 54545 and 1455 must
+be free on the browser's device; the helper reports a conflict before opening the
+provider. Stop another native login using the same port and start again.
+Management keys, provider tokens and PKCE verifiers are never sent to the helper
+page. Registration is restricted to loopback peers with a loopback Host header
+and a same-origin request from the helper page.
+
+Validation: `cargo test -p sap-router`, the dashboard's `npm test` and `npm run
+check`, plus `CHROME=/path/to/chromium node ui/sap/scripts/oauth-check.mjs` after
+building the dashboard and `cargo build -p sap-router`. The browser check uses two
+private local mock servers and intercepted provider pages. It needs free callback
+ports, never reads an auth directory, and never contacts a real provider. It checks
+both providers, sign-in again, issuer pinning while another server is preferred,
+and helper error handling. A real provider sign-in still needs a user to approve
+OAuth in their browser.

@@ -34,7 +34,7 @@ mod headers;
 mod identity;
 #[cfg(test)]
 pub(crate) mod kv_test;
-mod profile;
+pub(crate) mod profile;
 mod reconcile;
 mod replay;
 mod session;
@@ -209,6 +209,39 @@ impl ClaudeExecutor {
             .native_client(&proxy, None)
             .map_err(|_| crate::usage_probe::ProbeError::Transport)?;
         crate::usage_probe::fetch(client, &self.base_url, credential, true).await
+    }
+
+    fn account_client(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+    ) -> Result<wreq::Client, crate::usage_probe::ProbeError> {
+        self.native_client(&crate::proxy::Proxy::effective(credential, cfg), None)
+            .map_err(|_| crate::usage_probe::ProbeError::Transport)
+    }
+
+    /// The manual usage resets this subscription can spend (`reset_credits`).
+    pub async fn reset_credits(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+    ) -> Result<crate::reset_credits::ResetCredits, crate::usage_probe::ProbeError> {
+        let client = self.account_client(credential, cfg)?;
+        crate::reset_credits::read(client, &self.base_url, credential, true).await
+    }
+
+    /// Spends one manual usage reset (`reset_credits::redeem`).
+    pub async fn redeem_reset(
+        &self,
+        credential: &Credential,
+        cfg: &Config,
+        request_id: &str,
+        grant: Option<&str>,
+    ) -> Result<(Option<String>, crate::reset_credits::Redeemed), crate::reset_credits::RedeemError> {
+        let client = self
+            .account_client(credential, cfg)
+            .map_err(crate::reset_credits::RedeemError::Probe)?;
+        crate::reset_credits::redeem(client, &self.base_url, credential, true, request_id, grant).await
     }
 
     pub async fn prepare(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {

@@ -174,6 +174,22 @@ No real provider endpoint or LLM was contacted.
   Poll attempt/error metadata is process-local and resets on restart; quota
   history and account exhaustion persist. Refresh is on demand, with no periodic
   usage traffic. Expired OAuth tokens require the normal credential refresh path.
+- Manual usage resets (`resets.rs`, `cpa_exec::reset_credits`). The same refresh
+  also reads the resets each account can spend: Claude's `cedar_ember` grants
+  from `/api/oauth/usage?cedar_ember=1&skip_spend=1`, Codex credits from
+  `/backend-api/wham/rate-limit-reset-credits`. They appear as `resets` on the
+  account view, process-local like poll metadata, so each node shows only its
+  own reads. `POST /sap/api/accounts/{id}/reset` spends one through this node's
+  login (409 when the node has none or a spend is already running for the
+  account): Claude claims a grant with
+  `POST /api/organizations/{org}/reset_rate_limits`, Codex calls `…/consume`.
+  The node checks Claude eligibility first and sends nothing when no grant is
+  usable. A confirmed reset clears the account's exhaustion, cooling, exhaustion
+  and rate-limit failures for its threads, and the proxy's cooldowns for the
+  credential, then refreshes that account. A spend without a terminal answer
+  returns 502, and a retry within ten minutes reuses its request ID (and Claude
+  grant) so the retry cannot spend twice. The contract follows CLIProxyAPI's
+  management center; Go's server has no such route.
 - `SapPick` cannot express delayed selection or `Retry-After` headers. Future
   retry times therefore use 429 plus body `retry_at`, rather than waiting inside
   synchronous `select`.

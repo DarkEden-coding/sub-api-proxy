@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sub-Api-Proxy sign-in helper</title>
+<style>body{font:16px system-ui;max-width:36rem;margin:12vh auto;padding:24px;line-height:1.5}h1{font-size:24px}p{white-space:pre-wrap}</style>
+<h1>Account sign-in</h1>
+<p id="status">Connecting to your dashboard…</p>
+<script>
+(() => {
+  const status = document.getElementById("status");
+  const dashboard = window.opener;
+  let origin;
+  try {
+    origin = decodeURIComponent(location.hash.slice(1));
+    const parsed = new URL(origin);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== origin || !dashboard) throw new Error();
+  } catch {
+    status.textContent = "Start sign-in from your Sub-Api-Proxy dashboard.";
+    return;
+  }
+  // The fragment never reaches the helper's HTTP access logs or the provider.
+  history.replaceState(null, "", location.pathname);
+  let started = false;
+  const notify = (type, message) => dashboard.postMessage({type, message}, origin);
+  const timer = setTimeout(() => {
+    if (!started) { started = true; status.textContent = "Sign-in expired. Start again from your dashboard."; }
+  }, 60000);
+  window.addEventListener("message", async event => {
+    if (started || event.source !== dashboard || event.origin !== origin || event.data?.type !== "sap-oauth-start") return;
+    started = true;
+    clearTimeout(timer);
+    status.textContent = "Preparing the callback on this device…";
+    try {
+      const response = await fetch("/sap/oauth/register", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({server: origin, url: event.data.url}),
+        signal: AbortSignal.timeout(10000),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not prepare sign-in.");
+      notify("sap-oauth-registered");
+      // The OAuth provider gets neither an opener nor a dashboard referrer.
+      window.opener = null;
+      location.replace(event.data.url);
+    } catch (error) {
+      status.textContent = error.message;
+      notify("sap-oauth-error", error.message);
+    }
+  });
+  notify("sap-oauth-ready");
+})();
+</script>
+</html>

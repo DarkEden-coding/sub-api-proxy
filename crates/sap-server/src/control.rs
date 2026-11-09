@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use sap_core::api::{
     AccountHistory, AccountPatch, AccountView, ApiError, EventView, FlowSnapshot, LoginRequest, LoginStart, NodeView,
-    ThreadView,
+    ResetResult, ThreadView,
 };
 use sap_core::ids::{AccountId, NodeId, ThreadKey};
 use sap_core::reset_aware::{HistoryResponse, RequestsResponse, StatusResponse};
@@ -39,6 +39,23 @@ impl ControlError {
         Self {
             status: 400,
             error: "invalid_request",
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: 409,
+            error: "conflict",
+            message: message.into(),
+        }
+    }
+
+    /// The provider could not be reached or gave no usable answer.
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self {
+            status: 502,
+            error: "upstream",
             message: message.into(),
         }
     }
@@ -82,6 +99,9 @@ pub trait Control: Send + Sync + 'static {
     /// Starts a provider login on this node (adding an account, or re-logging one in).
     fn start_login(&self, request: LoginRequest) -> BoxFuture<'_, ControlResult<LoginStart>>;
     fn account_history(&self, id: &AccountId, hours: u32) -> ControlResult<AccountHistory>;
+    /// Spends one manual usage reset through this node's login for the account, then
+    /// clears its cooldowns and refreshes its quota.
+    fn use_reset(&self, id: &AccountId) -> BoxFuture<'_, ControlResult<ResetResult>>;
 
     /// Active threads only when `active_only`, otherwise every retained thread.
     fn threads(&self, active_only: bool) -> Vec<ThreadView>;

@@ -202,6 +202,19 @@ impl Node {
         })
     }
 
+    pub(crate) fn record_poll(
+        &self,
+        account: &sap_core::ids::AccountId,
+        at: sap_core::DateTime<Utc>,
+        error: Option<String>,
+    ) {
+        self.refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .polls
+            .insert(account.clone(), (at, error));
+    }
+
     async fn refresh_usage(&self) {
         let Some(rt) = self.runtime.upgrade() else {
             self.refresh
@@ -235,43 +248,11 @@ impl Node {
             }
         }
         let config = rt.config();
-        let mut pending = stream::iter(credentials.into_iter().map(|(account, credential)| {
-            let rt = &rt;
-            let config = &config;
-            async move {
-                let result = match credential.provider.as_str() {
-                    "claude" => rt.executors.claude.probe_usage(&credential, config).await,
-                    "codex" => rt.executors.codex.probe_usage(&credential, config).await,
-                    _ => return (account, Err("Usage probe is unsupported".to_owned())),
-                };
-                (account, result.map_err(|e| e.to_string()))
-            }
-        }))
-        .buffer_unordered(4);
-        while let Some((account, result)) = pending.next().await {
-            let at = Utc::now();
-            let error = match result {
-                Ok(signals) => self
-                    .quota_observation(
-                        &mut self.lock(),
-                        None,
-                        &account,
-                        crate::quota::Signals {
-                            at,
-                            values: signals,
-                            source: sap_core::quota::ObservationSource::Probe,
-                        },
-                    )
-                    .err()
-                    .map(|_| "Quota persistence failed".to_owned()),
-                Err(error) => Some(error),
-            };
-            self.refresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .polls
-                .insert(account, (at, error));
-            self.changed();
-        }
+        stream::iter(credentials)
+            .for_each_concurrent(4, |(account, credential)| {
+                let (rt, config) = (&rt, &config);
+                async move { self.refresh_account(rt, config, &account, &credential).await }
+            })
+            .await;
     }
 }

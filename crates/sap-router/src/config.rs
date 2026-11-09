@@ -39,6 +39,9 @@ pub struct Config {
 pub struct Server {
     pub name: String,
     pub base_url: String,
+    /// Browser-facing dashboard origins that issue logins on this server.
+    #[serde(default)]
+    pub oauth_origins: Vec<String>,
 }
 
 impl Default for Config {
@@ -111,6 +114,7 @@ impl Config {
             bail!("probe/connect durations and down_after_failures must be positive");
         }
         let mut names = std::collections::HashSet::new();
+        let mut origins = std::collections::HashMap::new();
         for server in &self.servers {
             let uri: Uri = server.base_url.parse().context("invalid server base_url")?;
             // ponytail: private-network HTTP servers only; add TLS with certificate verification
@@ -121,6 +125,24 @@ impl Config {
                 || uri.path_and_query().is_some_and(|p| p.as_str() != "/")
             {
                 bail!("base_url must be an http:// authority without credentials, path or query");
+            }
+            for raw in std::iter::once(&server.base_url).chain(&server.oauth_origins) {
+                let origin = url::Url::parse(raw).context("invalid OAuth dashboard origin")?;
+                if !matches!(origin.scheme(), "http" | "https")
+                    || origin.host_str().is_none()
+                    || !origin.username().is_empty()
+                    || origin.password().is_some()
+                    || origin.path() != "/"
+                    || origin.query().is_some()
+                    || origin.fragment().is_some()
+                {
+                    bail!("oauth_origins must contain http(s) origins without credentials, paths or queries");
+                }
+                if let Some(previous) = origins.insert(origin.origin().ascii_serialization(), &server.name)
+                    && previous != &server.name
+                {
+                    bail!("OAuth dashboard origins must identify exactly one server");
+                }
             }
             if server.name.is_empty() || !names.insert(&server.name) {
                 bail!("server names must be nonempty and unique");

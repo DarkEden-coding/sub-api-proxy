@@ -1,6 +1,6 @@
 import type {
   AccountHistory, AccountPatch, AccountView, ApiError, AssignRequest, Conflict, EventView,
-  FlowSnapshot, LoginRequest, LoginStart, NodeView, ResolveRequest, ThreadView, UsageHistory,
+  FlowSnapshot, LoginRequest, LoginStart, NodeView, ResetResult, ResolveRequest, ThreadView, UsageHistory,
 } from "./types.ts";
 import { parseSse } from "../model/sse.ts";
 
@@ -104,6 +104,7 @@ export const http = {
   patchAccount: (id: string, patch: AccountPatch) => request<AccountView>("PATCH", `/accounts/${enc(id)}`, patch),
   startLogin: (req: LoginRequest) => request<LoginStart>("POST", "/accounts/login", req),
   history: (id: string, hours: number) => request<AccountHistory>("GET", `/accounts/${enc(id)}/history?hours=${hours}`),
+  redeemReset: (id: string) => request<ResetResult>("POST", `/accounts/${enc(id)}/reset`),
   threads: (activeOnly: boolean) => request<ThreadView[]>("GET", `/threads?active=${activeOnly}`),
   assignThread: (key: string, req: AssignRequest) => request<ThreadView>("POST", `/threads/${enc(key)}/assign`, req),
   nodes: () => request<NodeView[]>("GET", "/nodes"),

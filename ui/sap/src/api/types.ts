@@ -59,6 +59,44 @@ export interface AccountView {
   login_needed_on: NodeId[];
   /** Quota data is missing or stale. */
   stale: boolean;
+  /** Manual usage resets, as last read by a quota refresh on this node. */
+  resets?: ResetsView;
+}
+
+export interface ResetsView {
+  checked_at: Timestamp;
+  /** Resets left across every grant or credit that has not expired. */
+  available: number;
+  /** Why no reset can be used now; null when one can. */
+  blocked: string | null;
+  credits: ResetCreditView[];
+  /** The last read failed; the other fields are from the read before it. */
+  error: string | null;
+}
+
+export interface ResetCreditView {
+  label: string | null;
+  left: number;
+  /** Null for single-use credits. */
+  total: number | null;
+  expires_at: Timestamp | null;
+}
+
+export type ResetOutcome =
+  | "reset"
+  | "already_used"
+  | "not_limited"
+  | "cooldown"
+  | "ineligible"
+  | "unavailable"
+  | "rate_limited"
+  | "unauthorized"
+  | "not_confirmed";
+
+export interface ResetResult {
+  outcome: ResetOutcome;
+  message: string;
+  account: AccountView;
 }
 
 export interface WindowView {
@@ -149,11 +187,13 @@ export interface LoginRequest {
   provider: Provider;
   /** Re-login an existing account on this node; null adds a new account. */
   account: AccountId | null;
+  callback_relay?: boolean;
 }
 
 export interface LoginStart {
   url: string;
   login_id: string;
+  callback_relay?: boolean;
 }
 
 export interface AccountHistory {

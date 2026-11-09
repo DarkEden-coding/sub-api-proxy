@@ -68,7 +68,21 @@
       "active_threads": 5,
       "available_at": null,
       "login_needed_on": [],
-      "stale": false
+      "stale": false,
+      "resets": {
+        "checked_at": "2026-10-22T16:20:00Z",
+        "available": 2,
+        "blocked": "Usable once a usage limit is reached",
+        "credits": [
+          {
+            "label": "Weekly limit reset",
+            "left": 2,
+            "total": 2,
+            "expires_at": "2026-11-05T00:00:00Z"
+          }
+        ],
+        "error": null
+      }
     },
     {
       "id": "claude-pro-personal",
@@ -196,7 +210,21 @@
       "active_threads": 0,
       "available_at": "2026-10-25T08:24:00Z",
       "login_needed_on": [],
-      "stale": false
+      "stale": false,
+      "resets": {
+        "checked_at": "2026-10-22T16:20:00Z",
+        "available": 1,
+        "blocked": null,
+        "credits": [
+          {
+            "label": null,
+            "left": 1,
+            "total": null,
+            "expires_at": "2026-10-30T00:00:00Z"
+          }
+        ],
+        "error": null
+      }
     },
     {
       "id": "codex-plus-side",

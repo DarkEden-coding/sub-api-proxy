@@ -27,12 +27,13 @@ impl std::fmt::Display for ProbeError {
     }
 }
 
-pub(crate) async fn fetch(
-    client: wreq::Client,
+/// The executor-owned base URL and the credential's stored access token, or
+/// `Unsupported`. Shared by every subscription account endpoint.
+pub(crate) fn target<'a>(
     base: &str,
-    credential: &Credential,
+    credential: &'a Credential,
     claude: bool,
-) -> Result<BTreeMap<String, String>, ProbeError> {
+) -> Result<(url::Url, &'a str), ProbeError> {
     // Only executor-owned origins are accepted. Credential base_url and quota_probe
     // metadata must never redirect subscription tokens to another service.
     let base = url::Url::parse(base).map_err(|_| ProbeError::Unsupported)?;
@@ -57,28 +58,22 @@ pub(crate) async fn fetch(
         .str("access_token")
         .filter(|s| !s.is_empty())
         .ok_or(ProbeError::Unsupported)?;
-    let url = base
-        .join(if claude {
-            "/api/oauth/usage"
-        } else {
-            "/backend-api/wham/usage"
-        })
-        .map_err(|_| ProbeError::Unsupported)?;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let mut request = client
-            .get(url.as_str())
+    Ok((base, token))
+}
+
+/// Sends `request` without following redirects, within `limit`. Returns the status and,
+/// for a 2xx answer, at most 1 MiB of body.
+pub(crate) async fn send(request: wreq::RequestBuilder, limit: Duration) -> Result<(u16, Vec<u8>), ProbeError> {
+    tokio::time::timeout(limit, async {
+        // These executor transports disable redirects. Never follow a redirect here.
+        let response = request
             .redirect(wreq::redirect::Policy::none())
-            .bearer_auth(token);
-        if claude {
-            request = request.header("anthropic-beta", "oauth-2025-04-20");
-        } else if let Some(account) = credential.str("account_id").filter(|s| !s.is_empty()) {
-            request = request.header("chatgpt-account-id", account);
-        }
-        // These executor transports disable redirects. Never follow a usage redirect.
-        let response = request.send().await.map_err(|_| ProbeError::Transport)?;
+            .send()
+            .await
+            .map_err(|_| ProbeError::Transport)?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(ProbeError::Status(status));
+            return Ok((status, Vec::new()));
         }
         let mut stream = response.bytes_stream();
         let mut raw = Vec::new();
@@ -89,10 +84,36 @@ pub(crate) async fn fetch(
             }
             raw.extend_from_slice(&chunk);
         }
-        signals(&raw, claude)
+        Ok((status, raw))
     })
     .await
     .map_err(|_| ProbeError::Timeout)?
+}
+
+pub(crate) async fn fetch(
+    client: wreq::Client,
+    base: &str,
+    credential: &Credential,
+    claude: bool,
+) -> Result<BTreeMap<String, String>, ProbeError> {
+    let (base, token) = target(base, credential, claude)?;
+    let url = base
+        .join(if claude {
+            "/api/oauth/usage"
+        } else {
+            "/backend-api/wham/usage"
+        })
+        .map_err(|_| ProbeError::Unsupported)?;
+    let mut request = client.get(url.as_str()).bearer_auth(token);
+    if claude {
+        request = request.header("anthropic-beta", "oauth-2025-04-20");
+    } else if let Some(account) = credential.str("account_id").filter(|s| !s.is_empty()) {
+        request = request.header("chatgpt-account-id", account);
+    }
+    match send(request, Duration::from_secs(10)).await? {
+        (200..300, raw) => signals(&raw, claude),
+        (status, _) => Err(ProbeError::Status(status)),
+    }
 }
 
 fn signals(raw: &[u8], claude: bool) -> Result<BTreeMap<String, String>, ProbeError> {

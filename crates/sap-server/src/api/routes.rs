@@ -91,6 +91,9 @@ pub(super) async fn account_history(
 ) -> Result<Json<AccountHistory>, Error> {
     Ok(Json(c.account_history(&AccountId(segment(id)?), params(query)?.hours)?))
 }
+pub(super) async fn use_reset(State(c): Node, id: Segment) -> Result<Json<ResetResult>, Error> {
+    Ok(Json(c.use_reset(&AccountId(segment(id)?)).await?))
+}
 pub(super) async fn threads(State(c): Node, query: Params<Active>) -> Result<Json<Vec<ThreadView>>, Error> {
     Ok(Json(c.threads(params(query)?.active)))
 }

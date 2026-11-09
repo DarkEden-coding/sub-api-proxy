@@ -33,6 +33,12 @@ export function weekdayTime(iso: string, tz?: string): string {
   return `${p.weekday} ${p.hour}:${p.minute}`;
 }
 
+/** "5 Nov". */
+export function dayMonth(iso: string, tz?: string): string {
+  const p = parts(iso, tz, { day: "numeric", month: "short" });
+  return `${p.day} ${p.month}`;
+}
+
 /** "16:24". */
 export function clock(iso: string, tz?: string): string {
   const p = parts(iso, tz, { hour: "2-digit", minute: "2-digit" });

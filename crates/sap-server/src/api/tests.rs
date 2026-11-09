@@ -60,6 +60,7 @@ impl Control for Fake {
             Ok(LoginStart {
                 url: "http://localhost/login".into(),
                 login_id: "login-1".into(),
+                callback_relay: false,
             })
         })
     }
@@ -68,6 +69,17 @@ impl Control for Fake {
         Ok(AccountHistory {
             account: id.clone(),
             samples: vec![],
+        })
+    }
+    fn use_reset(&self, id: &AccountId) -> BoxFuture<'_, ControlResult<ResetResult>> {
+        self.called(format!("use-reset:{id}"));
+        let account = self.view.accounts[0].clone();
+        Box::pin(async move {
+            Ok(ResetResult {
+                outcome: ResetOutcome::Reset,
+                message: "Reset used.".into(),
+                account,
+            })
         })
     }
     fn threads(&self, active_only: bool) -> Vec<ThreadView> {
@@ -164,6 +176,12 @@ async fn api_routes_follow_control_shapes_and_arguments() {
             format!("/sap/api/accounts/{account}/history?hours=7"),
             json!(null),
             json!({"account":account,"samples":[]}),
+        ),
+        (
+            "POST",
+            format!("/sap/api/accounts/{account}/reset"),
+            json!(null),
+            json!({"outcome":"reset","message":"Reset used.","account":fake.accounts()[0]}),
         ),
         (
             "GET",

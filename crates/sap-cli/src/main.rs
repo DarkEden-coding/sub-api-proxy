@@ -298,6 +298,7 @@ async fn run(cli: Cli) -> Result<()> {
                             CodingClient::Codex => Provider::Codex,
                         },
                         account: None,
+                        callback_relay: false,
                     }),
                 )
                 .await?;
