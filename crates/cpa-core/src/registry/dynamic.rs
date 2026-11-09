@@ -1672,8 +1672,10 @@ mod tests {
         let live = file("a.json", serde_json::json!({"type":"claude"}), &[]);
         let off = file("b.json", serde_json::json!({"type":"claude","disabled":true}), &[]);
         let r = Registry::build(&cfg, &[live, off]);
-        assert_eq!(r.available().count(), 18, "Go registers the 18-model Claude catalog");
+        // Go's 18-model Claude catalog plus claude-fable-5-2 (docs/DIFFERENCES-FROM-GO.md).
+        assert_eq!(r.available().count(), 19);
         assert_eq!(r.providers("claude-sonnet-4-6"), ["claude"]);
+        assert_eq!(r.providers("claude-fable-5-2"), ["claude"]);
         assert!(r.has_client("a.json") && !r.has_client("b.json"));
         assert!(r.providers("gpt-5.5").is_empty());
         let only_off = Registry::build(

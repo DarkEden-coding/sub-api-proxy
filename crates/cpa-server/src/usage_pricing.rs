@@ -31,6 +31,7 @@ pub struct Rate {
 /// ponytail: only the models in use at the time of writing; the online list covers the rest,
 /// and a model in neither shows as unpriced.
 const BUILT_IN: &[(&str, [f64; 4])] = &[
+    ("claude-fable-5-2", [8.0, 40.0, 0.20, 10.0]),
     ("claude-fable-5-1", [10.0, 50.0, 0.25, 12.5]),
     ("claude-fable-5", [10.0, 50.0, 0.25, 12.5]),
     ("claude-opus-5-5", [4.0, 20.0, 0.20, 5.0]),

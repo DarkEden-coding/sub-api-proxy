@@ -350,7 +350,12 @@ fn thinking_off_uses_the_lowest_effort_where_disabled_is_refused() {
     let disabled = |model: &str| {
         format!(r#"{{"model":"{model}","max_tokens":64,"thinking":{{"type":"disabled"}},"messages":[]}}"#)
     };
-    for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"] {
+    for model in [
+        "claude-opus-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-sonnet-5-5",
+    ] {
         assert_eq!(
             off(model, &disabled(model)),
             (
