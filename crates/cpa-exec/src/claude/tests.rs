@@ -2249,8 +2249,8 @@ async fn responses_compaction_matches_go() {
     reply.lock().unwrap().clear();
 }
 
-/// Claude Code run by the Agent SDK in TypeScript (`sdk-ts`, as T3 Code and other
-/// desktop agents launch it) is the same CLI as `sdk-cli`, and its request for a model
+/// Claude Code driven by the Agent SDK names its host in the entrypoint (`sdk-ts`, or
+/// `t3-code` from T3 Code) but is the same CLI as `sdk-cli`, so its request for a model
 /// that needs a newer release than the cloaking baseline, such as Claude Fable 5.2
 /// (2.1.290 or newer), goes upstream under its own release. Cloaked as the 2.1.280
 /// baseline, Anthropic answers 400 "Claude Code 2.1.280 does not support this model".
@@ -2276,35 +2276,38 @@ async fn agent_sdk_requests_keep_their_own_release() {
     credential.id = "agent-sdk.json".into();
     credential.attributes.insert("base_url".into(), base);
     let cfg = Config::parse("").unwrap();
-    // Captured from Claude Code 2.1.321 with CLAUDE_CODE_ENTRYPOINT=sdk-ts.
-    let user_agent = "claude-cli/2.1.321 (external, sdk-ts, agent-sdk/0.3.321)";
-    let mut headers = http::HeaderMap::new();
-    for (name, value) in [
-        ("user-agent", user_agent),
-        ("x-app", "cli"),
-        (
-            "anthropic-beta",
-            "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24",
-        ),
-        ("x-stainless-package-version", "0.128.0"),
-        ("x-stainless-runtime-version", "v26.12.1"),
-    ] {
-        headers.insert(name, value.parse().unwrap());
-    }
-    let user_id = serde_json::json!({
-        "device_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "account_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        "session_id": "dd01238e-cdb5-5572-8f27-a28d98fe9075",
-    })
-    .to_string();
-    let body = serde_json::json!({
+    // Captured from Claude Code 2.1.321 with CLAUDE_CODE_ENTRYPOINT set by the host.
+    for (n, entrypoint) in ["sdk-ts", "t3-code"].into_iter().enumerate() {
+        let user_agent = format!("claude-cli/2.1.321 (external, {entrypoint}, agent-sdk/0.3.321)");
+        let user_agent = user_agent.as_str();
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in [
+            ("user-agent", user_agent),
+            ("x-app", "cli"),
+            (
+                "anthropic-beta",
+                "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24",
+            ),
+            ("x-stainless-package-version", "0.128.0"),
+            ("x-stainless-runtime-version", "v26.12.1"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let user_id = serde_json::json!({
+            "device_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "account_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "session_id": "dd01238e-cdb5-5572-8f27-a28d98fe9075",
+        })
+        .to_string();
+        let body = serde_json::json!({
         "model": "claude-fable-5-2",
         "max_tokens": 8,
-        "system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.321.cf7; cc_entrypoint=sdk-ts;"}],
+        "system": [{"type": "text", "text": format!("x-anthropic-billing-header: cc_version=2.1.321.cf7; cc_entrypoint={entrypoint};")}],
         "messages": [{"role": "user", "content": "hi"}],
         "metadata": {"user_id": user_id},
     })
     .to_string();
-    drain(&executor, &credential, &cfg, client_request(body, headers)).await;
-    assert_eq!(*agents.lock().unwrap(), [user_agent]);
+        drain(&executor, &credential, &cfg, client_request(body, headers)).await;
+        assert_eq!(agents.lock().unwrap()[n], user_agent);
+    }
 }

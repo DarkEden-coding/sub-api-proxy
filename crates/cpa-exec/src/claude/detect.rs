@@ -15,10 +15,8 @@ use super::profile::{self, Profile};
 use super::settings::Settings;
 use crate::rawjson;
 
-/// Entrypoints whose wire behaviour was captured and reviewed for passthrough. Go
-/// lists the first three; `sdk-ts` is the same CLI started by the TypeScript Agent SDK
-/// and sends what `sdk-cli` sends (docs/DIFFERENCES-FROM-GO.md).
-pub(crate) const NATIVE_ENTRYPOINTS: &[&str] = &["cli", "sdk-cli", "claude-vscode", "sdk-ts"];
+/// Entrypoints whose wire behaviour was captured and reviewed for passthrough.
+pub(crate) const NATIVE_ENTRYPOINTS: &[&str] = &["cli", "sdk-cli", "claude-vscode"];
 pub(crate) const HELPER_MODEL: &str = "claude-haiku-4-5-20251001";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,7 +159,7 @@ pub(crate) fn valid_user_id(user_id: &str) -> bool {
 
 pub(crate) fn detect(headers: &HeaderMap, payload: &str, count_tokens: bool, settings: &Settings) -> Detection {
     let user_agent = raw_header(headers, "user-agent");
-    let (entrypoint, _) = user_agent_details(user_agent);
+    let (entrypoint, agent_sdk) = user_agent_details(user_agent);
     let x_app = raw_header(headers, "x-app") == "cli";
     // A newer release counts only with its own well-formed SDK and runtime versions:
     // otherwise its forwarded User-Agent would go upstream with baseline versions.
@@ -169,7 +167,10 @@ pub(crate) fn detect(headers: &HeaderMap, payload: &str, count_tokens: bool, set
     let betas = has_claude_code_beta(headers);
     let user_id = rawjson::get(payload, "metadata.user_id");
     let metadata_user_id = user_id.kind() == gjson::Kind::String && valid_user_id(user_id.str());
-    let native = NATIVE_ENTRYPOINTS.contains(&entrypoint.as_str());
+    // Claude Code driven by the Agent SDK names its host in the entrypoint (`sdk-ts`,
+    // `t3-code`, ...) but is the same CLI and sends what `sdk-cli` sends. Go accepts
+    // only the listed entrypoints (docs/DIFFERENCES-FROM-GO.md).
+    let native = NATIVE_ENTRYPOINTS.contains(&entrypoint.as_str()) || !agent_sdk.is_empty();
     let standard = x_app && ua && betas && (count_tokens || metadata_user_id);
     let helper = native
         && !count_tokens
