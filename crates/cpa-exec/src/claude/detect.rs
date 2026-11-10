@@ -15,8 +15,10 @@ use super::profile::{self, Profile};
 use super::settings::Settings;
 use crate::rawjson;
 
-/// Entrypoints whose wire behaviour was captured and reviewed for passthrough.
-pub(crate) const NATIVE_ENTRYPOINTS: &[&str] = &["cli", "sdk-cli", "claude-vscode"];
+/// Entrypoints whose wire behaviour was captured and reviewed for passthrough. Go
+/// lists the first three; `sdk-ts` is the same CLI started by the TypeScript Agent SDK
+/// and sends what `sdk-cli` sends (docs/DIFFERENCES-FROM-GO.md).
+pub(crate) const NATIVE_ENTRYPOINTS: &[&str] = &["cli", "sdk-cli", "claude-vscode", "sdk-ts"];
 pub(crate) const HELPER_MODEL: &str = "claude-haiku-4-5-20251001";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
