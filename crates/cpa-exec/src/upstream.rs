@@ -18,9 +18,42 @@ use tokio_util::io::{ReaderStream, StreamReader};
 pub(crate) const MAX_ERROR_BODY: usize = 64 * 1024;
 
 pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
-    // wreq errors may include a URL with credential-bearing query parameters.
-    let _ = e;
+    // wreq errors may include a URL with credential-bearing query parameters, so only
+    // a constant label of the failure kind is logged.
+    tracing::warn!(cause = transport_cause(&e), "upstream transport failure");
     ExecError::local(502, FailureScope::Transport, "upstream request failed")
+}
+
+/// A constant label for what failed, safe to log.
+fn transport_cause(e: &wreq::Error) -> &'static str {
+    let kinds: [(bool, &str); 12] = [
+        (e.is_timeout(), "timeout"),
+        (e.is_dns(), "dns"),
+        (e.is_proxy_connect(), "proxy_connect"),
+        (e.is_tls(), "tls"),
+        (e.is_connection_reset(), "connection_reset"),
+        (e.is_connect(), "connect"),
+        (e.is_redirect(), "redirect"),
+        (e.is_body(), "body"),
+        (e.is_decode(), "decode"),
+        (e.is_builder(), "builder"),
+        (e.is_upgrade(), "upgrade"),
+        (e.is_request(), "request"),
+    ];
+    kinds.iter().find(|(hit, _)| *hit).map_or("other", |(_, label)| label)
+}
+
+/// A constant label for a failed body read, safe to log.
+pub(crate) fn io_cause(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        UnexpectedEof => "unexpected_eof",
+        ConnectionReset => "connection_reset",
+        ConnectionAborted => "connection_aborted",
+        BrokenPipe => "broken_pipe",
+        TimedOut => "timeout",
+        _ => "other",
+    }
 }
 
 /// A response whose body went through Go's Claude `decodeResponseBody`. `body` is

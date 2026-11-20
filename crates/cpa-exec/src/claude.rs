@@ -254,7 +254,10 @@ impl ClaudeExecutor {
             Native::Transport(t) => t
                 .clients(proxy, handshake)
                 .map(|clients| clients.native.clone())
-                .map_err(|_| ExecError::local(502, FailureScope::Transport, "upstream request failed")),
+                .map_err(|_| {
+                    tracing::warn!(cause = "client_build", "upstream client unavailable");
+                    ExecError::local(502, FailureScope::Transport, "upstream request failed")
+                }),
         }
     }
 

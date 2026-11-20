@@ -562,7 +562,8 @@ pub struct Upstream {
 // exhausting a small VPS while covering any real provider error.
 pub const MAX_ERROR_BODY: usize = 16 << 20;
 
-fn body_error(_: std::io::Error) -> ExecError {
+fn body_error(e: std::io::Error) -> ExecError {
+    tracing::warn!(cause = crate::upstream::io_cause(&e), "upstream body read failed");
     ExecError::local(502, FailureScope::Transport, "upstream request failed")
 }
 
@@ -649,7 +650,10 @@ fn sanitize(error: SendError) -> ExecError {
         SendError::Transport { error, .. } => crate::upstream::transport_error(error),
         SendError::Local { error, .. } => error,
         // What `transport_error` makes of the transport's own timeout.
-        SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
+        SendError::Timeout { .. } => {
+            tracing::warn!(cause = "timeout", "upstream request deadline passed");
+            ExecError::local(502, FailureScope::Transport, "upstream request failed")
+        }
     }
 }
 
@@ -696,6 +700,7 @@ impl RawUpstream {
     fn scanned(self) -> Upstream {
         let map = |error: std::io::Error| {
             if ended_early(&error) {
+                tracing::warn!(cause = "unexpected_eof", "upstream body ended early");
                 ExecError::local(502, FailureScope::Transport, "unexpected EOF")
             } else {
                 body_error(error)
