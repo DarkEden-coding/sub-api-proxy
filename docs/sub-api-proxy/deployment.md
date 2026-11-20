@@ -1,6 +1,6 @@
 # Current deployment
 
-Updated November 7, 2026. power-server is the primary server for every client and
+Updated November 17, 2026. power-server is the primary server for every client and
 the Mac is the fallback. Each server holds its own provider logins; credentials and
 generated configuration stay outside this repository.
 
@@ -103,3 +103,27 @@ records with ordered timestamps and TTL buckets. Its latest observed record
 predates this restart; post-deployment checks on natural traffic remain pending.
 No synthetic inference requests were sent. Neither server's provider credentials
 were copied or changed during deployment.
+
+## November 17 OpenAI model update
+
+Both servers now register `gpt-6.2-sol` and `gpt-6.2-astra`. OpenAI's authenticated
+catalog returns them with Codex 0.169.0; querying with 0.163.0 hides them. Their
+minimum client version is 0.166.0. The proxy supplements the lagging model mirrors
+with these definitions and OpenAI's client templates, while preferring future
+mirror definitions for the same IDs.
+
+Both servers report serving and expose the models through the OpenAI model list
+and Codex catalog. Both lists also passed through the Mac and Scythe-Desktop
+routers, which prefer power-server. Sol advertises a 500,000-token default
+context and Astra 272,000; both advertise an 872,000-token maximum. The Mac's
+Codex CLI is 0.169.0, power-server's is 0.166.0, and Scythe-Desktop's is 0.165.0,
+below the models' stated minimum client version.
+
+The deployment includes only the model changes over commit `635dfae`, excluding
+unrelated workspace edits. All 110 cpa-core and cpa-common library tests and
+clippy for all targets passed. Rollback binaries, deployment hashes, and source
+manifests are under `~/.local/state/sub-api-proxy/deployments/models-6.2-20261117/`
+on each server. Usage statistics and Claude cache telemetry remain enabled on
+both servers. The Mac collector retains post-restart schema v2 records with
+ordered timestamps, TTLs, and hashed sections. Verification used model catalog
+requests and naturally occurring usage records.

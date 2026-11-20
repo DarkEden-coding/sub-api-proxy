@@ -78,6 +78,16 @@ fn capacity(runtime: &AccountRuntime, cfg: &RoutingConfig) -> f64 {
         .map_or(1.0, nonnegative)
 }
 
+/// Configured hold-back for the account's plan, 1 when the plan is unlisted.
+fn plan_share(runtime: &AccountRuntime, cfg: &RoutingConfig) -> f64 {
+    runtime
+        .account
+        .plan
+        .as_deref()
+        .and_then(|plan| crate::plan_share(plan, cfg))
+        .map_or(1.0, nonnegative)
+}
+
 /// Share multiplier from the five-hour window: new threads shift away as the window
 /// fills past the taper start, without a hard cutoff before it is exhausted.
 fn five_hour_taper(runtime: &AccountRuntime, now: DateTime<Utc>, cfg: &RoutingConfig) -> f64 {
@@ -206,7 +216,7 @@ pub(crate) fn score(
         }
         let raw = nonnegative(cfg.urgency_weight) * s.urgency + nonnegative(cfg.headroom_weight) * s.headroom
             - nonnegative(cfg.load_weight) * s.load;
-        shares[i] = raw.max(0.0) * s.taper;
+        shares[i] = raw.max(0.0) * s.taper * plan_share(&input.accounts[s.runtime_index], cfg);
     }
     let weights = weights(&scores, &candidates, &shares, input);
     for &i in &candidates {

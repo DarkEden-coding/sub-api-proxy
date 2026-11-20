@@ -394,6 +394,23 @@ fn plan_and_override_scale_allowance_but_learned_capacity_does_not() {
 }
 
 #[test]
+fn ultra_is_held_back_behind_smaller_claude_plans_but_still_drains() {
+    let mut request = input(RoutingEvent::NewThread);
+    request.accounts[0].account.plan = Some("default_claude_max_20x".into());
+    request.accounts[1].account.plan = Some("default_claude_ultra".into());
+    // Same capacity and usage: Ultra gets 0.05 / 1.05 of new threads.
+    let w = weights(&policy(), &request);
+    assert!(close(w[1], 100.0 * 0.05 / 1.05), "{w:?}");
+    // Once the other account's five-hour window is full, Ultra takes everything.
+    request.accounts[0].windows[0].used_percent = 100.0;
+    assert_eq!(weights(&policy(), &request), vec![0.0, 100.0]);
+    // An Ultra allowance about to reset is still drained rather than wasted.
+    request.accounts[0].windows[0].used_percent = 0.0;
+    weekly(&mut request.accounts[1], 70.0, 30 * HOUR);
+    assert_eq!(weights(&policy(), &request), vec![0.0, 100.0]);
+}
+
+#[test]
 fn account_near_weekly_reset_drains_until_its_five_hour_window_fills() {
     let mut request = input(RoutingEvent::NewThread);
     weekly(&mut request.accounts[1], 70.0, 30 * HOUR);

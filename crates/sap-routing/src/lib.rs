@@ -7,5 +7,5 @@ mod capacity;
 mod policy;
 mod scoring;
 
-pub use capacity::plan_capacity;
+pub use capacity::{plan_capacity, plan_share};
 pub use policy::ThreadAffinityPolicy;

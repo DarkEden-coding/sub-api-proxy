@@ -4,6 +4,7 @@ const PLAN_NAMES: Record<string, string> = {
   pro: "Pro",
   max_5x: "Max 5×",
   max_20x: "Max 20×",
+  ultra: "Ultra",
   team: "Team",
   enterprise: "Enterprise",
   // ChatGPT

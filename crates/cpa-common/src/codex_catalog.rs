@@ -214,6 +214,16 @@ fn templates() -> Option<Arc<Templates>> {
                 by_slug.insert(slug, model);
             }
         }
+        // Captured from OpenAI with client 0.169.0. Fill the mirror's missing 6.2
+        // templates so clients get the provider's instructions and capabilities.
+        // The remote template wins as soon as the mirror publishes it.
+        let mut supplement = GoValue::parse_f64(include_bytes!("codex_client_models_6_2.json"))?
+            .into_object()
+            .ok()?;
+        for model in supplement.remove("models")?.into_array().ok()? {
+            let model = model.into_object().ok()?;
+            by_slug.entry(string(&model, "slug")).or_insert(model);
+        }
         let default = default?;
         Some(Arc::new(Templates { by_slug, default }))
     });

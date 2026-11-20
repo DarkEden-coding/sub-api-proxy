@@ -6,6 +6,7 @@ test("Claude plans", () => {
   assert.equal(planName("pro"), "Pro");
   assert.equal(planName("default_claude_max_5x"), "Max 5×");
   assert.equal(planName("default_claude_max_20x"), "Max 20×");
+  assert.equal(planName("default_claude_ultra"), "Ultra");
   assert.equal(planName("claude_team"), "Team");
   assert.equal(planName("enterprise"), "Enterprise");
 });

@@ -15,6 +15,7 @@ fn decide(&self, input: &RoutingInput) -> Decision;
 fn scores(&self, input: &RoutingInput) -> Vec<AccountScore>;
 
 plan_capacity(plan: &str, cfg: &RoutingConfig) -> Option<f64>
+plan_share(plan: &str, cfg: &RoutingConfig) -> Option<f64>
 ```
 
 Import `sap_core::routing::RoutingPolicy` to call the trait methods. Domain types
@@ -35,8 +36,13 @@ H = remaining
 L = active_threads / sum(active_threads of eligible accounts)
 raw = urgency_weight * U/max(U) + headroom_weight * H/max(H) - load_weight * L
 taper = 1 below five_hour_taper_start_percent (90), falling linearly to 0 at 100
-share = max(raw, 0) * taper
+share = max(raw, 0) * taper * plan_share
 ```
+
+`plan_share` comes from the `plan_share` table, matched like `plan_capacity`, and
+is 1 for unlisted plans. The default holds Claude Ultra at 0.05, so smaller Claude
+plans take most new threads until they taper or run out. It does not apply to a
+draining account.
 
 Defaults are `urgency_weight` 1 and the other weights 0, so an account's share is
 its weekly allowance left divided by its time to reset: the rate at which it must

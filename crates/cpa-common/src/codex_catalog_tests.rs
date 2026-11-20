@@ -4,6 +4,55 @@
 use super::*;
 use serde_json::Value;
 
+#[test]
+fn codex_6_2_templates_keep_upstream_capabilities() {
+    let data = include_bytes!("codex_client_models_6_2.json");
+    assert!(validate(data).is_ok());
+    let templates = templates().unwrap();
+    for (slug, context) in [("gpt-6.2-sol", 500_000), ("gpt-6.2-astra", 272_000)] {
+        let model = &templates.by_slug[slug];
+        assert_eq!(int(model, "context_window"), context);
+        assert_eq!(int(model, "max_context_window"), 872_000);
+        assert_eq!(string(model, "minimal_client_version"), "0.166.0");
+        assert!(!string(model, "base_instructions").is_empty());
+    }
+}
+
+struct Sol;
+
+impl Registry for Sol {
+    fn lookup(&self, id: &str, _: Option<&str>) -> Option<ModelFacts> {
+        (id == "gpt-6.2-sol").then(|| ModelFacts {
+            id: id.into(),
+            thinking: serde_json::from_str(r#"{"levels":["low","medium","high","xhigh","max","ultra"]}"#).ok(),
+            ..Default::default()
+        })
+    }
+    fn providers(&self, _: &str) -> Vec<String> {
+        vec!["codex".into()]
+    }
+    fn web_search(&self, _: &str) -> Option<bool> {
+        None
+    }
+}
+
+#[test]
+fn codex_6_2_reaches_clients_with_reasoning_levels() {
+    let model: Map = GoValue::from_json(&serde_json::json!({"id": "gpt-6.2-sol"}))
+        .into_object()
+        .unwrap();
+    let out = build_response(&[model], &Sol, None, false, "0.169.0");
+    let out: Value = serde_json::from_slice(&marshal_compact(&out)).unwrap();
+    let levels: Vec<_> = out["models"][0]["supported_reasoning_levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| (l["effort"].as_str().unwrap(), l["description"].as_str().unwrap()))
+        .collect();
+    let efforts: Vec<_> = levels.iter().map(|l| l.0).collect();
+    assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+}
+
 fn fixture() -> Value {
     use std::io::Read;
     let gz = include_bytes!("../tests/fixtures/codex_catalog_go.json.gz");

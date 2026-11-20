@@ -563,6 +563,23 @@ fn codex_channel(name: &str) -> Vec<Spec> {
             !id.is_empty() && !builtins.iter().any(|b| b.id == id)
         })
         .collect();
+    // OpenAI's 0.169.0 catalog lists these paid-plan models before the mirror.
+    // Keep them available across remote refreshes; prefer the mirror once it catches up.
+    if matches!(name, "codex-team" | "codex-plus" | "codex-pro") {
+        static SUPPLEMENT: std::sync::LazyLock<Vec<ModelInfo>> = std::sync::LazyLock::new(|| {
+            let models: Vec<serde_json::Map<String, serde_json::Value>> =
+                serde_json::from_str(include_str!("codex_6_2.json")).expect("valid Codex 6.2 models");
+            models
+                .into_iter()
+                .map(|m| ModelInfo::from_raw(m).expect("valid model"))
+                .collect()
+        });
+        for model in SUPPLEMENT.iter() {
+            if !models.iter().any(|m| m.id.go_eq_fold(&model.id)) {
+                models.push(Spec::from_static(model));
+            }
+        }
+    }
     models.extend(builtins);
     models
 }
@@ -1602,6 +1619,31 @@ pub fn state_model(selection: &str, route_model: &str, upstream: &str, pooled: b
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn codex_6_2_paid_models_follow_exclusions_and_aliases() {
+        let cfg = Config::parse("oauth:\n  excluded-models:\n    codex: [gpt-6.2-astra]\n  model-alias:\n    codex:\n      - {name: gpt-6.2-sol, alias: sol-new, fork: true}\n").unwrap();
+        for plan in ["plus", "team", "pro"] {
+            let c = file(
+                "codex.json",
+                serde_json::json!({"type":"codex"}),
+                &[("plan_type", plan)],
+            );
+            let r = Registry::build(&cfg, &[c]);
+            let model = r.info("gpt-6.2-sol", None).unwrap();
+            assert_eq!(model.context_length, 500_000);
+            assert_eq!(model.supported_input_modalities, ["text", "image", "audio"]);
+            assert!(model.support_configuration_update);
+            assert_eq!(r.responses_web_search("gpt-6.2-sol"), Some(true));
+            assert!(r.client_supports("codex.json", "sol-new"));
+            assert!(r.info("gpt-6.2-astra", None).is_none());
+        }
+        assert!(
+            codex_channel("codex-free")
+                .iter()
+                .all(|m| !m.id.starts_with("gpt-6.2-"))
+        );
+    }
 
     fn file(id: &str, meta: Value, attrs: &[(&str, &str)]) -> Arc<Credential> {
         let mut c = Credential::from_file(

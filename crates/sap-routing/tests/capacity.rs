@@ -6,6 +6,7 @@ fn plan_lookup_is_ascii_case_insensitive_and_uses_table_order() {
     let cfg = RoutingConfig::default();
     assert_eq!(plan_capacity("default_CLAUDE_MAX_20X", &cfg), Some(20.0));
     assert_eq!(plan_capacity("MAX_5x", &cfg), Some(5.0));
+    assert_eq!(plan_capacity("default_claude_ultra", &cfg), Some(20.0));
     assert_eq!(plan_capacity("Enterprise", &cfg), None);
     assert_eq!(plan_capacity("pluſ", &cfg), None);
     let cfg = RoutingConfig {

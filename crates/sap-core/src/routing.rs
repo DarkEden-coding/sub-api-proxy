@@ -203,6 +203,10 @@ pub struct RoutingConfig {
     pub compaction_move_margin: f64,
     /// Capacity multiplier by plan name; lookups are case-insensitive substrings.
     pub plan_capacity: Vec<(String, f64)>,
+    /// Share multiplier by plan name, same lookup as `plan_capacity`; unlisted plans
+    /// use 1. A value below 1 holds a plan back so the others are used first, without
+    /// removing it from routing. It does not change draining before a weekly reset.
+    pub plan_share: Vec<(String, f64)>,
 }
 
 impl Default for RoutingConfig {
@@ -219,6 +223,7 @@ impl Default for RoutingConfig {
             retry_deadline_secs: 60,
             compaction_move_margin: 0.25,
             plan_capacity: vec![
+                ("ultra".into(), 20.0),
                 ("max_20x".into(), 20.0),
                 ("max_5x".into(), 5.0),
                 ("max".into(), 5.0),
@@ -227,6 +232,8 @@ impl Default for RoutingConfig {
                 ("plus".into(), 1.0),
                 ("free".into(), 0.2),
             ],
+            // Ultra is used mostly once the smaller Claude plans taper or run out.
+            plan_share: vec![("ultra".into(), 0.05)],
         }
     }
 }
