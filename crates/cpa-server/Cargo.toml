@@ -46,6 +46,7 @@ subtle = "2.6"
 wreq.workspace = true
 # The live call body reports whether it reached the connection (realtime/http.rs).
 http-body = "1"
+http-body-util = "0.1"
 # Codex Live WebRTC media relay (codex.live-media-relay), a pion port; ring crypto keeps
 # a second BoringSSL out of the binary. Off by default.
 webrtc = { version = "0.21", default-features = false, features = ["runtime-tokio", "crypto-ring"], optional = true }

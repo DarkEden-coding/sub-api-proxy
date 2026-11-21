@@ -324,6 +324,11 @@ pub(crate) async fn health(State(rt): State<Arc<Runtime>>) -> Response {
     }
 }
 
+fn body_too_large(error: &axum::Error) -> bool {
+    std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |e| e.source())
+        .any(|e| e.is::<http_body_util::LengthLimitError>())
+}
+
 pub(crate) async fn identify_http(State(rt): State<Arc<Runtime>>, request: Request, next: Next) -> Response {
     if rt.sap_hooks().is_none()
         || request.method() != axum::http::Method::POST
@@ -341,7 +346,19 @@ pub(crate) async fn identify_http(State(rt): State<Arc<Runtime>>, request: Reque
     let (parts, body) = request.into_parts();
     let body = match to_bytes(body, crate::MAX_REQUEST_BYTES).await {
         Ok(body) => body,
-        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(error) => {
+            // A read can also fail because the client went away mid-upload; only the
+            // length limit is a 413. The label is constant, so no request bytes are logged.
+            let too_large = body_too_large(&error);
+            let cause = if too_large { "too_large" } else { "read_failed" };
+            tracing::warn!(cause, "SAP request body rejected");
+            return if too_large {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+            .into_response();
+        }
     };
     let context = identify(&rt, parts.uri.path(), &parts.headers, &body, None);
     let response = scope(context.clone(), next.run(Request::from_parts(parts, Body::from(body)))).await;
@@ -1063,6 +1080,14 @@ mod tests {
 #[cfg(test)]
 mod entitlement_tests {
     use super::*;
+    #[tokio::test]
+    async fn only_the_length_limit_counts_as_too_large() {
+        let over = to_bytes(Body::from(vec![0_u8; 8]), 4).await.unwrap_err();
+        assert!(body_too_large(&over));
+        let stream = futures_util::stream::iter([Err::<Bytes, _>(std::io::Error::other("client went away"))]);
+        let broken = to_bytes(Body::from_stream(stream), 4).await.unwrap_err();
+        assert!(!body_too_large(&broken));
+    }
     #[test]
     fn explicit_model_errors_are_distinct_from_permissions_and_exhaustion() {
         let error = |status, body: &str| ExecError::local(status, FailureScope::Model, body);
