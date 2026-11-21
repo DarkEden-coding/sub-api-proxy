@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sap_core::ids::NodeId;
-use sap_core::sync::{Change, ChangeOp, SyncCursor, Table};
+use sap_core::sync::{ChangeOp, SyncCursor, Table};
 use sap_core::thread::ThreadRecord;
 use sap_core::{DateTime, Utc};
 
@@ -74,13 +74,23 @@ fn sidecar_bytes(conn: &Connection, include_wal: bool) -> Result<u64> {
     }
     Ok(total)
 }
-fn mark_pruned(conn: &Connection, origin: &str, seq: u64) -> Result<()> {
+fn note_pruned(pruned: &mut SyncCursor, origin: String, seq: u64) {
+    let old = pruned.entry(NodeId(origin)).or_default();
+    *old = (*old).max(seq);
+}
+/// Raise the stored log floor to cover every pruned change, in one write.
+fn mark_pruned(conn: &Connection, pruned: &SyncCursor) -> Result<()> {
+    if pruned.is_empty() {
+        return Ok(());
+    }
     let raw: Option<String> = conn
         .query_row("SELECT value FROM metadata WHERE key='log_floor'", [], |r| r.get(0))
         .optional()?;
     let mut floor: SyncCursor = raw.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
-    let old = floor.entry(NodeId(origin.into())).or_default();
-    *old = (*old).max(seq);
+    for (origin, seq) in pruned {
+        let old = floor.entry(origin.clone()).or_default();
+        *old = (*old).max(*seq);
+    }
     conn.execute(
         "INSERT INTO metadata VALUES ('log_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [serde_json::to_string(&floor)?],
@@ -108,23 +118,26 @@ impl Store {
                     .map(|s| Ok(serde_json::from_str(&s?)?))
                     .collect::<Result<_>>()?
             };
-            let logs: Vec<(i64, Change)> = {
-                let mut stmt = tx.prepare("SELECT id,value FROM op_log ORDER BY wall_ms,id")?;
-                stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-                    .map(|r| {
-                        let (id, raw) = r?;
-                        Ok((id, serde_json::from_str(&raw)?))
-                    })
-                    .collect::<Result<_>>()?
-            };
             // No registered peers means no acknowledgement evidence. Register all
             // configured peers, even with empty cursors, before enabling compaction.
-            let acknowledged =
-                |c: &Change| !peers.is_empty() && peers.iter().all(|p| p.get(&c.origin).copied().unwrap_or(0) >= c.seq);
-            for (id, c) in &logs {
-                if c.hlc.wall_ms < cutoff(now, self.limits.op_log_max_age) && acknowledged(c) {
+            let acknowledged = |origin: &str, seq: u64| {
+                let origin = NodeId(origin.into());
+                !peers.is_empty() && peers.iter().all(|p| p.get(&origin).copied().unwrap_or(0) >= seq)
+            };
+            let mut pruned = SyncCursor::new();
+            // This runs every minute on a log of hundreds of thousands of rows: select only
+            // expired rows and read origin and seq from columns, never decoding the JSON.
+            let expired: Vec<(i64, String, u64)> = {
+                let mut stmt = tx.prepare("SELECT id,origin,seq FROM op_log WHERE wall_ms<?1 ORDER BY wall_ms,id")?;
+                stmt.query_map([cutoff(now, self.limits.op_log_max_age)], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?
+            };
+            for (id, origin, seq) in expired {
+                if acknowledged(&origin, seq) {
                     report.op_log_rows_deleted += tx.execute("DELETE FROM op_log WHERE id=?1", [id])?;
-                    mark_pruned(tx, &c.origin.0, c.seq)?;
+                    note_pruned(&mut pruned, origin, seq);
                 }
             }
             let threads: Vec<ThreadRecord> = {
@@ -144,38 +157,59 @@ impl Store {
             }
             // Under pressure, discard oldest append data and acknowledged log rows
             // together in timestamp order. Cursors survive so replay cannot restore it.
-            let mut candidates: Vec<(i64, String, String, u64)> = Vec::new();
-            for table in APPEND_TABLES {
-                let mut stmt = tx.prepare(&format!("SELECT at_ms,origin,seq FROM {table}"))?;
-                for row in stmt.query_map([], |r| Ok((r.get(0)?, table.to_string(), r.get(1)?, r.get(2)?)))? {
-                    candidates.push(row?);
-                }
-            }
-            for (_, c) in logs {
-                if acknowledged(&c) {
-                    candidates.push((c.hlc.wall_ms, "op_log".into(), c.origin.0, c.seq));
-                }
-            }
-            candidates.sort();
+            // Trimming to 90% of the budget leaves headroom, so the next ticks skip this
+            // sort of the whole store instead of repeating it for every minute of growth.
             let mut retained = bytes(tx)?;
-            for (_, table, origin, seq) in candidates {
-                if retained <= self.limits.max_bytes {
-                    break;
-                }
-                let count = tx.execute(
-                    &format!("DELETE FROM {table} WHERE origin=?1 AND seq=?2"),
-                    params![origin, seq],
-                )?;
-                if table == "op_log" {
-                    report.op_log_rows_deleted += count;
-                    if count > 0 {
-                        mark_pruned(tx, &origin, seq)?;
+            let target = self.limits.max_bytes / 10 * 9;
+            if retained > self.limits.max_bytes {
+                let oldest = APPEND_TABLES
+                    .iter()
+                    .map(|t| format!("SELECT at_ms,'{t}',origin,seq,length(value) FROM {t}"))
+                    .chain(["SELECT wall_ms,'op_log',origin,seq,length(value) FROM op_log".into()])
+                    .collect::<Vec<_>>()
+                    .join(" UNION ALL ")
+                    + " ORDER BY 1,2,3,4";
+                // Row sizes only estimate the pages freed, so re-measure and repeat.
+                while retained > target {
+                    let wanted = retained - target;
+                    let mut batch = Vec::new();
+                    let mut freed = 0_u64;
+                    {
+                        let mut stmt = tx.prepare(&oldest)?;
+                        let mut rows = stmt.query([])?;
+                        while freed < wanted
+                            && let Some(row) = rows.next()?
+                        {
+                            let (table, origin, seq, len): (String, String, u64, u64) =
+                                (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?);
+                            if table == "op_log" && !acknowledged(&origin, seq) {
+                                continue;
+                            }
+                            freed += len;
+                            batch.push((table, origin, seq));
+                        }
                     }
-                } else {
-                    report.append_rows_deleted += count;
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for (table, origin, seq) in batch {
+                        let count = tx.execute(
+                            &format!("DELETE FROM {table} WHERE origin=?1 AND seq=?2"),
+                            params![origin, seq],
+                        )?;
+                        if table == "op_log" {
+                            report.op_log_rows_deleted += count;
+                            if count > 0 {
+                                note_pruned(&mut pruned, origin, seq);
+                            }
+                        } else {
+                            report.append_rows_deleted += count;
+                        }
+                    }
+                    retained = bytes(tx)?;
                 }
-                retained = bytes(tx)?;
             }
+            mark_pruned(tx, &pruned)?;
             for t in threads {
                 if retained <= self.limits.max_bytes {
                     break;

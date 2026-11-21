@@ -449,8 +449,11 @@ fn byte_budget_is_enforced_after_ack_and_reports_pinned_data() {
     a.record_peer_ack(&node("b"), &a.cursor().unwrap()).unwrap();
     let second = a.compact().unwrap();
     assert!(second.budget_met);
-    assert!(second.retained_bytes <= 256 * 1024);
+    assert!(second.retained_bytes <= 256 * 1024 / 10 * 9);
     assert!(second.op_log_rows_deleted > 0);
+    // Trimming leaves headroom, so the next tick has nothing to discard.
+    let third = a.compact().unwrap();
+    assert_eq!((third.append_rows_deleted, third.op_log_rows_deleted), (0, 0));
 }
 
 #[test]
