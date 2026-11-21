@@ -120,6 +120,25 @@ impl Health {
         self.is_stable(&self.servers.lock().unwrap()[index])
     }
 
+    pub fn stream_stall(&self) -> Duration {
+        Duration::from_millis(self.config.stream_stall_ms)
+    }
+
+    /// Resolves once the leased server is lost and `idle` reports no data for the stall
+    /// time, so a stream that is still flowing outlives a missed probe.
+    pub async fn lost_and_stalled(&self, lease: &mut Lease, idle: impl Fn() -> Duration) {
+        let stall = self.stream_stall();
+        loop {
+            // Re-checked after each wait: a server that recovered keeps its streams.
+            self.lost(lease).await;
+            let quiet = idle();
+            if quiet >= stall || self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(stall - quiet).await;
+        }
+    }
+
     pub fn state(&self, index: usize) -> State {
         self.servers.lock().unwrap()[index].state
     }

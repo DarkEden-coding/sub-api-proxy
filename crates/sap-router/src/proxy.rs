@@ -227,6 +227,7 @@ pub async fn forward(proxy: Proxy, mut request: Request<Body>) -> Response<Body>
             lease,
             connection,
             label: format!("{method} {path}"),
+            last_data: std::time::Instant::now(),
         };
         return Response::from_parts(parts, streamed(body, transfer));
     }
@@ -239,16 +240,23 @@ struct Transfer {
     lease: Lease,
     connection: Connection,
     label: String,
+    last_data: std::time::Instant,
 }
 
 fn streamed(body: Incoming, transfer: Transfer) -> Body {
     let stream = futures_util::stream::unfold(Some((body, transfer)), |state| async move {
         let (mut body, mut transfer) = state?;
         let next = {
-            let Transfer { health, lease, .. } = &mut transfer;
+            let Transfer {
+                health,
+                lease,
+                last_data,
+                ..
+            } = &mut transfer;
+            let since = *last_data;
             tokio::select! {
                 biased;
-                _ = health.lost(lease) => None,
+                _ = health.lost_and_stalled(lease, || since.elapsed()) => None,
                 frame = body.frame() => Some(frame),
             }
         };
@@ -264,8 +272,11 @@ fn streamed(body: Incoming, transfer: Transfer) -> Body {
             ))
         };
         match next {
-            None => aborted("server down, another server available"),
-            Some(Some(Ok(frame))) => Some((Ok(frame), Some((body, transfer)))),
+            None => aborted("server down and stream stalled, another server available"),
+            Some(Some(Ok(frame))) => {
+                transfer.last_data = std::time::Instant::now();
+                Some((Ok(frame), Some((body, transfer))))
+            }
             Some(Some(Err(error))) => aborted(&format!("upstream stream failed: {error}")),
             Some(None) => {
                 drop(transfer.connection);

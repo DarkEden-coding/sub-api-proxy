@@ -24,6 +24,10 @@ pub struct Config {
     pub down_after_failures: u32,
     pub stable_secs: u64,
     pub connect_timeout_ms: u64,
+    /// After its server is marked down, a response stream or websocket is cut only once
+    /// it has also carried no data for this long. A missed probe does not mean the
+    /// connection died, so a stream still delivering data finishes where it started.
+    pub stream_stall_ms: u64,
     /// File holding the proxy's client key. When set, inference requests (`/v1/...`
     /// and `/backend-api/...`) carry this key instead of whatever credential the
     /// client sent, so a coding client can keep its own subscription login without
@@ -55,6 +59,7 @@ impl Default for Config {
             down_after_failures: 2,
             stable_secs: 30,
             connect_timeout_ms: 1000,
+            stream_stall_ms: 30_000,
             client_key_file: None,
             client_auth: None,
         }

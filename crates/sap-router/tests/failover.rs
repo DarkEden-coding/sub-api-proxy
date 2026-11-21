@@ -195,6 +195,7 @@ impl Local {
             probe_interval_ms: if defaults { 1000 } else { 50 },
             probe_timeout_ms: if defaults { 1500 } else { 80 },
             stable_secs: 1,
+            stream_stall_ms: 500,
             ..Config::default()
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -379,6 +380,39 @@ async fn blackhole_cancels_pending_response_and_open_stream() {
         );
         assert!(start.elapsed() < Duration::from_secs(5));
         assert_eq!(backup.behavior.requests.load(Ordering::SeqCst), 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn flowing_stream_outlives_missed_probes_then_stall_ends_it() {
+    timeout(Duration::from_secs(6), async {
+        let primary = Fake::start().await;
+        let backup = Fake::start().await;
+        let local = Local::start(&[&primary, &backup], false).await;
+        let (send, receive) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Error>>(1);
+        let stream = futures_util::stream::unfold(receive, |mut receiver| async {
+            receiver.recv().await.map(|frame| (frame, receiver))
+        });
+        let mut echo = local
+            .request("/duplex", StreamBody::new(stream).boxed_unsync())
+            .await
+            .into_body();
+        // Probes now fail, but the open connection keeps echoing well past the stall time.
+        primary.behavior.blackhole.store(true, Ordering::SeqCst);
+        for i in 0..12 {
+            let chunk = Bytes::from(format!("chunk {i}"));
+            send.send(Ok(Frame::data(chunk.clone()))).await.unwrap();
+            let frame = echo.frame().await.unwrap().unwrap();
+            assert_eq!(frame.into_data().unwrap(), chunk);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(local.status().await["preferred"], "server1");
+        // Once data stops, the stall time ends the stream.
+        let ended = echo.frame().await;
+        assert!(ended.is_none() || ended.unwrap().is_err());
+        drop(send);
     })
     .await
     .unwrap();
