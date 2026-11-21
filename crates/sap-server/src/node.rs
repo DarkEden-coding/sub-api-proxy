@@ -33,6 +33,9 @@ pub(crate) struct State {
     pub persisted: BTreeMap<ThreadKey, DateTime<Utc>>,
     pub revisions: BTreeMap<String, u64>,
     pub upstream_at: BTreeMap<sap_core::ids::Provider, DateTime<Utc>>,
+    /// The store's sync cursor as of the last maintenance tick. Health reports it
+    /// from here so a probe never waits on the store connection.
+    pub sync: sap_core::sync::SyncCursor,
 }
 pub struct Node {
     pub(crate) self_weak: Weak<Node>,
@@ -217,6 +220,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             accounts.insert(account.id, serde_json::from_value(value)?);
         }
     }
+    let sync = sap_core::sync::ChangeLog::cursor(&*store).unwrap_or_default();
     let node = Arc::new_cyclic(|weak| Node {
         self_weak: weak.clone(),
         refresh: Mutex::default(),
@@ -236,6 +240,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             accounts,
             revisions: BTreeMap::new(),
             upstream_at: BTreeMap::new(),
+            sync,
             failures: BTreeMap::new(),
             compacted: BTreeSet::new(),
             resend: BTreeSet::new(),
@@ -274,6 +279,9 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
                     tracing::warn!("SAP store compaction failed");
                 }
                 compact_at = std::time::Instant::now() + Duration::from_secs(60);
+            }
+            if let Ok(cursor) = sap_core::sync::ChangeLog::cursor(&*node.store) {
+                node.lock().sync = cursor;
             }
             let _ = node.changes.send(ControlEvent::Changed);
         }

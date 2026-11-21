@@ -6,7 +6,6 @@ use sap_core::{
     health::{HealthReport, NodeState, UpstreamHealth},
     ids::Provider,
     routing::Outcome,
-    sync::ChangeLog,
     thread::{RequestClass, ThreadUsage},
 };
 use std::sync::{Arc, Mutex};
@@ -325,7 +324,7 @@ impl SapHooks for Node {
                     .is_some_and(|t| *t > Utc::now() - chrono::Duration::minutes(5)),
             },
             open_streams: state.streams.values().copied().sum(),
-            sync: self.store.cursor().unwrap_or_default(),
+            sync: state.sync.clone(),
         }
     }
     fn routes(&self) -> Option<axum::Router> {
