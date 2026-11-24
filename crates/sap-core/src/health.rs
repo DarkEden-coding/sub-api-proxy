@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::NodeId;
+use crate::ids::{AccountId, NodeId};
 use crate::sync::SyncCursor;
 use crate::{DateTime, Utc};
 
@@ -67,4 +67,14 @@ pub struct PeerTelemetry {
     /// Median SAP selection callback duration, excluding upstream time.
     pub added_latency_p50_ms: Option<f64>,
     pub rss_bytes: Option<u64>,
+    /// The accounts this node holds a login for. `None` from versions that do not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logins: Option<Vec<AccountLogin>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLogin {
+    pub account: AccountId,
+    /// False when the login was refused or its access token expired.
+    pub signed_in: bool,
 }

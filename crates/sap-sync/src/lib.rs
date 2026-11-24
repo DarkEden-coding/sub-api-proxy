@@ -1,11 +1,13 @@
 //! Authenticated, bounded HTTP replication over Tailscale.
 mod agent;
 mod auth;
+mod login;
 mod server;
 mod telemetry;
 
 pub use agent::{Peer, PeerStatus, SyncAgent};
-pub use server::{ServerState, router};
+pub use login::{forward_callback, start_login};
+pub use server::{LoginHandler, ServerState, router};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,4 +27,5 @@ pub(crate) const MAX_WAIT_MS: u64 = 25_000;
 #[cfg(test)]
 mod tests;
 
-pub(crate) const MAX_TELEMETRY_BODY: usize = 4096;
+// Room for a login report on a few hundred accounts.
+pub(crate) const MAX_TELEMETRY_BODY: usize = 32 * 1024;

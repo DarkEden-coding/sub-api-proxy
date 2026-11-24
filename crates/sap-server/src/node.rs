@@ -36,6 +36,9 @@ pub(crate) struct State {
     /// The store's sync cursor as of the last maintenance tick. Health reports it
     /// from here so a probe never waits on the store connection.
     pub sync: sap_core::sync::SyncCursor,
+    /// Accounts this node holds an enabled login for, and whether its access token is
+    /// still valid. Kept by `discover` so peer telemetry never reads the store.
+    pub logins: BTreeMap<AccountId, bool>,
 }
 pub struct Node {
     pub(crate) self_weak: Weak<Node>,
@@ -51,6 +54,9 @@ pub struct Node {
     pub(crate) changes: tokio::sync::broadcast::Sender<ControlEvent>,
     pub(crate) started: DateTime<Utc>,
     pub(crate) agent: sap_sync::SyncAgent,
+    pub(crate) peers: Vec<sap_sync::Peer>,
+    /// Logins this node started on a peer, by OAuth state, until their callback arrives.
+    pub(crate) delegated_logins: Mutex<BTreeMap<String, (sap_core::ids::NodeId, std::time::Instant)>>,
     pub(crate) sync_routes: axum::Router,
     /// The management API and dashboard, built once management is attached.
     pub(crate) api_routes: std::sync::OnceLock<axum::Router>,
@@ -210,8 +216,16 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
     } else {
         server
     };
+    let login_node = telemetry_node.clone();
+    let server = server.with_login(Arc::new(move |request| {
+        let node = login_node.get().and_then(Weak::upgrade);
+        Box::pin(async move {
+            let node = node.ok_or("node is shutting down")?;
+            node.login(request).await.map_err(|error| error.message)
+        })
+    }));
     let sync_routes = sap_sync::router(Arc::new(server));
-    let agent = sap_sync::SyncAgent::spawn(store.clone(), peers, notify.clone());
+    let agent = sap_sync::SyncAgent::spawn(store.clone(), peers.clone(), notify.clone());
     let mut registry = sap_threads::Registry::new(config.registry_max);
     registry.import(store.threads()?);
     let mut accounts = BTreeMap::new();
@@ -232,6 +246,8 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
         store,
         notify,
         agent,
+        peers,
+        delegated_logins: Mutex::default(),
         sync_routes,
         api_routes: std::sync::OnceLock::new(),
         state: Arc::new(Mutex::new(State {
@@ -241,6 +257,7 @@ pub fn install(rt: &Arc<Runtime>, path: &std::path::Path) -> anyhow::Result<Arc<
             revisions: BTreeMap::new(),
             upstream_at: BTreeMap::new(),
             sync,
+            logins: BTreeMap::new(),
             failures: BTreeMap::new(),
             compacted: BTreeSet::new(),
             resend: BTreeSet::new(),

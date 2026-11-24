@@ -22,7 +22,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 #[derive(Clone)]
 pub struct Peer {
     pub node: NodeId,
-    base_url: String,
+    pub(crate) base_url: String,
     secret: Vec<u8>,
 }
 

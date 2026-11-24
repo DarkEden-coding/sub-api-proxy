@@ -20,12 +20,21 @@ pub(crate) fn identity(c: &Credential) -> Option<(AccountId, Provider)> {
     // is stable for the same key, so each configured key is its own account.
     matches!(c.source, Source::Config { .. }).then(|| (AccountId(format!("{p}:api-key:{}", c.id)), p))
 }
+
+/// The access token has expired. The refresh loop renews tokens hours before expiry,
+/// so an expired one means its refreshes have been failing and only a new sign-in helps.
+fn expired(c: &Credential) -> bool {
+    c.str("expired")
+        .and_then(|s| sap_core::DateTime::parse_from_rfc3339(s).ok())
+        .is_some_and(|expiry| expiry < Utc::now())
+}
 impl Node {
     pub(crate) fn discover(&self) -> anyhow::Result<BTreeMap<String, AccountId>> {
         let Some(rt) = self.runtime.upgrade() else {
             return Ok(BTreeMap::new());
         };
         let mut mapping = BTreeMap::new();
+        let mut logins = BTreeMap::new();
         let existing = self.store.accounts()?;
         let prior_credentials = self.store.credentials()?;
         for c in rt.store().snapshot().iter() {
@@ -54,6 +63,7 @@ impl Node {
             }
             if !c.disabled {
                 mapping.insert(c.id.clone(), id.clone());
+                *logins.entry(id.clone()).or_insert(false) |= !expired(c);
             }
             if !existing.iter().any(|a| a.id == id) {
                 let plan = ["plan_type", "subscription_type", "rate_limit_tier"]
@@ -97,6 +107,7 @@ impl Node {
                 self.store.put_credential(credential)?;
             }
         }
+        self.lock().logins = logins;
         Ok(mapping)
     }
 }

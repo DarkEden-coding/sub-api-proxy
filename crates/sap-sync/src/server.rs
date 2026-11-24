@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -15,6 +17,7 @@ use axum::{
     routing::{get, post},
 };
 use sap_core::{
+    api::{LoginRequest, LoginStart},
     ids::NodeId,
     sync::{ChangeBatch, ChangeLog, SyncCursor},
 };
@@ -29,7 +32,12 @@ pub struct ServerState<C> {
     acknowledgements: Mutex<BTreeMap<NodeId, SyncCursor>>,
     allow_loopback: bool,
     telemetry: Option<Arc<dyn Fn() -> Option<sap_core::health::PeerTelemetry> + Send + Sync>>,
+    login: Option<LoginHandler>,
 }
+
+/// Starts a login on this node for a peer's dashboard. Errors are shown to the user.
+pub type LoginHandler =
+    Arc<dyn Fn(LoginRequest) -> Pin<Box<dyn Future<Output = Result<LoginStart, String>> + Send>> + Send + Sync>;
 
 impl<C: ChangeLog + 'static> ServerState<C> {
     pub fn new(log: Arc<C>, secrets: BTreeMap<NodeId, Vec<u8>>, notify: Arc<Notify>) -> Self {
@@ -40,6 +48,7 @@ impl<C: ChangeLog + 'static> ServerState<C> {
             acknowledgements: Mutex::new(BTreeMap::new()),
             allow_loopback: false,
             telemetry: None,
+            login: None,
         }
     }
 
@@ -49,6 +58,12 @@ impl<C: ChangeLog + 'static> ServerState<C> {
         source: impl Fn() -> Option<sap_core::health::PeerTelemetry> + Send + Sync + 'static,
     ) -> Self {
         self.telemetry = Some(Arc::new(source));
+        self
+    }
+
+    /// Let peers start logins here (`POST /sap/sync/login`).
+    pub fn with_login(mut self, handler: LoginHandler) -> Self {
+        self.login = Some(handler);
         self
     }
 
@@ -71,6 +86,7 @@ pub fn router<C: ChangeLog + 'static>(state: Arc<ServerState<C>>) -> Router {
         .route("/sap/sync/changes", get(changes::<C>))
         .route("/sap/sync/ack", post(ack::<C>))
         .route("/sap/sync/telemetry", get(telemetry::<C>))
+        .route(crate::login::LOGIN_PATH, post(login::<C>))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate::<C>))
         .layer(DefaultBodyLimit::max(crate::MAX_BODY))
         .with_state(state)
@@ -85,6 +101,19 @@ async fn telemetry<C: ChangeLog + 'static>(State(state): State<Arc<ServerState<C
             ([("content-type", "application/json")], body).into_response()
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn login<C: ChangeLog + 'static>(
+    State(state): State<Arc<ServerState<C>>>,
+    Json(request): Json<LoginRequest>,
+) -> Response {
+    let Some(handler) = state.login.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match handler(request).await {
+        Ok(start) => Json(start).into_response(),
+        Err(message) => (StatusCode::BAD_GATEWAY, message).into_response(),
     }
 }
 

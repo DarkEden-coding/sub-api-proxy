@@ -145,6 +145,14 @@ pub trait SapHooks: Send + Sync {
     fn routes(&self) -> Option<axum::Router> {
         None
     }
+    /// sub-api-proxy: a provider OAuth callback (`/anthropic/callback?…`) that no local
+    /// login is waiting for. A login this node started on a peer takes it there.
+    fn forward_oauth_callback(
+        &self,
+        _path_and_query: String,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(async {})
+    }
 }
 
 pub(crate) struct Context {

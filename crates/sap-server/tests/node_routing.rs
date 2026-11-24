@@ -46,6 +46,7 @@ async fn dashboard_callback_relay_does_not_start_a_server_listener() {
                 provider,
                 account: None,
                 callback_relay: true,
+                node: None,
             })
             .await
             .unwrap();
@@ -61,12 +62,23 @@ async fn dashboard_callback_relay_does_not_start_a_server_listener() {
                 .start_login(LoginRequest {
                     provider,
                     account: None,
-                    callback_relay: false
+                    callback_relay: false,
+                    node: None,
                 })
                 .await
                 .is_err()
         );
     }
+    let unknown = f
+        .node
+        .start_login(LoginRequest {
+            provider: Provider::Claude,
+            account: None,
+            callback_relay: true,
+            node: Some(sap_core::ids::NodeId("elsewhere".into())),
+        })
+        .await;
+    assert!(unknown.is_err_and(|e| e.message.contains("Unknown server")));
 }
 
 impl Drop for Fixture {
@@ -765,6 +777,34 @@ async fn model_entitlement_moves_thread_without_revoking_account() {
             .iter()
             .all(|a| a.state != sap_core::api::AccountState::LoginNeeded)
     );
+}
+
+/// A login whose access token expired (its refreshes kept failing) asks for a new
+/// sign-in on this node, though no request was refused.
+#[tokio::test]
+async fn an_expired_login_asks_for_a_new_sign_in() {
+    use sap_core::api::{AccountState, LoginState, NodeLogin};
+    let f = Fixture::new(Provider::Claude);
+    let mut expired = (*f.rt.store().snapshot()[0]).clone();
+    expired
+        .metadata
+        .insert("expired".into(), serde_json::json!("2020-01-01T00:00:00Z"));
+    f.rt.store().upsert(expired);
+    let accounts = f.node.accounts();
+    let local = sap_core::ids::NodeId("local".into());
+    let needed: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.state == AccountState::LoginNeeded)
+        .collect();
+    assert_eq!(needed.len(), 1);
+    assert_eq!(
+        needed[0].logins,
+        [NodeLogin {
+            node: local.clone(),
+            state: LoginState::LoginNeeded
+        }]
+    );
+    assert_eq!(needed[0].login_needed_on, [local]);
 }
 
 /// A 401 that lands just after a refresh rotated the token asks for a new sign-in, but

@@ -299,6 +299,7 @@ async fn run(cli: Cli) -> Result<()> {
                         },
                         account: None,
                         callback_relay: false,
+                        node: None,
                     }),
                 )
                 .await?;

@@ -92,8 +92,13 @@ Claude account IDs are `claude:<account_uuid>` with email as fallback. Codex IDs
 are `codex:<account_id>`. Config API keys without subscription metadata use
 `<provider>:api-key:<credential_id>` as their logical account. Other credentials
 without subscription identity fields are omitted. Account preferences survive rescans;
-credentials stay local. A peer-known account without a usable local credential
-appears as `login_needed_on` this node.
+credentials stay local. A peer-known account without a usable local credential,
+or whose access token has expired, appears as `login_needed_on` this node. Peer
+telemetry carries each node's logins, so `logins` lists the account's state on
+every node and `login_needed_on` includes peers. `POST /sap/api/accounts/login`
+with `node` set to a peer starts the login there (`POST /sap/sync/login`); this
+node keeps the OAuth state for 10 minutes and forwards the matching provider
+callback to that peer.
 
 ## Decision table to hook answers
 

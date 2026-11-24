@@ -53,6 +53,8 @@ impl Control for Node {
         let available: BTreeSet<_> = mapping.into_values().collect();
         // Taken before the state lock: the visualizer holds its own lock while reading accounts.
         let mut resets = self.reset_views();
+        let peers = self.agent.statuses();
+        let now = Utc::now();
         let state = self.lock();
         let mut views = Vec::new();
         for provider in [Provider::Claude, Provider::Codex] {
@@ -62,9 +64,32 @@ impl Control for Node {
             let scores = sap_routing::ThreadAffinityPolicy::new(self.config.routing.clone()).scores(&input);
             for runtime in input.accounts {
                 let score = scores.iter().find(|s| s.account == runtime.account.id);
+                let local = match state.logins.get(&runtime.account.id) {
+                    None => LoginState::Missing,
+                    Some(true) if !runtime.revoked => LoginState::SignedIn,
+                    Some(_) => LoginState::LoginNeeded,
+                };
+                let mut logins = vec![NodeLogin {
+                    node: self.config.node.clone(),
+                    state: local,
+                }];
+                for (node, status) in &peers {
+                    let reported = crate::telemetry::fresh_telemetry(status, now).and_then(|s| s.logins.as_ref());
+                    let login = reported.map_or(LoginState::Unknown, |reported| {
+                        match reported.iter().find(|l| l.account == runtime.account.id) {
+                            None => LoginState::Missing,
+                            Some(l) if l.signed_in => LoginState::SignedIn,
+                            Some(_) => LoginState::LoginNeeded,
+                        }
+                    });
+                    logins.push(NodeLogin {
+                        node: node.clone(),
+                        state: login,
+                    });
+                }
                 let status = if runtime.account.disabled {
                     AccountState::Disabled
-                } else if !runtime.credential_usable || runtime.revoked {
+                } else if local != LoginState::SignedIn {
                     AccountState::LoginNeeded
                 } else if runtime.exhausted_until.is_some() {
                     AccountState::Exhausted
@@ -100,11 +125,12 @@ impl Control for Node {
                         .collect(),
                     active_threads: runtime.active_threads,
                     available_at: runtime.exhausted_until.flatten().or(runtime.cooling_until),
-                    login_needed_on: if runtime.credential_usable && !runtime.revoked {
-                        vec![]
-                    } else {
-                        vec![self.config.node.clone()]
-                    },
+                    login_needed_on: logins
+                        .iter()
+                        .filter(|l| matches!(l.state, LoginState::LoginNeeded | LoginState::Missing))
+                        .map(|l| l.node.clone())
+                        .collect(),
+                    logins,
                     stale: score.is_none_or(|s| s.stale),
                     resets,
                 });

@@ -42,7 +42,18 @@ impl Metrics {
 impl Node {
     pub(crate) fn telemetry(&self) -> PeerTelemetry {
         let now = Utc::now();
-        let open_streams = self.lock().streams.values().copied().sum();
+        let (open_streams, logins) = {
+            let state = self.lock();
+            let logins = state
+                .logins
+                .iter()
+                .map(|(account, valid)| sap_core::health::AccountLogin {
+                    account: account.clone(),
+                    signed_in: *valid && !state.accounts.get(account).is_some_and(|a| a.revoked),
+                })
+                .collect();
+            (state.streams.values().copied().sum(), logins)
+        };
         let mut metrics = self.telemetry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         metrics.latency.retain(|(at, _)| at.elapsed() < Duration::from_secs(60));
         let mut latency: Vec<_> = metrics.latency.iter().map(|(_, ms)| *ms).collect();
@@ -62,6 +73,7 @@ impl Node {
             open_streams,
             added_latency_p50_ms: latency.get(latency.len() / 2).copied(),
             rss_bytes: metrics.rss,
+            logins: Some(logins),
         }
     }
     pub(crate) fn sample_rss(&self) {
@@ -105,6 +117,13 @@ impl SapHooks for Instrumented {
     }
     fn health(&self) -> sap_core::health::HealthReport {
         self.0.health()
+    }
+    fn forward_oauth_callback(
+        &self,
+        path_and_query: String,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        let node = self.0.clone();
+        Box::pin(async move { node.forward_oauth_callback(&path_and_query).await })
     }
     fn routes(&self) -> Option<axum::Router> {
         self.0.routes()
@@ -172,6 +191,20 @@ fn rss_bytes() -> Option<u64> {
     None
 }
 
+/// The peer's last telemetry sample, if it arrived and was taken in the last 15 seconds.
+pub(crate) fn fresh_telemetry(status: &sap_sync::PeerStatus, at: sap_core::DateTime<Utc>) -> Option<&PeerTelemetry> {
+    let now = at.timestamp().max(0) as u64;
+    status
+        .telemetry
+        .as_ref()
+        .filter(|sample| (sample.observed_at.timestamp() as i128 - now as i128).abs() <= 15)
+        .filter(|_| {
+            status
+                .telemetry_received_at
+                .is_some_and(|at| now.saturating_sub(at) <= 15)
+        })
+}
+
 /// Keep old samples for diagnostics, but never present expired values as current.
 pub(crate) fn peer_view(
     id: sap_core::ids::NodeId,
@@ -179,14 +212,8 @@ pub(crate) fn peer_view(
     at: sap_core::DateTime<Utc>,
 ) -> sap_core::api::NodeView {
     let now = at.timestamp().max(0) as u64;
-    let fresh = status
-        .telemetry_received_at
-        .is_some_and(|at| now.saturating_sub(at) <= 15)
-        && status
-            .telemetry
-            .as_ref()
-            .is_some_and(|sample| (sample.observed_at.timestamp() as i128 - now as i128).abs() <= 15);
-    let sample = status.telemetry.as_ref().filter(|_| fresh);
+    let sample = fresh_telemetry(&status, at);
+    let fresh = sample.is_some();
     sap_core::api::NodeView {
         id,
         role: sample.map(|s| s.role),
@@ -238,6 +265,7 @@ mod tests {
             open_streams: 0,
             added_latency_p50_ms: None,
             rss_bytes: Some(1234),
+            logins: None,
         });
         let fresh = peer_view(id.clone(), status.clone(), now);
         assert_eq!(fresh.open_streams, Some(0));

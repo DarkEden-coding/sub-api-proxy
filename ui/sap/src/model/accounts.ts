@@ -1,4 +1,4 @@
-import type { AccountState, AccountView, WindowView } from "../api/types.ts";
+import type { AccountState, AccountView, LoginState, WindowView } from "../api/types.ts";
 import { remaining, when, windowLimit, windowName } from "./format.ts";
 
 export type Tone = "live" | "idle" | "blocked";
@@ -66,3 +66,19 @@ export function presentAccount(a: AccountView, now: string, tz?: string): Accoun
 
 /** Bar colour class for a remaining percentage (same cut-offs as 90% and 70% used). */
 export const level = (left: number): "ok" | "warn" | "bad" => (left <= 10 ? "bad" : left <= 30 ? "warn" : "ok");
+
+const LOGIN_LABELS: Record<LoginState, string> = {
+  signed_in: "signed in",
+  login_needed: "sign in needed",
+  missing: "not signed in",
+  unknown: "not reporting",
+};
+
+/** One line per server for the Logins column. `signIn` marks the ones to offer a sign-in for. */
+export function presentLogins(a: AccountView): { node: string; label: string; signIn: boolean }[] {
+  return a.logins.map((l) => ({
+    node: l.node,
+    label: LOGIN_LABELS[l.state],
+    signIn: l.state === "login_needed" || l.state === "missing",
+  }));
+}

@@ -3,7 +3,7 @@
   import type { AccountView, Provider } from "../api/types.ts";
   import AccountDetail from "../components/AccountDetail.svelte";
   import QuotaBars from "../components/QuotaBars.svelte";
-  import { presentAccount } from "../model/accounts.ts";
+  import { presentAccount, presentLogins } from "../model/accounts.ts";
   import { presentResets } from "../model/resets.ts";
   import { planName } from "../model/plans.ts";
   import { store } from "../store.svelte.ts";
@@ -32,14 +32,17 @@
     }
   }
 
-  async function signIn(selected: Provider, account: string | null = null) {
+  /** `node`: the server to sign in on; the one answering this dashboard when omitted. */
+  async function signIn(selected: Provider, account: string | null = null, node: string | null = null) {
     if (signingIn) return;
     message = "";
     signingIn = true;
     try {
-      await browserLogin(() => startLogin({ provider: selected, account, callback_relay: true }), helper);
+      await browserLogin(() => startLogin({ provider: selected, account, callback_relay: true, node }), helper);
       localStorage.setItem("sap-oauth-helper", helper);
-      message = "Finish signing in in the new tab. The account will appear here when it is ready.";
+      message = node
+        ? `Finish signing in in the new tab. ${node} shows as signed in here within a few seconds.`
+        : "Finish signing in in the new tab. The account will appear here when it is ready.";
     } catch (e) {
       message = (e as Error).message;
     } finally {
@@ -62,7 +65,7 @@
     <input class="field" type="url" bind:value={helper} placeholder={DEFAULT_HELPER} />
   </label>
   <div class="table-scroll"><table class="table">
-    <thead><tr><th>Account</th><th>Plan</th><th>State</th><th>Weight</th><th>Priority</th><th>Resets</th><th style="width:360px">Quota</th></tr></thead>
+    <thead><tr><th>Account</th><th>Plan</th><th>State</th><th>Logins</th><th>Weight</th><th>Priority</th><th>Resets</th><th style="width:360px">Quota</th></tr></thead>
     <tbody>
       {#each snap.accounts as a (a.id)}
         {@const p = presentAccount(a, snap.now)}
@@ -71,13 +74,23 @@
           <td><span class="name">{a.label}</span><div class="faint">{a.email ?? a.id}</div></td>
           <td>{planName(a.plan)}</td>
           <td>{a.state.replace("_", " ")}{#if p.flag}<div class="flag">{p.flag}</div>{/if}</td>
+          <td class="logins">
+            {#each presentLogins(a) as l (l.node)}
+              <div class="login" class:needed={l.signIn}>
+                <span>{l.node}</span><span class="faint">{l.label}</span>
+                {#if l.signIn}
+                  <button class="btn small" disabled={signingIn} onclick={(e) => { e.stopPropagation(); void signIn(a.provider, a.id, l.node); }}>Sign in</button>
+                {/if}
+              </div>
+            {/each}
+          </td>
           <td>{p.tone === "blocked" ? "—" : `${Math.round(a.weight_percent)}%`}</td>
           <td>{a.priority}</td>
           <td class:usable={r?.usable}>{r?.count ?? "—"}</td>
           <td><QuotaBars windows={p.windows} provider={a.provider} /></td>
         </tr>
         {#if open === a.id}
-          <tr class="open"><td colspan="7"><AccountDetail account={a} now={snap.now} onerror={(m) => (message = m)} onnotice={(m) => (message = m)} onlogin={(account: AccountView) => signIn(account.provider, account.id)} /></td></tr>
+          <tr class="open"><td colspan="8"><AccountDetail account={a} now={snap.now} onerror={(m) => (message = m)} onnotice={(m) => (message = m)} onlogin={(account: AccountView) => signIn(account.provider, account.id)} /></td></tr>
         {/if}
       {/each}
     </tbody>
@@ -96,6 +109,9 @@
   .row.greyed { opacity: .6; }
   .name { font-family: var(--serif); font-size: 15px; }
   .usable { color: var(--tint); font-weight: 600; }
+  .login { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .login.needed > span:first-child { color: var(--warn); }
+  .btn.small { padding: 1px 8px; font-size: 11.5px; }
   .flag { color: var(--warn); font-family: var(--serif); font-style: italic; font-size: 11.5px; }
   .open td { background: var(--panel); padding-left: 14px; }
 </style>

@@ -589,6 +589,7 @@ async fn telemetry_is_authenticated_optional_bounded_and_independent_of_sync() {
             open_streams: 3,
             added_latency_p50_ms: Some(1.25),
             rss_bytes: Some(123456),
+            logins: None,
         };
         *source.lock().unwrap() = Some(sample.clone());
         assert_eq!(
@@ -639,4 +640,69 @@ async fn telemetry_client_rejects_oversized_mock_response() {
     })
     .await
     .unwrap();
+}
+
+/// A peer's dashboard starts a login here over the signed channel, then the provider's
+/// callback is handed to this node's public callback route.
+#[tokio::test]
+async fn a_peer_starts_a_login_and_forwards_its_callback() {
+    use sap_core::api::{LoginRequest, LoginStart};
+    use sap_core::ids::Provider;
+    let callbacks = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = callbacks.clone();
+    let state = Arc::new(
+        ServerState::new(
+            MemoryLog::new("b"),
+            BTreeMap::from([(NodeId("a".into()), b"shared-test-secret".to_vec())]),
+            Arc::new(Notify::new()),
+        )
+        .allow_loopback()
+        .with_login(Arc::new(|request: LoginRequest| {
+            Box::pin(async move {
+                Ok(LoginStart {
+                    url: format!("https://claude.ai/oauth/authorize?provider={}", request.provider),
+                    login_id: "abc123".into(),
+                    callback_relay: request.callback_relay,
+                })
+            })
+        })),
+    );
+    let app = router(state).route(
+        "/anthropic/callback",
+        axum::routing::get(move |uri: http::Uri| async move {
+            seen.lock().unwrap().push(uri.to_string());
+            "signed in"
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    });
+    let request = LoginRequest {
+        provider: Provider::Claude,
+        account: None,
+        callback_relay: true,
+        node: None,
+    };
+    let start = start_login(&NodeId("a".into()), &peer("b", address), &request)
+        .await
+        .unwrap();
+    assert_eq!(start.login_id, "abc123");
+    assert!(start.callback_relay);
+    let stranger = Peer::new(NodeId("a".into()), &format!("http://{address}"), b"wrong".to_vec()).unwrap();
+    assert_eq!(
+        start_login(&NodeId("a".into()), &stranger, &request).await.unwrap_err(),
+        "peer returned HTTP 401"
+    );
+    forward_callback(&peer("b", address), "/anthropic/callback?code=x%2By&state=abc123")
+        .await
+        .unwrap();
+    assert_eq!(
+        *callbacks.lock().unwrap(),
+        ["/anthropic/callback?code=x%2By&state=abc123"]
+    );
+    task.abort();
 }

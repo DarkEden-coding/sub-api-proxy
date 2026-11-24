@@ -277,6 +277,12 @@ async fn callback(State(rt): State<Arc<Runtime>>, OriginalUri(uri): OriginalUri)
                 r#"{"error":"SIWC callbacks require /v8/management/oauth/callback"}"#.into(),
             );
         }
+        if delivery == runtime::OAuthDelivery::NotPending
+            && let Some(hooks) = rt.sap_hooks()
+            && let Some(path_and_query) = uri.path_and_query()
+        {
+            hooks.forward_oauth_callback(path_and_query.as_str().to_owned()).await;
+        }
     }
     html()
 }

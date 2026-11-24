@@ -82,12 +82,33 @@ pub struct AccountView {
     pub available_at: Option<DateTime<Utc>>,
     /// Nodes without a working login for this account.
     pub login_needed_on: Vec<NodeId>,
+    /// The login state of this account on every node: this one first, then its peers.
+    #[serde(default)]
+    pub logins: Vec<NodeLogin>,
     /// Quota data is missing or stale.
     pub stale: bool,
     /// Manual usage resets the provider offers this account, as last read by a quota
     /// refresh on this node. Absent until the first read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets: Option<ResetsView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeLogin {
+    pub node: NodeId,
+    pub state: LoginState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    SignedIn,
+    /// The login was refused, or its access token expired because refreshes failed.
+    LoginNeeded,
+    /// The node holds no login for this account.
+    Missing,
+    /// The node has not reported recently, or runs a version that does not report logins.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -266,6 +287,10 @@ pub struct LoginRequest {
     /// A browser-device helper owns the callback listener instead of the server.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub callback_relay: bool,
+    /// Sign in on this peer instead of the node that answers. The answering node starts
+    /// the login there and forwards the provider's callback to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

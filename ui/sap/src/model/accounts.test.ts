@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AccountView } from "../api/types.ts";
-import { level, presentAccount } from "./accounts.ts";
+import { level, presentAccount, presentLogins } from "./accounts.ts";
 import { fixture } from "./fixture.ts";
 
 const snap = fixture();
@@ -51,4 +51,13 @@ test("cooling, disabled and login-needed explain themselves", () => {
   assert.equal(state({ state: "disabled" }).flag, "disabled");
   assert.equal(state({ state: "login_needed", login_needed_on: ["macbook"] }).flag, "sign in again on macbook");
   assert.equal(state({ state: "disabled" }).greyed, true);
+});
+
+test("each server's login is listed, with a sign-in where one is needed", () => {
+  assert.deepEqual(presentLogins(acct("claude-pro-personal")), [
+    { node: "power-server", label: "signed in", signIn: false },
+    { node: "macbook", label: "sign in needed", signIn: true },
+  ]);
+  const unknown = { ...acct("claude-pro-personal"), logins: [{ node: "macbook", state: "unknown" as const }] };
+  assert.deepEqual(presentLogins(unknown), [{ node: "macbook", label: "not reporting", signIn: false }]);
 });

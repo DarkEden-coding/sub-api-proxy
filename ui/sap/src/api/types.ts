@@ -57,10 +57,20 @@ export interface AccountView {
   /** When an exhausted or cooling account becomes usable, if known. */
   available_at: Timestamp | null;
   login_needed_on: NodeId[];
+  /** This account's login on every server: the answering one first, then its peers. */
+  logins: NodeLogin[];
   /** Quota data is missing or stale. */
   stale: boolean;
   /** Manual usage resets, as last read by a quota refresh on this node. */
   resets?: ResetsView;
+}
+
+/** `unknown`: the server has not reported recently, or runs an older version. */
+export type LoginState = "signed_in" | "login_needed" | "missing" | "unknown";
+
+export interface NodeLogin {
+  node: NodeId;
+  state: LoginState;
 }
 
 export interface ResetsView {
@@ -188,6 +198,8 @@ export interface LoginRequest {
   /** Re-login an existing account on this node; null adds a new account. */
   account: AccountId | null;
   callback_relay?: boolean;
+  /** Sign in on this server instead of the one answering; it forwards the callback. */
+  node?: NodeId | null;
 }
 
 export interface LoginStart {

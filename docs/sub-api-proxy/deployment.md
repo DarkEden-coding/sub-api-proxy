@@ -79,6 +79,14 @@ issuing server. See [automatic account sign-in](../../crates/sap-router/README.m
 for configuration, startup services and validation. Callback ports 54545 and 1455
 must be free on the browser device.
 
+Each account row has a Logins column with one line per server: signed in, sign in
+needed, not signed in, or not reporting. A login whose access token expired (its
+refreshes kept failing) counts as sign in needed. Sign in on any line signs in on
+that server, whichever server answers the dashboard: the answering server starts
+the login on its peer over the signed peer channel and forwards the provider's
+callback to it. A server learns its peer's logins from peer telemetry, every
+5 seconds, so a peer running an older version shows as not reporting.
+
 ## Updating
 
 On each server, from its checkout: `packaging/sub-api-proxy/update-local.sh`.
