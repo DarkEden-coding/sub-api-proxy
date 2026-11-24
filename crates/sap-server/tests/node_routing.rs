@@ -767,6 +767,39 @@ async fn model_entitlement_moves_thread_without_revoking_account() {
     );
 }
 
+/// A 401 that lands just after a refresh rotated the token asks for a new sign-in, but
+/// the retry on the same login succeeds, which clears it.
+#[tokio::test]
+async fn a_success_after_a_401_clears_login_needed() {
+    let f = Fixture::new(Provider::Claude);
+    let request = f.request("rotated", false, false, false);
+    let credential = f.pick(&request);
+    let login_needed = || {
+        f.node
+            .accounts()
+            .iter()
+            .any(|a| a.state == sap_core::api::AccountState::LoginNeeded)
+    };
+    f.node.on_outcome(
+        &request,
+        &credential,
+        &AttemptResult {
+            status: Some(401),
+            error: None,
+        },
+    );
+    assert!(login_needed());
+    f.node.on_outcome(
+        &request,
+        &credential,
+        &AttemptResult {
+            status: Some(200),
+            error: None,
+        },
+    );
+    assert!(!login_needed());
+}
+
 #[tokio::test]
 async fn active_refresh_codex_exhaustion_recovers_from_usage_endpoint() {
     use std::sync::atomic::{AtomicBool, Ordering};

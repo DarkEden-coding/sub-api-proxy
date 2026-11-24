@@ -187,6 +187,12 @@ impl SapHooks for Node {
                 tracing::warn!("SAP success count persistence failed");
             }
             state.failures.remove(key);
+            // The login works. A 401 can land just after a refresh rotated the token
+            // (the request still carried the old one); it must not leave the account
+            // asking for a new sign-in until the next refresh.
+            if let Some(local) = state.accounts.get_mut(account) {
+                local.revoked = false;
+            }
             state.upstream_at.insert(request.identity.provider(), Utc::now());
             if request.identity.class == RequestClass::Compaction
                 && request
