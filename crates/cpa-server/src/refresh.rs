@@ -59,6 +59,9 @@ impl RefreshState {
             entry.invalid_grants = 0;
             if ineffective { 30 } else { 0 }
         };
+        if let Some(error) = error {
+            log_failure(c, error, seconds);
+        }
         entry.next = now + Duration::from_secs(seconds);
     }
 
@@ -71,6 +74,25 @@ impl RefreshState {
         let ids: std::collections::HashSet<&str> = credentials.iter().map(|c| c.id.as_str()).collect();
         self.entries.retain(|id, _| ids.contains(id.as_str()));
     }
+}
+
+/// Background refresh failures are otherwise silent until the token expires. The error
+/// text is logged only when it was built locally (no upstream headers): Claude and Codex
+/// reduce token endpoint answers to a fixed message and the OAuth error code, while a
+/// raw upstream body may echo request material.
+fn log_failure(c: &Credential, error: &ExecError, retry_seconds: u64) {
+    let reason = if error.headers.is_empty() {
+        String::from_utf8_lossy(&error.body).into_owned()
+    } else {
+        String::from("upstream error")
+    };
+    tracing::warn!(
+        credential = %c.id,
+        provider = %c.provider,
+        status = error.status,
+        retry_seconds,
+        "token refresh failed: {reason}"
+    );
 }
 
 #[cfg(test)]

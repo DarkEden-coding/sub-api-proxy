@@ -113,9 +113,10 @@ impl OAuth {
         } else {
             None
         };
-        // Never expose a control-plane body: providers may echo tokens in errors.
+        // Never expose a control-plane body: providers may echo tokens in errors. Only
+        // the OAuth error code (such as `invalid_grant`) is kept.
         let response = into_response(response).await.map_err(|error| {
-            let mut safe = ExecError::local(error.status, error.scope, HTTP_FAILURE);
+            let mut safe = ExecError::local(error.status, error.scope, http_failure(&error.body));
             safe.retry_after = backoff.or(error.retry_after);
             safe
         })?;
@@ -245,7 +246,7 @@ impl OAuth {
                 Err(error)
                     if error.status >= 500
                         && error.scope == FailureScope::Credential
-                        && error.body == HTTP_FAILURE
+                        && error.body.starts_with(HTTP_FAILURE.as_bytes())
                         && attempt < 2 =>
                 {
                     continue;
@@ -625,6 +626,14 @@ pub(crate) fn random_hex(n: usize) -> Result<String, ExecError> {
 
 /// The error text for a token endpoint that answered with an error status.
 const HTTP_FAILURE: &str = "Claude OAuth acquisition failed";
+
+/// [`HTTP_FAILURE`] with the OAuth error code of `body`, when it has one.
+fn http_failure(body: &[u8]) -> String {
+    match crate::codex_oauth::oauth_code(body) {
+        code if code.is_empty() => HTTP_FAILURE.to_owned(),
+        code => format!("{HTTP_FAILURE}: {code}"),
+    }
+}
 
 fn acquisition_error(message: &str) -> ExecError {
     ExecError::local(502, FailureScope::Credential, message)

@@ -257,6 +257,18 @@ async fn an_unreadable_refresh_answer_is_not_retried() {
     .await;
 }
 
+/// A rejected grant reports its OAuth error code, and nothing else from the body, so
+/// the refresh loop can log it and back off as it does for `invalid_grant`.
+#[tokio::test]
+async fn a_rejected_refresh_keeps_only_the_oauth_error_code() {
+    let error = refresh_against_raw(
+        b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 81\r\nConnection: close\r\n\r\n{\"error\":\"invalid_grant\",\"error_description\":\"bad token fake-refresh-raw abcdef\"}",
+    )
+    .await;
+    assert_eq!(error.status, 400);
+    assert_eq!(&error.body[..], b"Claude OAuth acquisition failed: invalid_grant");
+}
+
 /// Refreshes against a server that answers every connection with `raw` and closes it,
 /// and asserts that exactly one token request was made.
 async fn refresh_against_raw(raw: &'static [u8]) -> ExecError {
